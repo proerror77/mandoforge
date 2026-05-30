@@ -57,6 +57,7 @@ mod store_backend;
 mod store_codex_app_server;
 mod store_context_packets;
 mod store_cost_alert_routes;
+mod store_dynamic_workflow_plans;
 mod store_entities;
 mod store_environments;
 mod store_eval;
@@ -1014,6 +1015,72 @@ struct ReviewManagerAgentPlan {
     status: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DynamicWorkflowPlan {
+    id: Uuid,
+    source_work_item_id: Option<Uuid>,
+    source_session_id: Option<Uuid>,
+    objective: String,
+    status: String,
+    phases: Value,
+    agent_fleet_policy: Value,
+    governance: Value,
+    validation: Value,
+    materialization: Value,
+    analysis: Value,
+    review: Value,
+    workflow_definition_id: Option<Uuid>,
+    workflow_run_id: Option<Uuid>,
+    audit_trace_id: Option<Uuid>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    reviewed_at: Option<DateTime<Utc>>,
+    materialized_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateDynamicWorkflowPlan {
+    #[serde(default)]
+    source_work_item_id: Option<Uuid>,
+    #[serde(default)]
+    source_session_id: Option<Uuid>,
+    objective: String,
+    #[serde(default = "empty_json_array")]
+    phases: Value,
+    #[serde(default = "default_dynamic_workflow_agent_fleet_policy")]
+    agent_fleet_policy: Value,
+    #[serde(default = "default_dynamic_workflow_governance")]
+    governance: Value,
+    #[serde(default = "default_dynamic_workflow_validation")]
+    validation: Value,
+    #[serde(default = "default_dynamic_workflow_materialization")]
+    materialization: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewDynamicWorkflowPlan {
+    review: Value,
+    #[serde(default)]
+    status: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MaterializeDynamicWorkflowPlan {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    environment_id: Option<Uuid>,
+    #[serde(default = "empty_json_object")]
+    input_payload: Value,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DynamicWorkflowPlanMaterializationResponse {
+    plan: DynamicWorkflowPlan,
+    workflow_definition: WorkflowDefinition,
+    workflow_run: WorkflowRun,
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateAgentHandoffEvent {
     target_agent_id: Uuid,
@@ -1154,6 +1221,11 @@ struct WorkflowDefinition {
     output_schema_ref: Option<String>,
     step_graph: Value,
     handoff_rules: Value,
+    execution_strategy: String,
+    runtime_adapter: Option<String>,
+    runtime_mode: Option<String>,
+    runtime_capability_contract: Value,
+    event_ingestion_policy: String,
     approval_policy_ref: Option<String>,
     eval_gate_refs: Vec<String>,
     release_state: String,
@@ -1181,6 +1253,16 @@ struct CreateWorkflowDefinition {
     step_graph: Value,
     #[serde(default = "empty_json_object")]
     handoff_rules: Value,
+    #[serde(default = "default_workflow_execution_strategy")]
+    execution_strategy: String,
+    #[serde(default)]
+    runtime_adapter: Option<String>,
+    #[serde(default)]
+    runtime_mode: Option<String>,
+    #[serde(default = "empty_json_object")]
+    runtime_capability_contract: Value,
+    #[serde(default = "default_event_ingestion_policy")]
+    event_ingestion_policy: String,
     #[serde(default)]
     approval_policy_ref: Option<String>,
     #[serde(default)]
@@ -1210,6 +1292,16 @@ struct UpdateWorkflowDefinition {
     #[serde(default)]
     handoff_rules: Option<Value>,
     #[serde(default)]
+    execution_strategy: Option<String>,
+    #[serde(default)]
+    runtime_adapter: Option<Option<String>>,
+    #[serde(default)]
+    runtime_mode: Option<Option<String>>,
+    #[serde(default)]
+    runtime_capability_contract: Option<Value>,
+    #[serde(default)]
+    event_ingestion_policy: Option<String>,
+    #[serde(default)]
     approval_policy_ref: Option<Option<String>>,
     #[serde(default)]
     eval_gate_refs: Option<Vec<String>>,
@@ -1230,6 +1322,13 @@ struct WorkflowRun {
     root_task_grant_id: Option<Uuid>,
     input_payload: Value,
     input_digest: String,
+    execution_strategy: String,
+    runtime_adapter: Option<String>,
+    runtime_mode: Option<String>,
+    delegation_status: Option<String>,
+    external_run_ref: Option<String>,
+    runtime_event_cursor: Option<String>,
+    runtime_envelope: Value,
     started_at: Option<DateTime<Utc>>,
     completed_at: Option<DateTime<Utc>>,
     audit_trace_id: Option<Uuid>,
@@ -1250,6 +1349,18 @@ struct CreateWorkflowRun {
     environment_id: Option<Uuid>,
     #[serde(default)]
     title: Option<String>,
+    #[serde(default)]
+    execution_strategy: Option<String>,
+    #[serde(default)]
+    runtime_adapter: Option<String>,
+    #[serde(default)]
+    runtime_mode: Option<String>,
+    #[serde(default)]
+    external_run_ref: Option<String>,
+    #[serde(default)]
+    runtime_event_cursor: Option<String>,
+    #[serde(default = "empty_json_object")]
+    runtime_envelope: Value,
     #[serde(default = "empty_json_object")]
     input_payload: Value,
 }
@@ -6307,6 +6418,22 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/sessions/{id}/manager-plans",
             get(list_session_manager_agent_plans).post(create_manager_agent_plan),
+        )
+        .route(
+            "/api/dynamic-workflow-plans",
+            get(list_dynamic_workflow_plans).post(create_dynamic_workflow_plan),
+        )
+        .route(
+            "/api/dynamic-workflow-plans/{id}",
+            get(get_dynamic_workflow_plan),
+        )
+        .route(
+            "/api/dynamic-workflow-plans/{id}/review",
+            post(review_dynamic_workflow_plan),
+        )
+        .route(
+            "/api/dynamic-workflow-plans/{id}/materialize",
+            post(materialize_dynamic_workflow_plan),
         )
         .route("/api/sessions/{id}/stream", get(stream_events))
         .route("/api/sessions/{id}/artifacts", get(list_artifacts))
@@ -13656,6 +13783,349 @@ async fn list_work_item_manager_agent_plans(
     Ok(Json(state.list_work_item_manager_agent_plans(id).await?))
 }
 
+async fn list_dynamic_workflow_plans(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<DynamicWorkflowPlan>>, AppError> {
+    authorize_collection_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "dynamic_workflow_plans",
+    )
+    .await?;
+    Ok(Json(state.list_dynamic_workflow_plans().await?))
+}
+
+async fn get_dynamic_workflow_plan(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<DynamicWorkflowPlan>, AppError> {
+    let plan = state.get_dynamic_workflow_plan(id).await?;
+    authorize_dynamic_workflow_plan_read(&state, &headers, &plan).await?;
+    Ok(Json(plan))
+}
+
+async fn create_dynamic_workflow_plan(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateDynamicWorkflowPlan>,
+) -> Result<Json<DynamicWorkflowPlan>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsWrite,
+        "dynamic_workflow_plans",
+        None,
+    )
+    .await?;
+    if let Some(work_item_id) = input.source_work_item_id {
+        state.ensure_work_item_exists(work_item_id).await?;
+    }
+    if let Some(session_id) = input.source_session_id {
+        authorize_request(
+            &state,
+            &headers,
+            Permission::SessionsRead,
+            "session",
+            Some(session_id),
+        )
+        .await?;
+        state.get_session(session_id).await?;
+    }
+    let objective = require_non_empty(input.objective, "dynamic workflow objective")?;
+    let phases = validate_dynamic_workflow_phases(input.phases)?;
+    let agent_fleet_policy =
+        validate_dynamic_workflow_agent_fleet_policy(input.agent_fleet_policy)?;
+    let governance = validate_dynamic_workflow_governance(input.governance)?;
+    let validation = validate_dynamic_workflow_validation(input.validation)?;
+    let materialization = validate_dynamic_workflow_materialization(input.materialization)?;
+    let analysis = analyze_dynamic_workflow_plan(
+        &phases,
+        &agent_fleet_policy,
+        &governance,
+        &validation,
+        &materialization,
+    )?;
+    let now = Utc::now();
+    let plan = state
+        .create_dynamic_workflow_plan(DynamicWorkflowPlan {
+            id: Uuid::new_v4(),
+            source_work_item_id: input.source_work_item_id,
+            source_session_id: input.source_session_id,
+            objective,
+            status: "proposed".to_string(),
+            phases,
+            agent_fleet_policy,
+            governance,
+            validation,
+            materialization,
+            analysis,
+            review: empty_json_object(),
+            workflow_definition_id: None,
+            workflow_run_id: None,
+            audit_trace_id: None,
+            created_at: now,
+            updated_at: now,
+            reviewed_at: None,
+            materialized_at: None,
+        })
+        .await?;
+    let audit = record_dynamic_workflow_plan_audit(
+        &state,
+        &plan,
+        "dynamic_workflow_plan.created",
+        json!({"status": plan.status, "analysis": plan.analysis}),
+    )
+    .await?;
+    let plan = state
+        .update_dynamic_workflow_plan_audit_trace(plan.id, Some(audit.id), audit.created_at)
+        .await?;
+    Ok(Json(plan))
+}
+
+async fn review_dynamic_workflow_plan(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<ReviewDynamicWorkflowPlan>,
+) -> Result<Json<DynamicWorkflowPlan>, AppError> {
+    let current = state.get_dynamic_workflow_plan(id).await?;
+    authorize_dynamic_workflow_plan_run(&state, &headers, &current).await?;
+    if !input.review.is_object() {
+        return Err(AppError::bad_request(
+            "dynamic workflow plan review must be a JSON object",
+        ));
+    }
+    let status = match input.status {
+        Some(status) => normalize_dynamic_workflow_plan_status(&status)?,
+        None => "reviewed".to_string(),
+    };
+    if current.status == "materialized" {
+        return Err(AppError::bad_request(
+            "materialized dynamic workflow plan cannot be reviewed",
+        ));
+    }
+    let reviewed_at = Utc::now();
+    let reviewed = state
+        .update_dynamic_workflow_plan_review(
+            current.id,
+            status,
+            input.review,
+            current.audit_trace_id,
+            reviewed_at,
+        )
+        .await?;
+    let audit = record_dynamic_workflow_plan_audit(
+        &state,
+        &reviewed,
+        "dynamic_workflow_plan.reviewed",
+        json!({"status": reviewed.status, "review": reviewed.review}),
+    )
+    .await?;
+    let reviewed = state
+        .update_dynamic_workflow_plan_review(
+            reviewed.id,
+            reviewed.status.clone(),
+            reviewed.review.clone(),
+            Some(audit.id),
+            reviewed_at,
+        )
+        .await?;
+    Ok(Json(reviewed))
+}
+
+async fn materialize_dynamic_workflow_plan(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<MaterializeDynamicWorkflowPlan>,
+) -> Result<Json<DynamicWorkflowPlanMaterializationResponse>, AppError> {
+    let plan = state.get_dynamic_workflow_plan(id).await?;
+    authorize_dynamic_workflow_plan_run(&state, &headers, &plan).await?;
+    if plan.status != "approved" {
+        return Err(AppError::bad_request(
+            "dynamic workflow plan must be approved before materialization",
+        ));
+    }
+    let agent = workflow_pack_materialization_default_agent(&state).await?;
+    let execution_strategy = dynamic_workflow_plan_execution_strategy(&plan)?;
+    let runtime_adapter = dynamic_workflow_plan_runtime_adapter(&plan)?;
+    let runtime_mode = dynamic_workflow_plan_runtime_mode(&plan)?;
+    let runtime_capability_contract = dynamic_workflow_plan_runtime_capability_contract(&plan)?;
+    let event_ingestion_policy = dynamic_workflow_plan_event_ingestion_policy(&plan)?;
+    validate_workflow_execution_binding(
+        &execution_strategy,
+        runtime_adapter.as_deref(),
+        &runtime_capability_contract,
+    )?;
+    let step_graph = dynamic_workflow_plan_step_graph(&plan, &execution_strategy)?;
+    validate_workflow_graph_definition(&step_graph)?;
+    let now = Utc::now();
+    let workflow_definition = state
+        .create_workflow_definition(WorkflowDefinition {
+            id: Uuid::new_v4(),
+            pack_installation_id: None,
+            pack_id: None,
+            pack_version: None,
+            name: format!("Dynamic plan: {}", plan.objective),
+            entrypoint: format!("dynamic-{}", workflow_slug(&plan.objective)),
+            trigger_type: "manual".to_string(),
+            default_agent_id: agent.id,
+            default_environment_id: input.environment_id,
+            input_schema_ref: None,
+            output_schema_ref: None,
+            step_graph,
+            handoff_rules: dynamic_workflow_plan_handoff_rules(&plan),
+            execution_strategy: execution_strategy.clone(),
+            runtime_adapter: runtime_adapter.clone(),
+            runtime_mode: runtime_mode.clone(),
+            runtime_capability_contract: runtime_capability_contract.clone(),
+            event_ingestion_policy: event_ingestion_policy.clone(),
+            approval_policy_ref: None,
+            eval_gate_refs: Vec::new(),
+            release_state: "released".to_string(),
+            created_at: now,
+            updated_at: now,
+            archived_at: None,
+        })
+        .await?;
+    let session = state
+        .create_session(CreateSession {
+            agent_id: workflow_definition.default_agent_id,
+            environment_id: input.environment_id,
+            title: input
+                .title
+                .filter(|title| !title.trim().is_empty())
+                .unwrap_or_else(|| format!("Dynamic workflow: {}", plan.objective)),
+            message: Some(plan.objective.clone()),
+        })
+        .await?;
+    ensure_primary_session_thread(&state, session.id).await?;
+    let input_payload = if input.input_payload.is_object()
+        && !input
+            .input_payload
+            .as_object()
+            .is_some_and(serde_json::Map::is_empty)
+    {
+        input.input_payload
+    } else {
+        json!({
+            "objective": plan.objective,
+            "dynamic_workflow_plan_id": plan.id,
+            "phases": plan.phases
+        })
+    };
+    let input_digest = workflow_input_digest(&input_payload);
+    let runtime_envelope = workflow_run_runtime_envelope(
+        &workflow_definition,
+        &execution_strategy,
+        runtime_adapter.as_deref(),
+        runtime_mode.as_deref(),
+        None,
+        &json!({
+            "dynamic_workflow_plan_id": plan.id,
+            "objective": plan.objective,
+            "phases": plan.phases,
+            "agent_fleet_policy": plan.agent_fleet_policy,
+            "validation": plan.validation,
+            "analysis": plan.analysis
+        }),
+    );
+    let workflow_run = state
+        .create_workflow_run(WorkflowRun {
+            id: Uuid::new_v4(),
+            workflow_definition_id: workflow_definition.id,
+            pack_installation_id: None,
+            source_event_id: None,
+            source_work_item_id: plan.source_work_item_id,
+            source_schedule_id: None,
+            status: "queued".to_string(),
+            primary_session_id: session.id,
+            root_task_grant_id: None,
+            input_payload,
+            input_digest,
+            execution_strategy,
+            runtime_adapter,
+            runtime_mode,
+            delegation_status: (workflow_definition.execution_strategy == "delegated_runtime")
+                .then_some("submitted".to_string()),
+            external_run_ref: None,
+            runtime_event_cursor: None,
+            runtime_envelope,
+            started_at: None,
+            completed_at: None,
+            audit_trace_id: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .await?;
+    let root_grant = issue_root_task_grant_for_workflow_run(
+        &state,
+        &workflow_run,
+        &workflow_definition,
+        &session,
+    )
+    .await?;
+    let workflow_run = state
+        .update_workflow_run_root_task_grant(workflow_run.id, root_grant.id)
+        .await?;
+    materialize_workflow_graph_start_steps(
+        &state,
+        &workflow_definition,
+        &workflow_run,
+        &session,
+        &root_grant,
+    )
+    .await?;
+    state
+        .append_event(
+            "system",
+            Some(workflow_run.id),
+            session.id,
+            "dynamic_workflow_plan.materialized",
+            json!({
+                "dynamic_workflow_plan_id": plan.id,
+                "workflow_definition_id": workflow_definition.id,
+                "workflow_run_id": workflow_run.id,
+                "execution_strategy": workflow_run.execution_strategy,
+                "runtime_adapter": workflow_run.runtime_adapter,
+                "runtime_mode": workflow_run.runtime_mode,
+                "root_task_grant_id": workflow_run.root_task_grant_id
+            }),
+        )
+        .await?;
+    let audit = record_dynamic_workflow_plan_audit(
+        &state,
+        &plan,
+        "dynamic_workflow_plan.materialized",
+        json!({
+            "workflow_definition_id": workflow_definition.id,
+            "workflow_run_id": workflow_run.id,
+            "root_task_grant_id": workflow_run.root_task_grant_id,
+            "execution_strategy": workflow_run.execution_strategy,
+            "runtime_adapter": workflow_run.runtime_adapter,
+            "runtime_mode": workflow_run.runtime_mode
+        }),
+    )
+    .await?;
+    let plan = state
+        .update_dynamic_workflow_plan_materialized(
+            plan.id,
+            workflow_definition.id,
+            workflow_run.id,
+            Some(audit.id),
+            now,
+        )
+        .await?;
+    Ok(Json(DynamicWorkflowPlanMaterializationResponse {
+        plan,
+        workflow_definition,
+        workflow_run,
+    }))
+}
+
 async fn get_capability_discovery(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -14888,6 +15358,118 @@ async fn record_manager_agent_plan_work_item_activity(
     Ok(())
 }
 
+async fn authorize_dynamic_workflow_plan_read(
+    state: &AppState,
+    headers: &HeaderMap,
+    plan: &DynamicWorkflowPlan,
+) -> Result<(), AppError> {
+    if let Some(session_id) = plan.source_session_id {
+        authorize_request(
+            state,
+            headers,
+            Permission::SessionsRead,
+            "session",
+            Some(session_id),
+        )
+        .await
+    } else {
+        authorize_request(
+            state,
+            headers,
+            Permission::SessionsRead,
+            "dynamic_workflow_plan",
+            Some(plan.id),
+        )
+        .await
+    }
+}
+
+async fn authorize_dynamic_workflow_plan_run(
+    state: &AppState,
+    headers: &HeaderMap,
+    plan: &DynamicWorkflowPlan,
+) -> Result<(), AppError> {
+    if let Some(session_id) = plan.source_session_id {
+        authorize_request(
+            state,
+            headers,
+            Permission::SessionsRun,
+            "session",
+            Some(session_id),
+        )
+        .await
+    } else {
+        authorize_request(
+            state,
+            headers,
+            Permission::SessionsRun,
+            "dynamic_workflow_plan",
+            Some(plan.id),
+        )
+        .await
+    }
+}
+
+async fn record_dynamic_workflow_plan_audit(
+    state: &AppState,
+    plan: &DynamicWorkflowPlan,
+    action: &str,
+    details: Value,
+) -> Result<AuditLog, AppError> {
+    let audit = state
+        .append_audit_log(new_audit_log(
+            plan.source_session_id,
+            "system",
+            Some(plan.id),
+            action,
+            "dynamic_workflow_plan",
+            Some(plan.id),
+            json!({
+                "dynamic_workflow_plan_id": plan.id,
+                "source_work_item_id": plan.source_work_item_id,
+                "source_session_id": plan.source_session_id,
+                "objective": plan.objective,
+                "status": plan.status,
+                "details": details.clone()
+            }),
+        ))
+        .await?;
+    if let Some(session_id) = plan.source_session_id {
+        state
+            .append_event(
+                "system",
+                Some(plan.id),
+                session_id,
+                action,
+                json!({
+                    "dynamic_workflow_plan_id": plan.id,
+                    "objective": plan.objective,
+                    "status": plan.status,
+                    "details": details.clone()
+                }),
+            )
+            .await?;
+    }
+    if let Some(work_item_id) = plan.source_work_item_id {
+        state
+            .append_work_item_activity_entry(
+                work_item_id,
+                action,
+                None,
+                Some("dynamic_workflow_plan"),
+                Some(plan.id),
+                format!("Dynamic workflow plan {} {}", plan.objective, plan.status),
+                json!({
+                    "dynamic_workflow_plan_id": plan.id,
+                    "status": plan.status,
+                    "details": details.clone()
+                }),
+            )
+            .await?;
+    }
+    Ok(audit)
+}
+
 fn normalize_manager_plan_risk(value: &str) -> Result<String, AppError> {
     let normalized = value.trim().to_ascii_lowercase();
     match normalized.as_str() {
@@ -14905,6 +15487,487 @@ fn normalize_manager_plan_status(value: &str) -> Result<String, AppError> {
         _ => Err(AppError::bad_request(
             "manager agent plan status must be planned, reviewed, approved, needs_changes, or blocked",
         )),
+    }
+}
+
+fn normalize_dynamic_workflow_plan_status(value: &str) -> Result<String, AppError> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "proposed" | "reviewed" | "approved" | "rejected" | "materialized" => Ok(normalized),
+        _ => Err(AppError::bad_request(
+            "dynamic workflow plan status must be proposed, reviewed, approved, rejected, or materialized",
+        )),
+    }
+}
+
+fn validate_dynamic_workflow_phases(phases: Value) -> Result<Value, AppError> {
+    let items = phases.as_array().ok_or_else(|| {
+        AppError::bad_request("dynamic workflow plan phases must be a JSON array")
+    })?;
+    if items.is_empty() {
+        return Err(AppError::bad_request(
+            "dynamic workflow plan phases must not be empty",
+        ));
+    }
+    let mut keys = BTreeSet::new();
+    for (index, phase) in items.iter().enumerate() {
+        let object = phase.as_object().ok_or_else(|| {
+            AppError::bad_request("dynamic workflow plan phases must be JSON objects")
+        })?;
+        let key = dynamic_phase_key(phase, index)?;
+        if !keys.insert(key.clone()) {
+            return Err(AppError::bad_request(format!(
+                "dynamic workflow plan phase key {key} is duplicated"
+            )));
+        }
+        if dynamic_phase_count(phase)? == 0 {
+            return Err(AppError::bad_request(format!(
+                "dynamic workflow plan phase {key} agent count must be at least 1"
+            )));
+        }
+        if object
+            .get("prompt")
+            .or_else(|| object.get("objective"))
+            .and_then(Value::as_str)
+            .and_then(|value| normalize_optional_text(value.to_string()))
+            .is_none()
+        {
+            return Err(AppError::bad_request(format!(
+                "dynamic workflow plan phase {key} requires prompt or objective"
+            )));
+        }
+    }
+    Ok(phases)
+}
+
+fn validate_dynamic_workflow_agent_fleet_policy(policy: Value) -> Result<Value, AppError> {
+    if !policy.is_object() {
+        return Err(AppError::bad_request(
+            "dynamic workflow agent_fleet_policy must be a JSON object",
+        ));
+    }
+    let max_total = dynamic_policy_u64(&policy, "max_total_agents", 64)?;
+    let max_parallel = dynamic_policy_u64(&policy, "max_parallel_agents", 16)?;
+    if max_total == 0 || max_total > 1000 {
+        return Err(AppError::bad_request(
+            "dynamic workflow max_total_agents must be between 1 and 1000",
+        ));
+    }
+    if max_parallel == 0 || max_parallel > 16 {
+        return Err(AppError::bad_request(
+            "dynamic workflow max_parallel_agents must be between 1 and 16",
+        ));
+    }
+    if max_parallel > max_total {
+        return Err(AppError::bad_request(
+            "dynamic workflow max_parallel_agents cannot exceed max_total_agents",
+        ));
+    }
+    Ok(policy)
+}
+
+fn validate_dynamic_workflow_governance(governance: Value) -> Result<Value, AppError> {
+    if !governance.is_object() {
+        return Err(AppError::bad_request(
+            "dynamic workflow governance must be a JSON object",
+        ));
+    }
+    for field in [
+        "memory_scope",
+        "tool_scope",
+        "connector_scope",
+        "approval_policy",
+        "external_effects",
+    ] {
+        if let Some(value) = governance.get(field)
+            && !value.is_object()
+        {
+            return Err(AppError::bad_request(format!(
+                "dynamic workflow governance.{field} must be a JSON object"
+            )));
+        }
+    }
+    if let Some(risk) = governance.get("risk_level").and_then(Value::as_str) {
+        normalize_task_grant_risk_level(risk)?;
+    }
+    Ok(governance)
+}
+
+fn validate_dynamic_workflow_validation(validation: Value) -> Result<Value, AppError> {
+    if !validation.is_object() {
+        return Err(AppError::bad_request(
+            "dynamic workflow validation must be a JSON object",
+        ));
+    }
+    if validation
+        .get("cross_check_required")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        && validation
+            .get("vote_threshold")
+            .and_then(Value::as_f64)
+            .is_some_and(|threshold| !(0.0..=1.0).contains(&threshold))
+    {
+        return Err(AppError::bad_request(
+            "dynamic workflow validation.vote_threshold must be between 0 and 1",
+        ));
+    }
+    Ok(validation)
+}
+
+fn validate_dynamic_workflow_materialization(materialization: Value) -> Result<Value, AppError> {
+    if !materialization.is_object() {
+        return Err(AppError::bad_request(
+            "dynamic workflow materialization must be a JSON object",
+        ));
+    }
+    let strategy = materialization
+        .get("execution_strategy")
+        .and_then(Value::as_str)
+        .unwrap_or("delegated_runtime");
+    let strategy = normalize_workflow_execution_strategy(strategy)?;
+    let adapter = materialization
+        .get("runtime_adapter")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let adapter = normalize_optional_runtime_adapter(adapter)?;
+    let contract = materialization
+        .get("runtime_capability_contract")
+        .cloned()
+        .unwrap_or_else(empty_json_object);
+    validate_workflow_execution_binding(&strategy, adapter.as_deref(), &contract)?;
+    if let Some(mode) = materialization.get("runtime_mode").and_then(Value::as_str) {
+        normalize_runtime_mode(mode)?;
+    }
+    Ok(materialization)
+}
+
+fn analyze_dynamic_workflow_plan(
+    phases: &Value,
+    agent_fleet_policy: &Value,
+    governance: &Value,
+    validation: &Value,
+    materialization: &Value,
+) -> Result<Value, AppError> {
+    let phase_items = phases.as_array().ok_or_else(|| {
+        AppError::bad_request("dynamic workflow plan phases must be a JSON array")
+    })?;
+    let max_total = dynamic_policy_u64(agent_fleet_policy, "max_total_agents", 64)?;
+    let max_parallel = dynamic_policy_u64(agent_fleet_policy, "max_parallel_agents", 16)?;
+    let mut total_agents = 0u64;
+    let mut max_phase_parallel = 0u64;
+    let mut phase_summaries = Vec::new();
+    for (index, phase) in phase_items.iter().enumerate() {
+        let key = dynamic_phase_key(phase, index)?;
+        let count = dynamic_phase_count(phase)?;
+        let parallel = dynamic_phase_max_parallel(phase, max_parallel)?;
+        total_agents += count;
+        max_phase_parallel = max_phase_parallel.max(parallel);
+        phase_summaries.push(json!({
+            "key": key,
+            "agent_count": count,
+            "max_parallel": parallel,
+            "depends_on": phase.get("depends_on").or_else(|| phase.get("after")).cloned().unwrap_or_else(|| json!([])),
+            "validation_strategy": phase.get("validation_strategy").cloned().unwrap_or_else(|| validation.clone())
+        }));
+    }
+    if total_agents > max_total {
+        return Err(AppError::bad_request(format!(
+            "dynamic workflow plan requests {total_agents} agents but max_total_agents is {max_total}"
+        )));
+    }
+    if max_phase_parallel > max_parallel {
+        return Err(AppError::bad_request(format!(
+            "dynamic workflow plan max phase parallelism {max_phase_parallel} exceeds max_parallel_agents {max_parallel}"
+        )));
+    }
+    Ok(json!({
+        "status": "ready_for_review",
+        "phase_count": phase_items.len(),
+        "total_agent_count": total_agents,
+        "max_parallel_agents": max_parallel,
+        "max_phase_parallel": max_phase_parallel,
+        "cross_check_required": validation.get("cross_check_required").and_then(Value::as_bool).unwrap_or(false),
+        "risk_level": governance.get("risk_level").and_then(Value::as_str).unwrap_or("medium"),
+        "execution_strategy": materialization.get("execution_strategy").and_then(Value::as_str).unwrap_or("delegated_runtime"),
+        "runtime_adapter": materialization.get("runtime_adapter").cloned().unwrap_or(Value::Null),
+        "runtime_mode": materialization.get("runtime_mode").cloned().unwrap_or(Value::Null),
+        "phases": phase_summaries
+    }))
+}
+
+fn dynamic_policy_u64(policy: &Value, key: &str, default_value: u64) -> Result<u64, AppError> {
+    match policy.get(key) {
+        Some(Value::Number(number)) => number.as_u64().ok_or_else(|| {
+            AppError::bad_request(format!("dynamic workflow {key} must be a positive integer"))
+        }),
+        Some(_) => Err(AppError::bad_request(format!(
+            "dynamic workflow {key} must be a positive integer"
+        ))),
+        None => Ok(default_value),
+    }
+}
+
+fn dynamic_phase_key(phase: &Value, index: usize) -> Result<String, AppError> {
+    phase
+        .get("key")
+        .or_else(|| phase.get("id"))
+        .and_then(Value::as_str)
+        .and_then(|value| normalize_optional_text(value.to_string()))
+        .or_else(|| Some(format!("phase-{}", index + 1)))
+        .ok_or_else(|| AppError::bad_request("dynamic workflow phase requires key"))
+}
+
+fn dynamic_phase_count(phase: &Value) -> Result<u64, AppError> {
+    match phase
+        .get("agent_count")
+        .or_else(|| phase.get("count"))
+        .or_else(|| phase.get("agents"))
+    {
+        Some(Value::Number(number)) => number.as_u64().ok_or_else(|| {
+            AppError::bad_request("dynamic workflow phase agent_count must be a positive integer")
+        }),
+        Some(Value::Array(agents)) => Ok(agents.len() as u64),
+        Some(_) => Err(AppError::bad_request(
+            "dynamic workflow phase agent_count must be a positive integer or agents array",
+        )),
+        None => Ok(1),
+    }
+}
+
+fn dynamic_phase_max_parallel(phase: &Value, default_value: u64) -> Result<u64, AppError> {
+    match phase
+        .get("max_parallel")
+        .or_else(|| phase.get("parallelism"))
+    {
+        Some(Value::Number(number)) => number.as_u64().ok_or_else(|| {
+            AppError::bad_request("dynamic workflow phase max_parallel must be a positive integer")
+        }),
+        Some(_) => Err(AppError::bad_request(
+            "dynamic workflow phase max_parallel must be a positive integer",
+        )),
+        None => Ok(default_value.min(dynamic_phase_count(phase)?)),
+    }
+}
+
+fn dynamic_workflow_plan_execution_strategy(
+    plan: &DynamicWorkflowPlan,
+) -> Result<String, AppError> {
+    normalize_workflow_execution_strategy(
+        plan.materialization
+            .get("execution_strategy")
+            .and_then(Value::as_str)
+            .unwrap_or("delegated_runtime"),
+    )
+}
+
+fn dynamic_workflow_plan_runtime_adapter(
+    plan: &DynamicWorkflowPlan,
+) -> Result<Option<String>, AppError> {
+    normalize_optional_runtime_adapter(
+        plan.materialization
+            .get("runtime_adapter")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+    )
+}
+
+fn dynamic_workflow_plan_runtime_mode(
+    plan: &DynamicWorkflowPlan,
+) -> Result<Option<String>, AppError> {
+    normalize_optional_runtime_mode(
+        plan.materialization
+            .get("runtime_mode")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+    )
+}
+
+fn dynamic_workflow_plan_runtime_capability_contract(
+    plan: &DynamicWorkflowPlan,
+) -> Result<Value, AppError> {
+    let contract = plan
+        .materialization
+        .get("runtime_capability_contract")
+        .cloned()
+        .unwrap_or_else(|| {
+            json!({
+                "max_total_agents": plan.agent_fleet_policy.get("max_total_agents").cloned().unwrap_or(json!(64)),
+                "max_parallel_agents": plan.agent_fleet_policy.get("max_parallel_agents").cloned().unwrap_or(json!(16)),
+                "validation": plan.validation
+            })
+        });
+    if !contract.is_object() {
+        return Err(AppError::bad_request(
+            "dynamic workflow runtime_capability_contract must be a JSON object",
+        ));
+    }
+    Ok(contract)
+}
+
+fn dynamic_workflow_plan_event_ingestion_policy(
+    plan: &DynamicWorkflowPlan,
+) -> Result<String, AppError> {
+    normalize_event_ingestion_policy(
+        plan.materialization
+            .get("event_ingestion_policy")
+            .and_then(Value::as_str)
+            .unwrap_or("normalized"),
+    )
+}
+
+fn dynamic_workflow_plan_handoff_rules(plan: &DynamicWorkflowPlan) -> Value {
+    json!({
+        "source": "dynamic_workflow_plan",
+        "dynamic_workflow_plan_id": plan.id,
+        "objective": plan.objective,
+        "root_task_grant": {
+            "semantic_scopes": plan.governance.get("semantic_scopes").cloned().unwrap_or_else(empty_json_object),
+            "memory_scope": plan.governance.get("memory_scope").cloned().unwrap_or_else(default_task_grant_memory_scope),
+            "tool_scope": plan.governance.get("tool_scope").cloned().unwrap_or_else(default_task_grant_tool_scope),
+            "connector_scope": plan.governance.get("connector_scope").cloned().unwrap_or_else(default_task_grant_connector_scope),
+            "approval_policy": plan.governance.get("approval_policy").cloned().unwrap_or_else(default_task_grant_approval_policy),
+            "external_effects": plan.governance.get("external_effects").cloned().unwrap_or_else(default_task_grant_external_effects),
+            "risk_level": plan.governance.get("risk_level").cloned().unwrap_or(json!("medium")),
+            "max_turns": plan.agent_fleet_policy.get("max_total_agents").cloned().unwrap_or(json!(64)),
+            "max_runtime_seconds": plan.agent_fleet_policy.get("timeout_seconds").cloned().unwrap_or(json!(3600))
+        },
+        "validation": plan.validation,
+        "agent_fleet_policy": plan.agent_fleet_policy
+    })
+}
+
+fn dynamic_workflow_plan_step_graph(
+    plan: &DynamicWorkflowPlan,
+    execution_strategy: &str,
+) -> Result<Value, AppError> {
+    if execution_strategy == "delegated_runtime" {
+        return Ok(workflow_definition_step_graph_for_execution(
+            execution_strategy,
+            &empty_json_object(),
+        ));
+    }
+    let phases = plan.phases.as_array().ok_or_else(|| {
+        AppError::bad_request("dynamic workflow plan phases must be a JSON array")
+    })?;
+    let mut steps = Vec::new();
+    let mut previous_phase_keys: Vec<String> = Vec::new();
+    let mut phase_step_keys: HashMap<String, Vec<String>> = HashMap::new();
+    for (index, phase) in phases.iter().enumerate() {
+        let phase_key = workflow_slug(&dynamic_phase_key(phase, index)?);
+        let count = dynamic_phase_count(phase)?;
+        let explicit_dependencies = dynamic_phase_dependencies(phase)?;
+        let dependencies = if explicit_dependencies.is_empty() {
+            previous_phase_keys.clone()
+        } else {
+            explicit_dependencies
+                .into_iter()
+                .flat_map(|dependency| {
+                    phase_step_keys
+                        .get(&dependency)
+                        .cloned()
+                        .unwrap_or_else(|| vec![dependency])
+                })
+                .collect()
+        };
+        let mut current_phase_keys = Vec::new();
+        for agent_index in 0..count {
+            let step_key = if count == 1 {
+                phase_key.clone()
+            } else {
+                format!("{}-{}", phase_key, agent_index + 1)
+            };
+            current_phase_keys.push(step_key.clone());
+            let mut step = serde_json::Map::new();
+            step.insert("key".to_string(), json!(step_key));
+            step.insert("type".to_string(), json!("agent"));
+            step.insert("dynamic_workflow_plan_id".to_string(), json!(plan.id));
+            step.insert("phase_key".to_string(), json!(phase_key));
+            step.insert("phase_index".to_string(), json!(index));
+            step.insert("agent_index".to_string(), json!(agent_index));
+            step.insert(
+                "agent_role".to_string(),
+                phase
+                    .get("agent_role")
+                    .cloned()
+                    .unwrap_or_else(|| json!("specialist")),
+            );
+            step.insert(
+                "input".to_string(),
+                json!({
+                    "objective": phase.get("objective").or_else(|| phase.get("prompt")).cloned().unwrap_or_else(|| json!(plan.objective)),
+                    "prompt": phase.get("prompt").cloned().unwrap_or_else(|| json!(plan.objective)),
+                    "validation_strategy": phase.get("validation_strategy").cloned().unwrap_or_else(|| plan.validation.clone()),
+                    "output_schema": phase.get("output_schema").cloned().unwrap_or(Value::Null)
+                }),
+            );
+            if index == 0 && dependencies.is_empty() {
+                step.insert("start".to_string(), json!(true));
+            } else if !dependencies.is_empty() {
+                step.insert("depends_on".to_string(), json!(dependencies));
+            }
+            steps.push(Value::Object(step));
+        }
+        phase_step_keys.insert(phase_key, current_phase_keys.clone());
+        previous_phase_keys = current_phase_keys;
+    }
+    Ok(json!({
+        "source": "dynamic_workflow_plan",
+        "dynamic_workflow_plan_id": plan.id,
+        "fan_out": {
+            "max_parallel": dynamic_policy_u64(&plan.agent_fleet_policy, "max_parallel_agents", 16)?
+        },
+        "steps": steps
+    }))
+}
+
+fn dynamic_phase_dependencies(phase: &Value) -> Result<Vec<String>, AppError> {
+    let Some(value) = phase.get("depends_on").or_else(|| phase.get("after")) else {
+        return Ok(Vec::new());
+    };
+    match value {
+        Value::String(item) => Ok(normalize_optional_text(workflow_slug(item))
+            .into_iter()
+            .collect()),
+        Value::Array(items) => items
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .map(workflow_slug)
+                    .and_then(normalize_optional_text)
+                    .ok_or_else(|| {
+                        AppError::bad_request(
+                            "dynamic workflow phase dependencies must be non-empty strings",
+                        )
+                    })
+            })
+            .collect(),
+        _ => Err(AppError::bad_request(
+            "dynamic workflow phase dependencies must be a string or array",
+        )),
+    }
+}
+
+fn workflow_slug(value: &str) -> String {
+    let slug = value
+        .chars()
+        .map(|item| {
+            if item.is_ascii_alphanumeric() || item == '-' || item == '_' {
+                item.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .take(8)
+        .collect::<Vec<_>>()
+        .join("-");
+    if slug.is_empty() {
+        "workflow".to_string()
+    } else {
+        slug
     }
 }
 
@@ -14936,6 +15999,106 @@ fn normalize_workflow_release_state(value: &str) -> Result<String, AppError> {
             "workflow release_state must be draft, staged, released, rolled_back, or archived",
         )),
     }
+}
+
+fn normalize_workflow_execution_strategy(value: &str) -> Result<String, AppError> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "native_steps" | "delegated_runtime" | "native_dynamic" => Ok(normalized),
+        _ => Err(AppError::bad_request(
+            "workflow execution_strategy must be native_steps, delegated_runtime, or native_dynamic",
+        )),
+    }
+}
+
+fn normalize_runtime_adapter(value: &str) -> Result<String, AppError> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "codex_app_server" | "codex_cli" | "claude_code" | "gemini" | "opencode" | "aider"
+        | "hosted" => Ok(normalized),
+        _ => Err(AppError::bad_request(
+            "runtime_adapter must be codex_app_server, codex_cli, claude_code, gemini, opencode, aider, or hosted",
+        )),
+    }
+}
+
+fn normalize_optional_runtime_adapter(value: Option<String>) -> Result<Option<String>, AppError> {
+    value
+        .and_then(normalize_optional_text)
+        .map(|value| normalize_runtime_adapter(&value))
+        .transpose()
+}
+
+fn normalize_runtime_mode(value: &str) -> Result<String, AppError> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "normal" | "ultracode" | "dynamic_workflow" => Ok(normalized),
+        _ => Err(AppError::bad_request(
+            "runtime_mode must be normal, ultracode, or dynamic_workflow",
+        )),
+    }
+}
+
+fn normalize_optional_runtime_mode(value: Option<String>) -> Result<Option<String>, AppError> {
+    value
+        .and_then(normalize_optional_text)
+        .map(|value| normalize_runtime_mode(&value))
+        .transpose()
+}
+
+fn normalize_event_ingestion_policy(value: &str) -> Result<String, AppError> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "normalized" | "raw_only" | "disabled" => Ok(normalized),
+        _ => Err(AppError::bad_request(
+            "event_ingestion_policy must be normalized, raw_only, or disabled",
+        )),
+    }
+}
+
+fn validate_workflow_execution_binding(
+    execution_strategy: &str,
+    runtime_adapter: Option<&str>,
+    runtime_capability_contract: &Value,
+) -> Result<(), AppError> {
+    if !runtime_capability_contract.is_object() {
+        return Err(AppError::bad_request(
+            "runtime_capability_contract must be a JSON object",
+        ));
+    }
+    if execution_strategy == "delegated_runtime" && runtime_adapter.is_none() {
+        return Err(AppError::bad_request(
+            "delegated_runtime workflow requires runtime_adapter",
+        ));
+    }
+    Ok(())
+}
+
+fn workflow_definition_step_graph_for_execution(
+    execution_strategy: &str,
+    step_graph: &Value,
+) -> Value {
+    if execution_strategy != "delegated_runtime"
+        || step_graph
+            .get("steps")
+            .and_then(Value::as_array)
+            .is_some_and(|steps| !steps.is_empty())
+    {
+        return step_graph.clone();
+    }
+    json!({
+        "source": "delegated_runtime_envelope",
+        "steps": [
+            {
+                "key": "delegated-runtime",
+                "type": "delegated_runtime",
+                "start": true,
+                "input": {
+                    "objective": "Delegate this workflow run to the configured external agent runtime."
+                }
+            }
+        ]
+    })
 }
 
 fn normalize_workflow_run_status(value: &str) -> Result<String, AppError> {
@@ -15557,6 +16720,17 @@ async fn create_workflow_definition_route(
             "workflow definition handoff_rules must be a JSON object",
         ));
     }
+    let execution_strategy = normalize_workflow_execution_strategy(&input.execution_strategy)?;
+    let runtime_adapter = normalize_optional_runtime_adapter(input.runtime_adapter)?;
+    let runtime_mode = normalize_optional_runtime_mode(input.runtime_mode)?;
+    let event_ingestion_policy = normalize_event_ingestion_policy(&input.event_ingestion_policy)?;
+    validate_workflow_execution_binding(
+        &execution_strategy,
+        runtime_adapter.as_deref(),
+        &input.runtime_capability_contract,
+    )?;
+    let step_graph =
+        workflow_definition_step_graph_for_execution(&execution_strategy, &input.step_graph);
     let (pack_id, pack_version) = if let Some(installation_id) = input.pack_installation_id {
         let installation = state
             .get_workflow_pack_installation(installation_id)
@@ -15579,8 +16753,13 @@ async fn create_workflow_definition_route(
             default_environment_id: input.default_environment_id,
             input_schema_ref: input.input_schema_ref,
             output_schema_ref: input.output_schema_ref,
-            step_graph: input.step_graph,
+            step_graph,
             handoff_rules: input.handoff_rules,
+            execution_strategy,
+            runtime_adapter,
+            runtime_mode,
+            runtime_capability_contract: input.runtime_capability_contract,
+            event_ingestion_policy,
             approval_policy_ref: input.approval_policy_ref,
             eval_gate_refs: input.eval_gate_refs,
             release_state,
@@ -15602,6 +16781,10 @@ async fn create_workflow_definition_route(
                 "entrypoint": definition.entrypoint,
                 "default_agent_id": definition.default_agent_id,
                 "pack_installation_id": definition.pack_installation_id,
+                "execution_strategy": definition.execution_strategy,
+                "runtime_adapter": definition.runtime_adapter,
+                "runtime_mode": definition.runtime_mode,
+                "event_ingestion_policy": definition.event_ingestion_policy,
                 "release_state": definition.release_state
             }),
         ))
@@ -15677,6 +16860,41 @@ async fn update_workflow_definition_route(
         definition.handoff_rules = handoff_rules;
         changed_fields.push("handoff_rules");
     }
+    if let Some(execution_strategy) = input.execution_strategy {
+        definition.execution_strategy = normalize_workflow_execution_strategy(&execution_strategy)?;
+        changed_fields.push("execution_strategy");
+    }
+    if let Some(runtime_adapter) = input.runtime_adapter {
+        definition.runtime_adapter = normalize_optional_runtime_adapter(runtime_adapter)?;
+        changed_fields.push("runtime_adapter");
+    }
+    if let Some(runtime_mode) = input.runtime_mode {
+        definition.runtime_mode = normalize_optional_runtime_mode(runtime_mode)?;
+        changed_fields.push("runtime_mode");
+    }
+    if let Some(runtime_capability_contract) = input.runtime_capability_contract {
+        if !runtime_capability_contract.is_object() {
+            return Err(AppError::bad_request(
+                "runtime_capability_contract must be a JSON object",
+            ));
+        }
+        definition.runtime_capability_contract = runtime_capability_contract;
+        changed_fields.push("runtime_capability_contract");
+    }
+    if let Some(event_ingestion_policy) = input.event_ingestion_policy {
+        definition.event_ingestion_policy =
+            normalize_event_ingestion_policy(&event_ingestion_policy)?;
+        changed_fields.push("event_ingestion_policy");
+    }
+    validate_workflow_execution_binding(
+        &definition.execution_strategy,
+        definition.runtime_adapter.as_deref(),
+        &definition.runtime_capability_contract,
+    )?;
+    definition.step_graph = workflow_definition_step_graph_for_execution(
+        &definition.execution_strategy,
+        &definition.step_graph,
+    );
     if let Some(approval_policy_ref) = input.approval_policy_ref {
         definition.approval_policy_ref = approval_policy_ref.and_then(normalize_optional_text);
         changed_fields.push("approval_policy_ref");
@@ -15717,6 +16935,10 @@ async fn update_workflow_definition_route(
                 "entrypoint": updated.entrypoint,
                 "default_agent_id": updated.default_agent_id,
                 "pack_installation_id": updated.pack_installation_id,
+                "execution_strategy": updated.execution_strategy,
+                "runtime_adapter": updated.runtime_adapter,
+                "runtime_mode": updated.runtime_mode,
+                "event_ingestion_policy": updated.event_ingestion_policy,
                 "release_state": updated.release_state
             }),
         ))
@@ -15805,6 +17027,37 @@ async fn create_workflow_run_route(
     ensure_primary_session_thread(&state, session.id).await?;
     let now = Utc::now();
     let input_digest = workflow_input_digest(&input.input_payload);
+    let execution_strategy = input
+        .execution_strategy
+        .as_deref()
+        .map(normalize_workflow_execution_strategy)
+        .transpose()?
+        .unwrap_or_else(|| definition.execution_strategy.clone());
+    let runtime_adapter = match input.runtime_adapter {
+        Some(runtime_adapter) => normalize_optional_runtime_adapter(Some(runtime_adapter))?,
+        None => definition.runtime_adapter.clone(),
+    };
+    let runtime_mode = match input.runtime_mode {
+        Some(runtime_mode) => normalize_optional_runtime_mode(Some(runtime_mode))?,
+        None => definition.runtime_mode.clone(),
+    };
+    validate_workflow_execution_binding(
+        &execution_strategy,
+        runtime_adapter.as_deref(),
+        &definition.runtime_capability_contract,
+    )?;
+    let external_run_ref = input.external_run_ref.and_then(normalize_optional_text);
+    let runtime_event_cursor = input.runtime_event_cursor.and_then(normalize_optional_text);
+    let delegation_status =
+        (execution_strategy == "delegated_runtime").then_some("submitted".to_string());
+    let runtime_envelope = workflow_run_runtime_envelope(
+        &definition,
+        &execution_strategy,
+        runtime_adapter.as_deref(),
+        runtime_mode.as_deref(),
+        external_run_ref.as_deref(),
+        &input.runtime_envelope,
+    );
     let run = state
         .create_workflow_run(WorkflowRun {
             id: Uuid::new_v4(),
@@ -15818,6 +17071,13 @@ async fn create_workflow_run_route(
             root_task_grant_id: None,
             input_payload: input.input_payload,
             input_digest,
+            execution_strategy,
+            runtime_adapter,
+            runtime_mode,
+            delegation_status,
+            external_run_ref,
+            runtime_event_cursor,
+            runtime_envelope,
             started_at: None,
             completed_at: None,
             audit_trace_id: None,
@@ -15844,6 +17104,11 @@ async fn create_workflow_run_route(
                 "pack_installation_id": run.pack_installation_id,
                 "root_task_grant_id": run.root_task_grant_id,
                 "input_digest": run.input_digest,
+                "execution_strategy": run.execution_strategy,
+                "runtime_adapter": run.runtime_adapter,
+                "runtime_mode": run.runtime_mode,
+                "delegation_status": run.delegation_status,
+                "external_run_ref": run.external_run_ref,
                 "status": run.status
             }),
         )
@@ -15861,7 +17126,12 @@ async fn create_workflow_run_route(
                 "pack_installation_id": run.pack_installation_id,
                 "primary_session_id": run.primary_session_id,
                 "root_task_grant_id": run.root_task_grant_id,
-                "input_digest": run.input_digest
+                "input_digest": run.input_digest,
+                "execution_strategy": run.execution_strategy,
+                "runtime_adapter": run.runtime_adapter,
+                "runtime_mode": run.runtime_mode,
+                "delegation_status": run.delegation_status,
+                "external_run_ref": run.external_run_ref
             }),
         ))
         .await?;
@@ -15899,6 +17169,36 @@ async fn materialize_workflow_graph_start_steps(
         materialized.push(step);
     }
     Ok(materialized)
+}
+
+fn workflow_run_runtime_envelope(
+    definition: &WorkflowDefinition,
+    execution_strategy: &str,
+    runtime_adapter: Option<&str>,
+    runtime_mode: Option<&str>,
+    external_run_ref: Option<&str>,
+    request_envelope: &Value,
+) -> Value {
+    let mut envelope = serde_json::Map::new();
+    envelope.insert("source".to_string(), json!("workflow_run"));
+    envelope.insert("workflow_definition_id".to_string(), json!(definition.id));
+    envelope.insert("execution_strategy".to_string(), json!(execution_strategy));
+    envelope.insert("runtime_adapter".to_string(), json!(runtime_adapter));
+    envelope.insert(
+        "runtime_mode".to_string(),
+        json!(runtime_mode.unwrap_or("normal")),
+    );
+    envelope.insert("external_run_ref".to_string(), json!(external_run_ref));
+    envelope.insert(
+        "event_ingestion_policy".to_string(),
+        json!(definition.event_ingestion_policy),
+    );
+    envelope.insert(
+        "runtime_capability_contract".to_string(),
+        definition.runtime_capability_contract.clone(),
+    );
+    envelope.insert("request_envelope".to_string(), request_envelope.clone());
+    Value::Object(envelope)
 }
 
 async fn materialize_workflow_graph_step(
@@ -15989,6 +17289,18 @@ fn workflow_graph_step_input_payload(
     payload.insert("source".to_string(), json!("step_graph"));
     payload.insert("graph_step".to_string(), graph_step.clone());
     payload.insert("workflow_input".to_string(), run.input_payload.clone());
+    payload.insert(
+        "runtime_delegation".to_string(),
+        json!({
+            "execution_strategy": run.execution_strategy,
+            "runtime_adapter": run.runtime_adapter,
+            "runtime_mode": run.runtime_mode,
+            "delegation_status": run.delegation_status,
+            "external_run_ref": run.external_run_ref,
+            "runtime_event_cursor": run.runtime_event_cursor,
+            "runtime_envelope": run.runtime_envelope
+        }),
+    );
     if let Value::Object(context) = input_context {
         for (key, value) in context {
             payload.insert(key, value);
@@ -21715,6 +23027,18 @@ struct WorkflowPackWorkflowFile {
     #[serde(default)]
     step_graph: Option<Value>,
     #[serde(default)]
+    execution: Value,
+    #[serde(default = "default_workflow_execution_strategy")]
+    execution_strategy: String,
+    #[serde(default)]
+    runtime_adapter: Option<String>,
+    #[serde(default)]
+    runtime_mode: Option<String>,
+    #[serde(default = "empty_json_object")]
+    runtime_capability_contract: Value,
+    #[serde(default = "default_event_ingestion_policy")]
+    event_ingestion_policy: String,
+    #[serde(default)]
     steps: Vec<Value>,
     #[serde(default)]
     approval: Value,
@@ -21750,6 +23074,15 @@ async fn workflow_pack_materialized_bindings_with_runtime_targets(
         payload.insert("workflow_definition_id".to_string(), json!(definition.id));
         payload.insert("release_state".to_string(), json!(definition.release_state));
         payload.insert(
+            "execution_strategy".to_string(),
+            json!(definition.execution_strategy),
+        );
+        payload.insert(
+            "runtime_adapter".to_string(),
+            json!(definition.runtime_adapter),
+        );
+        payload.insert("runtime_mode".to_string(), json!(definition.runtime_mode));
+        payload.insert(
             "step_count".to_string(),
             json!(
                 definition
@@ -21784,7 +23117,21 @@ async fn workflow_pack_materialize_workflow_definitions(
                 workflow.id
             )));
         }
-        let step_graph = workflow_pack_workflow_step_graph(workflow, &workflow_file)?;
+        let execution_strategy = workflow_pack_workflow_execution_strategy(&workflow_file)?;
+        let runtime_adapter = workflow_pack_workflow_runtime_adapter(&workflow_file)?;
+        let runtime_mode = workflow_pack_workflow_runtime_mode(&workflow_file)?;
+        let runtime_capability_contract =
+            workflow_pack_workflow_runtime_capability_contract(&workflow_file)?;
+        let event_ingestion_policy = workflow_pack_workflow_event_ingestion_policy(&workflow_file)?;
+        validate_workflow_execution_binding(
+            &execution_strategy,
+            runtime_adapter.as_deref(),
+            &runtime_capability_contract,
+        )?;
+        let step_graph = workflow_definition_step_graph_for_execution(
+            &execution_strategy,
+            &workflow_pack_workflow_step_graph(workflow, &workflow_file)?,
+        );
         workflow_graph_start_steps(&step_graph)?;
         let trigger_type = normalize_workflow_trigger_type(
             workflow_file.trigger_type.as_deref().unwrap_or("manual"),
@@ -21818,6 +23165,11 @@ async fn workflow_pack_materialize_workflow_definitions(
                 output_schema_ref: workflow_pack_workflow_output_schema_ref(&workflow_file),
                 step_graph,
                 handoff_rules: workflow_pack_workflow_handoff_rules(workflow, &workflow_file),
+                execution_strategy,
+                runtime_adapter,
+                runtime_mode,
+                runtime_capability_contract,
+                event_ingestion_policy,
                 approval_policy_ref: workflow_file.approval_policy_ref.clone(),
                 eval_gate_refs,
                 release_state: "staged".to_string(),
@@ -21972,6 +23324,73 @@ fn workflow_pack_workflow_output_schema_ref(
             .iter()
             .find_map(|step| workflow_pack_workflow_step_string(step, "output_schema"))
     })
+}
+
+fn workflow_pack_workflow_execution_strategy(
+    workflow_file: &WorkflowPackWorkflowFile,
+) -> Result<String, AppError> {
+    let value = workflow_file
+        .execution
+        .get("strategy")
+        .or_else(|| workflow_file.execution.get("execution_strategy"))
+        .and_then(Value::as_str)
+        .unwrap_or(&workflow_file.execution_strategy);
+    normalize_workflow_execution_strategy(value)
+}
+
+fn workflow_pack_workflow_runtime_adapter(
+    workflow_file: &WorkflowPackWorkflowFile,
+) -> Result<Option<String>, AppError> {
+    let value = workflow_file
+        .execution
+        .get("runtime_adapter")
+        .or_else(|| workflow_file.execution.get("adapter"))
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .or_else(|| workflow_file.runtime_adapter.clone());
+    normalize_optional_runtime_adapter(value)
+}
+
+fn workflow_pack_workflow_runtime_mode(
+    workflow_file: &WorkflowPackWorkflowFile,
+) -> Result<Option<String>, AppError> {
+    let value = workflow_file
+        .execution
+        .get("runtime_mode")
+        .or_else(|| workflow_file.execution.get("mode"))
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .or_else(|| workflow_file.runtime_mode.clone());
+    normalize_optional_runtime_mode(value)
+}
+
+fn workflow_pack_workflow_runtime_capability_contract(
+    workflow_file: &WorkflowPackWorkflowFile,
+) -> Result<Value, AppError> {
+    let contract = workflow_file
+        .execution
+        .get("runtime_capability_contract")
+        .or_else(|| workflow_file.execution.get("capability_contract"))
+        .cloned()
+        .unwrap_or_else(|| workflow_file.runtime_capability_contract.clone());
+    if !contract.is_object() {
+        return Err(AppError::bad_request(
+            "workflow pack workflow runtime_capability_contract must be a JSON object",
+        ));
+    }
+    Ok(contract)
+}
+
+fn workflow_pack_workflow_event_ingestion_policy(
+    workflow_file: &WorkflowPackWorkflowFile,
+) -> Result<String, AppError> {
+    let value = workflow_file
+        .execution
+        .get("event_ingestion_policy")
+        .or_else(|| workflow_file.execution.get("event_ingestion"))
+        .and_then(Value::as_str)
+        .unwrap_or(&workflow_file.event_ingestion_policy);
+    normalize_event_ingestion_policy(value)
 }
 
 fn workflow_pack_workflow_handoff_rules(
@@ -27450,6 +28869,7 @@ fn tenant_isolation_tracked_tables() -> Vec<&'static str> {
         "agent_handoff_events",
         "agent_handoff_assignments",
         "manager_agent_plans",
+        "dynamic_workflow_plans",
         "workflow_pack_installations",
         "workflow_pack_profile_assets",
         "workflow_pack_bindings",
@@ -51196,6 +52616,52 @@ fn default_workflow_run_status() -> String {
     "queued".to_string()
 }
 
+fn default_workflow_execution_strategy() -> String {
+    "native_steps".to_string()
+}
+
+fn default_event_ingestion_policy() -> String {
+    "normalized".to_string()
+}
+
+fn default_dynamic_workflow_agent_fleet_policy() -> Value {
+    json!({
+        "max_total_agents": 64,
+        "max_parallel_agents": 16,
+        "retry_limit": 1,
+        "timeout_seconds": 3600
+    })
+}
+
+fn default_dynamic_workflow_governance() -> Value {
+    json!({
+        "risk_level": "medium",
+        "budget_usd_micros": 0,
+        "memory_scope": default_task_grant_memory_scope(),
+        "tool_scope": default_task_grant_tool_scope(),
+        "connector_scope": default_task_grant_connector_scope(),
+        "approval_policy": default_task_grant_approval_policy(),
+        "external_effects": default_task_grant_external_effects()
+    })
+}
+
+fn default_dynamic_workflow_validation() -> Value {
+    json!({
+        "cross_check_required": true,
+        "vote_threshold": 0.67,
+        "adjudicator_agent": null,
+        "required_artifacts": ["final_report"]
+    })
+}
+
+fn default_dynamic_workflow_materialization() -> Value {
+    json!({
+        "execution_strategy": "delegated_runtime",
+        "runtime_adapter": "claude_code",
+        "runtime_mode": "dynamic_workflow"
+    })
+}
+
 fn default_task_grant_risk_level() -> String {
     "low".to_string()
 }
@@ -51251,6 +52717,10 @@ fn default_task_grant_external_effects() -> Value {
 
 fn empty_json_object() -> Value {
     json!({})
+}
+
+fn empty_json_array() -> Value {
+    json!([])
 }
 
 fn workflow_input_digest(value: &Value) -> String {
@@ -59577,6 +61047,399 @@ not json
     }
 
     #[tokio::test]
+    async fn delegated_runtime_workflow_records_external_envelope() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents.first().expect("seeded agent");
+
+        let (status, missing_adapter) = request_value(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-definitions",
+                json!({
+                    "name": "Delegated without adapter",
+                    "entrypoint": "delegated-without-adapter",
+                    "default_agent_id": agent.id,
+                    "execution_strategy": "delegated_runtime",
+                    "release_state": "released"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            missing_adapter["error"].as_str(),
+            Some("delegated_runtime workflow requires runtime_adapter")
+        );
+
+        let definition: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-definitions",
+                json!({
+                    "name": "Claude dynamic workflow envelope",
+                    "entrypoint": "claude-dynamic-envelope",
+                    "trigger_type": "manual",
+                    "default_agent_id": agent.id,
+                    "execution_strategy": "delegated_runtime",
+                    "runtime_adapter": "claude_code",
+                    "runtime_mode": "ultracode",
+                    "runtime_capability_contract": {
+                        "max_parallel_agents": 16,
+                        "allowed_tools": ["file.read", "artifact.create"]
+                    },
+                    "event_ingestion_policy": "normalized",
+                    "release_state": "released"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(definition["execution_strategy"], json!("delegated_runtime"));
+        assert_eq!(definition["runtime_adapter"], json!("claude_code"));
+        assert_eq!(definition["runtime_mode"], json!("ultracode"));
+        assert_eq!(
+            definition["step_graph"]["steps"][0]["type"],
+            json!("delegated_runtime")
+        );
+
+        let run: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-runs",
+                json!({
+                    "workflow_definition_id": definition["id"],
+                    "external_run_ref": "claude-run-001",
+                    "runtime_envelope": {
+                        "prompt_ref": "work-item:dynamic-review",
+                        "delegated": true
+                    },
+                    "input_payload": {
+                        "goal": "Review code with Claude Code ultracode"
+                    }
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        assert_eq!(run["execution_strategy"], json!("delegated_runtime"));
+        assert_eq!(run["runtime_adapter"], json!("claude_code"));
+        assert_eq!(run["runtime_mode"], json!("ultracode"));
+        assert_eq!(run["delegation_status"], json!("submitted"));
+        assert_eq!(run["external_run_ref"], json!("claude-run-001"));
+        assert_eq!(
+            run["runtime_envelope"]["runtime_capability_contract"]["max_parallel_agents"],
+            json!(16)
+        );
+        assert_eq!(
+            run["runtime_envelope"]["request_envelope"]["prompt_ref"],
+            json!("work-item:dynamic-review")
+        );
+
+        let steps: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/workflow-runs/{}/steps",
+                    run["id"].as_str().expect("run id")
+                ))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0]["step_type"], json!("delegated_runtime"));
+        assert_eq!(
+            steps[0]["input_payload"]["runtime_delegation"]["external_run_ref"],
+            json!("claude-run-001")
+        );
+
+        let session_id = run["primary_session_id"].as_str().expect("session id");
+        let events: Vec<SessionEvent> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{session_id}/events"))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(events.iter().any(|event| {
+            event.event_type == "workflow.run.created"
+                && event.payload["execution_strategy"] == json!("delegated_runtime")
+                && event.payload["runtime_adapter"] == json!("claude_code")
+                && event.payload["delegation_status"] == json!("submitted")
+        }));
+    }
+
+    #[tokio::test]
+    async fn dynamic_workflow_plan_validates_agent_fleet_policy() {
+        let app = test_app().await;
+
+        let (status, error) = request_value(
+            app,
+            json_request_with_headers(
+                "POST",
+                "/api/dynamic-workflow-plans",
+                json!({
+                    "objective": "Audit a large codebase with cross-checking agents",
+                    "phases": [
+                        {
+                            "key": "survey",
+                            "agent_count": 3,
+                            "prompt": "Survey independent subsystems and summarize risks."
+                        }
+                    ],
+                    "agent_fleet_policy": {
+                        "max_total_agents": 2,
+                        "max_parallel_agents": 2
+                    }
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            error["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("requests 3 agents"))
+        );
+    }
+
+    #[tokio::test]
+    async fn dynamic_workflow_plan_materializes_delegated_runtime_workflow() {
+        let app = test_app().await;
+
+        let plan: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/dynamic-workflow-plans",
+                json!({
+                    "objective": "Run a multi-agent migration audit",
+                    "phases": [
+                        {
+                            "key": "survey",
+                            "agent_count": 2,
+                            "max_parallel": 2,
+                            "prompt": "Inspect separate migration surfaces and report concrete risks."
+                        },
+                        {
+                            "key": "cross_check",
+                            "after": "survey",
+                            "agent_count": 1,
+                            "prompt": "Cross-check the survey findings and decide which findings survive."
+                        }
+                    ],
+                    "agent_fleet_policy": {
+                        "max_total_agents": 4,
+                        "max_parallel_agents": 2,
+                        "timeout_seconds": 1800
+                    },
+                    "governance": {
+                        "risk_level": "medium",
+                        "memory_scope": {
+                            "read": ["domain:engineering"],
+                            "write": ["session"]
+                        },
+                        "tool_scope": {
+                            "allowed_tools": ["file.read", "artifact.create"]
+                        },
+                        "connector_scope": {
+                            "allowed_connectors": []
+                        },
+                        "approval_policy": {
+                            "required_for": ["external_commit"]
+                        },
+                        "external_effects": {
+                            "mode": "draft_only"
+                        }
+                    },
+                    "validation": {
+                        "cross_check_required": true,
+                        "vote_threshold": 0.67,
+                        "required_artifacts": ["final_report"]
+                    },
+                    "materialization": {
+                        "execution_strategy": "delegated_runtime",
+                        "runtime_adapter": "claude_code",
+                        "runtime_mode": "dynamic_workflow",
+                        "runtime_capability_contract": {
+                            "max_total_agents": 4,
+                            "max_parallel_agents": 2,
+                            "allowed_tools": ["file.read", "artifact.create"]
+                        },
+                        "event_ingestion_policy": "normalized"
+                    }
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let plan_id = plan["id"].as_str().expect("plan id");
+        assert_eq!(plan["status"], json!("proposed"));
+        assert_eq!(plan["reviewed_at"], Value::Null);
+        assert_eq!(plan["analysis"]["phase_count"], json!(2));
+        assert_eq!(plan["analysis"]["total_agent_count"], json!(3));
+        assert_eq!(plan["analysis"]["max_parallel_agents"], json!(2));
+        assert_eq!(
+            plan["analysis"]["execution_strategy"],
+            json!("delegated_runtime")
+        );
+
+        let reviewed: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/dynamic-workflow-plans/{plan_id}/review"),
+                json!({
+                    "status": "approved",
+                    "review": {
+                        "approved_by": "architecture-review",
+                        "reason": "bounded delegated runtime with draft-only external effects"
+                    }
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(reviewed["status"], json!("approved"));
+        assert!(reviewed["reviewed_at"].as_str().is_some());
+
+        let materialized: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/dynamic-workflow-plans/{plan_id}/materialize"),
+                json!({
+                    "title": "Dynamic workflow audit demo",
+                    "input_payload": {}
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+
+        assert_eq!(materialized["plan"]["status"], json!("materialized"));
+        assert!(materialized["plan"]["materialized_at"].as_str().is_some());
+        assert_eq!(
+            materialized["workflow_definition"]["execution_strategy"],
+            json!("delegated_runtime")
+        );
+        assert_eq!(
+            materialized["workflow_definition"]["runtime_adapter"],
+            json!("claude_code")
+        );
+        assert_eq!(
+            materialized["workflow_definition"]["runtime_mode"],
+            json!("dynamic_workflow")
+        );
+        assert_eq!(
+            materialized["workflow_definition"]["step_graph"]["steps"][0]["type"],
+            json!("delegated_runtime")
+        );
+        assert_eq!(
+            materialized["workflow_run"]["delegation_status"],
+            json!("submitted")
+        );
+        assert!(
+            materialized["workflow_run"]["root_task_grant_id"]
+                .as_str()
+                .is_some()
+        );
+        assert_eq!(
+            materialized["workflow_run"]["runtime_envelope"]["request_envelope"]["dynamic_workflow_plan_id"],
+            json!(plan_id)
+        );
+        assert_eq!(
+            materialized["workflow_run"]["runtime_envelope"]["runtime_capability_contract"]["max_parallel_agents"],
+            json!(2)
+        );
+
+        let run_id = materialized["workflow_run"]["id"].as_str().expect("run id");
+        let steps: Vec<Value> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0]["step_type"], json!("delegated_runtime"));
+        assert_eq!(
+            steps[0]["input_payload"]["runtime_delegation"]["runtime_mode"],
+            json!("dynamic_workflow")
+        );
+    }
+
+    #[test]
+    fn dynamic_workflow_native_step_graph_expands_phase_dependencies() {
+        let now = Utc::now();
+        let plan = DynamicWorkflowPlan {
+            id: Uuid::new_v4(),
+            source_work_item_id: None,
+            source_session_id: None,
+            objective: "Compare independent findings".to_string(),
+            status: "approved".to_string(),
+            phases: json!([
+                {
+                    "key": "survey",
+                    "agent_count": 2,
+                    "prompt": "Survey independent inputs."
+                },
+                {
+                    "key": "adjudicate",
+                    "after": "survey",
+                    "prompt": "Adjudicate all survey outputs."
+                }
+            ]),
+            agent_fleet_policy: json!({
+                "max_total_agents": 4,
+                "max_parallel_agents": 2
+            }),
+            governance: default_dynamic_workflow_governance(),
+            validation: default_dynamic_workflow_validation(),
+            materialization: json!({
+                "execution_strategy": "native_steps"
+            }),
+            analysis: empty_json_object(),
+            review: empty_json_object(),
+            workflow_definition_id: None,
+            workflow_run_id: None,
+            audit_trace_id: None,
+            created_at: now,
+            updated_at: now,
+            reviewed_at: None,
+            materialized_at: None,
+        };
+
+        let graph = dynamic_workflow_plan_step_graph(&plan, "native_steps")
+            .expect("native graph is generated");
+        assert_eq!(graph["steps"].as_array().expect("steps").len(), 3);
+        assert_eq!(graph["steps"][0]["key"], json!("survey-1"));
+        assert_eq!(graph["steps"][1]["key"], json!("survey-2"));
+        assert_eq!(
+            graph["steps"][2]["depends_on"],
+            json!(["survey-1", "survey-2"])
+        );
+    }
+
+    #[tokio::test]
     async fn workflow_definition_patch_rejects_invalid_graph_without_updating() {
         let app = test_app().await;
         let agents: Vec<Agent> = request_json(
@@ -63331,6 +65194,11 @@ not json
                         }
                     }
                 }),
+                execution_strategy: default_workflow_execution_strategy(),
+                runtime_adapter: None,
+                runtime_mode: None,
+                runtime_capability_contract: empty_json_object(),
+                event_ingestion_policy: default_event_ingestion_policy(),
                 approval_policy_ref: None,
                 eval_gate_refs: Vec::new(),
                 release_state: "released".to_string(),
@@ -63362,6 +65230,13 @@ not json
                 root_task_grant_id: None,
                 input_payload: empty_json_object(),
                 input_digest: workflow_input_digest(&empty_json_object()),
+                execution_strategy: default_workflow_execution_strategy(),
+                runtime_adapter: None,
+                runtime_mode: None,
+                delegation_status: None,
+                external_run_ref: None,
+                runtime_event_cursor: None,
+                runtime_envelope: empty_json_object(),
                 started_at: None,
                 completed_at: None,
                 audit_trace_id: None,
@@ -63996,6 +65871,8 @@ not json
         assert!(names.contains(&"0054_workflow_pack_bindings.sql"));
         assert!(names.contains(&"0055_workflow_step_run_schedule.sql"));
         assert!(names.contains(&"0056_workflow_pack_runtime_objects.sql"));
+        assert!(names.contains(&"0058_delegated_runtime_workflow_envelope.sql"));
+        assert!(names.contains(&"0059_dynamic_workflow_plans.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
@@ -64047,6 +65924,7 @@ not json
             include_str!("../../../db/migrations/0053_workflow_transitions.sql"),
             include_str!("../../../db/migrations/0054_workflow_pack_bindings.sql"),
             include_str!("../../../db/migrations/0056_workflow_pack_runtime_objects.sql"),
+            include_str!("../../../db/migrations/0059_dynamic_workflow_plans.sql"),
         ]
         .join("\n");
         assert!(migration.contains("mandoforge_current_tenant_id"));
@@ -77930,6 +79808,11 @@ not json
                         }
                     }
                 }),
+                execution_strategy: default_workflow_execution_strategy(),
+                runtime_adapter: None,
+                runtime_mode: None,
+                runtime_capability_contract: empty_json_object(),
+                event_ingestion_policy: default_event_ingestion_policy(),
                 approval_policy_ref: None,
                 eval_gate_refs: Vec::new(),
                 release_state: "released".to_string(),
@@ -78434,6 +80317,11 @@ not json
                         }
                     }
                 }),
+                execution_strategy: default_workflow_execution_strategy(),
+                runtime_adapter: None,
+                runtime_mode: None,
+                runtime_capability_contract: empty_json_object(),
+                event_ingestion_policy: default_event_ingestion_policy(),
                 approval_policy_ref: None,
                 eval_gate_refs: Vec::new(),
                 release_state: "released".to_string(),

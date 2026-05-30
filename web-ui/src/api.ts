@@ -414,6 +414,13 @@ export type WorkflowRun = {
   primary_session_id: string;
   root_task_grant_id?: string | null;
   input_digest: string;
+  execution_strategy: string;
+  runtime_adapter?: string | null;
+  runtime_mode?: string | null;
+  delegation_status?: string | null;
+  external_run_ref?: string | null;
+  runtime_event_cursor?: string | null;
+  runtime_envelope?: Record<string, unknown>;
   started_at?: string | null;
   completed_at?: string | null;
   created_at: string;
@@ -434,6 +441,11 @@ export type WorkflowDefinition = {
   output_schema_ref?: string | null;
   step_graph: Record<string, unknown>;
   handoff_rules: Record<string, unknown>;
+  execution_strategy: string;
+  runtime_adapter?: string | null;
+  runtime_mode?: string | null;
+  runtime_capability_contract: Record<string, unknown>;
+  event_ingestion_policy: string;
   approval_policy_ref?: string | null;
   eval_gate_refs: string[];
   release_state: string;
@@ -452,6 +464,11 @@ export type UpdateWorkflowDefinitionRequest = {
   output_schema_ref?: string | null;
   step_graph?: Record<string, unknown>;
   handoff_rules?: Record<string, unknown>;
+  execution_strategy?: string;
+  runtime_adapter?: string | null;
+  runtime_mode?: string | null;
+  runtime_capability_contract?: Record<string, unknown>;
+  event_ingestion_policy?: string;
   approval_policy_ref?: string | null;
   eval_gate_refs?: string[];
   release_state?: string;
@@ -591,6 +608,45 @@ export type ManagerAgentPlan = {
   audit_trace_id?: string | null;
   created_at: string;
   updated_at: string;
+};
+
+export type DynamicWorkflowPlan = {
+  id: string;
+  source_work_item_id?: string | null;
+  source_session_id?: string | null;
+  objective: string;
+  status: string;
+  phases: unknown[];
+  agent_fleet_policy: Record<string, unknown>;
+  governance: Record<string, unknown>;
+  validation: Record<string, unknown>;
+  materialization: Record<string, unknown>;
+  analysis: Record<string, unknown>;
+  review: Record<string, unknown>;
+  workflow_definition_id?: string | null;
+  workflow_run_id?: string | null;
+  audit_trace_id?: string | null;
+  created_at: string;
+  updated_at: string;
+  reviewed_at?: string | null;
+  materialized_at?: string | null;
+};
+
+export type CreateDynamicWorkflowPlanRequest = {
+  source_work_item_id?: string | null;
+  source_session_id?: string | null;
+  objective: string;
+  phases: unknown[];
+  agent_fleet_policy?: Record<string, unknown>;
+  governance?: Record<string, unknown>;
+  validation?: Record<string, unknown>;
+  materialization?: Record<string, unknown>;
+};
+
+export type DynamicWorkflowPlanMaterializationResponse = {
+  plan: DynamicWorkflowPlan;
+  workflow_definition: WorkflowDefinition;
+  workflow_run: WorkflowRun;
 };
 
 export type AgentHandoffEvent = {
@@ -1233,6 +1289,56 @@ export async function reviewManagerAgentPlan(
     headers: adminHeaders(),
     body: JSON.stringify(input),
   });
+}
+
+export async function listDynamicWorkflowPlans(): Promise<DynamicWorkflowPlan[]> {
+  return api<DynamicWorkflowPlan[]>("/api/dynamic-workflow-plans");
+}
+
+export async function getDynamicWorkflowPlan(id: string): Promise<DynamicWorkflowPlan> {
+  return api<DynamicWorkflowPlan>(`/api/dynamic-workflow-plans/${id}`);
+}
+
+export async function createDynamicWorkflowPlan(
+  input: CreateDynamicWorkflowPlanRequest,
+): Promise<DynamicWorkflowPlan> {
+  return api<DynamicWorkflowPlan>("/api/dynamic-workflow-plans", {
+    method: "POST",
+    headers: adminHeaders(),
+    body: JSON.stringify(input),
+  });
+}
+
+export async function reviewDynamicWorkflowPlan(
+  id: string,
+  input: {
+    status?: string;
+    review: Record<string, unknown>;
+  },
+): Promise<DynamicWorkflowPlan> {
+  return api<DynamicWorkflowPlan>(`/api/dynamic-workflow-plans/${id}/review`, {
+    method: "POST",
+    headers: adminHeaders(),
+    body: JSON.stringify(input),
+  });
+}
+
+export async function materializeDynamicWorkflowPlan(
+  id: string,
+  input: {
+    title?: string | null;
+    environment_id?: string | null;
+    input_payload?: Record<string, unknown>;
+  } = {},
+): Promise<DynamicWorkflowPlanMaterializationResponse> {
+  return api<DynamicWorkflowPlanMaterializationResponse>(
+    `/api/dynamic-workflow-plans/${id}/materialize`,
+    {
+      method: "POST",
+      headers: adminHeaders(),
+      body: JSON.stringify(input),
+    },
+  );
 }
 
 export async function runSemanticGovernance(input: {

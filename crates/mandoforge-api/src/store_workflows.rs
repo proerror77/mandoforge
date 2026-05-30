@@ -27,9 +27,9 @@ impl AppState {
             StoreBackend::Postgres(pool) => {
                 let row = sqlx::query(
                     "INSERT INTO workflow_definitions
-                        (id, tenant_id, pack_installation_id, pack_id, pack_version, name, entrypoint, trigger_type, default_agent_id, default_environment_id, input_schema_ref, output_schema_ref, step_graph, handoff_rules, approval_policy_ref, eval_gate_refs, release_state, created_at, updated_at, archived_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
-                     RETURNING id, pack_installation_id, pack_id, pack_version, name, entrypoint, trigger_type, default_agent_id, default_environment_id, input_schema_ref, output_schema_ref, step_graph, handoff_rules, approval_policy_ref, eval_gate_refs, release_state, created_at, updated_at, archived_at",
+                        (id, tenant_id, pack_installation_id, pack_id, pack_version, name, entrypoint, trigger_type, default_agent_id, default_environment_id, input_schema_ref, output_schema_ref, step_graph, handoff_rules, execution_strategy, runtime_adapter, runtime_mode, runtime_capability_contract, event_ingestion_policy, approval_policy_ref, eval_gate_refs, release_state, created_at, updated_at, archived_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
+                     RETURNING id, pack_installation_id, pack_id, pack_version, name, entrypoint, trigger_type, default_agent_id, default_environment_id, input_schema_ref, output_schema_ref, step_graph, handoff_rules, execution_strategy, runtime_adapter, runtime_mode, runtime_capability_contract, event_ingestion_policy, approval_policy_ref, eval_gate_refs, release_state, created_at, updated_at, archived_at",
                 )
                 .bind(definition.id)
                 .bind(self.current_tenant_id())
@@ -45,6 +45,11 @@ impl AppState {
                 .bind(&definition.output_schema_ref)
                 .bind(&definition.step_graph)
                 .bind(&definition.handoff_rules)
+                .bind(&definition.execution_strategy)
+                .bind(&definition.runtime_adapter)
+                .bind(&definition.runtime_mode)
+                .bind(&definition.runtime_capability_contract)
+                .bind(&definition.event_ingestion_policy)
                 .bind(&definition.approval_policy_ref)
                 .bind(serde_json::to_value(&definition.eval_gate_refs)?)
                 .bind(&definition.release_state)
@@ -77,7 +82,7 @@ impl AppState {
             }
             StoreBackend::Postgres(pool) => {
                 let rows = sqlx::query(
-                    "SELECT id, pack_installation_id, pack_id, pack_version, name, entrypoint, trigger_type, default_agent_id, default_environment_id, input_schema_ref, output_schema_ref, step_graph, handoff_rules, approval_policy_ref, eval_gate_refs, release_state, created_at, updated_at, archived_at
+                    "SELECT id, pack_installation_id, pack_id, pack_version, name, entrypoint, trigger_type, default_agent_id, default_environment_id, input_schema_ref, output_schema_ref, step_graph, handoff_rules, execution_strategy, runtime_adapter, runtime_mode, runtime_capability_contract, event_ingestion_policy, approval_policy_ref, eval_gate_refs, release_state, created_at, updated_at, archived_at
                      FROM workflow_definitions
                      WHERE tenant_id = $1 AND archived_at IS NULL
                      ORDER BY created_at DESC",
@@ -105,7 +110,7 @@ impl AppState {
                 .ok_or_else(|| AppError::not_found("workflow definition not found")),
             StoreBackend::Postgres(pool) => {
                 let row = sqlx::query(
-                    "SELECT id, pack_installation_id, pack_id, pack_version, name, entrypoint, trigger_type, default_agent_id, default_environment_id, input_schema_ref, output_schema_ref, step_graph, handoff_rules, approval_policy_ref, eval_gate_refs, release_state, created_at, updated_at, archived_at
+                    "SELECT id, pack_installation_id, pack_id, pack_version, name, entrypoint, trigger_type, default_agent_id, default_environment_id, input_schema_ref, output_schema_ref, step_graph, handoff_rules, execution_strategy, runtime_adapter, runtime_mode, runtime_capability_contract, event_ingestion_policy, approval_policy_ref, eval_gate_refs, release_state, created_at, updated_at, archived_at
                      FROM workflow_definitions
                      WHERE tenant_id = $1 AND id = $2 AND archived_at IS NULL",
                 )
@@ -146,15 +151,20 @@ impl AppState {
                          output_schema_ref = $9,
                          step_graph = $10,
                          handoff_rules = $11,
-                         approval_policy_ref = $12,
-                         eval_gate_refs = $13,
-                         release_state = $14,
-                         updated_at = $15,
-                         archived_at = $16
+                         execution_strategy = $12,
+                         runtime_adapter = $13,
+                         runtime_mode = $14,
+                         runtime_capability_contract = $15,
+                         event_ingestion_policy = $16,
+                         approval_policy_ref = $17,
+                         eval_gate_refs = $18,
+                         release_state = $19,
+                         updated_at = $20,
+                         archived_at = $21
                      WHERE tenant_id = $1
                        AND id = $2
                        AND archived_at IS NULL
-                     RETURNING id, pack_installation_id, pack_id, pack_version, name, entrypoint, trigger_type, default_agent_id, default_environment_id, input_schema_ref, output_schema_ref, step_graph, handoff_rules, approval_policy_ref, eval_gate_refs, release_state, created_at, updated_at, archived_at",
+                     RETURNING id, pack_installation_id, pack_id, pack_version, name, entrypoint, trigger_type, default_agent_id, default_environment_id, input_schema_ref, output_schema_ref, step_graph, handoff_rules, execution_strategy, runtime_adapter, runtime_mode, runtime_capability_contract, event_ingestion_policy, approval_policy_ref, eval_gate_refs, release_state, created_at, updated_at, archived_at",
                 )
                 .bind(self.current_tenant_id())
                 .bind(definition.id)
@@ -167,6 +177,11 @@ impl AppState {
                 .bind(&definition.output_schema_ref)
                 .bind(&definition.step_graph)
                 .bind(&definition.handoff_rules)
+                .bind(&definition.execution_strategy)
+                .bind(&definition.runtime_adapter)
+                .bind(&definition.runtime_mode)
+                .bind(&definition.runtime_capability_contract)
+                .bind(&definition.event_ingestion_policy)
                 .bind(&definition.approval_policy_ref)
                 .bind(serde_json::to_value(&definition.eval_gate_refs)?)
                 .bind(&definition.release_state)
@@ -214,7 +229,7 @@ impl AppState {
                      WHERE tenant_id = $1
                        AND pack_installation_id = $2
                        AND archived_at IS NULL
-                     RETURNING id, pack_installation_id, pack_id, pack_version, name, entrypoint, trigger_type, default_agent_id, default_environment_id, input_schema_ref, output_schema_ref, step_graph, handoff_rules, approval_policy_ref, eval_gate_refs, release_state, created_at, updated_at, archived_at",
+                     RETURNING id, pack_installation_id, pack_id, pack_version, name, entrypoint, trigger_type, default_agent_id, default_environment_id, input_schema_ref, output_schema_ref, step_graph, handoff_rules, execution_strategy, runtime_adapter, runtime_mode, runtime_capability_contract, event_ingestion_policy, approval_policy_ref, eval_gate_refs, release_state, created_at, updated_at, archived_at",
                 )
                 .bind(self.current_tenant_id())
                 .bind(installation_id)
@@ -243,9 +258,9 @@ impl AppState {
             StoreBackend::Postgres(pool) => {
                 let row = sqlx::query(
                     "INSERT INTO workflow_runs
-                        (id, tenant_id, workflow_definition_id, pack_installation_id, source_event_id, source_work_item_id, source_schedule_id, status, primary_session_id, root_task_grant_id, input_payload, input_digest, started_at, completed_at, audit_trace_id, created_at, updated_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-                     RETURNING id, workflow_definition_id, pack_installation_id, source_event_id, source_work_item_id, source_schedule_id, status, primary_session_id, root_task_grant_id, input_payload, input_digest, started_at, completed_at, audit_trace_id, created_at, updated_at",
+                        (id, tenant_id, workflow_definition_id, pack_installation_id, source_event_id, source_work_item_id, source_schedule_id, status, primary_session_id, root_task_grant_id, input_payload, input_digest, execution_strategy, runtime_adapter, runtime_mode, delegation_status, external_run_ref, runtime_event_cursor, runtime_envelope, started_at, completed_at, audit_trace_id, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
+                     RETURNING id, workflow_definition_id, pack_installation_id, source_event_id, source_work_item_id, source_schedule_id, status, primary_session_id, root_task_grant_id, input_payload, input_digest, execution_strategy, runtime_adapter, runtime_mode, delegation_status, external_run_ref, runtime_event_cursor, runtime_envelope, started_at, completed_at, audit_trace_id, created_at, updated_at",
                 )
                 .bind(run.id)
                 .bind(self.current_tenant_id())
@@ -259,6 +274,13 @@ impl AppState {
                 .bind(run.root_task_grant_id)
                 .bind(&run.input_payload)
                 .bind(&run.input_digest)
+                .bind(&run.execution_strategy)
+                .bind(&run.runtime_adapter)
+                .bind(&run.runtime_mode)
+                .bind(&run.delegation_status)
+                .bind(&run.external_run_ref)
+                .bind(&run.runtime_event_cursor)
+                .bind(&run.runtime_envelope)
                 .bind(run.started_at)
                 .bind(run.completed_at)
                 .bind(run.audit_trace_id)
@@ -281,7 +303,7 @@ impl AppState {
             }
             StoreBackend::Postgres(pool) => {
                 let rows = sqlx::query(
-                    "SELECT id, workflow_definition_id, pack_installation_id, source_event_id, source_work_item_id, source_schedule_id, status, primary_session_id, root_task_grant_id, input_payload, input_digest, started_at, completed_at, audit_trace_id, created_at, updated_at
+                    "SELECT id, workflow_definition_id, pack_installation_id, source_event_id, source_work_item_id, source_schedule_id, status, primary_session_id, root_task_grant_id, input_payload, input_digest, execution_strategy, runtime_adapter, runtime_mode, delegation_status, external_run_ref, runtime_event_cursor, runtime_envelope, started_at, completed_at, audit_trace_id, created_at, updated_at
                      FROM workflow_runs
                      WHERE tenant_id = $1
                      ORDER BY created_at DESC",
@@ -305,7 +327,7 @@ impl AppState {
                 .ok_or_else(|| AppError::not_found("workflow run not found")),
             StoreBackend::Postgres(pool) => {
                 let row = sqlx::query(
-                    "SELECT id, workflow_definition_id, pack_installation_id, source_event_id, source_work_item_id, source_schedule_id, status, primary_session_id, root_task_grant_id, input_payload, input_digest, started_at, completed_at, audit_trace_id, created_at, updated_at
+                    "SELECT id, workflow_definition_id, pack_installation_id, source_event_id, source_work_item_id, source_schedule_id, status, primary_session_id, root_task_grant_id, input_payload, input_digest, execution_strategy, runtime_adapter, runtime_mode, delegation_status, external_run_ref, runtime_event_cursor, runtime_envelope, started_at, completed_at, audit_trace_id, created_at, updated_at
                      FROM workflow_runs
                      WHERE tenant_id = $1 AND id = $2",
                 )
@@ -340,7 +362,7 @@ impl AppState {
                     "UPDATE workflow_runs
                      SET root_task_grant_id = $3, updated_at = now()
                      WHERE tenant_id = $1 AND id = $2
-                     RETURNING id, workflow_definition_id, pack_installation_id, source_event_id, source_work_item_id, source_schedule_id, status, primary_session_id, root_task_grant_id, input_payload, input_digest, started_at, completed_at, audit_trace_id, created_at, updated_at",
+                     RETURNING id, workflow_definition_id, pack_installation_id, source_event_id, source_work_item_id, source_schedule_id, status, primary_session_id, root_task_grant_id, input_payload, input_digest, execution_strategy, runtime_adapter, runtime_mode, delegation_status, external_run_ref, runtime_event_cursor, runtime_envelope, started_at, completed_at, audit_trace_id, created_at, updated_at",
                 )
                 .bind(self.current_tenant_id())
                 .bind(id)
@@ -378,7 +400,7 @@ impl AppState {
                     "UPDATE workflow_runs
                      SET status = $3, started_at = $4, completed_at = $5, updated_at = now()
                      WHERE tenant_id = $1 AND id = $2
-                     RETURNING id, workflow_definition_id, pack_installation_id, source_event_id, source_work_item_id, source_schedule_id, status, primary_session_id, root_task_grant_id, input_payload, input_digest, started_at, completed_at, audit_trace_id, created_at, updated_at",
+                     RETURNING id, workflow_definition_id, pack_installation_id, source_event_id, source_work_item_id, source_schedule_id, status, primary_session_id, root_task_grant_id, input_payload, input_digest, execution_strategy, runtime_adapter, runtime_mode, delegation_status, external_run_ref, runtime_event_cursor, runtime_envelope, started_at, completed_at, audit_trace_id, created_at, updated_at",
                 )
                 .bind(self.current_tenant_id())
                 .bind(id)

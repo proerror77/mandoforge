@@ -64,6 +64,13 @@ execution backends that MandoForge calls and supervises. Manager Agents are
 managed agents running on this runtime; they coordinate WorkItems and
 Assignments, but they do not own a separate execution stack.
 
+For delegated runtime workflows, MandoForge owns the outer run envelope:
+WorkflowRun identity, Workflow Pack binding, TaskGrant, memory scope, approval
+policy, audit, artifacts, and UI observability. Claude Code, Codex App Server,
+or Codex CLI can own the inner dynamic multi-agent execution, including
+subagent fan-out/fan-in, as long as events and artifacts are streamed back into
+the MandoForge runtime record.
+
 ## Why Agent Middleware?
 
 A useful enterprise agent is more than a model call. It usually needs:
@@ -192,6 +199,7 @@ Current managed-agent baseline:
 - `Environment(type=remote_computer)` now owns automatic Remote Computer assignment: approved execution jobs only auto-claim leases or warm-pool resources that match the session environment contract, and remote environments fail closed when the Remote Computer execution transport is not enabled.
 - The UI start form loads environments and binds new sessions to the selected environment.
 - The UI run view is organized around the managed-session objects first: Agent, Environment, Event Stream, Blocking Actions, Artifacts, and Threads. Raw worker, Remote Computer, provider, secret, MCP, and tenant infrastructure remain in system and advanced panels.
+- Dynamic Workflow Plans are now first-class review envelopes: `POST /api/dynamic-workflow-plans` validates phases, agent fleet limits, governance, validation, and materialization policy; review approval gates execution; materialization creates a normal `WorkflowDefinition`, `WorkflowRun`, primary session, root `TaskGrant`, and start steps. Delegated plans target adapters such as Claude Code or Codex App Server without letting the external runtime bypass MandoForge policy and audit.
 
 Runtime alignment is tracked in
 [Claude Managed Agents Alignment](docs/claude-managed-agents-alignment.md) and

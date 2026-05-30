@@ -6,14 +6,14 @@ use crate::{
     Agent, AgentHandoffAssignment, AgentHandoffEvent, AgentRelease, AgentRuntimeProfile,
     AgentTeammate, AgentVersion, AppError, Approval, ApprovalCommitToken, ApprovalEscalationRule,
     ApprovalGroup, ApprovalNotificationChannelPolicy, Artifact, AuditLog, ContextPacket,
-    CostAlertRoute, Environment, EvalCase, EvalDataset, EvalRun, ManagerAgentPlan, McpServerRecord,
-    Membership, MemoryWritebackCandidate, Organization, PolicyRevision, Project, ProviderAccess,
-    ProviderRecord, SecretRecord, SemanticLink, SemanticObject, SemanticSource, Session,
-    SessionEvent, SessionLoopJob, SessionLoopJobStatus, SessionThread, Squad, SquadMember,
-    TaskGrant, Team, TenantInvitation, ToolCall, UsageRollup, WorkItem, WorkItemActivityEntry,
-    WorkItemAssignment, WorkItemReview, WorkflowDefinition, WorkflowPackBinding,
-    WorkflowPackInstallation, WorkflowPackProfileAsset, WorkflowPackRuntimeObject, WorkflowRun,
-    WorkflowStepRun, WorkflowTransition,
+    CostAlertRoute, DynamicWorkflowPlan, Environment, EvalCase, EvalDataset, EvalRun,
+    ManagerAgentPlan, McpServerRecord, Membership, MemoryWritebackCandidate, Organization,
+    PolicyRevision, Project, ProviderAccess, ProviderRecord, SecretRecord, SemanticLink,
+    SemanticObject, SemanticSource, Session, SessionEvent, SessionLoopJob, SessionLoopJobStatus,
+    SessionThread, Squad, SquadMember, TaskGrant, Team, TenantInvitation, ToolCall, UsageRollup,
+    WorkItem, WorkItemActivityEntry, WorkItemAssignment, WorkItemReview, WorkflowDefinition,
+    WorkflowPackBinding, WorkflowPackInstallation, WorkflowPackProfileAsset,
+    WorkflowPackRuntimeObject, WorkflowRun, WorkflowStepRun, WorkflowTransition,
 };
 
 fn json_array_from_row<T: serde::de::DeserializeOwned>(
@@ -430,6 +430,30 @@ pub(crate) fn manager_agent_plan_from_row(row: PgRow) -> Result<ManagerAgentPlan
     })
 }
 
+pub(crate) fn dynamic_workflow_plan_from_row(row: PgRow) -> Result<DynamicWorkflowPlan, AppError> {
+    Ok(DynamicWorkflowPlan {
+        id: row.try_get("id")?,
+        source_work_item_id: row.try_get("source_work_item_id")?,
+        source_session_id: row.try_get("source_session_id")?,
+        objective: row.try_get("objective")?,
+        status: row.try_get("status")?,
+        phases: row.try_get("phases")?,
+        agent_fleet_policy: row.try_get("agent_fleet_policy")?,
+        governance: row.try_get("governance")?,
+        validation: row.try_get("validation")?,
+        materialization: row.try_get("materialization")?,
+        analysis: row.try_get("analysis")?,
+        review: row.try_get("review")?,
+        workflow_definition_id: row.try_get("workflow_definition_id")?,
+        workflow_run_id: row.try_get("workflow_run_id")?,
+        audit_trace_id: row.try_get("audit_trace_id")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+        reviewed_at: row.try_get("reviewed_at")?,
+        materialized_at: row.try_get("materialized_at")?,
+    })
+}
+
 pub(crate) fn workflow_pack_installation_from_row(
     row: PgRow,
 ) -> Result<WorkflowPackInstallation, AppError> {
@@ -521,6 +545,11 @@ pub(crate) fn workflow_definition_from_row(row: PgRow) -> Result<WorkflowDefinit
         output_schema_ref: row.try_get("output_schema_ref")?,
         step_graph: row.try_get("step_graph")?,
         handoff_rules: row.try_get("handoff_rules")?,
+        execution_strategy: row.try_get("execution_strategy")?,
+        runtime_adapter: row.try_get("runtime_adapter")?,
+        runtime_mode: row.try_get("runtime_mode")?,
+        runtime_capability_contract: row.try_get("runtime_capability_contract")?,
+        event_ingestion_policy: row.try_get("event_ingestion_policy")?,
         approval_policy_ref: row.try_get("approval_policy_ref")?,
         eval_gate_refs: json_array_from_row(eval_gate_refs, "workflow_definitions.eval_gate_refs")?,
         release_state: row.try_get("release_state")?,
@@ -543,6 +572,13 @@ pub(crate) fn workflow_run_from_row(row: PgRow) -> Result<WorkflowRun, AppError>
         root_task_grant_id: row.try_get("root_task_grant_id")?,
         input_payload: row.try_get("input_payload")?,
         input_digest: row.try_get("input_digest")?,
+        execution_strategy: row.try_get("execution_strategy")?,
+        runtime_adapter: row.try_get("runtime_adapter")?,
+        runtime_mode: row.try_get("runtime_mode")?,
+        delegation_status: row.try_get("delegation_status")?,
+        external_run_ref: row.try_get("external_run_ref")?,
+        runtime_event_cursor: row.try_get("runtime_event_cursor")?,
+        runtime_envelope: row.try_get("runtime_envelope")?,
         started_at: row.try_get("started_at")?,
         completed_at: row.try_get("completed_at")?,
         audit_trace_id: row.try_get("audit_trace_id")?,

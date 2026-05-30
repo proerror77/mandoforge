@@ -1148,6 +1148,11 @@ export function App() {
                 <KeyValue label="Run ID" value={shortId(selectedWorkflowRun.id)} />
                 <KeyValue label="Definition" value={shortId(selectedWorkflowRun.workflow_definition_id)} />
                 <KeyValue label="Pack" value={shortId(selectedWorkflowRun.pack_installation_id ?? "none")} />
+                <KeyValue label="Strategy" value={selectedWorkflowRun.execution_strategy} />
+                <KeyValue label="Runtime" value={selectedWorkflowRun.runtime_adapter ?? "native"} />
+                <KeyValue label="Mode" value={selectedWorkflowRun.runtime_mode ?? "normal"} />
+                <KeyValue label="Delegation" value={selectedWorkflowRun.delegation_status ?? "none"} />
+                <KeyValue label="External ref" value={selectedWorkflowRun.external_run_ref ?? "none"} />
                 <KeyValue label="Root grant" value={shortId(selectedWorkflowRun.root_task_grant_id ?? "none")} />
               </>
             ) : <p className="muted">No workflow run is linked to this session.</p>}
@@ -1490,6 +1495,10 @@ export function App() {
                   <KeyValue label="Run status" value={selectedWorkflowRun.status} />
                   <KeyValue label="Run ID" value={shortId(selectedWorkflowRun.id)} />
                   <KeyValue label="Definition" value={shortId(selectedWorkflowRun.workflow_definition_id)} />
+                  <KeyValue label="Strategy" value={selectedWorkflowRun.execution_strategy} />
+                  <KeyValue label="Runtime" value={selectedWorkflowRun.runtime_adapter ?? "native"} />
+                  <KeyValue label="Mode" value={selectedWorkflowRun.runtime_mode ?? "normal"} />
+                  <KeyValue label="Delegation" value={selectedWorkflowRun.delegation_status ?? "none"} />
                   <KeyValue label="Root grant" value={shortId(selectedWorkflowRun.root_task_grant_id ?? "none")} />
                 </>
               ) : <p className="muted">No workflow run is linked to this session.</p>}

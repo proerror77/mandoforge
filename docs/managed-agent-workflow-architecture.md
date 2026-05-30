@@ -236,6 +236,13 @@ It should include:
 - `default_agent_id`, `default_environment_id`
 - `step_graph`
 - `handoff_rules`
+- `execution_strategy`: `native_steps`, `delegated_runtime`, or reserved
+  `native_dynamic`
+- `runtime_adapter`: optional `codex_app_server`, `codex_cli`,
+  `claude_code`, or another released runtime profile family
+- `runtime_mode`: optional `normal`, `ultracode`, or `dynamic_workflow`
+- `runtime_capability_contract`
+- `event_ingestion_policy`
 - `approval_policy_ref`
 - `eval_gate_refs`
 - `release_state`
@@ -256,11 +263,59 @@ It should include:
 - `primary_session_id`
 - `root_task_grant_id`
 - `input_payload`, `input_digest`
+- `execution_strategy`, `runtime_adapter`, `runtime_mode`
+- `delegation_status`, `external_run_ref`, `runtime_event_cursor`
+- `runtime_envelope`
 - `started_at`, `completed_at`
 - `audit_trace_id`
 
 `WorkflowRun` is the UI anchor. Operators should not have to infer a workflow
 from unrelated session logs.
+
+For delegated runtime runs, MandoForge owns the envelope and governance state,
+while the external runtime owns inner planning, dynamic fan-out/fan-in, and
+subagent execution. The worker may call Claude Code, Codex App Server, Codex
+CLI, or another released adapter, but all output must be ingested according to
+the run's event policy and projected back into sessions, artifacts, approvals,
+and audit logs.
+
+### DynamicWorkflowPlan
+
+`DynamicWorkflowPlan` is the pre-run object for dynamic multi-agent work. It
+bridges natural-language or pack-defined intake to the existing
+`WorkflowDefinition` and `WorkflowRun` runtime objects without making
+MandoForge own an inner JavaScript workflow runtime.
+
+The object stores:
+
+- source `WorkItem` or session.
+- objective.
+- phases with prompts/objectives, agent counts, max parallelism, and
+  dependencies.
+- `agent_fleet_policy` with `max_total_agents` capped at 1000 and
+  `max_parallel_agents` capped at 16.
+- governance scope for memory, tools, connectors, approval, and external
+  effects.
+- validation strategy such as cross-check requirements and voting threshold.
+- materialization target, runtime adapter, runtime mode, capability contract,
+  and event ingestion policy.
+- analysis, review, materialized workflow ids, and audit trace id.
+
+The API lifecycle is proposal -> review -> materialize:
+
+- `POST /api/dynamic-workflow-plans` validates the phase graph and fleet
+  limits, stores the proposal, and records audit evidence.
+- `POST /api/dynamic-workflow-plans/:id/review` records the review decision.
+  Only `approved` plans may be materialized.
+- `POST /api/dynamic-workflow-plans/:id/materialize` creates the
+  `WorkflowDefinition`, `WorkflowRun`, primary session, root `TaskGrant`, and
+  start steps. `delegated_runtime` plans become one governed delegated runtime
+  step; `native_steps` plans expand phases into concrete agent steps.
+
+This is the current MandoForge equivalent of Claude Code Dynamic Workflows:
+MandoForge governs the envelope, approval, memory/connector/tool scope, audit,
+and observability while Claude Code, Codex App Server, or another adapter may
+own the inner fleet execution.
 
 ### WorkflowStepRun
 

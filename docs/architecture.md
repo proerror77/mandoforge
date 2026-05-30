@@ -284,6 +284,66 @@ Rules:
 - The platform must not expose a hard-coded manager closed-loop API that
   bypasses pack/workflow definitions.
 
+## Delegated Runtime Workflow Envelope
+
+MandoForge should not reimplement every inner multi-agent workflow that Codex or
+Claude Code can already execute. The platform owns the outer enterprise
+control plane:
+
+- WorkItem and WorkflowRun identity.
+- Workflow Pack binding.
+- tenant, domain, memory, and task-grant scope.
+- approval and commit gates.
+- event ingestion, audit, artifacts, and UI observability.
+
+`WorkflowDefinition.execution_strategy` selects the control boundary:
+
+- `native_steps`: MandoForge materializes and schedules the declared step graph.
+- `delegated_runtime`: MandoForge creates one governed runtime envelope and
+  delegates inner planning, fan-out/fan-in, and subagent execution to a runtime
+  adapter such as `claude_code`, `codex_app_server`, or `codex_cli`.
+- `native_dynamic`: reserved for a future MandoForge-owned dynamic orchestrator.
+
+The delegated path records `runtime_adapter`, `runtime_mode`,
+`runtime_capability_contract`, and `event_ingestion_policy` on the definition.
+Each `WorkflowRun` snapshots those values with `delegation_status`,
+`external_run_ref`, `runtime_event_cursor`, and `runtime_envelope`. Workers may
+call the external runtime, but they still receive a TaskGrant and must stream or
+normalize runtime output back into MandoForge session events, artifacts, and
+audit records. Runtime scripts or external agents must not become a side channel
+around policy, approval, memory scope, connector scope, or worker leases.
+
+## Dynamic Workflow Plan
+
+`DynamicWorkflowPlan` is the reviewable planning envelope for large multi-agent
+runs. It is not a JavaScript or Rust workflow runtime. It is the platform-owned
+proposal that captures:
+
+- objective.
+- phases, prompts, agent counts, dependencies, and phase-level validation.
+- agent fleet limits such as total agents, max parallel agents, timeout, and
+  retry budget.
+- governance scope for memory, tools, connectors, external effects, and
+  approvals.
+- materialization target: `delegated_runtime` for Claude Code or Codex-managed
+  inner workflows, or `native_steps` when MandoForge should materialize the
+  phase graph itself.
+
+Lifecycle:
+
+1. `POST /api/dynamic-workflow-plans` validates phases and fleet policy, then
+   stores an analyzable proposal with audit evidence.
+2. `POST /api/dynamic-workflow-plans/:id/review` records the human or
+   pack-defined review decision. Only approved plans can be materialized.
+3. `POST /api/dynamic-workflow-plans/:id/materialize` creates a
+   `WorkflowDefinition`, `WorkflowRun`, primary session, root `TaskGrant`, and
+   start steps through the same managed runtime path as normal workflows.
+
+This keeps the Claude Code Dynamic Workflow product pattern, where many
+subagents may be planned behind one run, but preserves MandoForge's enterprise
+boundary: stable identity, approval, memory scope, connector scope, audit,
+artifacts, and UI observability stay outside the delegated runtime.
+
 ## Semantic Layer
 
 The semantic layer gives agents stable business context:
