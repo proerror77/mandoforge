@@ -1820,6 +1820,8 @@ h1 {
 .manager-composer,
 .manager-console,
 .manager-run-result,
+.dynamic-composer,
+.dynamic-plan-console,
 .capability-discovery,
 .work-item-list,
 .handoff-evidence,
@@ -1833,6 +1835,25 @@ h1 {
   display: grid;
   gap: 10px;
   min-width: 0;
+}
+
+.plan-list,
+.step-list {
+  display: grid;
+  gap: 8px;
+}
+
+.dynamic-plan-console .plan-list {
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+
+.dynamic-composer textarea,
+.dynamic-plan-console textarea {
+  min-height: 92px;
+}
+
+.dynamic-composer .wide-filter textarea {
+  min-height: 220px;
 }
 
 .marketplace-grid,

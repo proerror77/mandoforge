@@ -19572,6 +19572,9 @@ async fn run_workflow_step_run_route(
     if workflow_step_is_adapter_owned_compensation(&current) {
         return run_workflow_compensation_adapter_step(&state, &headers, current, run, input).await;
     }
+    if current.step_type == "delegated_runtime" || run.execution_strategy == "delegated_runtime" {
+        return run_workflow_delegated_runtime_step(&state, &headers, current, run, input).await;
+    }
     let agent_id = input
         .agent_id
         .or(current.agent_id)
@@ -19739,6 +19742,385 @@ async fn run_workflow_step_run_route(
             }))
         }
     }
+}
+
+async fn run_workflow_delegated_runtime_step(
+    state: &AppState,
+    headers: &HeaderMap,
+    current: WorkflowStepRun,
+    run: WorkflowRun,
+    input: RunWorkflowStepRun,
+) -> Result<Json<RunWorkflowStepRunResponse>, AppError> {
+    let agent_id = input
+        .agent_id
+        .or(current.agent_id)
+        .ok_or_else(|| AppError::bad_request("delegated runtime step requires agent_id"))?;
+    let worker_id = input
+        .worker_id
+        .clone()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| {
+            headers
+                .get("x-mandoforge-worker-id")
+                .and_then(|value| value.to_str().ok())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .unwrap_or_else(|| format!("agent:{agent_id}"))
+        });
+    let claim = claim_workflow_step_run(
+        state,
+        headers,
+        current,
+        run.clone(),
+        ClaimWorkflowStepRun {
+            agent_id,
+            worker_id: Some(worker_id.clone()),
+            lease_seconds: input.lease_seconds,
+        },
+    )
+    .await?;
+    let session_id = claim.step.session_id.unwrap_or(run.primary_session_id);
+    record_workflow_step_worker_started(
+        state,
+        &run,
+        &claim.step,
+        &worker_id,
+        claim.context_packet.id,
+    )
+    .await?;
+    let dispatch_event = state
+        .append_event(
+            "worker",
+            Some(claim.step.id),
+            session_id,
+            "workflow.delegated_runtime.dispatch_requested",
+            json!({
+                "workflow_run_id": run.id,
+                "workflow_step_run_id": claim.step.id,
+                "worker_id": worker_id,
+                "runtime_adapter": run.runtime_adapter,
+                "runtime_mode": run.runtime_mode,
+                "delegation_status": run.delegation_status,
+                "runtime_envelope": run.runtime_envelope
+            }),
+        )
+        .await?;
+    let queued = enqueue_session_loop(
+        state,
+        session_id,
+        Some(dispatch_event.id),
+        "workflow.delegated_runtime.run",
+    )
+    .await?;
+    let running_job = state.start_session_loop_job(queued.id, &worker_id).await?;
+    state
+        .append_event(
+            "worker",
+            Some(running_job.id),
+            running_job.session_id,
+            "session.loop.started",
+            json!({
+                "session_loop_job_id": running_job.id,
+                "environment_id": running_job.environment_id,
+                "worker_id": worker_id,
+                "attempt_count": running_job.attempt_count,
+                "workflow_step_run_id": claim.step.id,
+                "delegated_runtime": true
+            }),
+        )
+        .await?;
+
+    let adapter = run.runtime_adapter.as_deref().unwrap_or("unconfigured");
+    let execution = match adapter {
+        "codex_app_server" => {
+            run_codex_app_server_delegated_runtime(state, &run, &claim.step, &worker_id).await
+        }
+        _ => Err(AppError::bad_request(format!(
+            "delegated runtime adapter {adapter} requires an external worker adapter"
+        ))),
+    };
+
+    match execution {
+        Ok(output_payload) => {
+            let artifact = create_delegated_runtime_artifact(
+                state,
+                session_id,
+                "delegated-runtime-result.json",
+                output_payload.clone(),
+            )
+            .await?;
+            let completed_job = state
+                .complete_session_loop_job(running_job.id, &worker_id)
+                .await?;
+            let session = set_managed_session_status(
+                state,
+                session_id,
+                SessionStatus::Terminated,
+                "delegated runtime completed",
+            )
+            .await?;
+            let previous_status = claim.step.status.clone();
+            let now = Utc::now();
+            let mut completed_step = claim.step.clone();
+            completed_step.status = "completed".to_string();
+            completed_step.artifact_ids = vec![artifact.id];
+            completed_step.output_payload = json!({
+                "delegated_runtime": output_payload,
+                "artifact_ids": completed_step.artifact_ids,
+                "worker_id": worker_id,
+                "session_loop_job_id": completed_job.id,
+                "context_packet_id": completed_step.context_packet_id
+            });
+            completed_step.completed_at = Some(now);
+            completed_step.updated_at = now;
+            let completed_step = state.update_workflow_step_run(completed_step).await?;
+            record_workflow_step_run_updated(state, &run, &completed_step, &previous_status)
+                .await?;
+            record_workflow_step_worker_completed(
+                state,
+                &run,
+                &completed_step,
+                &worker_id,
+                &completed_job,
+            )
+            .await?;
+            state
+                .append_event(
+                    "worker",
+                    Some(completed_step.id),
+                    session_id,
+                    "workflow.delegated_runtime.completed",
+                    json!({
+                        "workflow_run_id": run.id,
+                        "workflow_step_run_id": completed_step.id,
+                        "worker_id": worker_id,
+                        "runtime_adapter": adapter,
+                        "artifact_id": artifact.id,
+                        "output": completed_step.output_payload
+                    }),
+                )
+                .await?;
+            advance_workflow_graph_after_step_update(state, &run, &completed_step).await?;
+            Ok(Json(RunWorkflowStepRunResponse {
+                step: completed_step,
+                task_grant: claim.task_grant,
+                context_packet: claim.context_packet,
+                session,
+                session_loop_job: completed_job,
+            }))
+        }
+        Err(error) => {
+            let reason = error.message.clone();
+            let completed_job = state
+                .complete_session_loop_job(running_job.id, &worker_id)
+                .await?;
+            let session = set_managed_session_status(
+                state,
+                session_id,
+                SessionStatus::RequiresAction,
+                "delegated runtime adapter requires configuration",
+            )
+            .await?;
+            let previous_status = claim.step.status.clone();
+            let mut blocked_step = claim.step.clone();
+            blocked_step.status = "requires_action".to_string();
+            blocked_step.output_payload = json!({
+                "delegated_runtime": {
+                    "status": "requires_action",
+                    "reason": reason,
+                    "runtime_adapter": adapter,
+                    "runtime_mode": run.runtime_mode,
+                    "runtime_envelope": run.runtime_envelope
+                },
+                "worker_id": worker_id,
+                "session_loop_job_id": completed_job.id,
+                "context_packet_id": blocked_step.context_packet_id
+            });
+            blocked_step.updated_at = Utc::now();
+            let blocked_step = state.update_workflow_step_run(blocked_step).await?;
+            record_workflow_step_run_updated(state, &run, &blocked_step, &previous_status).await?;
+            record_workflow_step_worker_completed(
+                state,
+                &run,
+                &blocked_step,
+                &worker_id,
+                &completed_job,
+            )
+            .await?;
+            state
+                .append_event(
+                    "worker",
+                    Some(blocked_step.id),
+                    session_id,
+                    "workflow.delegated_runtime.requires_action",
+                    json!({
+                        "workflow_run_id": run.id,
+                        "workflow_step_run_id": blocked_step.id,
+                        "worker_id": worker_id,
+                        "runtime_adapter": adapter,
+                        "reason": reason
+                    }),
+                )
+                .await?;
+            Ok(Json(RunWorkflowStepRunResponse {
+                step: blocked_step,
+                task_grant: claim.task_grant,
+                context_packet: claim.context_packet,
+                session,
+                session_loop_job: completed_job,
+            }))
+        }
+    }
+}
+
+async fn run_codex_app_server_delegated_runtime(
+    state: &AppState,
+    run: &WorkflowRun,
+    step: &WorkflowStepRun,
+    worker_id: &str,
+) -> Result<Value, AppError> {
+    let config = codex_app_server_config(state)?;
+    let metadata = json!({
+        "source": "mandoforge_delegated_runtime",
+        "workflow_run_id": run.id,
+        "workflow_step_run_id": step.id,
+        "runtime_mode": run.runtime_mode,
+        "worker_id": worker_id,
+        "runtime_envelope": run.runtime_envelope
+    });
+    let thread_request = CodexThreadRequest {
+        metadata: metadata.clone(),
+    };
+    let thread = state
+        .codex_app_server_client
+        .create_thread(config, thread_request.clone())
+        .await?;
+    state
+        .record_codex_app_server_run(
+            "delegated_runtime.thread.create",
+            Some(thread.thread_id.clone()),
+            None,
+            None,
+            serde_json::to_value(&thread_request)?,
+            serde_json::to_value(&thread)?,
+        )
+        .await?;
+
+    let turn_request = CodexTurnRequest {
+        message: delegated_runtime_turn_message(run, step),
+        metadata,
+    };
+    let turn = state
+        .codex_app_server_client
+        .create_turn(config, &thread.thread_id, turn_request.clone())
+        .await?;
+    state
+        .record_codex_app_server_run(
+            "delegated_runtime.turn.create",
+            Some(thread.thread_id.clone()),
+            Some(turn.turn_id.clone()),
+            None,
+            serde_json::to_value(&turn_request)?,
+            serde_json::to_value(&turn)?,
+        )
+        .await?;
+    let polled = state
+        .codex_app_server_client
+        .get_turn_status(config, &turn.turn_id)
+        .await?;
+    state
+        .record_codex_app_server_run(
+            "delegated_runtime.turn.poll",
+            Some(thread.thread_id.clone()),
+            Some(polled.turn_id.clone()),
+            None,
+            json!({"turn_id": turn.turn_id}),
+            serde_json::to_value(&polled)?,
+        )
+        .await?;
+    let status = polled.status.as_deref().unwrap_or("completed");
+    if matches!(status, "failed" | "canceled" | "error") {
+        return Err(AppError::bad_request(format!(
+            "Codex App Server delegated runtime returned {status}"
+        )));
+    }
+    Ok(json!({
+        "status": status,
+        "runtime_adapter": "codex_app_server",
+        "runtime_mode": run.runtime_mode,
+        "thread": thread,
+        "turn": turn,
+        "poll": polled
+    }))
+}
+
+fn delegated_runtime_turn_message(run: &WorkflowRun, step: &WorkflowStepRun) -> String {
+    let objective = step
+        .input_payload
+        .get("graph_step")
+        .and_then(|graph_step| graph_step.get("input"))
+        .and_then(|input| input.get("objective"))
+        .and_then(Value::as_str)
+        .or_else(|| run.input_payload.get("objective").and_then(Value::as_str))
+        .unwrap_or("Execute the delegated runtime workflow.");
+    format!(
+        "Run delegated workflow for MandoForge workflow run {}.\nObjective: {}\nRuntime envelope: {}",
+        run.id,
+        objective,
+        workflow_graph_console_summary(&run.runtime_envelope)
+    )
+}
+
+async fn create_delegated_runtime_artifact(
+    state: &AppState,
+    session_id: Uuid,
+    name: &str,
+    content: Value,
+) -> Result<Artifact, AppError> {
+    let artifact = Artifact {
+        id: Uuid::new_v4(),
+        session_id,
+        artifact_type: "json".to_string(),
+        name: name.to_string(),
+        path: Some(format!("delegated-runtime/{session_id}/{name}")),
+        content,
+        created_at: Utc::now(),
+    };
+    let artifact = state.insert_artifact(artifact).await?;
+    state
+        .append_event(
+            "system",
+            Some(artifact.id),
+            session_id,
+            "artifact.created",
+            json!({
+                "artifact_id": artifact.id,
+                "artifact_type": artifact.artifact_type,
+                "name": artifact.name,
+                "path": artifact.path,
+                "source": "delegated_runtime"
+            }),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(session_id),
+            "system",
+            None,
+            "artifact.created",
+            "artifact",
+            Some(artifact.id),
+            json!({
+                "name": artifact.name,
+                "artifact_type": artifact.artifact_type,
+                "path": artifact.path,
+                "source": "delegated_runtime"
+            }),
+        ))
+        .await?;
+    Ok(artifact)
 }
 
 fn workflow_step_is_adapter_owned_compensation(step: &WorkflowStepRun) -> bool {
@@ -61387,6 +61769,160 @@ not json
         );
     }
 
+    #[tokio::test]
+    async fn delegated_runtime_step_calls_codex_app_server_and_records_artifact() {
+        let codex_client = Arc::new(RecordingCodexAppServerClient::default());
+        let app = test_app_with_codex_app_server(codex_client.clone()).await;
+
+        let plan: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/dynamic-workflow-plans",
+                json!({
+                    "objective": "Run a delegated Codex App Server workflow",
+                    "phases": [
+                        {
+                            "key": "audit",
+                            "agent_count": 1,
+                            "prompt": "Audit runtime evidence and return a short report."
+                        }
+                    ],
+                    "agent_fleet_policy": {
+                        "max_total_agents": 1,
+                        "max_parallel_agents": 1
+                    },
+                    "materialization": {
+                        "execution_strategy": "delegated_runtime",
+                        "runtime_adapter": "codex_app_server",
+                        "runtime_mode": "dynamic_workflow",
+                        "runtime_capability_contract": {
+                            "max_total_agents": 1,
+                            "max_parallel_agents": 1
+                        },
+                        "event_ingestion_policy": "normalized"
+                    }
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let plan_id = plan["id"].as_str().expect("plan id");
+        let _approved: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/dynamic-workflow-plans/{plan_id}/review"),
+                json!({
+                    "status": "approved",
+                    "review": {"approved_by": "test"}
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let materialized: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/dynamic-workflow-plans/{plan_id}/materialize"),
+                json!({"title": "Codex delegated runtime test"}),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let run_id = materialized["workflow_run"]["id"].as_str().expect("run id");
+        let session_id = materialized["workflow_run"]["primary_session_id"]
+            .as_str()
+            .expect("session id");
+        let steps: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let step = steps.first().expect("delegated step");
+        assert_eq!(step["step_type"], json!("delegated_runtime"));
+        let step_id = step["id"].as_str().expect("step id");
+        let agent_id = step["agent_id"].as_str().expect("agent id");
+
+        let run_response: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/workflow-step-runs/{step_id}/run"),
+                json!({
+                    "agent_id": agent_id,
+                    "worker_id": "codex-delegated-worker",
+                    "lease_seconds": 600
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        assert_eq!(run_response["step"]["status"], json!("completed"));
+        assert_eq!(
+            run_response["step"]["output_payload"]["delegated_runtime"]["runtime_adapter"],
+            json!("codex_app_server")
+        );
+        assert_eq!(
+            run_response["step"]["output_payload"]["delegated_runtime"]["poll"]["status"],
+            json!("completed")
+        );
+        assert_eq!(
+            run_response["session_loop_job"]["status"],
+            json!("completed")
+        );
+        assert!(
+            run_response["step"]["artifact_ids"]
+                .as_array()
+                .is_some_and(|ids| ids.len() == 1)
+        );
+
+        let calls = codex_client.calls.lock().await.clone();
+        assert_eq!(
+            calls,
+            vec![
+                "thread".to_string(),
+                "turn:thread-1".to_string(),
+                "poll:turn-1".to_string()
+            ]
+        );
+        let artifacts: Vec<Artifact> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/sessions/{session_id}/artifacts"))
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].name, "delegated-runtime-result.json");
+        let events: Vec<SessionEvent> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{session_id}/events"))
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            events.iter().any(|event| {
+                event.event_type == "workflow.delegated_runtime.dispatch_requested"
+            })
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "workflow.delegated_runtime.completed")
+        );
+    }
+
     #[test]
     fn dynamic_workflow_native_step_graph_expands_phase_dependencies() {
         let now = Utc::now();
@@ -71900,6 +72436,17 @@ not json
 
     async fn test_app_with_worker(execution_worker: Arc<dyn ExecutionWorker>) -> Router {
         let state = test_state_with_worker(execution_worker);
+        state.seed_demo_agent().await.expect("seed demo agent");
+        build_router(state)
+    }
+
+    async fn test_app_with_codex_app_server(codex_client: Arc<dyn CodexAppServerClient>) -> Router {
+        let mut state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        state.codex_app_server_config = Some(CodexAppServerConfig {
+            endpoint: "http://codex-app-server.test".to_string(),
+            timeout_seconds: 5,
+        });
+        state.codex_app_server_client = codex_client;
         state.seed_demo_agent().await.expect("seed demo agent");
         build_router(state)
     }
