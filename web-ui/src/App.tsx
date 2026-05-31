@@ -1731,8 +1731,8 @@ export function App() {
                   <KeyValue label="Strategy" value={selectedWorkflowRun.execution_strategy} />
                   <KeyValue label="Runtime" value={selectedWorkflowRun.runtime_adapter ?? "native"} />
                   <KeyValue label="Delegation" value={selectedWorkflowRun.delegation_status ?? "none"} />
-                  <KeyValue label="Tokens" value={String(usage.data?.total_tokens ?? 0)} />
-                  <KeyValue label="Cost" value={`${((usage.data?.estimated_provider_cost_cents ?? 0) / 100).toFixed(4)} USD`} />
+                  <KeyValue label="Global tokens" value={String(usage.data?.total_tokens ?? 0)} />
+                  <KeyValue label="Global cost" value={`${((usage.data?.estimated_provider_cost_cents ?? 0) / 100).toFixed(4)} USD`} />
                 </>
               ) : <p className="muted">Select a workflow run.</p>}
             </Panel>
@@ -1750,13 +1750,13 @@ export function App() {
                     >
                       Run
                     </button>
-                    <button className="ghost" disabled={controlWorkflowStep.isPending || step.status === "completed"} onClick={() => controlWorkflowStep.mutate({ stepId: step.id, status: "requires_action" })}>Pause</button>
-                    <button className="ghost" disabled={controlWorkflowStep.isPending || step.status === "completed"} onClick={() => controlWorkflowStep.mutate({ stepId: step.id, status: "queued" })}>Resume</button>
-                    <button className="ghost" disabled={controlWorkflowStep.isPending || step.status === "completed"} onClick={() => controlWorkflowStep.mutate({ stepId: step.id, status: "canceled" })}>Cancel</button>
+                    <button className="ghost" disabled={controlWorkflowStep.isPending || step.status === "completed"} onClick={() => controlWorkflowStep.mutate({ stepId: step.id, status: "requires_action" })}>Mark paused</button>
+                    <button className="ghost" disabled={controlWorkflowStep.isPending || step.status === "completed"} onClick={() => controlWorkflowStep.mutate({ stepId: step.id, status: "queued" })}>Mark queued</button>
+                    <button className="ghost" disabled={controlWorkflowStep.isPending || step.status === "completed"} onClick={() => controlWorkflowStep.mutate({ stepId: step.id, status: "canceled" })}>Mark canceled</button>
                   </div>
                 ))}
               </div>
-              <p className="status-hint">Pause/resume/cancel updates the governed WorkflowStepRun state. Native external subagent interrupt still depends on adapter support.</p>
+              <p className="status-hint">These controls mark governed WorkflowStepRun state only. Native external subagent pause/resume/cancel requires adapter support.</p>
             </Panel>
             <Panel title="Transitions">
               {filteredTransitions.length ? filteredTransitions.slice(-8).reverse().map((transition) => (
@@ -2425,7 +2425,7 @@ function DynamicWorkflowPlanConsole({
               disabled={isPressureTesting}
               onClick={() => onPressureTest(selectedPlan.id)}
             >
-              {isPressureTesting ? "Testing..." : "Pressure gate"}
+              {isPressureTesting ? "Simulating..." : "Simulate pressure"}
             </button>
             <button
               className="secondary"
@@ -2440,10 +2440,10 @@ function DynamicWorkflowPlanConsole({
           </div>
           {reviewError ? <p className="error-note">Review failed: {errorMessage(reviewError)}</p> : null}
           {materializeError ? <p className="error-note">Materialize failed: {errorMessage(materializeError)}</p> : null}
-          {pressureError ? <p className="error-note">Pressure gate failed: {errorMessage(pressureError)}</p> : null}
+          {pressureError ? <p className="error-note">Pressure simulation failed: {errorMessage(pressureError)}</p> : null}
           {adjudicationError ? <p className="error-note">Adjudication failed: {errorMessage(adjudicationError)}</p> : null}
           <div className="graph-summary">
-            <KeyValue label="Pressure" value={pressureResult ? `${pressureResult.status} · ${pressureResult.target_agents} agents / ${pressureResult.simulated_batches} batches` : "not run"} />
+            <KeyValue label="Pressure sim" value={pressureResult ? `${pressureResult.status} · ${pressureResult.target_agents} agents / ${pressureResult.simulated_batches} batches` : "not run"} />
             <KeyValue label="Adjudication" value={adjudicationResult ? `${adjudicationResult.decision} · ${(adjudicationResult.score * 100).toFixed(0)}%` : "not run"} />
           </div>
           <details className="json-details">
@@ -2452,7 +2452,7 @@ function DynamicWorkflowPlanConsole({
           </details>
           {pressureResult ? (
             <details className="json-details">
-              <summary>pressure gate</summary>
+              <summary>pressure simulation</summary>
               <pre>{formatJson(pressureResult)}</pre>
             </details>
           ) : null}

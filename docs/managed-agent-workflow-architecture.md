@@ -318,11 +318,14 @@ The API lifecycle is proposal -> review -> materialize:
   step; `native_steps` plans expand phases into concrete agent steps.
 - `POST /api/dynamic-workflow-plans/:id/adjudicate` performs the first
   workflow-level cross-check/voting adjudication by reading materialized step
-  outputs and recording session/audit evidence.
+  outputs and recording session/audit evidence. Only explicit `vote: true`
+  step evidence counts as positive; missing votes keep the workflow in
+  `insufficient_evidence`.
 - `POST /api/dynamic-workflow-plans/:id/pressure-test` records a control-plane
   pressure simulation for large agent counts and max parallelism. This proves
   planning/backpressure math and review evidence, not provider capacity or live
-  LLM execution at that scale.
+  LLM execution at that scale. The API status is `control_plane_passed`, not a
+  live provider-scale claim.
 
 This is the current MandoForge equivalent of Claude Code Dynamic Workflows:
 MandoForge governs the envelope, approval, memory/connector/tool scope, audit,

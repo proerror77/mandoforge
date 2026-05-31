@@ -343,10 +343,11 @@ Lifecycle:
    start steps through the same managed runtime path as normal workflows.
 5. `POST /api/dynamic-workflow-plans/:id/adjudicate` evaluates materialized
    step outputs against the plan's voting threshold and records session/audit
-   evidence.
+   evidence. Missing vote evidence is not treated as approval.
 6. `POST /api/dynamic-workflow-plans/:id/pressure-test` records a large-fleet
    control-plane pressure simulation. It is evidence for batching and
-   backpressure limits, not a claim of live provider execution at that scale.
+   backpressure limits, not a claim of live provider execution at that scale;
+   the response status is `control_plane_passed`.
 
 This keeps the Claude Code Dynamic Workflow product pattern, where many
 subagents may be planned behind one run, but preserves MandoForge's enterprise
