@@ -642,6 +642,36 @@ impl AppState {
         }
     }
 
+    pub(crate) async fn get_work_item(&self, work_item_id: Uuid) -> Result<WorkItem, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => inner
+                .read()
+                .await
+                .work_items
+                .get(&work_item_id)
+                .filter(|work_item| work_item.archived_at.is_none())
+                .cloned()
+                .ok_or_else(|| AppError::not_found("active work item not found")),
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "SELECT id, organization_id, team_id, project_id, title, description, source,
+                            source_url, status, priority, assignee, metadata, created_at, updated_at,
+                            archived_at
+                     FROM work_items
+                     WHERE tenant_id = $1
+                       AND id = $2
+                       AND archived_at IS NULL",
+                )
+                .bind(self.current_tenant_id())
+                .bind(work_item_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("active work item not found"))?;
+                work_item_from_row(row)
+            }
+        }
+    }
+
     pub(crate) async fn create_work_item(
         &self,
         input: CreateWorkItem,

@@ -13859,14 +13859,28 @@ async fn list_dynamic_workflow_plans(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<DynamicWorkflowPlan>>, AppError> {
-    authorize_collection_request(
+    let principal = authorize_collection_request(
         &state,
         &headers,
         Permission::SessionsRead,
         "dynamic_workflow_plans",
     )
     .await?;
-    Ok(Json(state.list_dynamic_workflow_plans().await?))
+    let visible_session_ids = visible_session_ids_for_principal(&state, &principal).await?;
+    let mut visible_plans = Vec::new();
+    for plan in state.list_dynamic_workflow_plans().await? {
+        if dynamic_workflow_plan_visible_to_principal(
+            &state,
+            &principal,
+            &visible_session_ids,
+            &plan,
+        )
+        .await?
+        {
+            visible_plans.push(plan);
+        }
+    }
+    Ok(Json(visible_plans))
 }
 
 async fn get_dynamic_workflow_plan(
@@ -13893,7 +13907,14 @@ async fn create_dynamic_workflow_plan(
     )
     .await?;
     if let Some(work_item_id) = input.source_work_item_id {
-        state.ensure_work_item_exists(work_item_id).await?;
+        authorize_request(
+            &state,
+            &headers,
+            Permission::SessionsRead,
+            "work_item",
+            Some(work_item_id),
+        )
+        .await?;
     }
     if let Some(session_id) = input.source_session_id {
         authorize_request(
@@ -13971,7 +13992,14 @@ async fn compile_dynamic_workflow_plan(
     )
     .await?;
     if let Some(work_item_id) = input.source_work_item_id {
-        state.ensure_work_item_exists(work_item_id).await?;
+        authorize_request(
+            &state,
+            &headers,
+            Permission::SessionsRead,
+            "work_item",
+            Some(work_item_id),
+        )
+        .await?;
     }
     if let Some(session_id) = input.source_session_id {
         authorize_request(
@@ -14137,17 +14165,19 @@ async fn adjudicate_dynamic_workflow_plan(
         .iter()
         .filter(|step| step.status == "completed")
         .collect::<Vec<_>>();
-    let positive_votes = completed
+    let explicit_votes = completed
         .iter()
-        .filter(|step| dynamic_workflow_step_vote(&step.output_payload) != Some(false))
-        .count();
-    let negative_votes = completed.len().saturating_sub(positive_votes);
-    let score = if completed.is_empty() {
+        .filter_map(|step| dynamic_workflow_step_vote(&step.output_payload))
+        .collect::<Vec<_>>();
+    let positive_votes = explicit_votes.iter().filter(|vote| **vote).count();
+    let negative_votes = explicit_votes.len().saturating_sub(positive_votes);
+    let missing_votes = completed.len().saturating_sub(explicit_votes.len());
+    let score = if explicit_votes.is_empty() {
         0.0
     } else {
-        positive_votes as f64 / completed.len() as f64
+        positive_votes as f64 / explicit_votes.len() as f64
     };
-    let decision = if completed.is_empty() {
+    let decision = if explicit_votes.is_empty() || missing_votes > 0 {
         "insufficient_evidence"
     } else if score >= threshold {
         "accepted"
@@ -14168,6 +14198,8 @@ async fn adjudicate_dynamic_workflow_plan(
         evidence: json!({
             "step_count": steps.len(),
             "completed_step_ids": completed.iter().map(|step| step.id).collect::<Vec<_>>(),
+            "explicit_vote_count": explicit_votes.len(),
+            "missing_vote_count": missing_votes,
             "validation": plan.validation,
             "cross_check_required": plan.validation.get("cross_check_required").and_then(Value::as_bool).unwrap_or(false)
         }),
@@ -14219,7 +14251,7 @@ async fn pressure_test_dynamic_workflow_plan(
         .min(target_agents);
     let simulated_batches = target_agents.div_ceil(max_parallel_agents);
     let response = DynamicWorkflowPressureTestResponse {
-        status: "passed".to_string(),
+        status: "control_plane_passed".to_string(),
         plan_id: plan.id,
         target_agents,
         max_parallel_agents,
@@ -20248,6 +20280,84 @@ async fn run_workflow_delegated_runtime_step(
 
     match execution {
         Ok(output_payload) => {
+            let delegated_status = delegated_runtime_output_status(&output_payload);
+            if delegated_runtime_status_is_nonterminal(&delegated_status) {
+                let completed_job = state
+                    .complete_session_loop_job(running_job.id, &worker_id)
+                    .await?;
+                let session = set_managed_session_status(
+                    state,
+                    session_id,
+                    SessionStatus::Running,
+                    "delegated runtime is still running",
+                )
+                .await?;
+                let previous_status = claim.step.status.clone();
+                let now = Utc::now();
+                let mut pending_step = claim.step.clone();
+                pending_step.status = "running".to_string();
+                pending_step.output_payload = json!({
+                    "delegated_runtime": output_payload,
+                    "worker_id": worker_id,
+                    "session_loop_job_id": completed_job.id,
+                    "context_packet_id": pending_step.context_packet_id,
+                    "poll_status": delegated_status.clone()
+                });
+                pending_step.lease_expires_at = Some(now);
+                pending_step.updated_at = now;
+                let pending_step = state.update_workflow_step_run(pending_step).await?;
+                record_workflow_step_run_updated(state, &run, &pending_step, &previous_status)
+                    .await?;
+                record_workflow_step_worker_completed(
+                    state,
+                    &run,
+                    &pending_step,
+                    &worker_id,
+                    &completed_job,
+                )
+                .await?;
+                state
+                    .append_event(
+                        "worker",
+                        Some(pending_step.id),
+                        session_id,
+                        "workflow.delegated_runtime.poll_pending",
+                        json!({
+                            "workflow_run_id": run.id,
+                            "workflow_step_run_id": pending_step.id,
+                            "worker_id": worker_id,
+                            "runtime_adapter": adapter,
+                            "status": delegated_status.clone(),
+                            "output": pending_step.output_payload
+                        }),
+                    )
+                    .await?;
+                return Ok(Json(RunWorkflowStepRunResponse {
+                    step: pending_step,
+                    task_grant: claim.task_grant,
+                    context_packet: claim.context_packet,
+                    session,
+                    session_loop_job: completed_job,
+                }));
+            }
+            if !delegated_runtime_status_is_terminal_success(&delegated_status) {
+                return complete_delegated_runtime_requires_action(
+                    state,
+                    &run,
+                    &claim.step,
+                    claim.task_grant,
+                    claim.context_packet,
+                    running_job,
+                    &worker_id,
+                    session_id,
+                    adapter,
+                    format!(
+                        "delegated runtime returned non-success terminal status {delegated_status}"
+                    ),
+                    Some(output_payload),
+                )
+                .await;
+            }
             let artifact = create_delegated_runtime_artifact(
                 state,
                 session_id,
@@ -20316,67 +20426,110 @@ async fn run_workflow_delegated_runtime_step(
             }))
         }
         Err(error) => {
-            let reason = error.message.clone();
-            let completed_job = state
-                .complete_session_loop_job(running_job.id, &worker_id)
-                .await?;
-            let session = set_managed_session_status(
-                state,
-                session_id,
-                SessionStatus::RequiresAction,
-                "delegated runtime adapter requires configuration",
-            )
-            .await?;
-            let previous_status = claim.step.status.clone();
-            let mut blocked_step = claim.step.clone();
-            blocked_step.status = "requires_action".to_string();
-            blocked_step.output_payload = json!({
-                "delegated_runtime": {
-                    "status": "requires_action",
-                    "reason": reason,
-                    "runtime_adapter": adapter,
-                    "runtime_mode": run.runtime_mode,
-                    "runtime_envelope": run.runtime_envelope
-                },
-                "worker_id": worker_id,
-                "session_loop_job_id": completed_job.id,
-                "context_packet_id": blocked_step.context_packet_id
-            });
-            blocked_step.updated_at = Utc::now();
-            let blocked_step = state.update_workflow_step_run(blocked_step).await?;
-            record_workflow_step_run_updated(state, &run, &blocked_step, &previous_status).await?;
-            record_workflow_step_worker_completed(
+            complete_delegated_runtime_requires_action(
                 state,
                 &run,
-                &blocked_step,
+                &claim.step,
+                claim.task_grant,
+                claim.context_packet,
+                running_job,
                 &worker_id,
-                &completed_job,
+                session_id,
+                adapter,
+                error.message,
+                None,
             )
-            .await?;
-            state
-                .append_event(
-                    "worker",
-                    Some(blocked_step.id),
-                    session_id,
-                    "workflow.delegated_runtime.requires_action",
-                    json!({
-                        "workflow_run_id": run.id,
-                        "workflow_step_run_id": blocked_step.id,
-                        "worker_id": worker_id,
-                        "runtime_adapter": adapter,
-                        "reason": reason
-                    }),
-                )
-                .await?;
-            Ok(Json(RunWorkflowStepRunResponse {
-                step: blocked_step,
-                task_grant: claim.task_grant,
-                context_packet: claim.context_packet,
-                session,
-                session_loop_job: completed_job,
-            }))
+            .await
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn complete_delegated_runtime_requires_action(
+    state: &AppState,
+    run: &WorkflowRun,
+    step: &WorkflowStepRun,
+    task_grant: TaskGrant,
+    context_packet: ContextPacket,
+    running_job: SessionLoopJob,
+    worker_id: &str,
+    session_id: Uuid,
+    adapter: &str,
+    reason: String,
+    output_payload: Option<Value>,
+) -> Result<Json<RunWorkflowStepRunResponse>, AppError> {
+    let completed_job = state
+        .complete_session_loop_job(running_job.id, worker_id)
+        .await?;
+    let session = set_managed_session_status(
+        state,
+        session_id,
+        SessionStatus::RequiresAction,
+        "delegated runtime requires action",
+    )
+    .await?;
+    let previous_status = step.status.clone();
+    let mut blocked_step = step.clone();
+    blocked_step.status = "requires_action".to_string();
+    blocked_step.output_payload = json!({
+        "delegated_runtime": {
+            "status": "requires_action",
+            "reason": reason,
+            "runtime_adapter": adapter,
+            "runtime_mode": run.runtime_mode,
+            "runtime_envelope": run.runtime_envelope,
+            "output": output_payload
+        },
+        "worker_id": worker_id,
+        "session_loop_job_id": completed_job.id,
+        "context_packet_id": blocked_step.context_packet_id
+    });
+    blocked_step.updated_at = Utc::now();
+    let blocked_step = state.update_workflow_step_run(blocked_step).await?;
+    record_workflow_step_run_updated(state, run, &blocked_step, &previous_status).await?;
+    record_workflow_step_worker_completed(state, run, &blocked_step, worker_id, &completed_job)
+        .await?;
+    state
+        .append_event(
+            "worker",
+            Some(blocked_step.id),
+            session_id,
+            "workflow.delegated_runtime.requires_action",
+            json!({
+                "workflow_run_id": run.id,
+                "workflow_step_run_id": blocked_step.id,
+                "worker_id": worker_id,
+                "runtime_adapter": adapter,
+                "reason": reason
+            }),
+        )
+        .await?;
+    Ok(Json(RunWorkflowStepRunResponse {
+        step: blocked_step,
+        task_grant,
+        context_packet,
+        session,
+        session_loop_job: completed_job,
+    }))
+}
+
+fn delegated_runtime_output_status(output_payload: &Value) -> String {
+    output_payload
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+fn delegated_runtime_status_is_nonterminal(status: &str) -> bool {
+    matches!(
+        status,
+        "created" | "queued" | "pending" | "submitted" | "running" | "in_progress"
+    )
+}
+
+fn delegated_runtime_status_is_terminal_success(status: &str) -> bool {
+    matches!(status, "completed" | "complete" | "succeeded" | "success")
 }
 
 async fn run_codex_app_server_delegated_runtime(
@@ -20444,7 +20597,7 @@ async fn run_codex_app_server_delegated_runtime(
             serde_json::to_value(&polled)?,
         )
         .await?;
-    let status = polled.status.as_deref().unwrap_or("completed");
+    let status = polled.status.as_deref().unwrap_or("unknown");
     if matches!(status, "failed" | "canceled" | "error") {
         return Err(AppError::bad_request(format!(
             "Codex App Server delegated runtime returned {status}"
@@ -25807,6 +25960,50 @@ async fn visible_session_ids_for_principal(
         .collect())
 }
 
+async fn work_item_visible_to_principal(
+    state: &AppState,
+    principal: &Principal,
+    work_item_id: Uuid,
+) -> Result<bool, AppError> {
+    if principal.roles.contains(&Role::Admin) {
+        return Ok(true);
+    }
+    let work_item = state.get_work_item(work_item_id).await?;
+    if let Some(project_id) = work_item.project_id {
+        return state
+            .subject_can_access_project(&principal.subject_id, project_id)
+            .await;
+    }
+    if let Some(team_id) = work_item.team_id {
+        return state
+            .subject_can_access_team(&principal.subject_id, team_id)
+            .await;
+    }
+    Ok(true)
+}
+
+async fn dynamic_workflow_plan_visible_to_principal(
+    state: &AppState,
+    principal: &Principal,
+    visible_session_ids: &HashSet<Uuid>,
+    plan: &DynamicWorkflowPlan,
+) -> Result<bool, AppError> {
+    if principal.roles.contains(&Role::Admin) {
+        return Ok(true);
+    }
+    if let Some(session_id) = plan.source_session_id {
+        return Ok(visible_session_ids.contains(&session_id));
+    }
+    if let Some(workflow_run_id) = plan.workflow_run_id {
+        let run = state.get_workflow_run(workflow_run_id).await?;
+        return Ok(visible_session_ids.contains(&run.primary_session_id));
+    }
+    if let Some(work_item_id) = plan.source_work_item_id {
+        return work_item_visible_to_principal(state, principal, work_item_id).await;
+    }
+    Ok(false)
+}
+
 async fn enforce_resource_scope(
     state: &AppState,
     principal: &Principal,
@@ -25827,6 +26024,30 @@ async fn enforce_resource_scope(
             let session = state.get_session(resource_id).await?;
             let agent = state.get_agent(session.agent_id).await?;
             (agent.team_id, agent.project_id)
+        }
+        "work_item" => {
+            let work_item = state.get_work_item(resource_id).await?;
+            (work_item.team_id, work_item.project_id)
+        }
+        "dynamic_workflow_plan" => {
+            let plan = state.get_dynamic_workflow_plan(resource_id).await?;
+            if let Some(session_id) = plan.source_session_id {
+                let session = state.get_session(session_id).await?;
+                let agent = state.get_agent(session.agent_id).await?;
+                (agent.team_id, agent.project_id)
+            } else if let Some(workflow_run_id) = plan.workflow_run_id {
+                let run = state.get_workflow_run(workflow_run_id).await?;
+                let session = state.get_session(run.primary_session_id).await?;
+                let agent = state.get_agent(session.agent_id).await?;
+                (agent.team_id, agent.project_id)
+            } else if let Some(work_item_id) = plan.source_work_item_id {
+                let work_item = state.get_work_item(work_item_id).await?;
+                (work_item.team_id, work_item.project_id)
+            } else {
+                return Err(AppError::forbidden(
+                    "unscoped dynamic workflow plan requires admin access",
+                ));
+            }
         }
         _ => (None, None),
     };
@@ -62254,7 +62475,7 @@ not json
             ),
         )
         .await;
-        assert_eq!(pressure["status"], json!("passed"));
+        assert_eq!(pressure["status"], json!("control_plane_passed"));
         assert_eq!(pressure["simulated_batches"], json!(8));
         assert_eq!(
             pressure["evidence"]["type"],
@@ -62321,6 +62542,154 @@ not json
         assert_eq!(adjudication["status"], json!("completed"));
         assert_eq!(adjudication["decision"], json!("accepted"));
         assert_eq!(adjudication["positive_votes"], json!(1));
+    }
+
+    #[tokio::test]
+    async fn dynamic_workflow_plan_list_filters_unscoped_plans_for_non_admin() {
+        let app = test_app().await;
+
+        let plan: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/dynamic-workflow-plans",
+                json!({
+                    "objective": "Unscoped dynamic workflow should stay admin-only",
+                    "phases": [{"key": "audit", "agent_count": 1, "prompt": "Audit."}],
+                    "agent_fleet_policy": {"max_total_agents": 1, "max_parallel_agents": 1},
+                    "materialization": {
+                        "execution_strategy": "delegated_runtime",
+                        "runtime_adapter": "codex_app_server",
+                        "runtime_mode": "dynamic_workflow",
+                        "runtime_capability_contract": {"max_total_agents": 1, "max_parallel_agents": 1},
+                        "event_ingestion_policy": "normalized"
+                    }
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let plan_id = plan["id"].as_str().expect("plan id");
+
+        let visible_plans: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/dynamic-workflow-plans")
+                .header("x-mandoforge-subject", "viewer-1")
+                .header("x-mandoforge-roles", "viewer")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            !visible_plans
+                .iter()
+                .any(|candidate| candidate["id"] == json!(plan_id))
+        );
+
+        let (status, error) = request_value(
+            app,
+            Request::builder()
+                .uri(format!("/api/dynamic-workflow-plans/{plan_id}"))
+                .header("x-mandoforge-subject", "viewer-1")
+                .header("x-mandoforge-roles", "viewer")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("unscoped dynamic workflow plan requires admin access")
+        );
+    }
+
+    #[tokio::test]
+    async fn dynamic_workflow_adjudication_requires_explicit_votes() {
+        let app = test_app().await;
+
+        let plan: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/dynamic-workflow-plans",
+                json!({
+                    "objective": "Require explicit voting evidence",
+                    "phases": [{"key": "audit", "agent_count": 1, "prompt": "Audit."}],
+                    "agent_fleet_policy": {"max_total_agents": 1, "max_parallel_agents": 1},
+                    "materialization": {
+                        "execution_strategy": "delegated_runtime",
+                        "runtime_adapter": "codex_app_server",
+                        "runtime_mode": "dynamic_workflow",
+                        "runtime_capability_contract": {"max_total_agents": 1, "max_parallel_agents": 1},
+                        "event_ingestion_policy": "normalized"
+                    }
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let plan_id = plan["id"].as_str().expect("plan id");
+        let _: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/dynamic-workflow-plans/{plan_id}/review"),
+                json!({"status": "approved", "review": {"approved_by": "test"}}),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let materialized: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/dynamic-workflow-plans/{plan_id}/materialize"),
+                json!({"title": "Missing vote adjudication test"}),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let run_id = materialized["workflow_run"]["id"].as_str().expect("run id");
+        let steps: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let step_id = steps[0]["id"].as_str().expect("step id");
+        let _: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "PATCH",
+                &format!("/api/workflow-step-runs/{step_id}"),
+                json!({
+                    "status": "completed",
+                    "output_payload": {"summary": "completed without explicit vote"}
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        let adjudication: Value = request_json(
+            app,
+            json_request_with_headers(
+                "POST",
+                &format!("/api/dynamic-workflow-plans/{plan_id}/adjudicate"),
+                json!({"vote_threshold": 0.67}),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(adjudication["decision"], json!("insufficient_evidence"));
+        assert_eq!(adjudication["positive_votes"], json!(0));
+        assert_eq!(adjudication["negative_votes"], json!(0));
+        assert_eq!(adjudication["evidence"]["missing_vote_count"], json!(1));
     }
 
     #[tokio::test]
@@ -62474,6 +62843,112 @@ not json
             events
                 .iter()
                 .any(|event| event.event_type == "workflow.delegated_runtime.completed")
+        );
+    }
+
+    #[tokio::test]
+    async fn delegated_runtime_step_keeps_codex_nonterminal_poll_running() {
+        let codex_client = Arc::new(RecordingCodexAppServerClient::with_poll_statuses(vec![
+            "running",
+        ]));
+        let app = test_app_with_codex_app_server(codex_client.clone()).await;
+
+        let plan: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/dynamic-workflow-plans",
+                json!({
+                    "objective": "Run a nonterminal Codex App Server workflow",
+                    "phases": [{"key": "audit", "agent_count": 1, "prompt": "Audit."}],
+                    "agent_fleet_policy": {"max_total_agents": 1, "max_parallel_agents": 1},
+                    "materialization": {
+                        "execution_strategy": "delegated_runtime",
+                        "runtime_adapter": "codex_app_server",
+                        "runtime_mode": "dynamic_workflow",
+                        "runtime_capability_contract": {"max_total_agents": 1, "max_parallel_agents": 1},
+                        "event_ingestion_policy": "normalized"
+                    }
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let plan_id = plan["id"].as_str().expect("plan id");
+        let _: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/dynamic-workflow-plans/{plan_id}/review"),
+                json!({"status": "approved", "review": {"approved_by": "test"}}),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let materialized: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/dynamic-workflow-plans/{plan_id}/materialize"),
+                json!({"title": "Codex nonterminal delegated runtime test"}),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let run_id = materialized["workflow_run"]["id"].as_str().expect("run id");
+        let session_id = materialized["workflow_run"]["primary_session_id"]
+            .as_str()
+            .expect("session id");
+        let steps: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/workflow-runs/{run_id}/steps"))
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let step_id = steps[0]["id"].as_str().expect("step id");
+        let agent_id = steps[0]["agent_id"].as_str().expect("agent id");
+
+        let run_response: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/workflow-step-runs/{step_id}/run"),
+                json!({
+                    "agent_id": agent_id,
+                    "worker_id": "codex-delegated-worker",
+                    "lease_seconds": 600
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        assert_eq!(run_response["step"]["status"], json!("running"));
+        assert_eq!(
+            run_response["step"]["output_payload"]["delegated_runtime"]["status"],
+            json!("running")
+        );
+        assert!(
+            run_response["step"]["artifact_ids"]
+                .as_array()
+                .is_none_or(|ids| ids.is_empty())
+        );
+
+        let events: Vec<SessionEvent> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{session_id}/events"))
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "workflow.delegated_runtime.poll_pending")
         );
     }
 
