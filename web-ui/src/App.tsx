@@ -16,6 +16,7 @@ import {
   reviewDynamicWorkflowPlan,
   reviewManagerAgentPlan,
   reviewSemanticOntologyProposal,
+  buildSemanticOntology,
   expandSemanticOntology,
   resolveSemanticConflict,
   runSemanticDreaming,
@@ -54,6 +55,7 @@ import {
   type SemanticGraphSnapshot,
   type SemanticLink,
   type SemanticObject,
+  type SemanticOntologyBuilderResult,
   type SemanticReflectionQueue,
   type SemanticRetrievalBackendRegistry,
   type SemanticSearchResponse,
@@ -134,6 +136,9 @@ const DEFAULT_SYNTHESIS_RUN = JSON.stringify({
     },
   ],
 }, null, 2);
+
+const DEFAULT_ONTOLOGY_BUILDER_SOURCE =
+  "Contract review uses Contract, Party, Clause, Obligation, Risk, Jurisdiction, Template, and Approval Requirement concepts. Clauses create obligations, trigger risks, and may require approval.";
 
 const DEFAULT_PACK_PROFILE_ASSETS = JSON.stringify({
   profiles: [
@@ -227,6 +232,7 @@ export function App() {
   const [semanticWorkflowScope, setSemanticWorkflowScope] = useState("");
   const [semanticIngestionDraft, setSemanticIngestionDraft] = useState(DEFAULT_INGESTION_BATCH);
   const [semanticSynthesisDraft, setSemanticSynthesisDraft] = useState(DEFAULT_SYNTHESIS_RUN);
+  const [ontologyBuilderSource, setOntologyBuilderSource] = useState(DEFAULT_ONTOLOGY_BUILDER_SOURCE);
   const [graphEditorDraft, setGraphEditorDraft] = useState("");
   const [graphEditorStatus, setGraphEditorStatus] = useState("");
   const [managerGoal, setManagerGoal] = useState("Review this work item, decompose it, route it to a specialist, and preserve review evidence.");
@@ -779,6 +785,19 @@ export function App() {
     },
     onSuccess: () => invalidateAll(queryClient),
   });
+  const buildOntologyMutation = useMutation({
+    mutationFn: () => buildSemanticOntology({
+      domain_scope: semanticDomainScope || "general",
+      workflow_scope: semanticWorkflowScope || null,
+      memory_scope: semanticMemoryScope || "ontology",
+      objective: `Build an AI first-draft ontology proposal for ${semanticDomainScope || "general"}.`,
+      source_text: ontologyBuilderSource,
+      source_refs: ["ui://semantic-ontology-builder"],
+      max_object_types: 12,
+      max_relation_types: 12,
+    }),
+    onSuccess: () => invalidateAll(queryClient),
+  });
   const resolveConflictMutation = useMutation({
     mutationFn: () => {
       const conflict = semanticWorkbench.data?.conflict_queue[0];
@@ -1155,6 +1174,7 @@ export function App() {
     semanticReflectionQueue.error,
     ontologyRegistry.error,
     createSemanticIngestionBatch.error,
+    buildOntologyMutation.error,
     semanticBackends.error,
     contextPackets.error,
     sessionWritebackCandidates.error,
@@ -1935,6 +1955,14 @@ export function App() {
                 onResolveConflict={() => resolveConflictMutation.mutate()}
                 onRunDreaming={() => runDreamingMutation.mutate()}
               />
+              <SemanticOntologyBuilderPanel
+                sourceText={ontologyBuilderSource}
+                result={buildOntologyMutation.data}
+                isBuilding={buildOntologyMutation.isPending}
+                error={buildOntologyMutation.error}
+                onSourceTextChange={setOntologyBuilderSource}
+                onBuild={() => buildOntologyMutation.mutate()}
+              />
               <SemanticProductConsole
                 searchText={semanticSearchText}
                 memoryScope={semanticMemoryScope}
@@ -2436,7 +2464,7 @@ function DynamicWorkflowPlanConsole({
             >
               {isAdjudicating ? "Adjudicating..." : "Adjudicate"}
             </button>
-            <span>{selectedPlan.status === "approved" ? "ready to create WorkflowRun" : "approval required before materialization"}</span>
+            <span>{dynamicWorkflowPlanActionHint(selectedPlan)}</span>
           </div>
           {reviewError ? <p className="error-note">Review failed: {errorMessage(reviewError)}</p> : null}
           {materializeError ? <p className="error-note">Materialize failed: {errorMessage(materializeError)}</p> : null}
@@ -2470,6 +2498,21 @@ function DynamicWorkflowPlanConsole({
       ) : null}
     </div>
   );
+}
+
+function dynamicWorkflowPlanActionHint(plan: DynamicWorkflowPlan): string {
+  if (plan.status === "approved") {
+    return "ready to create WorkflowRun";
+  }
+  if (plan.status === "materialized") {
+    return plan.workflow_run_id
+      ? "WorkflowRun created; run the claimable step from Board or a worker"
+      : "materialized without linked run";
+  }
+  if (plan.status === "rejected") {
+    return "rejected; create a revised plan before materialization";
+  }
+  return "approval required before materialization";
 }
 
 function ManagerPlanComposer({
@@ -4391,6 +4434,66 @@ function SemanticWorkbenchPanel({
           {!reflectionQueue?.items.length ? <p className="muted">No pending reflection candidates.</p> : null}
         </div>
       </div>
+      {error ? <p className="error-note">{errorMessage(error)}</p> : null}
+    </div>
+  );
+}
+
+function SemanticOntologyBuilderPanel({
+  sourceText,
+  result,
+  isBuilding,
+  error,
+  onSourceTextChange,
+  onBuild,
+}: {
+  sourceText: string;
+  result?: SemanticOntologyBuilderResult;
+  isBuilding: boolean;
+  error: unknown;
+  onSourceTextChange: (value: string) => void;
+  onBuild: () => void;
+}) {
+  const content = result?.object?.content ?? {};
+  const objectTypes = Array.isArray(content.object_types) ? content.object_types : [];
+  const relationTypes = Array.isArray(content.relation_types) ? content.relation_types : [];
+  const resultStatus = typeof content.status === "string" ? content.status : result?.status ?? "proposed";
+  return (
+    <div className="semantic-product-console semantic-builder">
+      <div className="graph-summary">
+        <KeyValue label="Mode" value={result?.builder.mode ?? "ai_first_draft"} />
+        <KeyValue label="Authority" value={result?.builder.authority ?? "proposal_only"} />
+        <KeyValue label="Objects" value={String(result?.builder.object_candidate_count ?? 0)} />
+        <KeyValue label="Relations" value={String(result?.builder.relation_candidate_count ?? 0)} />
+      </div>
+      <textarea
+        value={sourceText}
+        rows={6}
+        spellCheck={false}
+        onChange={(event) => onSourceTextChange(event.target.value)}
+      />
+      <div className="action-row">
+        <button aria-busy={isBuilding} data-busy={isBuilding ? "true" : undefined} disabled={isBuilding || !sourceText.trim()} onClick={onBuild}>
+          {isBuilding ? "Building..." : "Build ontology draft"}
+        </button>
+        <span>{result ? `${shortId(result.object?.id ?? "preview")} · ${resultStatus}` : "review-only proposal"}</span>
+      </div>
+      {result ? (
+        <div className="semantic-product-columns">
+          <div>
+            <h4>Object types</h4>
+            {objectTypes.slice(0, 8).map((value) => (
+              <span key={String(value)} className="board-chip">{String(value)}</span>
+            ))}
+          </div>
+          <div>
+            <h4>Relation types</h4>
+            {relationTypes.slice(0, 8).map((value) => (
+              <span key={String(value)} className="board-chip">{String(value)}</span>
+            ))}
+          </div>
+        </div>
+      ) : null}
       {error ? <p className="error-note">{errorMessage(error)}</p> : null}
     </div>
   );

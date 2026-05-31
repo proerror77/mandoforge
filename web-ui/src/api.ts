@@ -226,6 +226,19 @@ export type SemanticWorkbenchSnapshot = {
   graph: SemanticGraphSnapshot;
 };
 
+export type SemanticOntologyBuilderResult = {
+  status: string;
+  builder: {
+    mode: string;
+    authority: string;
+    draft_source: string;
+    requires_review: boolean;
+    object_candidate_count: number;
+    relation_candidate_count: number;
+  };
+  object: SemanticObject | null;
+};
+
 export type SemanticReflectionQueue = {
   status: string;
   generated_at: string;
@@ -1440,6 +1453,26 @@ export async function expandSemanticOntology(input: {
   reason?: string | null;
 }): Promise<{ status: string; object: SemanticObject }> {
   return api<{ status: string; object: SemanticObject }>("/api/semantic-ontology/expand", {
+    method: "POST",
+    headers: adminHeaders(),
+    body: JSON.stringify(input),
+  });
+}
+
+export async function buildSemanticOntology(input: {
+  domain_scope: string;
+  workflow_scope?: string | null;
+  memory_scope?: string | null;
+  objective?: string | null;
+  source_text?: string | null;
+  source_refs?: string[];
+  evidence_object_ids?: string[];
+  agent_draft?: Record<string, unknown> | null;
+  max_object_types?: number;
+  max_relation_types?: number;
+  preview_only?: boolean;
+}): Promise<SemanticOntologyBuilderResult> {
+  return api<SemanticOntologyBuilderResult>("/api/semantic-ontology/builder", {
     method: "POST",
     headers: adminHeaders(),
     body: JSON.stringify(input),

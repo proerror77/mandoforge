@@ -200,6 +200,7 @@ Current managed-agent baseline:
 - The UI start form loads environments and binds new sessions to the selected environment.
 - The UI run view is organized around the managed-session objects first: Agent, Environment, Event Stream, Blocking Actions, Artifacts, and Threads. Raw worker, Remote Computer, provider, secret, MCP, and tenant infrastructure remain in system and advanced panels.
 - Dynamic Workflow Plans are now first-class review envelopes: `POST /api/dynamic-workflow-plans` validates phases, agent fleet limits, governance, validation, and materialization policy; review approval gates execution; materialization creates a normal `WorkflowDefinition`, `WorkflowRun`, primary session, root `TaskGrant`, and start steps. Delegated plans target adapters such as Claude Code or Codex App Server without letting the external runtime bypass MandoForge policy and audit.
+- Semantic Ontology Builder is proposal-only: `POST /api/semantic-ontology/builder` accepts operator/AI first-draft context, normalizes object and relation candidates, records source refs and review gates, and creates an `ontology_expansion` semantic object for review. It does not directly mutate the ontology registry or durable organizational memory.
 
 Runtime alignment is tracked in
 [Claude Managed Agents Alignment](docs/claude-managed-agents-alignment.md) and
@@ -233,6 +234,13 @@ Basic smoke check:
 
 ```bash
 BASE_URL=http://127.0.0.1:8787 ./scripts/smoke.sh
+```
+
+UI/API truth gate:
+
+```bash
+node scripts/verify-ui-api-truth-gate.mjs
+BASE_URL=http://127.0.0.1:8787 node scripts/verify-ui-api-truth-gate.mjs
 ```
 
 Full Stage 1 approval and artifact demo:

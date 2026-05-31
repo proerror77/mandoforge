@@ -2217,6 +2217,31 @@ struct ExpandSemanticOntologyRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct BuildSemanticOntologyRequest {
+    domain_scope: String,
+    #[serde(default)]
+    workflow_scope: Option<String>,
+    #[serde(default)]
+    memory_scope: Option<String>,
+    #[serde(default)]
+    objective: Option<String>,
+    #[serde(default)]
+    source_text: Option<String>,
+    #[serde(default)]
+    source_refs: Vec<String>,
+    #[serde(default)]
+    evidence_object_ids: Vec<Uuid>,
+    #[serde(default)]
+    agent_draft: Option<Value>,
+    #[serde(default)]
+    max_object_types: Option<usize>,
+    #[serde(default)]
+    max_relation_types: Option<usize>,
+    #[serde(default)]
+    preview_only: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct ReviewOntologyProposalRequest {
     decision: String,
     #[serde(default)]
@@ -6327,6 +6352,10 @@ fn build_router(state: AppState) -> Router {
             post(expand_semantic_ontology),
         )
         .route(
+            "/api/semantic-ontology/builder",
+            post(build_semantic_ontology),
+        )
+        .route(
             "/api/semantic-ontology/proposals/{id}/review",
             post(review_semantic_ontology_proposal),
         )
@@ -9512,6 +9541,185 @@ async fn expand_semantic_ontology(
     })))
 }
 
+async fn build_semantic_ontology(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<BuildSemanticOntologyRequest>,
+) -> Result<Json<Value>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsWrite,
+        "semantic_ontology",
+        None,
+    )
+    .await?;
+    let domain_scope =
+        normalize_ontology_builder_token("domain_scope", input.domain_scope.as_str())?;
+    let workflow_scope = input
+        .workflow_scope
+        .as_deref()
+        .map(|value| normalize_ontology_builder_token("workflow_scope", value))
+        .transpose()?;
+    let memory_scope = input
+        .memory_scope
+        .as_deref()
+        .map(|value| normalize_ontology_builder_token("memory_scope", value))
+        .transpose()?;
+    let objective = input
+        .objective
+        .and_then(normalize_optional_text)
+        .unwrap_or_else(|| format!("Build a governed ontology first draft for {domain_scope}."));
+    let source_text = input.source_text.and_then(normalize_optional_text);
+    let source_refs = normalize_ontology_builder_source_refs(input.source_refs)?;
+    let object_types = ontology_builder_candidate_types(
+        &domain_scope,
+        source_text.as_deref(),
+        input.agent_draft.as_ref(),
+        "object_types",
+        input.max_object_types.unwrap_or(12),
+    )?;
+    let relation_types = ontology_builder_candidate_types(
+        &domain_scope,
+        source_text.as_deref(),
+        input.agent_draft.as_ref(),
+        "relation_types",
+        input.max_relation_types.unwrap_or(12),
+    )?;
+    if object_types.is_empty() && relation_types.is_empty() {
+        return Err(AppError::bad_request(
+            "ontology builder requires at least one candidate object_type or relation_type",
+        ));
+    }
+    let evidence_objects = ontology_builder_evidence_objects(&state, &input.evidence_object_ids)
+        .await?
+        .into_iter()
+        .map(|object| {
+            json!({
+                "semantic_object_id": object.id,
+                "object_type": object.object_type,
+                "object_key": object.object_key,
+                "title": object.title,
+                "trust_level": object.trust_level,
+                "freshness": object.freshness,
+            })
+        })
+        .collect::<Vec<_>>();
+    let builder = json!({
+        "mode": "ai_first_draft",
+        "authority": "proposal_only",
+        "draft_source": if input.agent_draft.is_some() { "agent_draft" } else { "deterministic_scaffold" },
+        "requires_review": true,
+        "object_candidate_count": object_types.len(),
+        "relation_candidate_count": relation_types.len(),
+    });
+    let prompt_packet = semantic_ontology_builder_prompt_packet(
+        &domain_scope,
+        workflow_scope.as_deref(),
+        memory_scope.as_deref(),
+        &objective,
+        source_text.as_deref(),
+        &source_refs,
+    );
+    let content = json!({
+        "domain_scope": domain_scope,
+        "workflow_scope": workflow_scope,
+        "memory_scope": memory_scope,
+        "object_types": object_types,
+        "relation_types": relation_types,
+        "objective": objective,
+        "source_text": source_text,
+        "source_refs": source_refs,
+        "evidence_object_ids": input.evidence_object_ids,
+        "evidence_objects": evidence_objects,
+        "agent_draft": input.agent_draft,
+        "builder": builder.clone(),
+        "prompt_packet": prompt_packet,
+        "review_gates": [
+            "human_review_required",
+            "scope_isolation_check",
+            "relation_policy_review",
+            "source_provenance_check"
+        ],
+        "status": "proposed",
+        "preview_only": input.preview_only,
+    });
+    if input.preview_only {
+        return Ok(Json(json!({
+            "status": "preview",
+            "builder": builder,
+            "proposal": content,
+            "object": Value::Null,
+        })));
+    }
+    let domain_scope = content
+        .get("domain_scope")
+        .and_then(Value::as_str)
+        .unwrap_or("general")
+        .to_string();
+    let workflow_scope = content
+        .get("workflow_scope")
+        .and_then(Value::as_str)
+        .unwrap_or("ontology-builder")
+        .to_string();
+    let memory_scope = content
+        .get("memory_scope")
+        .and_then(Value::as_str)
+        .unwrap_or("ontology")
+        .to_string();
+    let object = state
+        .create_semantic_object(CreateSemanticObject {
+            source_id: None,
+            object_type: "ontology_expansion".to_string(),
+            object_key: format!("ontology:{domain_scope}:builder:{}", Uuid::new_v4()),
+            title: format!("AI ontology first draft for {domain_scope}"),
+            summary: format!(
+                "AI-assisted ontology proposal for {domain_scope}/{workflow_scope}/{memory_scope}; review required before promotion."
+            ),
+            content: content.clone(),
+            semantic_scopes: json!({
+                "domain_scope": domain_scope,
+                "workflow_scope": workflow_scope,
+                "memory_scope": memory_scope,
+                "share_policy": "review_required",
+            }),
+            source_uri: Some(format!("mandoforge://semantic-ontology/{domain_scope}/builder")),
+            provenance: json!({
+                "source": "semantic_ontology.builder",
+                "proposed_at": Utc::now(),
+                "authority": "proposal_only",
+            }),
+            trust_level: "source_attested".to_string(),
+            freshness: "current".to_string(),
+            status: "active".to_string(),
+        })
+        .await?;
+    let principal = principal_from_request(&state, &headers).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "semantic_ontology.builder_proposed",
+            "semantic_object",
+            Some(object.id),
+            json!({
+                "subject": principal.subject_id,
+                "domain_scope": domain_scope,
+                "workflow_scope": workflow_scope,
+                "memory_scope": memory_scope,
+                "semantic_object_id": object.id,
+                "builder": builder.clone(),
+            }),
+        ))
+        .await?;
+    Ok(Json(json!({
+        "status": "proposed",
+        "builder": builder,
+        "object": object,
+    })))
+}
+
 async fn review_semantic_ontology_proposal(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -9876,6 +10084,227 @@ fn domain_ontology_relation_type_suggestions(domain_scope: &str) -> Vec<&'static
         }
         _ => vec!["supports", "contradicts", "supersedes"],
     }
+}
+
+fn ontology_builder_candidate_types(
+    domain_scope: &str,
+    source_text: Option<&str>,
+    agent_draft: Option<&Value>,
+    field: &str,
+    max_items: usize,
+) -> Result<Vec<String>, AppError> {
+    let limit = max_items.clamp(1, 50);
+    let mut candidates = BTreeSet::<String>::new();
+    let domain_defaults = match field {
+        "object_types" => domain_ontology_object_type_suggestions(domain_scope),
+        "relation_types" => domain_ontology_relation_type_suggestions(domain_scope),
+        _ => {
+            return Err(AppError::bad_request(
+                "ontology builder field must be object_types or relation_types",
+            ));
+        }
+    };
+    for candidate in domain_defaults {
+        candidates.insert(normalize_ontology_builder_token(field, candidate)?);
+    }
+    for candidate in ontology_builder_terms_from_source(domain_scope, source_text, field) {
+        candidates.insert(normalize_ontology_builder_token(field, &candidate)?);
+    }
+    for candidate in ontology_builder_agent_draft_terms(agent_draft, field) {
+        candidates.insert(normalize_ontology_builder_token(field, &candidate)?);
+    }
+    Ok(candidates.into_iter().take(limit).collect())
+}
+
+fn ontology_builder_agent_draft_terms(agent_draft: Option<&Value>, field: &str) -> Vec<String> {
+    let Some(agent_draft) = agent_draft else {
+        return Vec::new();
+    };
+    agent_draft
+        .get(field)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .filter_map(|value| normalize_optional_text(value.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn ontology_builder_terms_from_source(
+    domain_scope: &str,
+    source_text: Option<&str>,
+    field: &str,
+) -> Vec<String> {
+    let Some(source_text) = source_text else {
+        return Vec::new();
+    };
+    let normalized_source = source_text.to_ascii_lowercase().replace(['_', '-'], " ");
+    let dictionary = ontology_builder_dictionary(domain_scope, field);
+    dictionary
+        .into_iter()
+        .filter(|(phrase, _)| normalized_source.contains(phrase))
+        .map(|(_, token)| token.to_string())
+        .collect()
+}
+
+fn ontology_builder_dictionary(
+    domain_scope: &str,
+    field: &str,
+) -> Vec<(&'static str, &'static str)> {
+    match (domain_scope, field) {
+        ("legal", "object_types") => vec![
+            ("contract", "contract"),
+            ("party", "party"),
+            ("clause", "clause"),
+            ("obligation", "obligation"),
+            ("risk", "risk"),
+            ("jurisdiction", "jurisdiction"),
+            ("approval requirement", "approval_requirement"),
+            ("template", "template"),
+            ("negotiation position", "negotiation_position"),
+        ],
+        ("legal", "relation_types") => vec![
+            ("contains", "contains"),
+            ("creates obligation", "creates_obligation"),
+            ("triggers risk", "triggers_risk"),
+            ("requires approval", "requires_approval"),
+            ("supersedes", "supersedes"),
+        ],
+        ("ecommerce" | "e-commerce", "object_types") => vec![
+            ("store", "store"),
+            ("product", "product"),
+            ("sku", "sku"),
+            ("inventory", "inventory"),
+            ("campaign", "campaign"),
+            ("ad set", "ad_set"),
+            ("creative", "creative"),
+            ("roas", "roas"),
+            ("margin", "margin"),
+            ("budget rule", "budget_rule"),
+            ("customer segment", "customer_segment"),
+        ],
+        ("ecommerce" | "e-commerce", "relation_types") => vec![
+            ("promotes", "promotes"),
+            ("has inventory", "has_inventory"),
+            ("measured by", "measured_by"),
+            ("applies to", "applies_to"),
+            ("constrains", "constrains"),
+        ],
+        ("social-media" | "social_media", "object_types") => vec![
+            ("account", "account"),
+            ("platform", "platform"),
+            ("post", "post"),
+            ("topic", "topic"),
+            ("content pillar", "content_pillar"),
+            ("audience segment", "audience_segment"),
+            ("campaign", "campaign"),
+            ("engagement metric", "engagement_metric"),
+            ("brand risk", "brand_risk"),
+            ("publishing approval", "publishing_approval"),
+        ],
+        ("social-media" | "social_media", "relation_types") => vec![
+            ("belongs to", "belongs_to"),
+            ("targets", "targets"),
+            ("measured by", "measured_by"),
+            ("requires approval", "requires_approval"),
+            ("supersedes", "supersedes"),
+        ],
+        (_, "object_types") => vec![
+            ("policy", "policy"),
+            ("memory", "memory"),
+            ("decision", "decision"),
+            ("evidence", "evidence"),
+        ],
+        (_, "relation_types") => vec![
+            ("supports", "supports"),
+            ("contradicts", "contradicts"),
+            ("supersedes", "supersedes"),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn normalize_ontology_builder_source_refs(
+    source_refs: Vec<String>,
+) -> Result<Vec<String>, AppError> {
+    let mut refs = BTreeSet::<String>::new();
+    for source_ref in source_refs {
+        let source_ref = require_non_empty(source_ref, "ontology builder source_ref")?;
+        if source_ref.len() > 512 {
+            return Err(AppError::bad_request(
+                "ontology builder source_ref must be 512 characters or shorter",
+            ));
+        }
+        refs.insert(source_ref);
+    }
+    Ok(refs.into_iter().take(50).collect())
+}
+
+async fn ontology_builder_evidence_objects(
+    state: &AppState,
+    evidence_object_ids: &[Uuid],
+) -> Result<Vec<SemanticObject>, AppError> {
+    let mut objects = Vec::new();
+    for id in evidence_object_ids.iter().take(50) {
+        objects.push(state.get_semantic_object(*id).await?);
+    }
+    Ok(objects)
+}
+
+fn semantic_ontology_builder_prompt_packet(
+    domain_scope: &str,
+    workflow_scope: Option<&str>,
+    memory_scope: Option<&str>,
+    objective: &str,
+    source_text: Option<&str>,
+    source_refs: &[String],
+) -> Value {
+    json!({
+        "system": "Draft a domain ontology proposal only. Do not create durable memory, mutate the registry, or broaden sharing scopes. Return object_types, relation_types, rationale, evidence, and review risks.",
+        "user": {
+            "objective": objective,
+            "domain_scope": domain_scope,
+            "workflow_scope": workflow_scope,
+            "memory_scope": memory_scope,
+            "source_text": source_text.unwrap_or(""),
+            "source_refs": source_refs,
+            "output_schema": {
+                "object_types": ["lower_snake_case"],
+                "relation_types": ["lower_snake_case"],
+                "rationale": "why these concepts are useful",
+                "review_risks": ["scope leak, duplicate type, unsupported relation, stale source"]
+            }
+        },
+    })
+}
+
+fn normalize_ontology_builder_token(field: &str, value: &str) -> Result<String, AppError> {
+    let normalized = ontology_builder_token(value);
+    validate_handoff_token(field, &normalized)
+}
+
+fn ontology_builder_token(value: &str) -> String {
+    let mut token = String::new();
+    let mut previous_was_separator = true;
+    let mut previous_was_lower_or_digit = false;
+    for ch in value.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            if ch.is_ascii_uppercase() && previous_was_lower_or_digit && !previous_was_separator {
+                token.push('_');
+            }
+            token.push(ch.to_ascii_lowercase());
+            previous_was_separator = false;
+            previous_was_lower_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+        } else if !previous_was_separator {
+            token.push('_');
+            previous_was_separator = true;
+            previous_was_lower_or_digit = false;
+        }
+    }
+    token.trim_matches('_').to_string()
 }
 
 fn semantic_object_matched_fields(object: &SemanticObject, query_text: &str) -> Vec<String> {
@@ -16029,8 +16458,10 @@ fn compile_dynamic_workflow_phases(
             }
         ]);
     }
-    let research_agents = max_total_agents.saturating_sub(2).clamp(1, 6);
     let review_agents = if max_total_agents >= 4 { 2 } else { 1 };
+    let research_agents = max_total_agents
+        .saturating_sub(review_agents + 1)
+        .clamp(1, 6);
     json!([
         {
             "key": "survey",
@@ -60376,6 +60807,158 @@ not json
     }
 
     #[tokio::test]
+    async fn semantic_ontology_builder_creates_review_only_ai_first_draft() {
+        let app = test_app().await;
+        let admin_headers = [
+            ("x-mandoforge-subject", "admin-1"),
+            ("x-mandoforge-roles", "admin"),
+        ];
+
+        let before_registry: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/ontology/registry")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+
+        let preview: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-ontology/builder",
+                json!({
+                    "domain_scope": "legal",
+                    "workflow_scope": "contract-review",
+                    "memory_scope": "legal-policy",
+                    "source_text": "Contract review uses Contract, Clause, and Risk concepts.",
+                    "source_refs": ["repo://docs/legal-contract-review-preview.md"],
+                    "preview_only": true
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        assert_eq!(preview["status"], "preview");
+        assert_eq!(preview["object"], Value::Null);
+        assert_eq!(preview["builder"]["authority"], json!("proposal_only"));
+
+        let built: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-ontology/builder",
+                json!({
+                    "domain_scope": "legal",
+                    "workflow_scope": "contract-review",
+                    "memory_scope": "legal-policy",
+                    "objective": "Build the first draft ontology for legal contract review.",
+                    "source_text": "Contract review uses Contract, Party, Clause, Obligation, Risk, Jurisdiction, and Approval Requirement concepts.",
+                    "source_refs": ["repo://docs/legal-contract-review.md"],
+                    "agent_draft": {
+                        "object_types": ["Contract", "Clause", "Obligation", "Risk", "ApprovalRequirement"],
+                        "relation_types": ["contains", "creates_obligation", "triggers_risk", "requires_approval"],
+                        "rationale": "AI first draft extracted legal review nouns and relations."
+                    }
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+
+        assert_eq!(built["status"], "proposed");
+        assert_eq!(built["builder"]["mode"], "ai_first_draft");
+        assert_eq!(built["builder"]["authority"], "proposal_only");
+        assert_eq!(built["builder"]["requires_review"], json!(true));
+        assert_eq!(built["object"]["object_type"], "ontology_expansion");
+        assert_eq!(built["object"]["content"]["status"], "proposed");
+        assert_eq!(built["object"]["content"]["domain_scope"], json!("legal"));
+        assert!(
+            built["object"]["content"]["object_types"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("approval_requirement"))
+        );
+        assert!(
+            built["object"]["content"]["relation_types"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("requires_approval"))
+        );
+        assert_eq!(
+            built["object"]["content"]["review_gates"],
+            json!([
+                "human_review_required",
+                "scope_isolation_check",
+                "relation_policy_review",
+                "source_provenance_check"
+            ])
+        );
+        assert!(
+            built["object"]["content"]["prompt_packet"]["system"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("proposal")
+        );
+        assert_eq!(
+            built["object"]["semantic_scopes"]["share_policy"],
+            json!("review_required")
+        );
+
+        let after_registry: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/ontology/registry")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(
+            before_registry["version"], after_registry["version"],
+            "builder must not directly mutate the registry"
+        );
+
+        let proposals: Vec<SemanticObject> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/semantic-objects")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(proposals.iter().any(|object| {
+            object.object_type == "ontology_expansion"
+                && object.content["builder"]["mode"] == json!("ai_first_draft")
+                && object.content["source_refs"] == json!(["repo://docs/legal-contract-review.md"])
+        }));
+        assert!(!proposals.iter().any(|object| {
+            object.object_type == "ontology_expansion"
+                && object.content["source_refs"]
+                    == json!(["repo://docs/legal-contract-review-preview.md"])
+        }));
+
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            audit_logs
+                .iter()
+                .any(|log| log.action == "semantic_ontology.builder_proposed")
+        );
+    }
+
+    #[tokio::test]
     async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidance() {
         let app = test_app().await;
         let admin_headers = [
@@ -62542,6 +63125,50 @@ not json
         assert_eq!(adjudication["status"], json!("completed"));
         assert_eq!(adjudication["decision"], json!("accepted"));
         assert_eq!(adjudication["positive_votes"], json!(1));
+    }
+
+    #[tokio::test]
+    async fn dynamic_workflow_compiler_respects_default_ui_agent_limit() {
+        let app = test_app().await;
+
+        let compiled: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/dynamic-workflow-plans/compile",
+                json!({
+                    "objective": "Run a multi-agent codebase audit and produce a cross-checked report.",
+                    "runtime_adapter": "codex_app_server",
+                    "max_total_agents": 4,
+                    "max_parallel_agents": 2
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+
+        assert_eq!(compiled["compiler"]["status"], json!("compiled"));
+        assert_eq!(
+            compiled["compiler"]["analysis"]["total_agent_count"],
+            json!(4)
+        );
+        assert_eq!(
+            compiled["request"]["agent_fleet_policy"]["max_total_agents"],
+            json!(4)
+        );
+
+        let plan: Value = request_json(
+            app,
+            json_request_with_headers(
+                "POST",
+                "/api/dynamic-workflow-plans",
+                compiled["request"].clone(),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(plan["status"], json!("proposed"));
+        assert_eq!(plan["analysis"]["total_agent_count"], json!(4));
     }
 
     #[tokio::test]

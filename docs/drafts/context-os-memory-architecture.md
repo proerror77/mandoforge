@@ -544,6 +544,11 @@ checks.
 - Add core ontology object and relation types.
 - Add first domain ontology for one pack, preferably Social Media or Legal.
 - Add validation for typed relations.
+- Add an AI first-draft builder that turns source text, evidence object ids, and
+  optional agent-generated `object_types` / `relation_types` JSON into an
+  `ontology_expansion` proposal. The builder must only create reviewable
+  proposals with source refs, prompt packet, and review gates; it must not
+  directly mutate the ontology registry or durable memory.
 
 ### Slice 6: Optional Retrieval Backends
 
