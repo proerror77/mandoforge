@@ -1843,6 +1843,19 @@ h1 {
   gap: 8px;
 }
 
+.mini-control-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) repeat(4, minmax(54px, auto));
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.mini-control-row .ghost {
+  min-height: 28px;
+  padding: 4px 8px;
+}
+
 .dynamic-plan-console .plan-list {
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
 }

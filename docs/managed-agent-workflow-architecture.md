@@ -303,6 +303,11 @@ The object stores:
 
 The API lifecycle is proposal -> review -> materialize:
 
+- `POST /api/dynamic-workflow-plans/compile` turns a natural-language
+  objective plus fleet limits into a reviewable `CreateDynamicWorkflowPlan`
+  request. The current compiler is deterministic and conservative: it creates
+  survey, cross-check, and synthesis phases rather than letting generated code
+  execute directly.
 - `POST /api/dynamic-workflow-plans` validates the phase graph and fleet
   limits, stores the proposal, and records audit evidence.
 - `POST /api/dynamic-workflow-plans/:id/review` records the review decision.
@@ -311,11 +316,28 @@ The API lifecycle is proposal -> review -> materialize:
   `WorkflowDefinition`, `WorkflowRun`, primary session, root `TaskGrant`, and
   start steps. `delegated_runtime` plans become one governed delegated runtime
   step; `native_steps` plans expand phases into concrete agent steps.
+- `POST /api/dynamic-workflow-plans/:id/adjudicate` performs the first
+  workflow-level cross-check/voting adjudication by reading materialized step
+  outputs and recording session/audit evidence.
+- `POST /api/dynamic-workflow-plans/:id/pressure-test` records a control-plane
+  pressure simulation for large agent counts and max parallelism. This proves
+  planning/backpressure math and review evidence, not provider capacity or live
+  LLM execution at that scale.
 
 This is the current MandoForge equivalent of Claude Code Dynamic Workflows:
 MandoForge governs the envelope, approval, memory/connector/tool scope, audit,
 and observability while Claude Code, Codex App Server, or another adapter may
 own the inner fleet execution.
+
+Delegated runtime adapter status:
+
+- `codex_app_server`: calls thread -> turn -> poll and records normalized run
+  evidence plus a delegated runtime artifact.
+- `claude_code` and `codex_cli`: route through the governed `agent_cli`
+  execution profile path. They require a matching Environment/agent/handoff
+  runtime profile or an explicit local/demo allowlist, and they ingest adapter
+  events through the existing runtime event parser.
+- Unsupported adapters remain fail-closed as `requires_action`.
 
 ### WorkflowStepRun
 

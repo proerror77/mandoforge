@@ -2,12 +2,15 @@ import { useEffect, useMemo, useState } from "react";
 import { useIsFetching, useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   appendUserMessage,
+  adjudicateDynamicWorkflowPlan,
   api,
+  compileDynamicWorkflowPlan,
   createDynamicWorkflowPlan,
   createManagerAgentPlan,
   createSession,
   decideApproval,
   materializeDynamicWorkflowPlan,
+  pressureTestDynamicWorkflowPlan,
   getAdminToken,
   reviewMemoryWritebackCandidate,
   reviewDynamicWorkflowPlan,
@@ -30,7 +33,9 @@ import {
   type ContextPacket,
   type CapabilityDiscovery,
   type DeploymentVersion,
+  type DynamicWorkflowAdjudicationResponse,
   type DynamicWorkflowPlan,
+  type DynamicWorkflowPressureTestResponse,
   type Environment,
   type ManagerAgentPlan,
   type MemoryGovernancePartitionDetail,
@@ -178,7 +183,7 @@ type SemanticLinkDraft = {
 
 type TaskBoardItemView = TaskBoardSnapshot["items"][number];
 type TaskBoardColumnId = "ready" | "running" | "review" | "blocked" | "backlog" | "done";
-type WorkbenchView = "agents" | "board" | "dynamic" | "manager" | "semantic" | "packs" | "deploy";
+type WorkbenchView = "agents" | "board" | "workflows" | "dynamic" | "manager" | "semantic" | "packs" | "deploy";
 
 const TASK_BOARD_COLUMNS: Array<{
   id: TaskBoardColumnId;
@@ -238,6 +243,9 @@ export function App() {
   const [selectedDynamicPlanId, setSelectedDynamicPlanId] = useState("");
   const [dynamicReviewNote, setDynamicReviewNote] = useState("Approved for governed delegated runtime execution.");
   const [dynamicMaterializeTitle, setDynamicMaterializeTitle] = useState("Dynamic workflow demo");
+  const [dynamicPressureTarget, setDynamicPressureTarget] = useState(128);
+  const [dynamicPressureResult, setDynamicPressureResult] = useState<DynamicWorkflowPressureTestResponse | null>(null);
+  const [dynamicAdjudicationResult, setDynamicAdjudicationResult] = useState<DynamicWorkflowAdjudicationResponse | null>(null);
   const [packManifestPath, setPackManifestPath] = useState("packs/ai-governance/package.yaml");
   const [selectedPackInstallationId, setSelectedPackInstallationId] = useState("");
   const [packProfileDraft, setPackProfileDraft] = useState(DEFAULT_PACK_PROFILE_ASSETS);
@@ -328,6 +336,11 @@ export function App() {
   const capabilityDiscovery = useQuery({
     queryKey: ["capability-discovery"],
     queryFn: () => api<CapabilityDiscovery>("/api/capability-discovery"),
+    refetchInterval: 5000,
+  });
+  const usage = useQuery({
+    queryKey: ["usage"],
+    queryFn: () => api<{ total_tokens?: number; estimated_provider_cost_cents?: number }>("/api/usage"),
     refetchInterval: 5000,
   });
 
@@ -624,6 +637,22 @@ export function App() {
     }),
     onSuccess: () => invalidateAll(queryClient),
   });
+  const controlWorkflowStep = useMutation({
+    mutationFn: ({ stepId, status }: { stepId: string; status: string }) => api<WorkflowStepRun>(`/api/workflow-step-runs/${stepId}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        status,
+        output_payload: {
+          control: {
+            status,
+            source: "workflow_console",
+            controlled_at: new Date().toISOString(),
+          },
+        },
+      }),
+    }),
+    onSuccess: () => invalidateAll(queryClient),
+  });
   const createContextPacket = useMutation({
     mutationFn: () => api<ContextPacket>(`/api/sessions/${sessionId}/context-packet`, {
       method: "POST",
@@ -873,6 +902,20 @@ export function App() {
       invalidateAll(queryClient);
     },
   });
+  const compileDynamicWorkflowPlanMutation = useMutation({
+    mutationFn: () => compileDynamicWorkflowPlan({
+      objective: dynamicObjective.trim(),
+      runtime_adapter: dynamicRuntimeAdapter,
+      max_total_agents: dynamicMaxTotalAgents,
+      max_parallel_agents: dynamicMaxParallelAgents,
+    }),
+    onSuccess: (compiled) => {
+      setDynamicObjective(compiled.request.objective);
+      setDynamicPhasesDraft(JSON.stringify(compiled.request.phases, null, 2));
+      setDynamicMaxTotalAgents(Number(compiled.request.agent_fleet_policy?.max_total_agents ?? dynamicMaxTotalAgents));
+      setDynamicMaxParallelAgents(Number(compiled.request.agent_fleet_policy?.max_parallel_agents ?? dynamicMaxParallelAgents));
+    },
+  });
   const reviewDynamicWorkflowPlanMutation = useMutation({
     mutationFn: ({ id, status }: { id: string; status: string }) => reviewDynamicWorkflowPlan(id, {
       status,
@@ -885,6 +928,23 @@ export function App() {
     }),
     onSuccess: (plan) => {
       setSelectedDynamicPlanId(plan.id);
+      invalidateAll(queryClient);
+    },
+  });
+  const pressureTestDynamicWorkflowPlanMutation = useMutation({
+    mutationFn: (id: string) => pressureTestDynamicWorkflowPlan(id, {
+      target_agents: dynamicPressureTarget,
+      max_parallel_agents: dynamicMaxParallelAgents,
+    }),
+    onSuccess: (result) => {
+      setDynamicPressureResult(result);
+      invalidateAll(queryClient);
+    },
+  });
+  const adjudicateDynamicWorkflowPlanMutation = useMutation({
+    mutationFn: (id: string) => adjudicateDynamicWorkflowPlan(id),
+    onSuccess: (result) => {
+      setDynamicAdjudicationResult(result);
       invalidateAll(queryClient);
     },
   });
@@ -1155,6 +1215,7 @@ export function App() {
         {[
           { id: "agents" as const, label: "Agents", detail: "runtime, logs, approvals" },
           { id: "board" as const, label: "Board", detail: "work items and inbox" },
+          { id: "workflows" as const, label: "Workflows", detail: "graph, agents, cost" },
           { id: "dynamic" as const, label: "Dynamic", detail: "plan, approve, materialize" },
           { id: "manager" as const, label: "Manager", detail: "plans, routing, review" },
           { id: "semantic" as const, label: "Semantic", detail: "memory and ontology" },
@@ -1627,6 +1688,83 @@ export function App() {
             </Panel>
           </aside>
         </section>
+      ) : activeView === "workflows" ? (
+        <section className="product-page workflows-page">
+          <div className="product-main">
+            <Panel title="Workflow runs">
+              <div className="plan-list">
+                {(workflowRuns.data ?? []).length ? (workflowRuns.data ?? []).map((run) => (
+                  <button
+                    key={run.id}
+                    className={selectedWorkflowRun?.id === run.id ? "writeback-select selected" : "writeback-select"}
+                    onClick={() => {
+                      setSelectedSessionId(run.primary_session_id);
+                      localStorage.setItem("mandoforge.activeSessionId", run.primary_session_id);
+                    }}
+                  >
+                    <strong>{run.execution_strategy} · {run.status}</strong>
+                    <span>{run.runtime_adapter ?? "native"} · {run.runtime_mode ?? "normal"} · {shortId(run.workflow_definition_id)}</span>
+                    <small>{shortId(run.id)} · {relativeAge(run.updated_at)} ago</small>
+                  </button>
+                )) : <p className="muted">No workflow runs yet.</p>}
+              </div>
+            </Panel>
+            <Panel title="Phase and agent graph">
+              {workflowGraph.data ? <WorkflowGraph graph={workflowGraph.data} /> : <p className="muted">Select a workflow run to inspect graph state.</p>}
+            </Panel>
+            <Panel title="Step fleet">
+              {(workflowSteps.data ?? []).length ? (
+                <div className="task-list compact">
+                  {(workflowSteps.data ?? []).map((step) => (
+                    <StepRow key={step.id} step={step} />
+                  ))}
+                </div>
+              ) : <p className="muted">No step runs materialized.</p>}
+            </Panel>
+          </div>
+          <aside className="product-side">
+            <Panel title="Run control">
+              {selectedWorkflowRun ? (
+                <>
+                  <KeyValue label="Status" value={selectedWorkflowRun.status} />
+                  <KeyValue label="Run" value={shortId(selectedWorkflowRun.id)} />
+                  <KeyValue label="Strategy" value={selectedWorkflowRun.execution_strategy} />
+                  <KeyValue label="Runtime" value={selectedWorkflowRun.runtime_adapter ?? "native"} />
+                  <KeyValue label="Delegation" value={selectedWorkflowRun.delegation_status ?? "none"} />
+                  <KeyValue label="Tokens" value={String(usage.data?.total_tokens ?? 0)} />
+                  <KeyValue label="Cost" value={`${((usage.data?.estimated_provider_cost_cents ?? 0) / 100).toFixed(4)} USD`} />
+                </>
+              ) : <p className="muted">Select a workflow run.</p>}
+            </Panel>
+            <Panel title="Agent controls">
+              <div className="step-list">
+                {(workflowSteps.data ?? []).slice(0, 8).map((step) => (
+                  <div key={step.id} className="mini-control-row">
+                    <span className="board-chip">{step.step_key} · {step.status}</span>
+                    <button
+                      className="ghost"
+                      disabled={runStep.isPending || !operatorAgent || step.status === "completed"}
+                      onClick={() => {
+                        if (operatorAgent) runStep.mutate({ stepId: step.id, agentId: operatorAgent.id });
+                      }}
+                    >
+                      Run
+                    </button>
+                    <button className="ghost" disabled={controlWorkflowStep.isPending || step.status === "completed"} onClick={() => controlWorkflowStep.mutate({ stepId: step.id, status: "requires_action" })}>Pause</button>
+                    <button className="ghost" disabled={controlWorkflowStep.isPending || step.status === "completed"} onClick={() => controlWorkflowStep.mutate({ stepId: step.id, status: "queued" })}>Resume</button>
+                    <button className="ghost" disabled={controlWorkflowStep.isPending || step.status === "completed"} onClick={() => controlWorkflowStep.mutate({ stepId: step.id, status: "canceled" })}>Cancel</button>
+                  </div>
+                ))}
+              </div>
+              <p className="status-hint">Pause/resume/cancel updates the governed WorkflowStepRun state. Native external subagent interrupt still depends on adapter support.</p>
+            </Panel>
+            <Panel title="Transitions">
+              {filteredTransitions.length ? filteredTransitions.slice(-8).reverse().map((transition) => (
+                <TransitionRow key={transition.id} transition={transition} />
+              )) : <p className="muted">No transition records for the selected workflow.</p>}
+            </Panel>
+          </aside>
+        </section>
       ) : activeView === "dynamic" ? (
         <section className="product-page dynamic-page">
           <div className="product-main">
@@ -1638,13 +1776,16 @@ export function App() {
                 maxTotalAgents={dynamicMaxTotalAgents}
                 maxParallelAgents={dynamicMaxParallelAgents}
                 isCreating={createDynamicWorkflowPlanMutation.isPending}
+                isCompiling={compileDynamicWorkflowPlanMutation.isPending}
                 error={createDynamicWorkflowPlanMutation.error}
+                compileError={compileDynamicWorkflowPlanMutation.error}
                 onObjectiveChange={setDynamicObjective}
                 onPhasesDraftChange={setDynamicPhasesDraft}
                 onRuntimeAdapterChange={setDynamicRuntimeAdapter}
                 onMaxTotalAgentsChange={setDynamicMaxTotalAgents}
                 onMaxParallelAgentsChange={setDynamicMaxParallelAgents}
                 onCreate={() => createDynamicWorkflowPlanMutation.mutate()}
+                onCompile={() => compileDynamicWorkflowPlanMutation.mutate()}
               />
             </Panel>
 
@@ -1655,15 +1796,25 @@ export function App() {
                 workflowRuns={workflowRuns.data ?? []}
                 reviewNote={dynamicReviewNote}
                 materializeTitle={dynamicMaterializeTitle}
+                pressureTarget={dynamicPressureTarget}
+                pressureResult={dynamicPressureResult}
+                adjudicationResult={dynamicAdjudicationResult}
                 isReviewing={reviewDynamicWorkflowPlanMutation.isPending}
                 isMaterializing={materializeDynamicWorkflowPlanMutation.isPending}
+                isPressureTesting={pressureTestDynamicWorkflowPlanMutation.isPending}
+                isAdjudicating={adjudicateDynamicWorkflowPlanMutation.isPending}
                 reviewError={reviewDynamicWorkflowPlanMutation.error}
                 materializeError={materializeDynamicWorkflowPlanMutation.error}
+                pressureError={pressureTestDynamicWorkflowPlanMutation.error}
+                adjudicationError={adjudicateDynamicWorkflowPlanMutation.error}
                 onSelectPlan={setSelectedDynamicPlanId}
                 onReviewNoteChange={setDynamicReviewNote}
                 onMaterializeTitleChange={setDynamicMaterializeTitle}
+                onPressureTargetChange={setDynamicPressureTarget}
                 onReview={(id, status) => reviewDynamicWorkflowPlanMutation.mutate({ id, status })}
                 onMaterialize={(id) => materializeDynamicWorkflowPlanMutation.mutate(id)}
+                onPressureTest={(id) => pressureTestDynamicWorkflowPlanMutation.mutate(id)}
+                onAdjudicate={(id) => adjudicateDynamicWorkflowPlanMutation.mutate(id)}
                 onOpenRun={(run) => {
                   setSelectedSessionId(run.primary_session_id);
                   localStorage.setItem("mandoforge.activeSessionId", run.primary_session_id);
@@ -1689,7 +1840,7 @@ export function App() {
                 ))}
               </div>
               <p className="status-hint">
-                Codex App Server plans call the configured App Server adapter from the worker step path. Other delegated adapters stop at requires_action until their worker adapter exists.
+                Codex App Server calls thread/turn/poll. claude_code and codex_cli route through governed agent_cli profiles and require a matching Environment runtime binding.
               </p>
             </Panel>
             <Panel title="Graph console">
@@ -2028,13 +2179,16 @@ function DynamicWorkflowComposer({
   maxTotalAgents,
   maxParallelAgents,
   isCreating,
+  isCompiling,
   error,
+  compileError,
   onObjectiveChange,
   onPhasesDraftChange,
   onRuntimeAdapterChange,
   onMaxTotalAgentsChange,
   onMaxParallelAgentsChange,
   onCreate,
+  onCompile,
 }: {
   objective: string;
   phasesDraft: string;
@@ -2042,13 +2196,16 @@ function DynamicWorkflowComposer({
   maxTotalAgents: number;
   maxParallelAgents: number;
   isCreating: boolean;
+  isCompiling: boolean;
   error: unknown;
+  compileError: unknown;
   onObjectiveChange: (value: string) => void;
   onPhasesDraftChange: (value: string) => void;
   onRuntimeAdapterChange: (value: string) => void;
   onMaxTotalAgentsChange: (value: number) => void;
   onMaxParallelAgentsChange: (value: number) => void;
   onCreate: () => void;
+  onCompile: () => void;
 }) {
   return (
     <div className="dynamic-composer">
@@ -2098,6 +2255,15 @@ function DynamicWorkflowComposer({
       </div>
       <div className="action-row">
         <button
+          className="secondary"
+          aria-busy={isCompiling}
+          data-busy={isCompiling ? "true" : undefined}
+          disabled={isCompiling || !objective.trim()}
+          onClick={onCompile}
+        >
+          {isCompiling ? "Compiling..." : "Compile graph"}
+        </button>
+        <button
           aria-busy={isCreating}
           data-busy={isCreating ? "true" : undefined}
           disabled={isCreating || !objective.trim()}
@@ -2107,6 +2273,7 @@ function DynamicWorkflowComposer({
         </button>
         <span>Creates a governed plan only; execution still waits for review and materialization.</span>
       </div>
+      {compileError ? <p className="error-note">Compile failed: {errorMessage(compileError)}</p> : null}
       {error ? <p className="error-note">{errorMessage(error)}</p> : null}
     </div>
   );
@@ -2118,15 +2285,25 @@ function DynamicWorkflowPlanConsole({
   workflowRuns,
   reviewNote,
   materializeTitle,
+  pressureTarget,
+  pressureResult,
+  adjudicationResult,
   isReviewing,
   isMaterializing,
+  isPressureTesting,
+  isAdjudicating,
   reviewError,
   materializeError,
+  pressureError,
+  adjudicationError,
   onSelectPlan,
   onReviewNoteChange,
   onMaterializeTitleChange,
+  onPressureTargetChange,
   onReview,
   onMaterialize,
+  onPressureTest,
+  onAdjudicate,
   onOpenRun,
 }: {
   plans: DynamicWorkflowPlan[];
@@ -2134,15 +2311,25 @@ function DynamicWorkflowPlanConsole({
   workflowRuns: WorkflowRun[];
   reviewNote: string;
   materializeTitle: string;
+  pressureTarget: number;
+  pressureResult: DynamicWorkflowPressureTestResponse | null;
+  adjudicationResult: DynamicWorkflowAdjudicationResponse | null;
   isReviewing: boolean;
   isMaterializing: boolean;
+  isPressureTesting: boolean;
+  isAdjudicating: boolean;
   reviewError: unknown;
   materializeError: unknown;
+  pressureError: unknown;
+  adjudicationError: unknown;
   onSelectPlan: (id: string) => void;
   onReviewNoteChange: (value: string) => void;
   onMaterializeTitleChange: (value: string) => void;
+  onPressureTargetChange: (value: number) => void;
   onReview: (id: string, status: string) => void;
   onMaterialize: (id: string) => void;
+  onPressureTest: (id: string) => void;
+  onAdjudicate: (id: string) => void;
   onOpenRun: (run: WorkflowRun) => void;
 }) {
   const selectedRun = selectedPlan?.workflow_run_id
@@ -2194,6 +2381,16 @@ function DynamicWorkflowPlanConsole({
               <span>Run title</span>
               <input value={materializeTitle} onChange={(event) => onMaterializeTitleChange(event.target.value)} />
             </label>
+            <label>
+              <span>Pressure target</span>
+              <input
+                type="number"
+                min={1}
+                max={1000}
+                value={pressureTarget}
+                onChange={(event) => onPressureTargetChange(clampNumber(event.target.valueAsNumber, 1, 1000, 128))}
+              />
+            </label>
           </div>
           <div className="action-row">
             <button
@@ -2221,14 +2418,50 @@ function DynamicWorkflowPlanConsole({
             >
               {isMaterializing ? "Materializing..." : "Materialize"}
             </button>
+            <button
+              className="secondary"
+              aria-busy={isPressureTesting}
+              data-busy={isPressureTesting ? "true" : undefined}
+              disabled={isPressureTesting}
+              onClick={() => onPressureTest(selectedPlan.id)}
+            >
+              {isPressureTesting ? "Testing..." : "Pressure gate"}
+            </button>
+            <button
+              className="secondary"
+              aria-busy={isAdjudicating}
+              data-busy={isAdjudicating ? "true" : undefined}
+              disabled={isAdjudicating || !selectedPlan.workflow_run_id}
+              onClick={() => onAdjudicate(selectedPlan.id)}
+            >
+              {isAdjudicating ? "Adjudicating..." : "Adjudicate"}
+            </button>
             <span>{selectedPlan.status === "approved" ? "ready to create WorkflowRun" : "approval required before materialization"}</span>
           </div>
           {reviewError ? <p className="error-note">Review failed: {errorMessage(reviewError)}</p> : null}
           {materializeError ? <p className="error-note">Materialize failed: {errorMessage(materializeError)}</p> : null}
+          {pressureError ? <p className="error-note">Pressure gate failed: {errorMessage(pressureError)}</p> : null}
+          {adjudicationError ? <p className="error-note">Adjudication failed: {errorMessage(adjudicationError)}</p> : null}
+          <div className="graph-summary">
+            <KeyValue label="Pressure" value={pressureResult ? `${pressureResult.status} · ${pressureResult.target_agents} agents / ${pressureResult.simulated_batches} batches` : "not run"} />
+            <KeyValue label="Adjudication" value={adjudicationResult ? `${adjudicationResult.decision} · ${(adjudicationResult.score * 100).toFixed(0)}%` : "not run"} />
+          </div>
           <details className="json-details">
             <summary>analysis</summary>
             <pre>{formatJson(selectedPlan.analysis)}</pre>
           </details>
+          {pressureResult ? (
+            <details className="json-details">
+              <summary>pressure gate</summary>
+              <pre>{formatJson(pressureResult)}</pre>
+            </details>
+          ) : null}
+          {adjudicationResult ? (
+            <details className="json-details">
+              <summary>adjudication</summary>
+              <pre>{formatJson(adjudicationResult)}</pre>
+            </details>
+          ) : null}
           <details className="json-details">
             <summary>phases</summary>
             <pre>{formatJson(selectedPlan.phases)}</pre>
@@ -4260,13 +4493,14 @@ function preferredAgent(agents: Agent[]): Agent | undefined {
 }
 
 function isWorkbenchView(value: string | null): value is WorkbenchView {
-  return value === "agents" || value === "board" || value === "dynamic" || value === "manager" || value === "semantic" || value === "packs" || value === "deploy";
+  return value === "agents" || value === "board" || value === "workflows" || value === "dynamic" || value === "manager" || value === "semantic" || value === "packs" || value === "deploy";
 }
 
 function viewTitle(view: WorkbenchView): string {
   return {
     agents: "Managed agent observability",
     board: "Collaboration board",
+    workflows: "Workflow operations console",
     dynamic: "Dynamic workflow console",
     manager: "Manager agent desk",
     semantic: "Semantic memory governance",

@@ -51,12 +51,12 @@ pub(crate) struct CodexRequest {
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct AgentCliRequest {
-    profile: String,
-    task: String,
+    pub(crate) profile: String,
+    pub(crate) task: String,
     #[serde(default)]
-    args: Vec<String>,
+    pub(crate) args: Vec<String>,
     #[serde(default)]
-    timeout_seconds: Option<u64>,
+    pub(crate) timeout_seconds: Option<u64>,
 }
 
 #[allow(dead_code)]
@@ -3134,7 +3134,7 @@ fn non_empty_string(value: &str) -> Option<String> {
 }
 
 #[allow(dead_code)]
-async fn run_agent_cli(
+pub(crate) async fn run_agent_cli(
     state: &AppState,
     session_id: Uuid,
     request: AgentCliRequest,

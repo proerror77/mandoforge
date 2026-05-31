@@ -331,13 +331,22 @@ proposal that captures:
 
 Lifecycle:
 
-1. `POST /api/dynamic-workflow-plans` validates phases and fleet policy, then
+1. `POST /api/dynamic-workflow-plans/compile` deterministically compiles a
+   natural-language objective into a reviewable phase graph request. This is a
+   compiler for governed workflow plans, not a side-channel script runtime.
+2. `POST /api/dynamic-workflow-plans` validates phases and fleet policy, then
    stores an analyzable proposal with audit evidence.
-2. `POST /api/dynamic-workflow-plans/:id/review` records the human or
+3. `POST /api/dynamic-workflow-plans/:id/review` records the human or
    pack-defined review decision. Only approved plans can be materialized.
-3. `POST /api/dynamic-workflow-plans/:id/materialize` creates a
+4. `POST /api/dynamic-workflow-plans/:id/materialize` creates a
    `WorkflowDefinition`, `WorkflowRun`, primary session, root `TaskGrant`, and
    start steps through the same managed runtime path as normal workflows.
+5. `POST /api/dynamic-workflow-plans/:id/adjudicate` evaluates materialized
+   step outputs against the plan's voting threshold and records session/audit
+   evidence.
+6. `POST /api/dynamic-workflow-plans/:id/pressure-test` records a large-fleet
+   control-plane pressure simulation. It is evidence for batching and
+   backpressure limits, not a claim of live provider execution at that scale.
 
 This keeps the Claude Code Dynamic Workflow product pattern, where many
 subagents may be planned behind one run, but preserves MandoForge's enterprise

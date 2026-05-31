@@ -643,10 +643,38 @@ export type CreateDynamicWorkflowPlanRequest = {
   materialization?: Record<string, unknown>;
 };
 
+export type DynamicWorkflowPlanCompilationResponse = {
+  request: CreateDynamicWorkflowPlanRequest;
+  compiler: Record<string, unknown>;
+};
+
 export type DynamicWorkflowPlanMaterializationResponse = {
   plan: DynamicWorkflowPlan;
   workflow_definition: WorkflowDefinition;
   workflow_run: WorkflowRun;
+};
+
+export type DynamicWorkflowPressureTestResponse = {
+  status: string;
+  plan_id: string;
+  target_agents: number;
+  max_parallel_agents: number;
+  simulated_batches: number;
+  estimated_worker_claims: number;
+  evidence: Record<string, unknown>;
+};
+
+export type DynamicWorkflowAdjudicationResponse = {
+  status: string;
+  plan_id: string;
+  workflow_run_id: string;
+  threshold: number;
+  completed_votes: number;
+  positive_votes: number;
+  negative_votes: number;
+  score: number;
+  decision: string;
+  evidence: Record<string, unknown>;
 };
 
 export type AgentHandoffEvent = {
@@ -1309,6 +1337,21 @@ export async function createDynamicWorkflowPlan(
   });
 }
 
+export async function compileDynamicWorkflowPlan(input: {
+  objective: string;
+  runtime_adapter?: string | null;
+  max_total_agents?: number;
+  max_parallel_agents?: number;
+  source_work_item_id?: string | null;
+  source_session_id?: string | null;
+}): Promise<DynamicWorkflowPlanCompilationResponse> {
+  return api<DynamicWorkflowPlanCompilationResponse>("/api/dynamic-workflow-plans/compile", {
+    method: "POST",
+    headers: adminHeaders(),
+    body: JSON.stringify(input),
+  });
+}
+
 export async function reviewDynamicWorkflowPlan(
   id: string,
   input: {
@@ -1317,6 +1360,28 @@ export async function reviewDynamicWorkflowPlan(
   },
 ): Promise<DynamicWorkflowPlan> {
   return api<DynamicWorkflowPlan>(`/api/dynamic-workflow-plans/${id}/review`, {
+    method: "POST",
+    headers: adminHeaders(),
+    body: JSON.stringify(input),
+  });
+}
+
+export async function pressureTestDynamicWorkflowPlan(
+  id: string,
+  input: { target_agents?: number; max_parallel_agents?: number } = {},
+): Promise<DynamicWorkflowPressureTestResponse> {
+  return api<DynamicWorkflowPressureTestResponse>(`/api/dynamic-workflow-plans/${id}/pressure-test`, {
+    method: "POST",
+    headers: adminHeaders(),
+    body: JSON.stringify(input),
+  });
+}
+
+export async function adjudicateDynamicWorkflowPlan(
+  id: string,
+  input: { vote_threshold?: number } = {},
+): Promise<DynamicWorkflowAdjudicationResponse> {
+  return api<DynamicWorkflowAdjudicationResponse>(`/api/dynamic-workflow-plans/${id}/adjudicate`, {
     method: "POST",
     headers: adminHeaders(),
     body: JSON.stringify(input),
