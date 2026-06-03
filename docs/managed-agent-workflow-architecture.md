@@ -305,9 +305,10 @@ The API lifecycle is proposal -> review -> materialize:
 
 - `POST /api/dynamic-workflow-plans/compile` turns a natural-language
   objective plus fleet limits into a reviewable `CreateDynamicWorkflowPlan`
-  request. The current compiler is deterministic and conservative: it creates
-  survey, cross-check, and synthesis phases rather than letting generated code
-  execute directly.
+  request. The current compiler is deterministic and conservative: by default
+  it creates a native dynamic implement/evaluate/repair/gate feedback-loop
+  request rather than letting generated code execute directly. Callers can
+  explicitly request `delegated_runtime` for externally owned inner planning.
 - `POST /api/dynamic-workflow-plans` validates the phase graph and fleet
   limits, stores the proposal, and records audit evidence.
 - `POST /api/dynamic-workflow-plans/:id/review` records the review decision.
@@ -315,7 +316,10 @@ The API lifecycle is proposal -> review -> materialize:
 - `POST /api/dynamic-workflow-plans/:id/materialize` creates the
   `WorkflowDefinition`, `WorkflowRun`, primary session, root `TaskGrant`, and
   start steps. `delegated_runtime` plans become one governed delegated runtime
-  step; `native_steps` plans expand phases into concrete agent steps.
+  step; `native_steps` plans expand phases into concrete agent steps;
+  `native_dynamic` plans create a MandoForge-owned evaluator feedback graph:
+  `implement`, `implementation-evaluator`, `developer`, `troubleshooter`,
+  `integration-tester`, `integration-gate-keeper`, and `unexpected-error`.
 - `POST /api/dynamic-workflow-plans/:id/adjudicate` performs the first
   workflow-level cross-check/voting adjudication by reading materialized step
   outputs and recording session/audit evidence. Only explicit `vote: true`

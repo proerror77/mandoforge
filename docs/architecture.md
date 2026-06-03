@@ -302,7 +302,10 @@ control plane:
 - `delegated_runtime`: MandoForge creates one governed runtime envelope and
   delegates inner planning, fan-out/fan-in, and subagent execution to a runtime
   adapter such as `claude_code`, `codex_app_server`, or `codex_cli`.
-- `native_dynamic`: reserved for a future MandoForge-owned dynamic orchestrator.
+- `native_dynamic`: MandoForge materializes a governed evaluator feedback loop
+  with explicit implement, evaluator, repair, integration, gatekeeper, and
+  unexpected-error steps. This is the first MandoForge-owned dynamic
+  orchestration slice; recursive runtime spawning remains a later enhancement.
 
 The delegated path records `runtime_adapter`, `runtime_mode`,
 `runtime_capability_contract`, and `event_ingestion_policy` on the definition.
@@ -326,14 +329,17 @@ proposal that captures:
 - governance scope for memory, tools, connectors, external effects, and
   approvals.
 - materialization target: `delegated_runtime` for Claude Code or Codex-managed
-  inner workflows, or `native_steps` when MandoForge should materialize the
-  phase graph itself.
+  inner workflows, `native_steps` when MandoForge should materialize the phase
+  graph itself, or the default `native_dynamic` path when MandoForge should own
+  the implement/evaluate/repair/integrate/gate control loop.
 
 Lifecycle:
 
 1. `POST /api/dynamic-workflow-plans/compile` deterministically compiles a
-   natural-language objective into a reviewable phase graph request. This is a
-   compiler for governed workflow plans, not a side-channel script runtime.
+   natural-language objective into a reviewable dynamic feedback-loop request
+   by default. Callers can explicitly request `delegated_runtime` or
+   `native_steps` for the older materialization shapes. This is a compiler for
+   governed workflow plans, not a side-channel script runtime.
 2. `POST /api/dynamic-workflow-plans` validates phases and fleet policy, then
    stores an analyzable proposal with audit evidence.
 3. `POST /api/dynamic-workflow-plans/:id/review` records the human or
@@ -341,6 +347,10 @@ Lifecycle:
 4. `POST /api/dynamic-workflow-plans/:id/materialize` creates a
    `WorkflowDefinition`, `WorkflowRun`, primary session, root `TaskGrant`, and
    start steps through the same managed runtime path as normal workflows.
+   `native_dynamic` materialization creates a feedback graph shaped as
+   `/implement -> implementation-evaluator -> developer/troubleshooter ->
+   integration-tester -> integration-gate-keeper`, with `unexpected-error`
+   attached to implementation, repair, and integration failures.
 5. `POST /api/dynamic-workflow-plans/:id/adjudicate` evaluates materialized
    step outputs against the plan's voting threshold and records session/audit
    evidence. Missing vote evidence is not treated as approval.

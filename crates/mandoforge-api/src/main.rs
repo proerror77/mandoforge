@@ -1063,6 +1063,8 @@ struct CompileDynamicWorkflowPlan {
     #[serde(default)]
     runtime_adapter: Option<String>,
     #[serde(default)]
+    execution_strategy: Option<String>,
+    #[serde(default)]
     max_total_agents: Option<u64>,
     #[serde(default)]
     max_parallel_agents: Option<u64>,
@@ -14454,7 +14456,16 @@ async fn compile_dynamic_workflow_plan(
         .unwrap_or_else(|| "codex_app_server".to_string());
     let runtime_adapter = normalize_optional_runtime_adapter(Some(runtime_adapter))?
         .unwrap_or_else(|| "codex_app_server".to_string());
-    let phases = compile_dynamic_workflow_phases(&objective, max_total_agents, max_parallel_agents);
+    let execution_strategy = input
+        .execution_strategy
+        .and_then(normalize_optional_text)
+        .unwrap_or_else(|| "native_dynamic".to_string());
+    let execution_strategy = normalize_workflow_execution_strategy(&execution_strategy)?;
+    let phases = if execution_strategy == "native_dynamic" {
+        compile_native_dynamic_workflow_phases(&objective, max_total_agents, max_parallel_agents)
+    } else {
+        compile_dynamic_workflow_phases(&objective, max_total_agents, max_parallel_agents)
+    };
     let request = CreateDynamicWorkflowPlan {
         source_work_item_id: input.source_work_item_id,
         source_session_id: input.source_session_id,
@@ -14481,7 +14492,7 @@ async fn compile_dynamic_workflow_plan(
             "adjudication": "majority_vote_with_synthesis"
         }),
         materialization: json!({
-            "execution_strategy": "delegated_runtime",
+            "execution_strategy": execution_strategy,
             "runtime_adapter": runtime_adapter,
             "runtime_mode": "dynamic_workflow",
             "runtime_capability_contract": {
@@ -14506,7 +14517,7 @@ async fn compile_dynamic_workflow_plan(
             "status": "compiled",
             "analysis": analysis,
             "notes": [
-                "deterministic compiler generated reviewable phases from objective",
+                "deterministic compiler generated reviewable dynamic workflow phases from objective",
                 "materialization still requires plan creation and approval"
             ]
         }),
@@ -16498,6 +16509,140 @@ fn compile_dynamic_workflow_phases(
     ])
 }
 
+fn compile_native_dynamic_workflow_phases(
+    objective: &str,
+    max_total_agents: u64,
+    max_parallel_agents: u64,
+) -> Value {
+    if max_total_agents == 1 {
+        return json!([
+            {
+                "key": "dynamic_feedback_loop",
+                "agent_count": 1,
+                "max_parallel": 1,
+                "prompt": format!("Implement, evaluate, repair, test, and gate this objective as a single bounded dynamic workflow loop: {objective}"),
+                "validation_strategy": {
+                    "artifact": "integration_gate_decision",
+                    "required_paths": ["/integration/no_gap"],
+                    "vote": true
+                }
+            }
+        ]);
+    }
+    if max_total_agents == 2 {
+        return json!([
+            {
+                "key": "implement",
+                "agent_count": 1,
+                "max_parallel": 1,
+                "prompt": format!("Implement the requested milestone and emit structured evidence: {objective}"),
+                "validation_strategy": {
+                    "artifact": "implementation_result",
+                    "vote": true
+                }
+            },
+            {
+                "key": "evaluate_and_gate",
+                "after": "implement",
+                "agent_count": 1,
+                "max_parallel": 1,
+                "prompt": "Evaluate implementation evidence, report gaps/issues, and make the integration gate decision.",
+                "validation_strategy": {
+                    "artifact": "integration_gate_decision",
+                    "required_paths": ["/evaluation/found_gap", "/evaluation/found_issues", "/integration/no_gap"],
+                    "vote": true
+                }
+            }
+        ]);
+    }
+    if max_total_agents == 3 {
+        return json!([
+            {
+                "key": "implement",
+                "agent_count": 1,
+                "max_parallel": 1,
+                "prompt": format!("Implement the requested milestone and emit structured evidence: {objective}"),
+                "validation_strategy": {
+                    "artifact": "implementation_result",
+                    "vote": true
+                }
+            },
+            {
+                "key": "implementation_evaluator",
+                "after": "implement",
+                "agent_count": 1,
+                "max_parallel": 1,
+                "prompt": "Evaluate implementation evidence and route found gaps or issues.",
+                "validation_strategy": {
+                    "artifact": "implementation_evaluation",
+                    "required_paths": ["/evaluation/found_gap", "/evaluation/found_issues"],
+                    "vote": true
+                }
+            },
+            {
+                "key": "integration_gate",
+                "after": "implementation_evaluator",
+                "agent_count": 1,
+                "max_parallel": 1,
+                "prompt": "Run integration validation and make the final gate decision.",
+                "validation_strategy": {
+                    "artifact": "integration_gate_decision",
+                    "required_paths": ["/integration/no_gap"],
+                    "vote": true
+                }
+            }
+        ]);
+    }
+    let repair_agents = max_total_agents.saturating_sub(3);
+    json!([
+        {
+            "key": "implement",
+            "agent_count": 1,
+            "max_parallel": 1,
+            "prompt": format!("Implement the requested milestone and emit structured evidence: {objective}"),
+            "validation_strategy": {
+                "artifact": "implementation_result",
+                "vote": true
+            }
+        },
+        {
+            "key": "implementation_evaluator",
+            "after": "implement",
+            "agent_count": 1,
+            "max_parallel": 1,
+            "prompt": "Evaluate implementation evidence and route found gaps or issues.",
+            "validation_strategy": {
+                "artifact": "implementation_evaluation",
+                "required_paths": ["/evaluation/found_gap", "/evaluation/found_issues"],
+                "vote": true
+            }
+        },
+        {
+            "key": "repair_loop",
+            "after": "implementation_evaluator",
+            "agent_count": repair_agents,
+            "max_parallel": max_parallel_agents.min(repair_agents),
+            "prompt": "Close evaluator gaps, troubleshoot reported issues, and emit repair evidence.",
+            "validation_strategy": {
+                "artifact": "repair_or_troubleshooting_report",
+                "vote": true
+            }
+        },
+        {
+            "key": "integration_gate",
+            "after": "repair_loop",
+            "agent_count": 1,
+            "max_parallel": 1,
+            "prompt": "Run integration validation and make the final gate decision.",
+            "validation_strategy": {
+                "artifact": "integration_gate_decision",
+                "required_paths": ["/integration/no_gap"],
+                "vote": true
+            }
+        }
+    ])
+}
+
 fn dynamic_workflow_step_vote(output_payload: &Value) -> Option<bool> {
     output_payload
         .pointer("/validation/vote")
@@ -16711,6 +16856,9 @@ fn dynamic_workflow_plan_step_graph(
             &empty_json_object(),
         ));
     }
+    if execution_strategy == "native_dynamic" {
+        return dynamic_workflow_native_dynamic_step_graph(plan);
+    }
     let phases = plan.phases.as_array().ok_or_else(|| {
         AppError::bad_request("dynamic workflow plan phases must be a JSON array")
     })?;
@@ -16782,6 +16930,173 @@ fn dynamic_workflow_plan_step_graph(
             "max_parallel": dynamic_policy_u64(&plan.agent_fleet_policy, "max_parallel_agents", 16)?
         },
         "steps": steps
+    }))
+}
+
+fn dynamic_workflow_native_dynamic_step_graph(
+    plan: &DynamicWorkflowPlan,
+) -> Result<Value, AppError> {
+    let max_parallel = dynamic_policy_u64(&plan.agent_fleet_policy, "max_parallel_agents", 16)?;
+    let objective = plan.objective.clone();
+    Ok(json!({
+        "source": "dynamic_workflow_plan",
+        "dynamic_workflow_plan_id": plan.id,
+        "fan_out": {
+            "max_parallel": max_parallel
+        },
+        "dynamic_loop": {
+            "pattern": "implement_evaluate_repair_integrate_gate",
+            "entry_step": "implement",
+            "terminal_success_step": "integration-gate-keeper",
+            "terminal_error_step": "unexpected-error",
+            "feedback_routes": [
+                {
+                    "from": "implementation-evaluator",
+                    "when": "/evaluation/found_gap == true",
+                    "to": "developer"
+                },
+                {
+                    "from": "implementation-evaluator",
+                    "when": "/evaluation/found_issues == true",
+                    "to": "troubleshooter"
+                },
+                {
+                    "from": "integration-tester",
+                    "when": "/integration/no_gap == true",
+                    "to": "integration-gate-keeper"
+                }
+            ],
+            "error_routes": [
+                {
+                    "from": ["implement", "developer", "troubleshooter", "integration-tester"],
+                    "to": "unexpected-error"
+                }
+            ]
+        },
+        "steps": [
+            {
+                "key": "implement",
+                "type": "agent",
+                "start": true,
+                "dynamic_workflow_plan_id": plan.id,
+                "agent_role": "implementer",
+                "input": {
+                    "objective": objective,
+                    "prompt": format!("Implement the requested milestone and emit structured evidence for this objective: {objective}"),
+                    "validation_strategy": {
+                        "artifact": "implementation_result",
+                        "expected_paths": ["/implementation/summary", "/implementation/evidence_refs"]
+                    }
+                }
+            },
+            {
+                "key": "implementation-evaluator",
+                "type": "agent",
+                "depends_on": ["implement"],
+                "dynamic_workflow_plan_id": plan.id,
+                "agent_role": "implementation_evaluator",
+                "input": {
+                    "objective": objective,
+                    "prompt": "Evaluate the implementation evidence. Return /evaluation/found_gap, /evaluation/found_issues, and cited reasons.",
+                    "validation_strategy": {
+                        "artifact": "implementation_evaluation",
+                        "required_paths": ["/evaluation/found_gap", "/evaluation/found_issues"],
+                        "vote": true
+                    }
+                }
+            },
+            {
+                "key": "developer",
+                "type": "agent",
+                "depends_on": ["implementation-evaluator"],
+                "condition": {
+                    "source_step": "implementation-evaluator",
+                    "path": "/evaluation/found_gap",
+                    "equals": true
+                },
+                "dynamic_workflow_plan_id": plan.id,
+                "agent_role": "developer",
+                "input": {
+                    "objective": objective,
+                    "prompt": "Close evaluator-identified implementation gaps and emit patch evidence.",
+                    "validation_strategy": {
+                        "artifact": "gap_fix_report",
+                        "vote": true
+                    }
+                }
+            },
+            {
+                "key": "troubleshooter",
+                "type": "agent",
+                "depends_on": ["implementation-evaluator"],
+                "condition": {
+                    "source_step": "implementation-evaluator",
+                    "path": "/evaluation/found_issues",
+                    "equals": true
+                },
+                "dynamic_workflow_plan_id": plan.id,
+                "agent_role": "troubleshooter",
+                "input": {
+                    "objective": objective,
+                    "prompt": "Investigate evaluator-reported issues, separate code defects from environment/tooling failures, and emit findings.",
+                    "validation_strategy": {
+                        "artifact": "troubleshooting_report",
+                        "vote": true
+                    }
+                }
+            },
+            {
+                "key": "integration-tester",
+                "type": "agent",
+                "depends_on": ["developer", "troubleshooter"],
+                "dynamic_workflow_plan_id": plan.id,
+                "agent_role": "integration_tester",
+                "input": {
+                    "objective": objective,
+                    "prompt": "Run integration validation over the implementation, developer fixes, and troubleshooting evidence. Return /integration/no_gap.",
+                    "validation_strategy": {
+                        "artifact": "integration_test_report",
+                        "required_paths": ["/integration/no_gap"],
+                        "vote": true
+                    }
+                }
+            },
+            {
+                "key": "integration-gate-keeper",
+                "type": "agent",
+                "depends_on": ["integration-tester"],
+                "condition": {
+                    "source_step": "integration-tester",
+                    "path": "/integration/no_gap",
+                    "equals": true
+                },
+                "dynamic_workflow_plan_id": plan.id,
+                "agent_role": "integration_gate_keeper",
+                "input": {
+                    "objective": objective,
+                    "prompt": "Decide whether the mission is complete. Only pass with explicit evidence and no remaining integration gap.",
+                    "validation_strategy": {
+                        "artifact": "integration_gate_decision",
+                        "vote": true
+                    }
+                }
+            },
+            {
+                "key": "unexpected-error",
+                "type": "agent",
+                "on_failure_of": ["implement", "developer", "troubleshooter", "integration-tester"],
+                "dynamic_workflow_plan_id": plan.id,
+                "agent_role": "unexpected_error_reporter",
+                "input": {
+                    "objective": objective,
+                    "prompt": "Report environmental errors, insufficient permissions, missing tools, or other non-code blockers.",
+                    "validation_strategy": {
+                        "artifact": "unexpected_error_report",
+                        "vote": false
+                    }
+                }
+            }
+        ]
     }))
 }
 
@@ -63019,6 +63334,7 @@ not json
                 json!({
                     "objective": "Audit dynamic workflow evidence across the repo",
                     "runtime_adapter": "claude_code",
+                    "execution_strategy": "delegated_runtime",
                     "max_total_agents": 128,
                     "max_parallel_agents": 16
                 }),
@@ -63156,6 +63472,10 @@ not json
             compiled["request"]["agent_fleet_policy"]["max_total_agents"],
             json!(4)
         );
+        assert_eq!(
+            compiled["request"]["materialization"]["execution_strategy"],
+            json!("native_dynamic")
+        );
 
         let plan: Value = request_json(
             app,
@@ -63169,6 +63489,92 @@ not json
         .await;
         assert_eq!(plan["status"], json!("proposed"));
         assert_eq!(plan["analysis"]["total_agent_count"], json!(4));
+    }
+
+    #[tokio::test]
+    async fn dynamic_workflow_compiler_defaults_to_native_dynamic_feedback_graph() {
+        let app = test_app().await;
+
+        let compiled: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/dynamic-workflow-plans/compile",
+                json!({
+                    "objective": "Implement a milestone, evaluate it, repair gaps, and gate integration.",
+                    "runtime_adapter": "codex_app_server",
+                    "max_total_agents": 4,
+                    "max_parallel_agents": 2
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+
+        assert_eq!(
+            compiled["request"]["materialization"]["execution_strategy"],
+            json!("native_dynamic")
+        );
+        assert_eq!(
+            compiled["compiler"]["analysis"]["execution_strategy"],
+            json!("native_dynamic")
+        );
+
+        let plan: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/dynamic-workflow-plans",
+                compiled["request"].clone(),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let plan_id = plan["id"].as_str().expect("plan id");
+
+        let _approved: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/dynamic-workflow-plans/{plan_id}/review"),
+                json!({"status": "approved", "review": {"approved_by": "test"}}),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+
+        let materialized: Value = request_json(
+            app,
+            json_request_with_headers(
+                "POST",
+                &format!("/api/dynamic-workflow-plans/{plan_id}/materialize"),
+                json!({"title": "Native dynamic feedback graph"}),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(
+            materialized["workflow_definition"]["execution_strategy"],
+            json!("native_dynamic")
+        );
+        let step_keys = materialized["workflow_definition"]["step_graph"]["steps"]
+            .as_array()
+            .expect("steps")
+            .iter()
+            .map(|step| step["key"].as_str().expect("step key"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            step_keys,
+            vec![
+                "implement",
+                "implementation-evaluator",
+                "developer",
+                "troubleshooter",
+                "integration-tester",
+                "integration-gate-keeper",
+                "unexpected-error"
+            ]
+        );
     }
 
     #[tokio::test]
@@ -63739,6 +64145,88 @@ not json
         assert_eq!(
             graph["steps"][2]["depends_on"],
             json!(["survey-1", "survey-2"])
+        );
+    }
+
+    #[test]
+    fn dynamic_workflow_native_dynamic_graph_models_evaluator_feedback_loop() {
+        let now = Utc::now();
+        let plan = DynamicWorkflowPlan {
+            id: Uuid::new_v4(),
+            source_work_item_id: None,
+            source_session_id: None,
+            objective: "Implement a milestone and verify it with external evaluators".to_string(),
+            status: "approved".to_string(),
+            phases: json!([
+                {
+                    "key": "implementation",
+                    "prompt": "Implement the requested milestone."
+                }
+            ]),
+            agent_fleet_policy: json!({
+                "max_total_agents": 12,
+                "max_parallel_agents": 4
+            }),
+            governance: default_dynamic_workflow_governance(),
+            validation: default_dynamic_workflow_validation(),
+            materialization: json!({
+                "execution_strategy": "native_dynamic",
+                "runtime_adapter": "codex_app_server",
+                "runtime_mode": "dynamic_workflow"
+            }),
+            analysis: empty_json_object(),
+            review: empty_json_object(),
+            workflow_definition_id: None,
+            workflow_run_id: None,
+            audit_trace_id: None,
+            created_at: now,
+            updated_at: now,
+            reviewed_at: None,
+            materialized_at: None,
+        };
+
+        let graph = dynamic_workflow_plan_step_graph(&plan, "native_dynamic")
+            .expect("native dynamic graph is generated");
+        let steps = graph["steps"].as_array().expect("steps");
+        let keys = steps
+            .iter()
+            .map(|step| step["key"].as_str().expect("step key"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            keys,
+            vec![
+                "implement",
+                "implementation-evaluator",
+                "developer",
+                "troubleshooter",
+                "integration-tester",
+                "integration-gate-keeper",
+                "unexpected-error"
+            ]
+        );
+        assert_eq!(steps[0]["start"], json!(true));
+        assert_eq!(steps[1]["depends_on"], json!(["implement"]));
+        assert_eq!(
+            steps[2]["condition"]["path"],
+            json!("/evaluation/found_gap")
+        );
+        assert_eq!(
+            steps[3]["condition"]["path"],
+            json!("/evaluation/found_issues")
+        );
+        assert_eq!(steps[5]["condition"]["path"], json!("/integration/no_gap"));
+        assert_eq!(
+            steps[6]["on_failure_of"],
+            json!([
+                "implement",
+                "developer",
+                "troubleshooter",
+                "integration-tester"
+            ])
+        );
+        assert_eq!(
+            graph["dynamic_loop"]["terminal_success_step"],
+            json!("integration-gate-keeper")
         );
     }
 
