@@ -17,7 +17,7 @@ serde_json = "1"
 serde_yaml = "0.9"
 sha2 = "0.10"
 sqlparser = "0.53"
-sqlx = { version = "0.8", features = ["chrono", "json", "postgres", "runtime-tokio", "uuid"] }
+sqlx = { version = "0.8", default-features = false, features = ["chrono", "json", "postgres", "runtime-tokio", "uuid"] }
 tokio = { version = "1", features = ["macros", "process", "rt-multi-thread", "signal", "time"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 tower = { version = "0.5", features = ["util"] }

@@ -111,16 +111,17 @@ wait_for_static_ui() {
 (() => {
   const text = document.body?.innerText || '';
   const normalizedText = text.toLowerCase();
-  const selectors = ['.workbench', '.agent-lane', '.log-console', '.observer-panel', '.taskbar'];
+  const selectors = ['.console-shell', '.tabs', '.workspace', '.panel', '.taskbar', '.visual-command-deck', '.agent-topology', '.runtime-pipeline', '.live-log'];
   const result = {
     title: document.title,
     hasMountedShell: selectors.every((selector) => Boolean(document.querySelector(selector))),
     hasHeader: normalizedText.includes('mandoforge co-work') && normalizedText.includes('managed agent observability'),
-    hasMetrics: normalizedText.includes('agents') && normalizedText.includes('running') && normalizedText.includes('needs input') && normalizedText.includes('workflows'),
-    hasLiveLog: normalizedText.includes('live log stream') && normalizedText.includes('no events yet'),
-    hasWorkflowPanels: normalizedText.includes('workflow') && normalizedText.includes('steps') && normalizedText.includes('transitions') && normalizedText.includes('grants'),
+    hasMetrics: normalizedText.includes('agents running') && normalizedText.includes('workers active') && normalizedText.includes('approvals') && normalizedText.includes('errors'),
+    hasLiveLog: normalizedText.includes('live log stream') && normalizedText.includes('operator action'),
+    hasWorkflowNavigation: normalizedText.includes('workflows') && normalizedText.includes('dynamic') && normalizedText.includes('semantic') && normalizedText.includes('packs') && normalizedText.includes('deploy'),
     hasExecutionPanels: normalizedText.includes('worker') && normalizedText.includes('runtime') && normalizedText.includes('approvals') && normalizedText.includes('tool calls') && normalizedText.includes('artifacts'),
-    hasTaskLauncher: normalizedText.includes('start task') && Boolean(document.querySelector('.taskbar textarea')),
+    hasVisualizations: Boolean(document.querySelector('.dynamic-workflow-canvas')) && Boolean(document.querySelector('.topology-canvas')) && Boolean(document.querySelector('.runtime-pipeline')),
+    hasTaskLauncher: normalizedText.includes('start task') && Boolean(document.querySelector('.taskbar textarea')) && Boolean(document.querySelector('.taskbar select')),
     metricCards: document.querySelectorAll('.metric').length,
   };
   result.ok = result.title === 'MandoForge Agent OS Console'
@@ -128,8 +129,9 @@ wait_for_static_ui() {
     && result.hasHeader
     && result.hasMetrics
     && result.hasLiveLog
-    && result.hasWorkflowPanels
+    && result.hasWorkflowNavigation
     && result.hasExecutionPanels
+    && result.hasVisualizations
     && result.hasTaskLauncher
     && result.metricCards >= 4
     && !text.includes('Uncaught');
@@ -169,14 +171,27 @@ curl -fsS "$BASE_URL/" >/tmp/mandoforge-actionbook-index.html
 require_text /tmp/mandoforge-actionbook-index.html "MandoForge Agent OS Console"
 require_text /tmp/mandoforge-actionbook-index.html "id=\"root\""
 
-js_asset="$(grep -Eo '/assets/[^"]+\.js' /tmp/mandoforge-actionbook-index.html | head -n 1)"
-css_asset="$(grep -Eo '/assets/[^"]+\.css' /tmp/mandoforge-actionbook-index.html | head -n 1)"
-if [[ -z "$js_asset" || -z "$css_asset" ]]; then
-  echo "static UI actionbook check failed: index does not reference Vite JS/CSS assets" >&2
+asset_refs=()
+while IFS= read -r asset_ref; do
+  asset_refs+=("$asset_ref")
+done < <(grep -Eo '/[^"]+\.(js|css|wasm)' /tmp/mandoforge-actionbook-index.html | sort -u)
+if [[ "${#asset_refs[@]}" -eq 0 ]]; then
+  echo "static UI actionbook check failed: index does not reference Trunk JS/CSS/WASM assets" >&2
   exit 1
 fi
-curl -fsS "$BASE_URL$js_asset" >/tmp/mandoforge-actionbook-app.js
-curl -fsS "$BASE_URL$css_asset" >/tmp/mandoforge-actionbook-app.css
+rm -rf /tmp/mandoforge-actionbook-assets
+mkdir -p /tmp/mandoforge-actionbook-assets
+for asset_ref in "${asset_refs[@]}"; do
+  curl -fsS "$BASE_URL$asset_ref" >"/tmp/mandoforge-actionbook-assets/${asset_ref##*/}"
+done
+
+js_asset_count="$(find /tmp/mandoforge-actionbook-assets -maxdepth 1 -type f -name '*.js' | wc -l | tr -d ' ')"
+css_asset_count="$(find /tmp/mandoforge-actionbook-assets -maxdepth 1 -type f -name '*.css' | wc -l | tr -d ' ')"
+wasm_asset_count="$(find /tmp/mandoforge-actionbook-assets -maxdepth 1 -type f -name '*.wasm' | wc -l | tr -d ' ')"
+if [[ "$js_asset_count" -lt 1 || "$css_asset_count" -lt 1 || "$wasm_asset_count" -lt 1 ]]; then
+  echo "static UI actionbook check failed: expected Trunk JS, CSS, and WASM assets" >&2
+  exit 1
+fi
 
 asset_patterns=(
   "MandoForge Co-Work"
@@ -192,10 +207,13 @@ asset_patterns=(
 )
 
 for pattern in "${asset_patterns[@]}"; do
-  require_text /tmp/mandoforge-actionbook-app.js "$pattern"
+  if ! grep -aR -q "$pattern" /tmp/mandoforge-actionbook-assets; then
+    echo "static UI actionbook check failed: Trunk assets missing pattern: $pattern" >&2
+    exit 1
+  fi
 done
 
-if grep -q "window.prompt" /tmp/mandoforge-actionbook-app.js; then
+if grep -aR -q "window.prompt" /tmp/mandoforge-actionbook-assets; then
   echo "static UI must not use window.prompt" >&2
   exit 1
 fi

@@ -54,15 +54,31 @@ jobs:
     environment: stage2-production
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: web-ui/package-lock.json
+          targets: wasm32-unknown-unknown
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.cargo/bin/trunk
+            target
+            web-ui/target
+          key: deploy-yew-${{ runner.os }}-${{ hashFiles('web-ui/Cargo.toml') }}
+          restore-keys: |
+            deploy-yew-${{ runner.os }}-
+      - name: Install Trunk
+        run: |
+          if ! command -v trunk >/dev/null 2>&1; then
+            cargo install trunk --locked --version 0.21.14
+          fi
       - name: Build web UI
         run: |
-          npm ci --prefix web-ui
-          npm run build --prefix web-ui
+          cd web-ui
+          trunk build --release --dist ../web
+          cd ..
           scripts/verify-static-ui-assets.sh
       - name: Build image
         run: |

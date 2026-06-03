@@ -6,7 +6,7 @@ Mandoforge keeps the default CI path fast and moves full evidence runs to explic
 
 `.github/workflows/ci.yml` runs on every push and pull request:
 
-- `Static gates` builds the React/Vite web UI, verifies the emitted `web/` assets, checks JavaScript and shell syntax, Kubernetes manifest renderability, and evidence manifest validators without compiling Rust.
+- `Static gates` builds the Yew/Trunk WebAssembly web UI into `web/`, verifies the emitted static assets, checks JavaScript and shell syntax, Kubernetes manifest renderability, and evidence manifest validators without compiling the API workspace.
 - `Rust tests` installs the stable Rust toolchain, restores Cargo registry and `target/` cache, runs `cargo fetch --locked`, checks formatting, and runs `cargo test --workspace --locked --all-targets -- --test-threads=1`.
 
 The Rust job intentionally does not run both `cargo check` and `cargo test` on every PR. `cargo test --all-targets` already compiles the workspace test targets and avoids a second full compile path in ordinary CI.
@@ -28,7 +28,7 @@ path unless the change requires them.
 
 ## Deploy
 
-`.github/workflows/deploy.yml` is manual and uses the `stage2-production` GitHub Environment. It builds the React/Vite web UI, builds a `linux/amd64` Docker image, and pushes it to GHCR by default.
+`.github/workflows/deploy.yml` is manual and uses the `stage2-production` GitHub Environment. It builds the Yew/Trunk WebAssembly web UI, builds a `linux/amd64` Docker image, and pushes it to GHCR by default.
 
 To update the Whiskey adoption stack through GitHub Actions, run the workflow with:
 

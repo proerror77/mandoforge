@@ -1,0 +1,5 @@
+[advisories]
+# sqlx's meta crate still records the optional MySQL dependency in Cargo.lock,
+# but mandoforge-api disables sqlx default features and enables only Postgres.
+# Verify with: cargo tree --target all -e features -p mandoforge-api | rg "mysql|rsa"
+ignore = ["RUSTSEC-2023-0071"]

@@ -3,12 +3,24 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%231d232a'/%3E%3Cpath d='M8 10h16v3H8zm0 5h11v3H8zm0 5h16v3H8z' fill='%23f6f0df'/%3E%3C/svg%3E" />
+    <meta name="color-scheme" content="light" />
     <title>MandoForge Agent OS Console</title>
-    <script type="module" crossorigin src="/assets/index-BdWcM9zW.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-DSV1BhHd.css">
-  </head>
+    <link rel="icon" href="/favicon.ico" />
+    
+    <link rel="stylesheet" href="/styles-e783ac4965383024.css" integrity="sha384-0RqbW72kiJ6cjcPLXM56esTUsBOwOaKstgJFUHuuZ+TSzuMHSLdRg9zOBzO8Io/S"/>
+  <link rel="modulepreload" href="/mandoforge-web-ui-d39edaa8e9d74c9c.js" crossorigin="anonymous" integrity="sha384-9vnvctusvAU4jxHw5hBxLyIoDAwqsD/tTO6iaYXSRTtOAl5Odwz4VPRMsYa9POtH"><link rel="preload" href="/mandoforge-web-ui-d39edaa8e9d74c9c_bg.wasm" crossorigin="anonymous" integrity="sha384-cxqDffTTk3U/hqYE3zFhGH0JKFqXsCSfA0RNkombhbELdj3q51S8bhJzM0SlYKM6" as="fetch" type="application/wasm"></head>
   <body>
     <div id="root"></div>
-  </body>
+  
+<script type="module">
+import init, * as bindings from '/mandoforge-web-ui-d39edaa8e9d74c9c.js';
+const wasm = await init({ module_or_path: '/mandoforge-web-ui-d39edaa8e9d74c9c_bg.wasm' });
+
+
+window.wasmBindings = bindings;
+
+
+dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
+
+</script></body>
 </html>

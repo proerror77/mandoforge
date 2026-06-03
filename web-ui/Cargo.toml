@@ -1,0 +1,16 @@
+[package]
+name = "mandoforge-web-ui"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+gloo-net = "0.7"
+gloo-timers = "0.4"
+js-sys = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["HtmlInputElement", "HtmlSelectElement", "HtmlTextAreaElement", "Storage", "Window"] }
+yew = { version = "0.23", features = ["csr"] }

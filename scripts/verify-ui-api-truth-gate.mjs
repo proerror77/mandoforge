@@ -3,7 +3,7 @@ import fs from "node:fs";
 import process from "node:process";
 
 const BACKEND_FILE = "crates/mandoforge-api/src/main.rs";
-const FRONTEND_FILES = ["web-ui/src/App.tsx", "web-ui/src/api.ts"];
+const FRONTEND_ROOT = "web-ui/src";
 
 const ACTION_EXPANSIONS = new Map([
   ["/api/approvals/{param}/{param}", ["/api/approvals/{param}/approve", "/api/approvals/{param}/reject"]],
@@ -90,6 +90,19 @@ function read(path) {
   return fs.readFileSync(path, "utf8");
 }
 
+function listFrontendFiles(dir = FRONTEND_ROOT) {
+  const files = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const path = `${dir}/${entry.name}`;
+    if (entry.isDirectory()) {
+      files.push(...listFrontendFiles(path));
+    } else if (entry.isFile() && path.endsWith(".rs")) {
+      files.push(path);
+    }
+  }
+  return files.sort();
+}
+
 function backendRoutes() {
   return [...read(BACKEND_FILE).matchAll(/\.route\(\s*"([^"]+)"/gs)].map((match) => match[1]);
 }
@@ -97,11 +110,12 @@ function backendRoutes() {
 function frontendApiRefs() {
   const refs = [];
   const quotedApi = /([`'"])(\/api\/[\s\S]*?)\1/g;
-  for (const file of FRONTEND_FILES) {
+  for (const file of listFrontendFiles()) {
     const text = read(file);
     for (const match of text.matchAll(quotedApi)) {
       let path = match[2]
         .replace(/\$\{[^}]+\}/g, "{param}")
+        .replace(/\{[^}]*\}/g, "{param}")
         .replace(/\?.*$/g, "");
       if (path.includes("\n")) {
         continue;

@@ -22,21 +22,36 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: web-ui/package-lock.json
+          targets: wasm32-unknown-unknown
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.cargo/bin/trunk
+            target
+            web-ui/target
+          key: static-yew-${{ runner.os }}-${{ hashFiles('web-ui/Cargo.toml') }}
+          restore-keys: |
+            static-yew-${{ runner.os }}-
       - name: Install kubectl
         run: |
           KUBECTL_VERSION="$(curl -fsSL https://dl.k8s.io/release/stable.txt)"
           curl -fsSLo kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/kubectl
+      - name: Install Trunk
+        run: |
+          if ! command -v trunk >/dev/null 2>&1; then
+            cargo install trunk --locked --version 0.21.14
+          fi
       - name: Build web UI
         run: |
-          npm ci --prefix web-ui
-          npm run build --prefix web-ui
+          cd web-ui
+          trunk build --release --dist ../web
       - name: Check JavaScript syntax
         run: |
           node --check scripts/stage2-mock-controller.js
