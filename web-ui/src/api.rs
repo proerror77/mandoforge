@@ -259,6 +259,95 @@ pub struct SemanticReflectionQueue {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct ContextPacket {
+    pub id: String,
+    #[serde(default)]
+    pub session_id: String,
+    #[serde(default)]
+    pub agent_id: String,
+    #[serde(default)]
+    pub version: i64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct RenderedExecutionContext {
+    #[serde(default)]
+    pub context_packet_id: String,
+    #[serde(default)]
+    pub session_id: String,
+    #[serde(default)]
+    pub agent_id: String,
+    #[serde(default)]
+    pub context_packet_version: i64,
+    #[serde(default)]
+    pub ontology_scope: Value,
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub must_follow: Vec<String>,
+    #[serde(default)]
+    pub relevant_objects: Vec<RenderedSemanticObject>,
+    #[serde(default)]
+    pub fetchable_object_ids: Vec<String>,
+    #[serde(default)]
+    pub omitted: RenderedContextOmissions,
+    #[serde(default)]
+    pub budget: RenderedContextBudget,
+    #[serde(default)]
+    pub available_tools: Vec<String>,
+    #[serde(default)]
+    pub full_content_included: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct RenderedSemanticObject {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub object_type: String,
+    #[serde(default)]
+    pub object_key: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub trust_level: String,
+    #[serde(default)]
+    pub freshness: String,
+    #[serde(default)]
+    pub source_uri: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct RenderedContextOmissions {
+    #[serde(default)]
+    pub token_budget_exceeded: usize,
+    #[serde(default)]
+    pub object_limit_exceeded: usize,
+    #[serde(default)]
+    pub policy_reminders_omitted: usize,
+    #[serde(default)]
+    pub source_refs_not_rendered: usize,
+    #[serde(default)]
+    pub full_content_not_rendered: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct RenderedContextBudget {
+    #[serde(default)]
+    pub max_prompt_tokens: usize,
+    #[serde(default)]
+    pub estimated_tokens_used: usize,
+    #[serde(default)]
+    pub max_objects: usize,
+    #[serde(default)]
+    pub max_summary_chars: usize,
+    #[serde(default)]
+    pub max_policy_reminders: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 pub struct WorkflowPackInstallation {
     pub id: String,
     #[serde(default)]
@@ -424,6 +513,22 @@ pub fn ontology_builder_body(source_text: &str) -> Value {
         "max_object_types": 8,
         "max_relation_types": 8,
         "preview_only": true
+    })
+}
+
+pub fn render_context_body(
+    max_prompt_tokens: usize,
+    max_objects: usize,
+    max_summary_chars: usize,
+    max_policy_reminders: usize,
+) -> Value {
+    json!({
+        "max_prompt_tokens": max_prompt_tokens,
+        "max_objects": max_objects,
+        "max_summary_chars": max_summary_chars,
+        "max_policy_reminders": max_policy_reminders,
+        "allow_full_content": false,
+        "allow_on_demand_fetch": true
     })
 }
 

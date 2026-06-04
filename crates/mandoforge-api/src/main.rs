@@ -2326,6 +2326,116 @@ struct ContextPacketSemanticObject {
     provenance: Value,
 }
 
+#[derive(Debug, Deserialize)]
+struct RenderContextPacketRequest {
+    #[serde(default)]
+    max_prompt_tokens: Option<usize>,
+    #[serde(default)]
+    max_objects: Option<usize>,
+    #[serde(default)]
+    max_summary_chars: Option<usize>,
+    #[serde(default)]
+    max_policy_reminders: Option<usize>,
+    #[serde(default)]
+    allow_full_content: Option<bool>,
+    #[serde(default)]
+    allow_on_demand_fetch: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RenderedExecutionContext {
+    context_packet_id: Uuid,
+    session_id: Uuid,
+    agent_id: Uuid,
+    context_packet_version: i64,
+    ontology_scope: Value,
+    role: String,
+    must_follow: Vec<String>,
+    relevant_objects: Vec<RenderedSemanticObject>,
+    fetchable_object_ids: Vec<Uuid>,
+    omitted: RenderedContextOmissions,
+    budget: RenderedContextBudget,
+    available_tools: Vec<String>,
+    full_content_included: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RenderedSemanticObject {
+    id: Uuid,
+    object_type: String,
+    object_key: String,
+    title: String,
+    summary: String,
+    trust_level: String,
+    freshness: String,
+    source_uri: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct RenderedContextOmissions {
+    token_budget_exceeded: usize,
+    object_limit_exceeded: usize,
+    policy_reminders_omitted: usize,
+    source_refs_not_rendered: usize,
+    full_content_not_rendered: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RenderedContextBudget {
+    max_prompt_tokens: usize,
+    estimated_tokens_used: usize,
+    max_objects: usize,
+    max_summary_chars: usize,
+    max_policy_reminders: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct FetchSemanticObjectRequest {
+    context_packet_id: Uuid,
+    #[serde(default)]
+    include_content: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FetchSemanticObjectResponse {
+    context_packet_id: Uuid,
+    object: FetchableSemanticObject,
+    content_included: bool,
+    fetch_policy: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FetchableSemanticObject {
+    id: Uuid,
+    object_type: String,
+    object_key: String,
+    title: String,
+    summary: String,
+    content: Option<Value>,
+    semantic_scopes: Value,
+    source_uri: Option<String>,
+    trust_level: String,
+    freshness: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExpandSemanticLinksRequest {
+    context_packet_id: Uuid,
+    object_id: Uuid,
+    #[serde(default)]
+    relation_type: Option<String>,
+    #[serde(default)]
+    max_links: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ExpandSemanticLinksResponse {
+    context_packet_id: Uuid,
+    object_id: Uuid,
+    links: Vec<SemanticLink>,
+    omitted: Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SemanticRetrievalBackendRegistry {
     selected_backend: String,
@@ -6379,6 +6489,10 @@ fn build_router(state: AppState) -> Router {
                 .patch(update_semantic_object)
                 .delete(archive_semantic_object),
         )
+        .route(
+            "/api/semantic-objects/{id}/fetch",
+            post(fetch_semantic_object),
+        )
         .route("/api/ontology/registry", get(get_ontology_registry))
         .route(
             "/api/semantic-ingestion/batches",
@@ -6388,6 +6502,7 @@ fn build_router(state: AppState) -> Router {
             "/api/semantic-links",
             get(list_semantic_links).post(create_semantic_link),
         )
+        .route("/api/semantic-links/expand", post(expand_semantic_links))
         .route(
             "/api/semantic-links/{id}",
             get(get_semantic_link)
@@ -6478,6 +6593,10 @@ fn build_router(state: AppState) -> Router {
             post(create_session_semantic_synthesis_run),
         )
         .route("/api/context-packets/{id}", get(get_context_packet))
+        .route(
+            "/api/context-packets/{id}/render",
+            post(render_context_packet),
+        )
         .route(
             "/api/semantic-retrieval/backends",
             get(get_semantic_retrieval_backends),
@@ -11011,6 +11130,50 @@ async fn get_semantic_object(
     Ok(Json(state.get_semantic_object(id).await?))
 }
 
+async fn fetch_semantic_object(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<FetchSemanticObjectRequest>,
+) -> Result<Json<FetchSemanticObjectResponse>, AppError> {
+    let packet = state.get_context_packet(input.context_packet_id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "context_packet",
+        Some(packet.session_id),
+    )
+    .await?;
+    ensure_context_packet_allows_semantic_object(&packet, id)?;
+    let object = state.get_semantic_object(id).await?;
+    let include_content = input.include_content.unwrap_or(false);
+    let response = FetchSemanticObjectResponse {
+        context_packet_id: packet.id,
+        object: FetchableSemanticObject {
+            id: object.id,
+            object_type: object.object_type,
+            object_key: object.object_key,
+            title: object.title,
+            summary: object.summary,
+            content: include_content.then_some(object.content),
+            semantic_scopes: object.semantic_scopes,
+            source_uri: object.source_uri,
+            trust_level: object.trust_level,
+            freshness: object.freshness,
+        },
+        content_included: include_content,
+        fetch_policy: json!({
+            "boundary": "context_packet",
+            "context_packet_id": packet.id,
+            "allowed_by_retrieved_objects": true,
+            "full_content_requires_explicit_request": true,
+        }),
+    };
+    record_semantic_object_fetch(&state, &packet, &response).await?;
+    Ok(Json(response))
+}
+
 async fn update_semantic_object(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -11605,6 +11768,75 @@ async fn create_semantic_link(
     let link = state.create_semantic_link(input).await?;
     record_semantic_link_audit(&state, &headers, &link, "semantic_link.created").await?;
     Ok(Json(link))
+}
+
+async fn expand_semantic_links(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<ExpandSemanticLinksRequest>,
+) -> Result<Json<ExpandSemanticLinksResponse>, AppError> {
+    let packet = state.get_context_packet(input.context_packet_id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "context_packet",
+        Some(packet.session_id),
+    )
+    .await?;
+    ensure_context_packet_allows_semantic_object(&packet, input.object_id)?;
+    let max_links = input.max_links.unwrap_or(10).clamp(1, 50);
+    let allowed_object_ids = context_packet_semantic_object_ids(&packet);
+    let object_id = input.object_id.to_string();
+    let relation_type = input
+        .relation_type
+        .as_deref()
+        .map(normalized_ontology_token)
+        .filter(|value| !value.is_empty());
+    let mut outside_packet_count = 0usize;
+    let mut relation_filtered_count = 0usize;
+    let mut links = Vec::new();
+    for link in state
+        .list_semantic_links()
+        .await?
+        .into_iter()
+        .filter(|link| link.status == "active")
+        .filter(|link| {
+            (link.from_entity_type == "semantic_object" && link.from_entity_id == object_id)
+                || (link.to_entity_type == "semantic_object" && link.to_entity_id == object_id)
+        })
+    {
+        if relation_type
+            .as_ref()
+            .is_some_and(|expected| normalized_ontology_token(&link.relation_type) != *expected)
+        {
+            relation_filtered_count += 1;
+            continue;
+        }
+        let endpoints_allowed = [link.from_entity_id.as_str(), link.to_entity_id.as_str()]
+            .into_iter()
+            .filter_map(|value| Uuid::parse_str(value).ok())
+            .all(|id| allowed_object_ids.contains(&id));
+        if !endpoints_allowed {
+            outside_packet_count += 1;
+            continue;
+        }
+        if links.len() < max_links {
+            links.push(link);
+        }
+    }
+    let response = ExpandSemanticLinksResponse {
+        context_packet_id: packet.id,
+        object_id: input.object_id,
+        links,
+        omitted: json!({
+            "outside_context_packet": outside_packet_count,
+            "relation_type_filtered": relation_filtered_count,
+            "max_links": max_links,
+        }),
+    };
+    record_semantic_links_expanded(&state, &packet, &response).await?;
+    Ok(Json(response))
 }
 
 async fn get_semantic_link(
@@ -26918,6 +27150,24 @@ async fn get_context_packet(
     Ok(Json(packet))
 }
 
+async fn render_context_packet(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<RenderContextPacketRequest>,
+) -> Result<Json<RenderedExecutionContext>, AppError> {
+    let packet = state.get_context_packet(id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "context_packet",
+        Some(packet.session_id),
+    )
+    .await?;
+    Ok(Json(render_execution_context(&packet, input)))
+}
+
 async fn get_semantic_retrieval_backends(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -28584,6 +28834,260 @@ fn semantic_object_rank(object: &ContextPacketSemanticObject) -> i32 {
         _ => 0,
     };
     freshness_score + trust_score
+}
+
+fn render_execution_context(
+    packet: &ContextPacket,
+    input: RenderContextPacketRequest,
+) -> RenderedExecutionContext {
+    let max_prompt_tokens = bounded_render_budget(input.max_prompt_tokens, 1_500, 256, 8_000);
+    let max_objects = bounded_render_budget(input.max_objects, 5, 1, 20);
+    let max_summary_chars = bounded_render_budget(input.max_summary_chars, 280, 32, 1_200);
+    let max_policy_reminders = bounded_render_budget(input.max_policy_reminders, 3, 0, 12);
+    let allow_on_demand_fetch = input.allow_on_demand_fetch.unwrap_or(true);
+    let _allow_full_content = input.allow_full_content.unwrap_or(false);
+
+    let mut must_follow = packet
+        .policy_reminders
+        .iter()
+        .take(max_policy_reminders)
+        .cloned()
+        .collect::<Vec<_>>();
+    if must_follow.len() < max_policy_reminders {
+        must_follow.extend(
+            packet
+                .freshness_warnings
+                .iter()
+                .take(max_policy_reminders - must_follow.len())
+                .map(|warning| format!("Freshness warning: {warning}")),
+        );
+    }
+
+    let mut omitted = RenderedContextOmissions {
+        policy_reminders_omitted: packet
+            .policy_reminders
+            .len()
+            .saturating_sub(max_policy_reminders),
+        source_refs_not_rendered: packet.source_refs.len(),
+        full_content_not_rendered: packet.retrieved_objects.len(),
+        ..Default::default()
+    };
+
+    let mut estimated_tokens_used = estimate_rendered_context_base_tokens(packet, &must_follow);
+    let mut relevant_objects = Vec::new();
+    for object in &packet.retrieved_objects {
+        if relevant_objects.len() >= max_objects {
+            omitted.object_limit_exceeded += 1;
+            continue;
+        }
+        let rendered = RenderedSemanticObject {
+            id: object.id,
+            object_type: object.object_type.clone(),
+            object_key: object.object_key.clone(),
+            title: truncate_for_execution_context(&object.title, max_summary_chars),
+            summary: truncate_for_execution_context(&object.summary, max_summary_chars),
+            trust_level: object.trust_level.clone(),
+            freshness: object.freshness.clone(),
+            source_uri: object.source_uri.clone(),
+        };
+        let object_tokens = estimate_tokens(&format!(
+            "{} {} {} {} {}",
+            rendered.object_type,
+            rendered.object_key,
+            rendered.title,
+            rendered.summary,
+            rendered.source_uri.clone().unwrap_or_default()
+        ));
+        if estimated_tokens_used + object_tokens > max_prompt_tokens {
+            omitted.token_budget_exceeded += 1;
+            continue;
+        }
+        estimated_tokens_used += object_tokens;
+        relevant_objects.push(rendered);
+    }
+
+    let available_tools = if allow_on_demand_fetch {
+        vec![
+            "semantic_object.fetch".to_string(),
+            "semantic_link.expand".to_string(),
+            "ontology_type.lookup".to_string(),
+        ]
+    } else {
+        Vec::new()
+    };
+    let fetchable_object_ids = if allow_on_demand_fetch {
+        packet
+            .retrieved_objects
+            .iter()
+            .map(|object| object.id)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    RenderedExecutionContext {
+        context_packet_id: packet.id,
+        session_id: packet.session_id,
+        agent_id: packet.agent_id,
+        context_packet_version: packet.version,
+        ontology_scope: render_ontology_scope(&packet.semantic_scopes),
+        role: packet.agent.agent_role.clone(),
+        must_follow,
+        relevant_objects,
+        fetchable_object_ids,
+        omitted,
+        budget: RenderedContextBudget {
+            max_prompt_tokens,
+            estimated_tokens_used,
+            max_objects,
+            max_summary_chars,
+            max_policy_reminders,
+        },
+        available_tools,
+        full_content_included: false,
+    }
+}
+
+fn bounded_render_budget(
+    requested: Option<usize>,
+    default: usize,
+    minimum: usize,
+    maximum: usize,
+) -> usize {
+    requested.unwrap_or(default).clamp(minimum, maximum)
+}
+
+fn render_ontology_scope(semantic_scopes: &Value) -> Value {
+    let Some(scopes) = semantic_scopes.as_object() else {
+        return json!({});
+    };
+    let rendered = scopes
+        .iter()
+        .filter(|(key, _)| key.ends_with("_scope"))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<serde_json::Map<_, _>>();
+    Value::Object(rendered)
+}
+
+fn truncate_for_execution_context(value: &str, max_chars: usize) -> String {
+    let trimmed = value.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+    let keep = max_chars.saturating_sub(3);
+    let mut output = trimmed.chars().take(keep).collect::<String>();
+    output.push_str("...");
+    output
+}
+
+fn estimate_rendered_context_base_tokens(packet: &ContextPacket, must_follow: &[String]) -> usize {
+    estimate_tokens(&format!(
+        "{} {} {} {}",
+        packet.id,
+        packet.agent.agent_role,
+        packet.semantic_scopes,
+        must_follow.join(" ")
+    ))
+}
+
+fn estimate_tokens(value: &str) -> usize {
+    value.chars().count().div_ceil(4).max(1)
+}
+
+fn ensure_context_packet_allows_semantic_object(
+    packet: &ContextPacket,
+    object_id: Uuid,
+) -> Result<(), AppError> {
+    if packet
+        .retrieved_objects
+        .iter()
+        .any(|object| object.id == object_id)
+    {
+        Ok(())
+    } else {
+        Err(AppError::forbidden(
+            "semantic object is not available in this context packet",
+        ))
+    }
+}
+
+fn context_packet_semantic_object_ids(packet: &ContextPacket) -> HashSet<Uuid> {
+    packet
+        .retrieved_objects
+        .iter()
+        .map(|object| object.id)
+        .collect()
+}
+
+async fn record_semantic_object_fetch(
+    state: &AppState,
+    packet: &ContextPacket,
+    response: &FetchSemanticObjectResponse,
+) -> Result<(), AppError> {
+    let details = json!({
+        "context_packet_id": packet.id,
+        "context_packet_version": packet.version,
+        "semantic_object_id": response.object.id,
+        "object_key": response.object.object_key,
+        "content_included": response.content_included,
+    });
+    state
+        .append_event(
+            "tool",
+            Some(response.object.id),
+            packet.session_id,
+            "semantic_object.fetched",
+            details.clone(),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(packet.session_id),
+            "tool",
+            Some(response.object.id),
+            "semantic_object.fetched",
+            "semantic_object",
+            Some(response.object.id),
+            details,
+        ))
+        .await?;
+    Ok(())
+}
+
+async fn record_semantic_links_expanded(
+    state: &AppState,
+    packet: &ContextPacket,
+    response: &ExpandSemanticLinksResponse,
+) -> Result<(), AppError> {
+    let details = json!({
+        "context_packet_id": packet.id,
+        "context_packet_version": packet.version,
+        "semantic_object_id": response.object_id,
+        "link_count": response.links.len(),
+        "link_ids": response.links.iter().map(|link| link.id).collect::<Vec<_>>(),
+        "omitted": response.omitted.clone(),
+    });
+    state
+        .append_event(
+            "tool",
+            Some(response.object_id),
+            packet.session_id,
+            "semantic_links.expanded",
+            details.clone(),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(packet.session_id),
+            "tool",
+            Some(response.object_id),
+            "semantic_links.expanded",
+            "semantic_object",
+            Some(response.object_id),
+            details,
+        ))
+        .await?;
+    Ok(())
 }
 
 async fn evaluate_semantic_context_gate(
@@ -80181,6 +80685,59 @@ not json
             ),
         )
         .await;
+        let semantic_object_detail: SemanticObject = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-objects",
+                json!({
+                    "source_id": source.id,
+                    "object_type": "workflow",
+                    "object_key": "workflow:context-os-detail",
+                    "title": "Context OS detail fetch",
+                    "summary": "Agent runs should fetch detailed semantic object content only through a context-packet-bound tool.",
+                    "content": {"stage": "5.2", "detail": "fetchable only"},
+                    "semantic_scopes": {
+                        "project_scope": "mandoforge",
+                        "repo_scope": "mandoforge",
+                        "service_scope": "mandoforge-api",
+                        "workflow_scope": "context-os",
+                        "policy_scope": "approval-required",
+                        "memory_scope": "engineering"
+                    },
+                    "provenance": {"source_ref": "tasks/todo.md"},
+                    "trust_level": "human_verified",
+                    "freshness": "current"
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        let semantic_link: SemanticLink = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-links",
+                json!({
+                    "from_entity_type": "semantic_object",
+                    "from_entity_id": semantic_object.id,
+                    "relation_type": "supports",
+                    "to_entity_type": "semantic_object",
+                    "to_entity_id": semantic_object_detail.id,
+                    "metadata": {"purpose": "on_demand_context"},
+                    "provenance": {"source_ref": "context packet test"},
+                    "confidence": 0.95
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
         let agent: Agent = request_json(
             app.clone(),
             json_request_with_headers(
@@ -80250,6 +80807,12 @@ not json
                 && object.trust_level == "human_verified"
                 && object.freshness == "current"
         }));
+        assert!(
+            packet_v1
+                .retrieved_objects
+                .iter()
+                .any(|object| object.id == semantic_object_detail.id)
+        );
         assert!(packet_v1.source_refs.iter().any(|source_ref| {
             source_ref.source_type == "semantic_object"
                 && source_ref.source_id == semantic_object.id.to_string()
@@ -80263,6 +80826,88 @@ not json
             packet_v1.replay_summary["retrieved_object_count"],
             json!(packet_v1.retrieved_objects.len())
         );
+
+        let rendered: RenderedExecutionContext = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/context-packets/{}/render", packet_v1.id),
+                json!({
+                    "max_prompt_tokens": 256,
+                    "max_objects": 1,
+                    "max_summary_chars": 64,
+                    "max_policy_reminders": 2,
+                    "allow_on_demand_fetch": true
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(rendered.context_packet_id, packet_v1.id);
+        assert_eq!(rendered.context_packet_version, 1);
+        assert_eq!(rendered.ontology_scope["workflow_scope"], "context-os");
+        assert_eq!(rendered.relevant_objects.len(), 1);
+        assert!(!rendered.full_content_included);
+        assert!(rendered.fetchable_object_ids.contains(&semantic_object.id));
+        assert!(
+            rendered
+                .fetchable_object_ids
+                .contains(&semantic_object_detail.id)
+        );
+        assert_eq!(
+            rendered.omitted.source_refs_not_rendered,
+            packet_v1.source_refs.len()
+        );
+        assert_eq!(
+            rendered.omitted.full_content_not_rendered,
+            packet_v1.retrieved_objects.len()
+        );
+
+        let fetched_object: FetchSemanticObjectResponse = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/semantic-objects/{}/fetch", semantic_object.id),
+                json!({
+                    "context_packet_id": packet_v1.id,
+                    "include_content": true
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(fetched_object.context_packet_id, packet_v1.id);
+        assert_eq!(fetched_object.object.id, semantic_object.id);
+        assert!(fetched_object.content_included);
+        assert_eq!(fetched_object.object.content, Some(json!({"stage": "5.2"})));
+
+        let expanded_links: ExpandSemanticLinksResponse = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/semantic-links/expand",
+                json!({
+                    "context_packet_id": packet_v1.id,
+                    "object_id": semantic_object.id,
+                    "relation_type": "supports",
+                    "max_links": 5
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(expanded_links.context_packet_id, packet_v1.id);
+        assert_eq!(expanded_links.links.len(), 1);
+        assert_eq!(expanded_links.links[0].id, semantic_link.id);
 
         let packet_v2: ContextPacket = request_json(
             app.clone(),
@@ -80349,7 +80994,8 @@ not json
             event.event_type == "context_packet.generated"
                 && event.payload["context_packet_id"] == json!(packet_v1.id)
                 && event.payload["version"] == json!(1)
-                && event.payload["retrieved_object_count"] == json!(1)
+                && event.payload["retrieved_object_count"]
+                    == json!(packet_v1.retrieved_objects.len())
                 && event.payload["retrieved_objects"][0]["id"] == json!(semantic_object.id)
         }));
 
@@ -80367,7 +81013,7 @@ not json
             log.action == "context_packet.generated"
                 && log.resource_id == Some(packet_v1.id)
                 && log.details["version"] == json!(1)
-                && log.details["retrieved_object_count"] == json!(1)
+                && log.details["retrieved_object_count"] == json!(packet_v1.retrieved_objects.len())
         }));
     }
 
