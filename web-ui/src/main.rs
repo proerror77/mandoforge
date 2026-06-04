@@ -301,7 +301,7 @@ fn App() -> Html {
                             .set("Context render failed: no session is available.".to_string());
                         return;
                     };
-                    let path = format!("/api/sessions/{}/context-packets", session.id);
+                    let path = format!("/api/sessions/{}/context-packet", session.id);
                     match api_post::<ContextPacket, _>(&path, &json!({})).await {
                         Ok(packet) => {
                             context_packet_id.set(packet.id.clone());
