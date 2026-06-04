@@ -1,0 +1,25 @@
+id: after-sales-triage
+entry_agent: connector-reader
+steps:
+  - agent: connector-reader
+    task: read refund, return, logistics, order, product, and platform-intervention evidence
+    output_schema: after-sales-triage
+  - agent: touchpoint-analyzer
+    handoff_intent: classify-after-sales-risk
+    skills:
+      - tmall-after-sales-triage
+      - tmall-service-risk-classifier
+  - agent: response-writer
+    handoff_intent: draft-after-sales-plan
+    output_schema: after-sales-triage
+    skills:
+      - tmall-customer-reply-drafter
+      - tmall-after-sales-triage
+approval:
+  required_before_external_write: true
+  required_before_refund_agree: true
+  required_before_refund_refuse: true
+  required_before_compensation_commitment: true
+output:
+  draft_only: true
+  provenance_required: true

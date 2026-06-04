@@ -1,0 +1,34 @@
+id: product-knowledge-sync
+entry_agent: connector-reader
+steps:
+  - agent: connector-reader
+    task: read item, SKU, media, attribute, FAQ, activity, and policy source data
+    output_schema: product-knowledge
+  - agent: touchpoint-analyzer
+    handoff_intent: classify-product-knowledge-gap
+    skills:
+      - tmall-product-knowledge-sync
+output:
+  draft_only: true
+  provenance_required: true
+handoff_rules:
+  root_task_grant:
+    memory_scope:
+      mode: candidate_writeback
+      allowed_scope_keys:
+        - domain_scope
+        - workflow_scope
+        - memory_scope
+        - share_policy
+      allowed_object_types:
+        - memory
+      allowed_source_types:
+        - semantic_synthesis
+        - artifact
+        - session_event
+      allowed_object_ids: []
+      minimum_trust_level: source_attested
+      max_objects: 25
+      approval_memory_allowed: false
+      handoff_memory_allowed: false
+      writeback_allowed: true

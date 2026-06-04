@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["risk_policy"],
+  "properties": {
+    "risk_policy": {
+      "type": "object",
+      "required": ["critical", "high", "medium", "low"],
+      "additionalProperties": {
+        "type": "object",
+        "required": ["approval_required", "external_write_allowed"],
+        "properties": {
+          "approval_required": { "type": "boolean" },
+          "external_write_allowed": { "type": "boolean" },
+          "examples": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    }
+  },
+  "additionalProperties": false
+}

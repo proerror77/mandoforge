@@ -1,0 +1,22 @@
+risk_tiers:
+  critical:
+    approval_required: true
+    approver_role: admin
+  high:
+    approval_required: true
+    approver_role: operator
+  medium:
+    approval_required: false
+    approver_role: operator
+external_writes:
+  default: blocked
+  allowed_with_approval:
+    - native.connector.call
+write_operations_requiring_approval:
+  - send-approved-customer-message
+  - submit-approved-review-explanation
+  - create-approved-qianniu-workorder
+  - execute-approved-after-sales-action
+  - upload-approved-product-image
+  - upload-approved-product-video
+  - associate-approved-product-video

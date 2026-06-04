@@ -1,0 +1,1 @@
+{"id":"store-profile-grounding-required","input":{"store_name":"Example Tmall Store","shop_id":"123456","brand_voice":"专业克制"},"expected_fragments":["store","connector_map","risk_policy","approval_matrix","output_style"]}

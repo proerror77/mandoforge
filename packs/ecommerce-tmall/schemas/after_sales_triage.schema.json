@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["case_id", "case_type", "recommended_path", "risk_tier", "approval_required", "provenance"],
+  "properties": {
+    "case_id": { "type": "string", "minLength": 1 },
+    "case_type": { "type": "string", "enum": ["refund_only", "return_refund", "exchange", "logistics", "quality", "platform_dispute", "other"] },
+    "recommended_path": { "type": "string", "minLength": 1 },
+    "evidence_needed": { "type": "array", "items": { "type": "string" } },
+    "buyer_facing_draft": { "type": "string" },
+    "risk_tier": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+    "approval_required": { "type": "boolean" },
+    "provenance": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 }
+  },
+  "additionalProperties": true
+}

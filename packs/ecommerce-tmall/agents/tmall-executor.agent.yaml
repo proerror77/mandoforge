@@ -1,0 +1,3 @@
+id: tmall-executor
+role: executor
+instructions: Execute approved Tmall native connector writes only when the task grant and approval token exactly authorize the connector id, operation, and payload.

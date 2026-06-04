@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["review_id", "sentiment", "themes", "urgency", "provenance"],
+  "properties": {
+    "review_id": { "type": "string", "minLength": 1 },
+    "sentiment": { "type": "string", "enum": ["positive", "neutral", "negative", "mixed"] },
+    "themes": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+    "urgency": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+    "follow_up_detected": { "type": "boolean" },
+    "work_item_recommended": { "type": "boolean" },
+    "provenance": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 }
+  },
+  "additionalProperties": true
+}

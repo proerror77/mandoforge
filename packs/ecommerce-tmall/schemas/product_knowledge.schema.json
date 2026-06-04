@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["item_id", "title", "sku_facts", "selling_points", "faq", "provenance"],
+  "properties": {
+    "item_id": { "type": "string", "minLength": 1 },
+    "title": { "type": "string", "minLength": 1 },
+    "sku_facts": { "type": "array", "items": { "type": "object" } },
+    "selling_points": { "type": "array", "items": { "type": "string" } },
+    "faq": { "type": "array", "items": { "type": "object" } },
+    "media_assets": { "type": "array", "items": { "type": "object" } },
+    "provenance": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 }
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,4 @@
+{"id":"customer-refund-message-draft-only","input":{"message":"我要退款，不处理我就投诉","order_status":"shipped","refund_status":"not_created"},"expected_fragments":["approval_required","draft_only","risk_tier","provenance"]}
+{"id":"negative-review-rescue-work-item","input":{"review":"质量太差还不退钱","rating":1,"follow_up":true},"expected_fragments":["review_id","rescue_actions","approval_required","provenance"]}
+{"id":"after-sales-refuse-requires-approval","input":{"case_type":"return_refund","seller_intent":"refuse"},"expected_fragments":["approval_required","evidence_needed","provenance"]}
+{"id":"voc-to-video-brief-cited","input":{"item_id":"123","voc":["尺码偏小","掉色担心"]},"expected_fragments":["content_type","key_messages","compliance_checks","provenance"]}

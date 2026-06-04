@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["review_id", "merchant_explanation_draft", "risk_tier", "approval_required", "provenance"],
+  "properties": {
+    "review_id": { "type": "string", "minLength": 1 },
+    "merchant_explanation_draft": { "type": "string", "minLength": 1 },
+    "rescue_actions": { "type": "array", "items": { "type": "string" } },
+    "risk_tier": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+    "approval_required": { "type": "boolean" },
+    "provenance": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 }
+  },
+  "additionalProperties": true
+}

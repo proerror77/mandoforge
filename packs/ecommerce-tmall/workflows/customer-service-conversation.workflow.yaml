@@ -1,0 +1,21 @@
+id: customer-service-conversation
+entry_agent: connector-reader
+steps:
+  - agent: connector-reader
+    task: read customer message, order context, product knowledge, refund state, and relevant policy
+    output_schema: order-context
+  - agent: touchpoint-analyzer
+    handoff_intent: classify-customer-service-intent
+    skills:
+      - tmall-service-risk-classifier
+  - agent: response-writer
+    handoff_intent: draft-customer-reply
+    output_schema: customer-reply-draft
+    skills:
+      - tmall-customer-reply-drafter
+approval:
+  required_before_external_write: true
+  required_before_customer_message_send: true
+output:
+  draft_only: true
+  provenance_required: true

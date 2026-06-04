@@ -17824,7 +17824,10 @@ async fn plan_workflow_pack_config_wizard(
 }
 
 fn workflow_pack_marketplace_manifest_paths() -> Vec<String> {
-    vec!["packs/ai-governance/package.yaml".to_string()]
+    vec![
+        "packs/ai-governance/package.yaml".to_string(),
+        "packs/ecommerce-tmall/package.yaml".to_string(),
+    ]
 }
 
 fn workflow_pack_marketplace_id_from_path(manifest_path: &str) -> String {
@@ -61633,6 +61636,13 @@ not json
                 .unwrap()
                 .iter()
                 .any(|pack| { pack["id"] == "ai-governance" })
+        );
+        assert!(
+            marketplace["packs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|pack| { pack["id"] == "ecommerce-tmall" })
         );
 
         let wizard: Value = request_json(

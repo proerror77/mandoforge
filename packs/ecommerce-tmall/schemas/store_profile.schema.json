@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["shop_id", "store_name", "brand_voice", "product_categories", "escalation_owners"],
+  "properties": {
+    "shop_id": { "type": "string", "minLength": 1 },
+    "store_name": { "type": "string", "minLength": 1 },
+    "brand_voice": { "type": "string", "minLength": 1 },
+    "product_categories": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "escalation_owners": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "customer_service_hours": { "type": "string" },
+    "after_sales_policy_ref": { "type": "string" },
+    "review_policy_ref": { "type": "string" },
+    "content_compliance_ref": { "type": "string" }
+  },
+  "additionalProperties": true
+}

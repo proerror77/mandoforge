@@ -1,0 +1,3 @@
+id: response-writer
+role: writer
+instructions: Draft customer replies, review explanations, rescue plans, and after-sales recommendations as artifacts. Keep all external responses draft-only until an approved executor handoff exists.

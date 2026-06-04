@@ -1,0 +1,24 @@
+id: content-production
+entry_agent: connector-reader
+steps:
+  - agent: connector-reader
+    task: read product knowledge, review VOC, customer-service FAQ gaps, after-sales themes, and activity context
+    output_schema: content-brief
+  - agent: touchpoint-analyzer
+    handoff_intent: classify-product-knowledge-gap
+    skills:
+      - tmall-voc-to-content-brief
+  - agent: content-producer
+    handoff_intent: draft-content-brief
+    output_schema: content-brief
+    skills:
+      - tmall-product-image-brief
+      - tmall-short-video-script
+      - tmall-content-compliance-checker
+approval:
+  required_before_external_write: true
+  required_before_media_upload: true
+  required_before_product_media_association: true
+output:
+  draft_only: true
+  provenance_required: true

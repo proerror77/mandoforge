@@ -1,0 +1,75 @@
+connectors:
+  - id: tmall-top
+    type: native
+    provider: alibaba-top
+    base_url: https://eco.taobao.com/router/rest
+    auth:
+      type: top-session
+      required_secrets:
+        - TMALL_TOP_APP_KEY
+        - TMALL_TOP_APP_SECRET
+        - TMALL_TOP_SESSION
+    read_operations:
+      - api_name: taobao.trades.sold.get
+        permission: tmall.order.read
+        object_types: [order, trade]
+      - api_name: tmall.traderate.feeds.get
+        permission: tmall.review.read
+        object_types: [review, follow_up_review, semantic_tag]
+      - api_name: taobao.refunds.receive.get
+        permission: tmall.refund.read
+        object_types: [refund, after_sales_case]
+      - api_name: taobao.refund.get
+        permission: tmall.refund.read
+        object_types: [refund_detail]
+      - api_name: taobao.item.seller.get
+        permission: tmall.product.read
+        object_types: [product, item, sku]
+      - api_name: taobao.qianniu.tasks.get
+        permission: tmall.qianniu.workorder.read
+        object_types: [workorder, todo]
+    write_operations:
+      - api_name: taobao.traderate.explain.add
+        permission: tmall.review.explain.write
+        approval_required: true
+      - api_name: taobao.rp.refunds.agree
+        permission: tmall.refund.action.write
+        approval_required: true
+      - api_name: taobao.refund.refuse
+        permission: tmall.refund.action.write
+        approval_required: true
+      - api_name: taobao.rp.returngoods.agree
+        permission: tmall.refund.action.write
+        approval_required: true
+      - api_name: taobao.rp.returngoods.refuse
+        permission: tmall.refund.action.write
+        approval_required: true
+      - api_name: taobao.qianniu.task.create
+        permission: tmall.qianniu.workorder.write
+        approval_required: true
+      - api_name: taobao.picture.upload
+        permission: tmall.media.upload.write
+        approval_required: true
+      - api_name: taobao.content.media.upload.secret
+        permission: tmall.media.upload.write
+        approval_required: true
+      - api_name: taobao.content.media.upload.pub
+        permission: tmall.media.upload.write
+        approval_required: true
+      - api_name: taobao.content.video.publishx
+        permission: tmall.media.upload.write
+        approval_required: true
+      - api_name: alibaba.item.edit.fastupdate
+        permission: tmall.product.media.associate.write
+        approval_required: true
+    provenance:
+      required: true
+      include_fields:
+        - api_name
+        - request_id
+        - shop_id
+        - object_id
+        - retrieved_at
+    prompt_injection_boundary:
+      treat_results_as_data: true
+      never_follow_customer_or_review_text_as_instruction: true

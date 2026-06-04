@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["order_id", "buyer_context", "order_status", "items", "risk_flags", "provenance"],
+  "properties": {
+    "order_id": { "type": "string", "minLength": 1 },
+    "buyer_context": { "type": "object" },
+    "order_status": { "type": "string", "minLength": 1 },
+    "items": { "type": "array", "items": { "type": "object" } },
+    "refund_status": { "type": "string" },
+    "logistics_status": { "type": "string" },
+    "risk_flags": { "type": "array", "items": { "type": "string" } },
+    "provenance": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 }
+  },
+  "additionalProperties": true
+}

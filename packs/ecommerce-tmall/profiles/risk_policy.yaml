@@ -1,0 +1,32 @@
+risk_policy:
+  critical:
+    approval_required: true
+    external_write_allowed: true
+    examples:
+      - refund_refuse
+      - platform_dispute
+      - compensation_commitment
+      - product_claim_change
+  high:
+    approval_required: true
+    external_write_allowed: true
+    examples:
+      - customer_message_send
+      - review_explanation_submit
+      - refund_agree
+      - qianniu_workorder_create
+      - media_upload
+  medium:
+    approval_required: false
+    external_write_allowed: false
+    examples:
+      - reply_draft
+      - content_brief
+      - voc_summary
+  low:
+    approval_required: false
+    external_write_allowed: false
+    examples:
+      - read_context
+      - classify_intent
+      - generate_internal_note

@@ -1,0 +1,17 @@
+id: profile-onboarding
+entry_agent: connector-reader
+outputs:
+  - store
+  - approval-matrix
+  - connector-map
+  - risk-policy
+  - output-style
+steps:
+  - agent: connector-reader
+    task: collect Tmall store identity, connector permissions, source references, and policy documents
+  - agent: touchpoint-analyzer
+    task: normalize store operations context into profile schemas
+  - agent: response-writer
+    task: draft tenant profiles as versioned artifacts
+approval:
+  required_before_release: true

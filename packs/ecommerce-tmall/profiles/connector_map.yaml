@@ -1,0 +1,15 @@
+connectors:
+  tmall-top:
+    scope: tenant
+    required_permissions:
+      - tmall.order.read
+      - tmall.product.read
+      - tmall.review.read
+      - tmall.refund.read
+      - tmall.qianniu.workorder.read
+      - tmall.customer.message.draft
+      - tmall.review.explain.write
+      - tmall.refund.action.write
+      - tmall.qianniu.workorder.write
+      - tmall.media.upload.write
+      - tmall.product.media.associate.write

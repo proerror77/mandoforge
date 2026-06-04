@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["item_id", "content_type", "objective", "key_messages", "compliance_checks", "provenance"],
+  "properties": {
+    "item_id": { "type": "string", "minLength": 1 },
+    "content_type": { "type": "string", "enum": ["main_image", "detail_page", "short_video", "faq", "live_script", "review_rescue"] },
+    "objective": { "type": "string", "minLength": 1 },
+    "key_messages": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 },
+    "required_assets": { "type": "array", "items": { "type": "string" } },
+    "forbidden_claims": { "type": "array", "items": { "type": "string" } },
+    "compliance_checks": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 },
+    "approval_required": { "type": "boolean" },
+    "provenance": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 }
+  },
+  "additionalProperties": true
+}

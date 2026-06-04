@@ -1,0 +1,24 @@
+id: negative-review-rescue
+entry_agent: connector-reader
+steps:
+  - agent: connector-reader
+    task: read negative review, follow-up review, order context, refund status, and product knowledge
+    output_schema: review-voc
+  - agent: touchpoint-analyzer
+    handoff_intent: classify-review-voc
+    skills:
+      - tmall-review-voc-ingestor
+      - tmall-service-risk-classifier
+  - agent: response-writer
+    handoff_intent: draft-negative-review-rescue-plan
+    output_schema: review-reply-draft
+    skills:
+      - tmall-negative-review-rescue
+      - tmall-review-reply-drafter
+approval:
+  required_before_external_write: true
+  required_before_review_explanation_submit: true
+  required_before_workorder_create: true
+output:
+  draft_only: true
+  provenance_required: true

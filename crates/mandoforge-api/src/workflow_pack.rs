@@ -850,6 +850,12 @@ mod tests {
             .join("packs/ai-governance/package.yaml")
     }
 
+    fn ecommerce_tmall_manifest_path() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("packs/ecommerce-tmall/package.yaml")
+    }
+
     #[test]
     fn validates_ai_governance_workflow_pack_fixture() {
         let report = validate_workflow_pack_manifest_path(&fixture_manifest_path())
@@ -861,6 +867,19 @@ mod tests {
         assert_eq!(report.connector_count, 1);
         assert_eq!(report.required_eval_gate_count, 2);
         assert!(report.validated_file_count >= 10);
+    }
+
+    #[test]
+    fn validates_ecommerce_tmall_domain_pack_fixture() {
+        let report = validate_workflow_pack_manifest_path(&ecommerce_tmall_manifest_path())
+            .expect("Tmall ecommerce domain pack fixture should validate");
+
+        assert_eq!(report.pack_id, "ecommerce-tmall");
+        assert_eq!(report.schema_version, SUPPORTED_SCHEMA_VERSION);
+        assert_eq!(report.agent_count, 5);
+        assert_eq!(report.connector_count, 1);
+        assert_eq!(report.required_eval_gate_count, 2);
+        assert!(report.validated_file_count >= 30);
     }
 
     #[test]

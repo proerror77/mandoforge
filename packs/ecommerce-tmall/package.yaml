@@ -1,0 +1,327 @@
+schema_version: workflowpack.mandoforge.dev/v1
+kind: DomainPack
+id: ecommerce-tmall
+name: Tmall Ecommerce Operations Pack
+version: 0.1.0
+description: Draft-first Tmall store operations workflows for customer service, reviews, after-sales, product knowledge, and content production.
+capabilities:
+  - tmall-order-context
+  - tmall-product-knowledge-sync
+  - tmall-customer-reply-drafter
+  - tmall-service-risk-classifier
+  - tmall-review-voc-ingestor
+  - tmall-review-reply-drafter
+  - tmall-negative-review-rescue
+  - tmall-question-answer-ops
+  - tmall-after-sales-triage
+  - tmall-voc-to-content-brief
+  - tmall-product-image-brief
+  - tmall-short-video-script
+  - tmall-content-compliance-checker
+profiles:
+  - id: default
+    path: profiles/default.md
+    required: true
+  - id: onboarding
+    path: profiles/onboarding.md
+    required: true
+  - id: store
+    path: profiles/store.md
+    required: true
+  - id: approval-matrix
+    path: profiles/approval_matrix.yaml
+    required: true
+  - id: connector-map
+    path: profiles/connector_map.yaml
+    required: true
+  - id: risk-policy
+    path: profiles/risk_policy.yaml
+    required: true
+  - id: output-style
+    path: profiles/output_style.md
+    required: true
+skills:
+  - id: tmall-order-context
+    path: skills/tmall-order-context/skill.md
+    required: true
+  - id: tmall-product-knowledge-sync
+    path: skills/tmall-product-knowledge-sync/skill.md
+    required: true
+  - id: tmall-review-voc-ingestor
+    path: skills/tmall-review-voc-ingestor/skill.md
+    required: true
+  - id: tmall-customer-reply-drafter
+    path: skills/tmall-customer-reply-drafter/skill.md
+    required: true
+  - id: tmall-service-risk-classifier
+    path: skills/tmall-service-risk-classifier/skill.md
+    required: true
+  - id: tmall-review-reply-drafter
+    path: skills/tmall-review-reply-drafter/skill.md
+    required: true
+  - id: tmall-negative-review-rescue
+    path: skills/tmall-negative-review-rescue/skill.md
+    required: true
+  - id: tmall-question-answer-ops
+    path: skills/tmall-question-answer-ops/skill.md
+    required: true
+  - id: tmall-after-sales-triage
+    path: skills/tmall-after-sales-triage/skill.md
+    required: true
+  - id: tmall-voc-to-content-brief
+    path: skills/tmall-voc-to-content-brief/skill.md
+    required: true
+  - id: tmall-product-image-brief
+    path: skills/tmall-product-image-brief/skill.md
+    required: true
+  - id: tmall-short-video-script
+    path: skills/tmall-short-video-script/skill.md
+    required: true
+  - id: tmall-content-compliance-checker
+    path: skills/tmall-content-compliance-checker/skill.md
+    required: true
+workflows:
+  - id: customer-service-conversation
+    path: workflows/customer-service-conversation.workflow.yaml
+    entry_agent: connector-reader
+  - id: review-voc-and-reply
+    path: workflows/review-voc-and-reply.workflow.yaml
+    entry_agent: connector-reader
+  - id: negative-review-rescue
+    path: workflows/negative-review-rescue.workflow.yaml
+    entry_agent: connector-reader
+  - id: question-answer-ops
+    path: workflows/question-answer-ops.workflow.yaml
+    entry_agent: connector-reader
+  - id: after-sales-triage
+    path: workflows/after-sales-triage.workflow.yaml
+    entry_agent: connector-reader
+  - id: product-knowledge-sync
+    path: workflows/product-knowledge-sync.workflow.yaml
+    entry_agent: connector-reader
+  - id: content-production
+    path: workflows/content-production.workflow.yaml
+    entry_agent: connector-reader
+  - id: profile-onboarding
+    path: workflows/profile-onboarding.workflow.yaml
+    entry_agent: connector-reader
+agents:
+  - id: connector-reader
+    path: agents/connector-reader.agent.yaml
+    role: reader
+    tool_scope:
+      read:
+        - connector.read
+    handoffs:
+      - target_agent: touchpoint-analyzer
+        intents:
+          - classify-customer-service-intent
+          - classify-review-voc
+          - classify-after-sales-risk
+          - classify-question-answer-gap
+          - classify-product-knowledge-gap
+        risk_level: medium
+        approval_required: false
+        schema: schemas/handoff.schema.json
+  - id: touchpoint-analyzer
+    path: agents/touchpoint-analyzer.agent.yaml
+    role: analyzer
+    tool_scope:
+      read:
+        - profile.read
+        - schema.read
+    handoffs:
+      - target_agent: response-writer
+        intents:
+          - draft-customer-reply
+          - draft-review-explanation
+          - draft-negative-review-rescue-plan
+          - draft-after-sales-plan
+        risk_level: high
+        approval_required: true
+        schema: schemas/handoff.schema.json
+      - target_agent: content-producer
+        intents:
+          - draft-content-brief
+          - draft-image-brief
+          - draft-short-video-script
+        risk_level: medium
+        approval_required: false
+        schema: schemas/handoff.schema.json
+  - id: response-writer
+    path: agents/response-writer.agent.yaml
+    role: writer
+    tool_scope:
+      read:
+        - profile.read
+      write:
+        - artifact.write
+    handoffs:
+      - target_agent: tmall-executor
+        intents:
+          - send-approved-customer-message
+          - submit-approved-review-explanation
+          - create-approved-qianniu-workorder
+          - execute-approved-after-sales-action
+        risk_level: high
+        approval_required: true
+        schema: schemas/handoff.schema.json
+  - id: content-producer
+    path: agents/content-producer.agent.yaml
+    role: writer
+    tool_scope:
+      read:
+        - profile.read
+      write:
+        - artifact.write
+    handoffs:
+      - target_agent: tmall-executor
+        intents:
+          - upload-approved-product-image
+          - upload-approved-product-video
+          - associate-approved-product-video
+        risk_level: high
+        approval_required: true
+        schema: schemas/handoff.schema.json
+  - id: tmall-executor
+    path: agents/tmall-executor.agent.yaml
+    role: executor
+    tool_scope:
+      read:
+        - profile.read
+      write:
+        - artifact.write
+      external_write:
+        - native.connector.call
+connectors:
+  - id: tmall-top
+    kind: native
+    path: connectors/tmall-top.yaml
+    required_permissions:
+      - tmall.order.read
+      - tmall.product.read
+      - tmall.review.read
+      - tmall.refund.read
+      - tmall.qianniu.workorder.read
+      - tmall.customer.message.draft
+      - tmall.review.explain.write
+      - tmall.refund.action.write
+      - tmall.qianniu.workorder.write
+      - tmall.media.upload.write
+      - tmall.product.media.associate.write
+    writes:
+      enabled: true
+      approval_required: true
+    provenance:
+      required: true
+    tenant_scope:
+      tenant_id: required
+      workspace_id: required
+    prompt_injection_boundary:
+      treat_results_as_data: true
+    data_quality:
+      min_sample_count: 3
+      max_age_hours: 24
+      citation_required: true
+      required_metadata_fields:
+        - api_name
+        - shop_id
+        - retrieved_at
+        - request_id
+      required_content_fields:
+        - object_type
+        - object_id
+        - summary
+schemas:
+  - id: handoff
+    path: schemas/handoff.schema.json
+    required: true
+  - id: store-profile
+    path: schemas/store_profile.schema.json
+    required: true
+  - id: approval-matrix
+    path: schemas/approval_matrix.schema.json
+    required: true
+  - id: connector-map
+    path: schemas/connector_map.schema.json
+    required: true
+  - id: risk-policy
+    path: schemas/risk_policy.schema.json
+    required: true
+  - id: output-style
+    path: schemas/output_style.schema.json
+    required: true
+  - id: order-context
+    path: schemas/order_context.schema.json
+    required: true
+  - id: product-knowledge
+    path: schemas/product_knowledge.schema.json
+    required: true
+  - id: customer-reply-draft
+    path: schemas/customer_reply_draft.schema.json
+    required: true
+  - id: review-voc
+    path: schemas/review_voc.schema.json
+    required: true
+  - id: review-reply-draft
+    path: schemas/review_reply_draft.schema.json
+    required: true
+  - id: after-sales-triage
+    path: schemas/after_sales_triage.schema.json
+    required: true
+  - id: content-brief
+    path: schemas/content_brief.schema.json
+    required: true
+policies:
+  - id: approval
+    path: policies/approval.yaml
+    required: true
+  - id: tool-scope
+    path: policies/tool_scope.yaml
+    required: true
+evals:
+  - id: ecommerce-tmall-regression
+    path: evals/golden_cases.jsonl
+    gate:
+      required: true
+      min_score: 1.0
+  - id: profile-onboarding-regression
+    path: evals/profile_onboarding_cases.jsonl
+    gate:
+      required: true
+      min_score: 1.0
+release_gates:
+  - id: pack-regression
+    gate_type: eval
+    required: true
+  - id: approval-policy
+    gate_type: policy
+    required: true
+  - id: connector-readiness
+    gate_type: connector_quality
+    required: true
+onboarding:
+  workflow: profile-onboarding
+  required_profiles:
+    - store
+    - approval-matrix
+    - connector-map
+    - risk-policy
+    - output-style
+  profile_schemas:
+    - id: store-profile
+      path: schemas/store_profile.schema.json
+      required: true
+    - id: approval-matrix
+      path: schemas/approval_matrix.schema.json
+      required: true
+    - id: connector-map
+      path: schemas/connector_map.schema.json
+      required: true
+    - id: risk-policy
+      path: schemas/risk_policy.schema.json
+      required: true
+    - id: output-style
+      path: schemas/output_style.schema.json
+      required: true
+  eval: profile-onboarding-regression

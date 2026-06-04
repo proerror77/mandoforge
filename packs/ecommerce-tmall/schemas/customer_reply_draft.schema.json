@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["intent", "buyer_facing_draft", "risk_tier", "approval_required", "provenance"],
+  "properties": {
+    "intent": { "type": "string", "minLength": 1 },
+    "buyer_facing_draft": { "type": "string", "minLength": 1 },
+    "internal_notes": { "type": "array", "items": { "type": "string" } },
+    "risk_tier": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+    "approval_required": { "type": "boolean" },
+    "escalation_reason": { "type": "string" },
+    "provenance": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 }
+  },
+  "additionalProperties": true
+}

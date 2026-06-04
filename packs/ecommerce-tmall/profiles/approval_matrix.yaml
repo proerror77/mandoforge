@@ -1,0 +1,11 @@
+approvals:
+  critical:
+    required_role: admin
+    escalation_role: owner
+  high:
+    required_role: operator
+    escalation_role: admin
+  medium:
+    required_role: operator
+  low:
+    required_role: operator
