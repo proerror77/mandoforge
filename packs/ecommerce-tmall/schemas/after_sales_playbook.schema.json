@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["case_states", "evidence_checklist", "action_drafts", "critical_gates", "refusal_requirements"],
+  "properties": {
+    "case_states": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+    "evidence_checklist": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+    "action_drafts": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+    "critical_gates": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+    "refusal_requirements": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+  },
+  "additionalProperties": false
+}

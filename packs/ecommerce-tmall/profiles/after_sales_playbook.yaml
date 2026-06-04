@@ -1,0 +1,36 @@
+case_states:
+  - refund_only
+  - return_and_refund
+  - exchange
+  - logistics_dispute
+  - damaged_item
+  - missing_item
+  - counterfeit_claim
+  - platform_intervention
+evidence_checklist:
+  - order_status
+  - payment_status
+  - logistics_trace
+  - refund_history
+  - buyer_message_summary
+  - product_policy
+  - platform_rule_reference
+  - item_or_sku_evidence
+action_drafts:
+  - agree_refund
+  - refuse_refund
+  - agree_return_goods
+  - refuse_return_goods
+  - request_buyer_evidence
+  - create_internal_task
+critical_gates:
+  - platform_intervention
+  - refund_refuse
+  - compensation_commitment
+  - counterfeit_or_legal_claim
+  - policy_exception
+refusal_requirements:
+  - evidence_gap_summary
+  - policy_basis
+  - operator_review_reason
+  - buyer_facing_safe_language

@@ -6,19 +6,59 @@ steps:
     output_schema: content-brief
   - agent: touchpoint-analyzer
     handoff_intent: classify-product-knowledge-gap
+    required_profiles:
+      - content-production-policy
+      - review-voc-taxonomy
+      - store
     skills:
       - tmall-voc-to-content-brief
+    output:
+      required_fields:
+        - deliverable_type
+        - audience
+        - sku
+        - scene
+        - claims
+        - evidence_source
   - agent: content-producer
     handoff_intent: draft-content-brief
     output_schema: content-brief
+    required_profiles:
+      - content-production-policy
+      - output-style
+      - approval-matrix
     skills:
       - tmall-product-image-brief
       - tmall-short-video-script
       - tmall-content-compliance-checker
+    output:
+      required_fields:
+        - handoff_assets
+        - compliance_checks
+        - approval_owner
+    checks:
+      - claim_evidence_present
+      - prohibited_claims_blocked
+      - asset_upload_target_declared
+      - media_upload_approval_required
+deliverable_lanes:
+  images:
+    - main_image
+    - detail_page_image
+    - sku_image
+    - review_voc_explainer_image
+    - promo_banner
+  videos:
+    - product_demo_video
+    - pain_point_explainer_video
+    - comparison_video
+    - promo_teaser_video
+    - post_sale_usage_guide_video
 approval:
   required_before_external_write: true
   required_before_media_upload: true
   required_before_product_media_association: true
+  required_before_product_claim_change: true
 output:
   draft_only: true
   provenance_required: true

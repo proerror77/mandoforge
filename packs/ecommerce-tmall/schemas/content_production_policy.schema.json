@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["deliverable_types", "brief_required_sections", "handoff_assets", "approval_gates", "claim_rules"],
+  "properties": {
+    "deliverable_types": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+    "brief_required_sections": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+    "handoff_assets": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+    "approval_gates": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+    "claim_rules": { "type": "object", "minProperties": 1 }
+  },
+  "additionalProperties": false
+}

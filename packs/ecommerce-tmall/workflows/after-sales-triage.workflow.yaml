@@ -6,20 +6,54 @@ steps:
     output_schema: after-sales-triage
   - agent: touchpoint-analyzer
     handoff_intent: classify-after-sales-risk
+    required_profiles:
+      - after-sales-playbook
+      - approval-matrix
+      - risk-policy
     skills:
       - tmall-after-sales-triage
       - tmall-service-risk-classifier
+    output:
+      required_fields:
+        - case_state
+        - evidence_checklist
+        - evidence_gaps
+        - critical_gate
+        - risk_tier
   - agent: response-writer
     handoff_intent: draft-after-sales-plan
     output_schema: after-sales-triage
+    required_profiles:
+      - after-sales-playbook
+      - service-playbook
+      - output-style
     skills:
       - tmall-customer-reply-drafter
       - tmall-after-sales-triage
+    output:
+      required_fields:
+        - recommended_action
+        - buyer_facing_draft
+        - operator_review_reason
+        - external_write_blocked_until_approved
+    checks:
+      - evidence_gap_summary_present
+      - policy_basis_present
+      - no_refund_decision_without_approval
+      - approval_bind_fields_present
 approval:
   required_before_external_write: true
   required_before_refund_agree: true
   required_before_refund_refuse: true
+  required_before_returngoods_agree: true
+  required_before_returngoods_refuse: true
   required_before_compensation_commitment: true
+critical_gates:
+  - platform_intervention
+  - refund_refuse
+  - compensation_commitment
+  - counterfeit_or_legal_claim
+  - policy_exception
 output:
   draft_only: true
   provenance_required: true

@@ -1,17 +1,99 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "required": ["item_id", "content_type", "objective", "key_messages", "compliance_checks", "provenance"],
+  "required": [
+    "item_id",
+    "deliverable_type",
+    "objective",
+    "audience",
+    "sku",
+    "scene",
+    "key_messages",
+    "claims",
+    "required_assets",
+    "handoff_assets",
+    "compliance_checks",
+    "approval_required",
+    "provenance"
+  ],
   "properties": {
     "item_id": { "type": "string", "minLength": 1 },
-    "content_type": { "type": "string", "enum": ["main_image", "detail_page", "short_video", "faq", "live_script", "review_rescue"] },
+    "deliverable_type": {
+      "type": "string",
+      "enum": [
+        "main_image",
+        "detail_page_image",
+        "sku_image",
+        "review_voc_explainer_image",
+        "promo_banner",
+        "product_demo_video",
+        "pain_point_explainer_video",
+        "comparison_video",
+        "promo_teaser_video",
+        "post_sale_usage_guide_video"
+      ]
+    },
     "objective": { "type": "string", "minLength": 1 },
-    "key_messages": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 },
-    "required_assets": { "type": "array", "items": { "type": "string" } },
-    "forbidden_claims": { "type": "array", "items": { "type": "string" } },
-    "compliance_checks": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 },
+    "audience": { "type": "string", "minLength": 1 },
+    "sku": { "type": "string", "minLength": 1 },
+    "scene": { "type": "string", "minLength": 1 },
+    "key_messages": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "minItems": 1
+    },
+    "claims": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["claim", "evidence_source", "approval_required"],
+        "properties": {
+          "claim": { "type": "string", "minLength": 1 },
+          "evidence_source": { "type": "string", "minLength": 1 },
+          "approval_required": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "visual_reference": { "type": "array", "items": { "type": "string" } },
+    "platform_restrictions": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "required_assets": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "handoff_assets": {
+      "type": "object",
+      "required": ["script", "storyboard", "shot_list", "caption", "overlay_text", "compliance_notes", "asset_upload_target"],
+      "properties": {
+        "script": { "type": "string" },
+        "storyboard": { "type": "array", "items": { "type": "string" } },
+        "shot_list": { "type": "array", "items": { "type": "string" } },
+        "caption": { "type": "string" },
+        "overlay_text": { "type": "array", "items": { "type": "string" } },
+        "compliance_notes": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "asset_upload_target": { "type": "string", "enum": ["none", "picture_upload", "content_media_upload", "video_publish", "product_edit"] }
+      },
+      "additionalProperties": false
+    },
+    "compliance_checks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["check", "passed"],
+        "properties": {
+          "check": { "type": "string", "minLength": 1 },
+          "passed": { "type": "boolean" },
+          "reason": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
     "approval_required": { "type": "boolean" },
-    "provenance": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 }
+    "approval_owner": { "type": "string" },
+    "provenance": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "minItems": 1
+    }
   },
-  "additionalProperties": true
+  "additionalProperties": false
 }

@@ -155,6 +155,33 @@ themes, sample window, sample count, confidence, feedback targets, and
 provenance. Negative-review rescue separates public merchant explanation,
 private recovery plan, and internal root-cause note before approval.
 
+## After-Sales Boundary
+
+After-sales workflows use `after-sales-playbook` to model refund-only,
+return-and-refund, exchange, logistics dispute, damaged item, missing item,
+counterfeit/legal claim, and platform-intervention states. Every output must
+include an evidence checklist, evidence gaps, policy basis, buyer-facing safe
+draft, operator review reason, risk tier, approval requirement, and provenance.
+
+Refund refusal, platform intervention, compensation commitment, counterfeit or
+legal claims, and policy exceptions are critical gates. The pack can draft
+recommended actions such as agree/refuse refund, agree/refuse return goods,
+request buyer evidence, or create an internal task, but connector writes remain
+blocked until approval binds the exact operation and payload digest.
+
+## Content Production Boundary
+
+Content workflows use `content-production-policy` to produce production-ready
+briefs for main images, detail-page images, SKU images, review/VOC explainer
+images, promo banners, product demo videos, pain-point explainers, comparison
+videos, promo teasers, and post-sale usage guides.
+
+Every content brief must include SKU, audience, scene, selling point, claims,
+evidence sources, platform restrictions, required assets, script/storyboard or
+visual handoff assets, compliance checks, approval owner, and upload target.
+Media upload, product-media association, product-claim changes, and promotion
+price/discount claims require approval.
+
 ## Verification
 
 Run:

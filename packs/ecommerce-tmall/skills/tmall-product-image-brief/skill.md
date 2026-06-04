@@ -1,3 +1,8 @@
 # Tmall Product Image Brief
 
-Draft image-production briefs for product main images, SKU explainers, activity graphics, detail-page modules, and review-rescue visuals. Include objective, claims allowed, forbidden claims, required proof, dimensions, copy points, and compliance checks.
+Draft image-production briefs for main images, detail-page images, SKU images,
+review/VOC explainer images, and promo banners.
+
+Include SKU, audience, selling point, scene, claim, evidence source, visual
+reference, platform restrictions, required assets, overlay text, compliance
+notes, approval owner, and media upload target. Do not upload or associate media.

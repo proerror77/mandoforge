@@ -1,0 +1,41 @@
+deliverable_types:
+  - main_image
+  - detail_page_image
+  - sku_image
+  - review_voc_explainer_image
+  - promo_banner
+  - product_demo_video
+  - pain_point_explainer_video
+  - comparison_video
+  - promo_teaser_video
+  - post_sale_usage_guide_video
+brief_required_sections:
+  - sku
+  - audience
+  - selling_point
+  - scene
+  - claim
+  - evidence_source
+  - visual_reference
+  - platform_restriction
+  - approval_owner
+handoff_assets:
+  - script
+  - storyboard
+  - shot_list
+  - caption
+  - overlay_text
+  - compliance_notes
+  - asset_upload_target
+approval_gates:
+  - media_upload
+  - product_media_association
+  - product_claim_change
+  - promotion_price_or_discount_claim
+claim_rules:
+  prohibited_without_evidence:
+    - best_selling
+    - guaranteed_effect
+    - medical_or_health_effect
+    - absolute_quality_claim
+    - platform_or_delivery_guarantee

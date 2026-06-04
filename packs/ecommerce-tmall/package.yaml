@@ -49,6 +49,12 @@ profiles:
   - id: review-voc-taxonomy
     path: profiles/review_voc_taxonomy.yaml
     required: true
+  - id: after-sales-playbook
+    path: profiles/after_sales_playbook.yaml
+    required: true
+  - id: content-production-policy
+    path: profiles/content_production_policy.yaml
+    required: true
 skills:
   - id: tmall-order-context
     path: skills/tmall-order-context/skill.md
@@ -268,6 +274,12 @@ schemas:
   - id: review-voc-taxonomy
     path: schemas/review_voc_taxonomy.schema.json
     required: true
+  - id: after-sales-playbook
+    path: schemas/after_sales_playbook.schema.json
+    required: true
+  - id: content-production-policy
+    path: schemas/content_production_policy.schema.json
+    required: true
   - id: order-context
     path: schemas/order_context.schema.json
     required: true
@@ -334,6 +346,8 @@ onboarding:
     - service-playbook
     - question-answer-policy
     - review-voc-taxonomy
+    - after-sales-playbook
+    - content-production-policy
   profile_schemas:
     - id: store-profile
       path: schemas/store_profile.schema.json
@@ -358,5 +372,11 @@ onboarding:
       required: true
     - id: review-voc-taxonomy
       path: schemas/review_voc_taxonomy.schema.json
+      required: true
+    - id: after-sales-playbook
+      path: schemas/after_sales_playbook.schema.json
+      required: true
+    - id: content-production-policy
+      path: schemas/content_production_policy.schema.json
       required: true
   eval: profile-onboarding-regression
