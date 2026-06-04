@@ -1,17 +1,166 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "required": ["shop_id", "store_name", "brand_voice", "product_categories", "escalation_owners"],
+  "required": [
+    "tenant_id",
+    "workspace_id",
+    "shop_id",
+    "store_name",
+    "seller_nick",
+    "primary_category",
+    "brand_voice",
+    "customer_service_policy",
+    "after_sales_policy",
+    "logistics_policy",
+    "review_policy",
+    "content_policy",
+    "channel_capabilities",
+    "escalation_owners"
+  ],
   "properties": {
+    "tenant_id": { "type": "string", "minLength": 1 },
+    "workspace_id": { "type": "string", "minLength": 1 },
     "shop_id": { "type": "string", "minLength": 1 },
     "store_name": { "type": "string", "minLength": 1 },
-    "brand_voice": { "type": "string", "minLength": 1 },
-    "product_categories": { "type": "array", "items": { "type": "string", "minLength": 1 } },
-    "escalation_owners": { "type": "array", "items": { "type": "string", "minLength": 1 } },
-    "customer_service_hours": { "type": "string" },
-    "after_sales_policy_ref": { "type": "string" },
-    "review_policy_ref": { "type": "string" },
-    "content_compliance_ref": { "type": "string" }
+    "seller_nick": { "type": "string", "minLength": 1 },
+    "primary_category": { "type": "string", "minLength": 1 },
+    "secondary_categories": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "brand_voice": {
+      "type": "object",
+      "required": ["tone", "forbidden_phrases", "allowed_compensation_language"],
+      "properties": {
+        "tone": { "type": "string", "minLength": 1 },
+        "formality": { "type": "string" },
+        "apology_style": { "type": "string" },
+        "forbidden_phrases": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "allowed_compensation_language": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      },
+      "additionalProperties": false
+    },
+    "customer_service_policy": {
+      "type": "object",
+      "required": ["service_hours", "response_sla_minutes", "escalation_owner", "forbidden_commitments"],
+      "properties": {
+        "service_hours": { "type": "string", "minLength": 1 },
+        "response_sla_minutes": { "type": "integer", "minimum": 1 },
+        "escalation_owner": { "type": "string", "minLength": 1 },
+        "pre_sale_boundaries": { "type": "array", "items": { "type": "string" } },
+        "post_sale_boundaries": { "type": "array", "items": { "type": "string" } },
+        "platform_dispute_owner": { "type": "string" },
+        "forbidden_commitments": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      },
+      "additionalProperties": false
+    },
+    "after_sales_policy": {
+      "type": "object",
+      "required": ["owner", "refund_only", "return_and_refund", "exchange", "evidence_requirements"],
+      "properties": {
+        "owner": { "type": "string", "minLength": 1 },
+        "refund_only": { "type": "string", "minLength": 1 },
+        "return_and_refund": { "type": "string", "minLength": 1 },
+        "exchange": { "type": "string", "minLength": 1 },
+        "damaged_item": { "type": "string" },
+        "missing_item": { "type": "string" },
+        "logistics_dispute": { "type": "string" },
+        "evidence_requirements": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      },
+      "additionalProperties": false
+    },
+    "logistics_policy": {
+      "type": "object",
+      "required": ["carriers", "promiseable_language", "non_promiseable_language"],
+      "properties": {
+        "carriers": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "promiseable_language": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "non_promiseable_language": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "warehouse_cutoff_time": { "type": "string" },
+        "holiday_exceptions": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
+    "review_policy": {
+      "type": "object",
+      "required": ["owner", "public_explanation_style", "forbidden_phrases", "redaction_rules"],
+      "properties": {
+        "owner": { "type": "string", "minLength": 1 },
+        "public_explanation_style": { "type": "string", "minLength": 1 },
+        "private_recovery_options": { "type": "array", "items": { "type": "string" } },
+        "forbidden_phrases": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "redaction_rules": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      },
+      "additionalProperties": false
+    },
+    "content_policy": {
+      "type": "object",
+      "required": ["owner", "allowed_claims", "prohibited_claims", "evidence_sources"],
+      "properties": {
+        "owner": { "type": "string", "minLength": 1 },
+        "allowed_claims": { "type": "array", "items": { "type": "string" } },
+        "prohibited_claims": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "evidence_sources": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "required_disclaimers": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
+    "channel_capabilities": {
+      "type": "object",
+      "required": ["top_api", "qianniu_workorder", "operator_import", "browser_assisted_import", "media_upload", "product_edit"],
+      "additionalProperties": {
+        "type": "object",
+        "required": ["status", "mode"],
+        "properties": {
+          "status": { "type": "string", "enum": ["ready", "degraded", "blocked", "tenant_bound", "permission_bound"] },
+          "mode": { "type": "string", "minLength": 1 },
+          "notes": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "campaign_calendar": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "active_window", "affected_skus", "customer_service_notes"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "active_window": { "type": "string", "minLength": 1 },
+          "affected_skus": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "discount_terms": { "type": "string" },
+          "customer_service_notes": { "type": "string", "minLength": 1 },
+          "content_restrictions": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": false
+      }
+    },
+    "escalation_owners": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["role", "owner"],
+        "properties": {
+          "role": { "type": "string", "minLength": 1 },
+          "owner": { "type": "string", "minLength": 1 },
+          "backup_owner": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    }
   },
-  "additionalProperties": true
+  "additionalProperties": false
 }

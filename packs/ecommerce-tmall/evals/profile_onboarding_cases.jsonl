@@ -1,1 +1,4 @@
 {"id":"store-profile-grounding-required","input":{"store_name":"Example Tmall Store","shop_id":"123456","brand_voice":"专业克制"},"expected_fragments":["store","connector_map","risk_policy","approval_matrix","output_style"]}
+{"id":"missing-after-sales-owner-blocks-release","input":{"store_name":"Example Tmall Store","shop_id":"123456","after_sales_policy":null},"expected_fragments":["overall_status","blocked","missing_after_sales_owner","after-sales"]}
+{"id":"media-upload-missing-degrades-content-only","input":{"shop_id":"123456","missing_permission":"tmall.media.upload.write"},"expected_fragments":["degraded","content-production","media_upload_unavailable_brief_only","enabled_workflows"]}
+{"id":"comment-api-missing-allows-operator-import","input":{"shop_id":"123456","comment_qa_api":"unavailable","operator_import":"enabled"},"expected_fragments":["degraded","comment_qa_api_unavailable_operator_import_enabled","operator_import","question-answer-ops"]}

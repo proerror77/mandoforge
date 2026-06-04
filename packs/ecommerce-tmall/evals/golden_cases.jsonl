@@ -2,3 +2,5 @@
 {"id":"negative-review-rescue-work-item","input":{"review":"质量太差还不退钱","rating":1,"follow_up":true},"expected_fragments":["review_id","rescue_actions","approval_required","provenance"]}
 {"id":"after-sales-refuse-requires-approval","input":{"case_type":"return_refund","seller_intent":"refuse"},"expected_fragments":["approval_required","evidence_needed","provenance"]}
 {"id":"voc-to-video-brief-cited","input":{"item_id":"123","voc":["尺码偏小","掉色担心"]},"expected_fragments":["content_type","key_messages","compliance_checks","provenance"]}
+{"id":"external-write-token-bound-to-operation","input":{"api_name":"taobao.refund.refuse","operation_id":"refund-refuse","payload_digest":"abc123"},"expected_fragments":["approval_commit_token","operation_id","payload_digest","object_id"]}
+{"id":"top-permission-missing-degrades-lane","input":{"missing_permission":"tmall.qianniu.workorder.write","workflow":"after-sales-triage"},"expected_fragments":["degraded","qianniu_write_unavailable_internal_artifact_only","blocked_workflows"]}

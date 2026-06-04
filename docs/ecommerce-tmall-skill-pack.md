@@ -51,6 +51,12 @@ connector requirement. The pack does not embed credentials. A tenant must bind
 store-scoped `TMALL_TOP_APP_KEY`, `TMALL_TOP_APP_SECRET`, and
 `TMALL_TOP_SESSION` secrets before live connector quality can pass.
 
+Connector readiness is operation-level, not all-or-nothing. A tenant can be
+`ready`, `degraded`, or `blocked` per lane depending on credential binding, shop
+scope, app permission, and sample reads. For example, missing media upload
+permission degrades content production to brief-only, while missing refund read
+permission blocks after-sales triage.
+
 Declared read operations include:
 
 - `taobao.trades.sold.get` for order/trade context.
@@ -73,6 +79,12 @@ Declared write operations include:
   approved media upload/publish flows.
 - `alibaba.item.edit.fastupdate` for approved product-media association or
   product image updates when the tenant has that permission.
+
+Each declared operation in `connectors/tmall-top.yaml` now includes an operation
+id, request contract, response contract, evidence id, and permission boundary.
+Write operations additionally require approval and are bound to
+`tenant_id`, `workspace_id`, `connector_id`, `api_name`, `operation_id`,
+`object_id`, `payload_digest`, and `approval_commit_token`.
 
 Question-answer and comment-area signals are supported as a workflow lane even
 when a tenant does not have a stable API source for every signal. In that case,
@@ -107,6 +119,22 @@ High-risk or critical actions include:
 Those actions are routed through `tmall-executor`, whose manifest grants
 `native.connector.call` only as an external write scope. MandoForge must still
 enforce TaskGrant scope and ApprovalCommitToken exact binding at runtime.
+
+## Onboarding Boundary
+
+The `profile-onboarding` workflow must produce typed tenant profiles before
+release:
+
+- Store profile with shop identity, brand voice, customer-service policy,
+  after-sales policy, logistics policy, review policy, content policy, channel
+  capabilities, campaign calendar, and escalation owners.
+- Approval matrix with workflow owners and approval commit-token bind fields.
+- Connector map with readiness probes and degraded-lane behavior.
+- Risk policy and output style.
+
+The onboarding readiness output reports each lane as `ready`, `degraded`, or
+`blocked`. Missing owners or missing required read lanes block release; missing
+optional write/media/comment capabilities degrade only the affected workflow.
 
 ## Verification
 

@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["tenant_id", "workspace_id", "shop_id", "overall_status", "lanes", "release_blockers"],
+  "properties": {
+    "tenant_id": { "type": "string", "minLength": 1 },
+    "workspace_id": { "type": "string", "minLength": 1 },
+    "shop_id": { "type": "string", "minLength": 1 },
+    "overall_status": { "type": "string", "enum": ["ready", "degraded", "blocked"] },
+    "lanes": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["status", "enabled_workflows", "blocked_workflows", "required_profiles", "required_connector_operations"],
+        "properties": {
+          "status": { "type": "string", "enum": ["ready", "degraded", "blocked"] },
+          "enabled_workflows": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "blocked_workflows": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "degraded_reason": { "type": "string" },
+          "required_profiles": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "required_connector_operations": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "missing_inputs": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+        },
+        "additionalProperties": false
+      }
+    },
+    "release_blockers": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "manual_followups": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    }
+  },
+  "additionalProperties": false
+}

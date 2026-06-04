@@ -7,9 +7,99 @@ connectors:
       - tmall.review.read
       - tmall.refund.read
       - tmall.qianniu.workorder.read
-      - tmall.customer.message.draft
       - tmall.review.explain.write
       - tmall.refund.action.write
       - tmall.qianniu.workorder.write
+      - tmall.media.upload.write
+      - tmall.product.media.associate.write
+    readiness:
+      credential_probe:
+        required_secrets:
+          - TMALL_TOP_APP_KEY
+          - TMALL_TOP_APP_SECRET
+          - TMALL_TOP_SESSION
+      permission_probe:
+        status_values:
+          - ready
+          - degraded
+          - blocked
+        sample_reads:
+          - taobao.trades.sold.get
+          - tmall.traderate.feeds.get
+          - taobao.refunds.receive.get
+          - taobao.item.seller.get
+      tenant_scope_probe:
+        required_fields:
+          - tenant_id
+          - workspace_id
+          - shop_id
+          - seller_nick
+      degraded_lane_behavior:
+        missing_tmall_review_read:
+          blocked_workflows:
+            - review-voc-and-reply
+            - negative-review-rescue
+          degraded_workflows:
+            - content-production
+        missing_tmall_refund_read:
+          blocked_workflows:
+            - after-sales-triage
+          degraded_workflows:
+            - customer-service-conversation
+        missing_tmall_media_upload_write:
+          blocked_workflows: []
+          degraded_workflows:
+            - content-production
+        missing_tmall_qianniu_workorder_write:
+          blocked_workflows: []
+          degraded_workflows:
+            - customer-service-conversation
+            - after-sales-triage
+channel_capabilities:
+  customer_message:
+    status: tenant_bound
+    default_mode: draft_and_operator_handoff
+    allowed_modes:
+      - draft_only
+      - qianniu_workorder
+      - approved_direct_connector
+  comment_question_answer:
+    status: tenant_bound
+    default_mode: operator_import
+    allowed_modes:
+      - api_read
+      - operator_import
+      - browser_assisted_import
+  media_upload:
+    status: permission_bound
+    default_mode: approved_connector_write
+  product_edit:
+    status: permission_bound
+    default_mode: approved_connector_write
+workflow_lanes:
+  customer-service:
+    required_capabilities:
+      - tmall.order.read
+      - tmall.product.read
+    optional_capabilities:
+      - tmall.refund.read
+      - tmall.qianniu.workorder.write
+  review-voc:
+    required_capabilities:
+      - tmall.review.read
+    optional_capabilities:
+      - tmall.review.explain.write
+  after-sales:
+    required_capabilities:
+      - tmall.refund.read
+      - tmall.order.read
+    optional_capabilities:
+      - tmall.refund.action.write
+      - tmall.qianniu.workorder.write
+  content-production:
+    required_capabilities:
+      - tmall.product.read
+    optional_capabilities:
+      - tmall.review.read
       - tmall.media.upload.write
       - tmall.product.media.associate.write

@@ -10,58 +10,216 @@ connectors:
         - TMALL_TOP_APP_SECRET
         - TMALL_TOP_SESSION
     read_operations:
-      - api_name: taobao.trades.sold.get
+      - id: order-trade-list-read
+        api_name: taobao.trades.sold.get
         permission: tmall.order.read
         object_types: [order, trade]
-      - api_name: tmall.traderate.feeds.get
+        request_contract:
+          required_fields: [start_created, end_created, fields]
+          optional_fields: [status, buyer_nick, page_no, page_size]
+        response_contract:
+          required_fields: [tid, status, buyer_nick, created, payment, orders]
+          evidence_id_field: tid
+      - id: review-feed-read
+        api_name: tmall.traderate.feeds.get
         permission: tmall.review.read
         object_types: [review, follow_up_review, semantic_tag]
-      - api_name: taobao.refunds.receive.get
+        request_contract:
+          required_fields: [start_modified, end_modified, page_no, page_size]
+          optional_fields: [rate_type, result, tag_id]
+        response_contract:
+          required_fields: [feed_id, oid, tid, content, created, result]
+          evidence_id_field: feed_id
+      - id: refund-list-read
+        api_name: taobao.refunds.receive.get
         permission: tmall.refund.read
         object_types: [refund, after_sales_case]
-      - api_name: taobao.refund.get
+        request_contract:
+          required_fields: [start_modified, end_modified, fields]
+          optional_fields: [status, page_no, page_size]
+        response_contract:
+          required_fields: [refund_id, tid, oid, status, reason, modified]
+          evidence_id_field: refund_id
+      - id: refund-detail-read
+        api_name: taobao.refund.get
         permission: tmall.refund.read
         object_types: [refund_detail]
-      - api_name: taobao.item.seller.get
+        request_contract:
+          required_fields: [refund_id, fields]
+          optional_fields: [include_message]
+        response_contract:
+          required_fields: [refund_id, tid, oid, status, reason]
+          evidence_id_field: refund_id
+      - id: item-detail-read
+        api_name: taobao.item.seller.get
         permission: tmall.product.read
         object_types: [product, item, sku]
-      - api_name: taobao.qianniu.tasks.get
+        request_contract:
+          required_fields: [num_iid, fields]
+          optional_fields: [nick]
+        response_contract:
+          required_fields: [num_iid, title, cid, price, skus]
+          evidence_id_field: num_iid
+      - id: qianniu-task-list-read
+        api_name: taobao.qianniu.tasks.get
         permission: tmall.qianniu.workorder.read
         object_types: [workorder, todo]
+        request_contract:
+          required_fields: [task_type, page_no, page_size]
+          optional_fields: [status, start_modified, end_modified]
+        response_contract:
+          required_fields: [task_id, task_type, status, title, modified]
+          evidence_id_field: task_id
     write_operations:
-      - api_name: taobao.traderate.explain.add
+      - id: review-explanation-submit
+        api_name: taobao.traderate.explain.add
         permission: tmall.review.explain.write
         approval_required: true
-      - api_name: taobao.rp.refunds.agree
+        request_contract:
+          required_fields: [oid, tid, reply]
+          forbidden_fields: [buyer_phone, buyer_address, raw_private_message]
+        response_contract:
+          required_fields: [success, request_id]
+      - id: refund-agree
+        api_name: taobao.rp.refunds.agree
         permission: tmall.refund.action.write
         approval_required: true
-      - api_name: taobao.refund.refuse
+        request_contract:
+          required_fields: [refund_id, tid, oid]
+          optional_fields: [refund_phase, version]
+        response_contract:
+          required_fields: [success, request_id]
+      - id: refund-refuse
+        api_name: taobao.refund.refuse
         permission: tmall.refund.action.write
         approval_required: true
-      - api_name: taobao.rp.returngoods.agree
+        request_contract:
+          required_fields: [refund_id, tid, oid, refuse_message]
+          forbidden_fields: [unsupported_policy_claim, buyer_private_data]
+        response_contract:
+          required_fields: [success, request_id]
+      - id: returngoods-agree
+        api_name: taobao.rp.returngoods.agree
         permission: tmall.refund.action.write
         approval_required: true
-      - api_name: taobao.rp.returngoods.refuse
+        request_contract:
+          required_fields: [refund_id, tid, oid, return_address_id]
+          optional_fields: [refund_phase, version]
+        response_contract:
+          required_fields: [success, request_id]
+      - id: returngoods-refuse
+        api_name: taobao.rp.returngoods.refuse
         permission: tmall.refund.action.write
         approval_required: true
-      - api_name: taobao.qianniu.task.create
+        request_contract:
+          required_fields: [refund_id, tid, oid, refuse_message]
+          forbidden_fields: [unsupported_policy_claim, buyer_private_data]
+        response_contract:
+          required_fields: [success, request_id]
+      - id: qianniu-task-create
+        api_name: taobao.qianniu.task.create
         permission: tmall.qianniu.workorder.write
         approval_required: true
-      - api_name: taobao.picture.upload
+        request_contract:
+          required_fields: [title, content, assignee]
+          optional_fields: [biz_id, priority, due_at]
+        response_contract:
+          required_fields: [task_id, request_id]
+      - id: picture-upload
+        api_name: taobao.picture.upload
         permission: tmall.media.upload.write
         approval_required: true
-      - api_name: taobao.content.media.upload.secret
+        request_contract:
+          required_fields: [picture_category_id, image_bytes, image_name]
+          optional_fields: [title, client_type]
+        response_contract:
+          required_fields: [picture_id, picture_url, request_id]
+      - id: content-media-secret-upload
+        api_name: taobao.content.media.upload.secret
         permission: tmall.media.upload.write
         approval_required: true
-      - api_name: taobao.content.media.upload.pub
+        request_contract:
+          required_fields: [media_type, media_bytes, title]
+          optional_fields: [description, cover_url]
+        response_contract:
+          required_fields: [media_id, request_id]
+      - id: content-media-public-upload
+        api_name: taobao.content.media.upload.pub
         permission: tmall.media.upload.write
         approval_required: true
-      - api_name: taobao.content.video.publishx
+        request_contract:
+          required_fields: [media_type, media_bytes, title]
+          optional_fields: [description, cover_url]
+        response_contract:
+          required_fields: [media_id, request_id]
+      - id: content-video-publish
+        api_name: taobao.content.video.publishx
         permission: tmall.media.upload.write
         approval_required: true
-      - api_name: alibaba.item.edit.fastupdate
+        request_contract:
+          required_fields: [media_id, title, publish_channel]
+          optional_fields: [cover_url, item_ids]
+        response_contract:
+          required_fields: [video_id, request_id]
+      - id: item-fast-update
+        api_name: alibaba.item.edit.fastupdate
         permission: tmall.product.media.associate.write
         approval_required: true
+        request_contract:
+          required_fields: [num_iid, update_fields]
+          forbidden_fields: [price_change_without_campaign_approval, unsupported_product_claim]
+        response_contract:
+          required_fields: [success, request_id]
+    readiness_probes:
+      credential_probe:
+        required_secrets:
+          - TMALL_TOP_APP_KEY
+          - TMALL_TOP_APP_SECRET
+          - TMALL_TOP_SESSION
+      tenant_scope_probe:
+        required_fields: [tenant_id, workspace_id, shop_id, seller_nick]
+      permission_probe:
+        sample_read_operations:
+          - order-trade-list-read
+          - review-feed-read
+          - refund-list-read
+          - item-detail-read
+        status_values:
+          ready: required secrets, tenant scope, permission, and sample reads are valid
+          degraded: optional permission or channel is missing but draft workflow can run
+          blocked: required read permission, tenant scope, or credential is missing
+      per_operation_status:
+        required: true
+        missing_permission_behavior: disable_dependent_workflow_lane
+    error_classes:
+      retryable:
+        - network_timeout
+        - top_service_unavailable
+        - rate_limited
+      permission_denied:
+        - invalid_session
+        - insufficient_app_permission
+        - shop_scope_mismatch
+      tenant_missing:
+        - missing_shop_id
+        - missing_seller_nick
+        - tenant_secret_not_bound
+      unsafe_write:
+        - approval_token_missing
+        - approval_payload_digest_mismatch
+        - forbidden_field_present
+        - object_id_mismatch
+    approval_commit_binding:
+      required_for_write_operations: true
+      bind_fields:
+        - tenant_id
+        - workspace_id
+        - connector_id
+        - api_name
+        - operation_id
+        - object_id
+        - payload_digest
+        - approval_commit_token
     provenance:
       required: true
       include_fields:

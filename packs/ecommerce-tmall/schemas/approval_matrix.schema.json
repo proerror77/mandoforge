@@ -1,19 +1,55 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "required": ["approvals"],
+  "required": ["approvals", "workflow_owners", "approval_commit_token"],
   "properties": {
     "approvals": {
       "type": "object",
       "required": ["critical", "high", "medium", "low"],
       "additionalProperties": {
         "type": "object",
-        "required": ["required_role"],
+        "required": ["required_role", "approver_groups", "operations"],
         "properties": {
           "required_role": { "type": "string", "minLength": 1 },
-          "escalation_role": { "type": "string", "minLength": 1 }
-        }
+          "escalation_role": { "type": "string", "minLength": 1 },
+          "approver_groups": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "operations": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string", "minLength": 1 }
+          }
+        },
+        "additionalProperties": false
       }
+    },
+    "workflow_owners": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["owner_group", "backup_group"],
+        "properties": {
+          "owner_group": { "type": "string", "minLength": 1 },
+          "backup_group": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "approval_commit_token": {
+      "type": "object",
+      "required": ["required_for_external_write", "bind_fields"],
+      "properties": {
+        "required_for_external_write": { "type": "boolean", "const": true },
+        "bind_fields": {
+          "type": "array",
+          "minItems": 6,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false

@@ -1,17 +1,105 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "required": ["connectors"],
+  "required": ["connectors", "channel_capabilities", "workflow_lanes"],
   "properties": {
     "connectors": {
       "type": "object",
       "additionalProperties": {
         "type": "object",
-        "required": ["scope", "required_permissions"],
+        "required": ["scope", "required_permissions", "readiness"],
         "properties": {
           "scope": { "type": "string", "enum": ["tenant", "workspace"] },
-          "required_permissions": { "type": "array", "items": { "type": "string", "minLength": 1 } }
-        }
+          "required_permissions": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "readiness": {
+            "type": "object",
+            "required": ["credential_probe", "permission_probe", "tenant_scope_probe", "degraded_lane_behavior"],
+            "properties": {
+              "credential_probe": {
+                "type": "object",
+                "required": ["required_secrets"],
+                "properties": {
+                  "required_secrets": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 }
+                  }
+                },
+                "additionalProperties": false
+              },
+              "permission_probe": {
+                "type": "object",
+                "required": ["status_values", "sample_reads"],
+                "properties": {
+                  "status_values": {
+                    "type": "array",
+                    "items": { "type": "string", "enum": ["ready", "degraded", "blocked"] }
+                  },
+                  "sample_reads": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 }
+                  }
+                },
+                "additionalProperties": false
+              },
+              "tenant_scope_probe": {
+                "type": "object",
+                "required": ["required_fields"],
+                "properties": {
+                  "required_fields": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 }
+                  }
+                },
+                "additionalProperties": false
+              },
+              "degraded_lane_behavior": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object",
+                  "required": ["blocked_workflows", "degraded_workflows"],
+                  "properties": {
+                    "blocked_workflows": { "type": "array", "items": { "type": "string" } },
+                    "degraded_workflows": { "type": "array", "items": { "type": "string" } }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "channel_capabilities": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["status", "default_mode"],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": ["ready", "degraded", "blocked", "tenant_bound", "permission_bound"]
+          },
+          "default_mode": { "type": "string", "minLength": 1 },
+          "allowed_modes": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+        },
+        "additionalProperties": false
+      }
+    },
+    "workflow_lanes": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["required_capabilities", "optional_capabilities"],
+        "properties": {
+          "required_capabilities": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "optional_capabilities": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+        },
+        "additionalProperties": false
       }
     }
   },

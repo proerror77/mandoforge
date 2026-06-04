@@ -203,7 +203,6 @@ connectors:
       - tmall.review.read
       - tmall.refund.read
       - tmall.qianniu.workorder.read
-      - tmall.customer.message.draft
       - tmall.review.explain.write
       - tmall.refund.action.write
       - tmall.qianniu.workorder.write
@@ -271,6 +270,12 @@ schemas:
     required: true
   - id: content-brief
     path: schemas/content_brief.schema.json
+    required: true
+  - id: onboarding-readiness
+    path: schemas/onboarding_readiness.schema.json
+    required: true
+  - id: tmall-connector-operation
+    path: schemas/tmall_connector_operation.schema.json
     required: true
 policies:
   - id: approval

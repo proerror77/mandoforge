@@ -8,10 +8,35 @@ outputs:
   - output-style
 steps:
   - agent: connector-reader
-    task: collect Tmall store identity, connector permissions, source references, and policy documents
+    task: collect Tmall store identity, channel capabilities, connector permissions, source references, and policy documents
   - agent: touchpoint-analyzer
-    task: normalize store operations context into profile schemas
+    task: normalize store operations context into store, approval, connector, risk, and output-style profile schemas
   - agent: response-writer
-    task: draft tenant profiles as versioned artifacts
+    task: draft tenant profiles as versioned artifacts and produce onboarding readiness by workflow lane
+readiness:
+  output_schema: onboarding-readiness
+  required_lanes:
+    - customer-service
+    - review-voc
+    - after-sales
+    - content-production
+    - product-knowledge
+  status_values:
+    - ready
+    - degraded
+    - blocked
+  blockers:
+    - missing_store_identity
+    - missing_customer_service_owner
+    - missing_after_sales_owner
+    - missing_review_owner
+    - missing_content_owner
+    - missing_external_write_approver
+    - no_top_read_lane_available
+  degraded_reasons:
+    - comment_qa_api_unavailable_operator_import_enabled
+    - media_upload_unavailable_brief_only
+    - product_edit_unavailable_manual_association
+    - qianniu_write_unavailable_internal_artifact_only
 approval:
   required_before_release: true

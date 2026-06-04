@@ -2,10 +2,79 @@ approvals:
   critical:
     required_role: admin
     escalation_role: owner
+    approver_groups:
+      - store-owner
+      - compliance-owner
+    operations:
+      - refund_refuse
+      - platform_dispute_response
+      - legal_or_counterfeit_claim
+      - compensation_commitment
+      - product_claim_change
   high:
     required_role: operator
     escalation_role: admin
+    approver_groups:
+      - customer-service-lead
+      - after-sales-lead
+      - content-lead
+    operations:
+      - customer_message_send
+      - review_explanation_submit
+      - refund_agree
+      - returngoods_agree
+      - returngoods_refuse
+      - qianniu_workorder_create
+      - media_upload
+      - product_media_association
   medium:
     required_role: operator
+    escalation_role: admin
+    approver_groups:
+      - lane-owner
+    operations:
+      - reply_draft_release
+      - content_brief_release
+      - voc_summary_release
   low:
     required_role: operator
+    escalation_role: operator
+    approver_groups:
+      - lane-owner
+    operations:
+      - read_context
+      - classify_intent
+      - internal_note
+workflow_owners:
+  customer-service-conversation:
+    owner_group: customer-service-lead
+    backup_group: store-owner
+  review-voc-and-reply:
+    owner_group: review-ops-lead
+    backup_group: store-owner
+  negative-review-rescue:
+    owner_group: review-ops-lead
+    backup_group: after-sales-lead
+  question-answer-ops:
+    owner_group: customer-service-lead
+    backup_group: content-lead
+  after-sales-triage:
+    owner_group: after-sales-lead
+    backup_group: store-owner
+  product-knowledge-sync:
+    owner_group: product-ops-lead
+    backup_group: content-lead
+  content-production:
+    owner_group: content-lead
+    backup_group: compliance-owner
+approval_commit_token:
+  required_for_external_write: true
+  bind_fields:
+    - tenant_id
+    - workspace_id
+    - connector_id
+    - api_name
+    - operation_id
+    - object_id
+    - payload_digest
+    - approver_subject

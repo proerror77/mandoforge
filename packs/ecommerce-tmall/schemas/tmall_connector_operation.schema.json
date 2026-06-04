@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["id", "api_name", "permission", "request_contract", "response_contract"],
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "api_name": { "type": "string", "minLength": 1 },
+    "permission": { "type": "string", "minLength": 1 },
+    "object_types": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "approval_required": { "type": "boolean" },
+    "request_contract": {
+      "type": "object",
+      "required": ["required_fields"],
+      "properties": {
+        "required_fields": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "optional_fields": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "forbidden_fields": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      },
+      "additionalProperties": false
+    },
+    "response_contract": {
+      "type": "object",
+      "required": ["required_fields"],
+      "properties": {
+        "required_fields": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "evidence_id_field": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
