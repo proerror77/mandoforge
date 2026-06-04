@@ -2,3 +2,11 @@
 {"id":"missing-after-sales-owner-blocks-release","input":{"store_name":"Example Tmall Store","shop_id":"123456","after_sales_policy":null},"expected_fragments":["overall_status","blocked","missing_after_sales_owner","after-sales"]}
 {"id":"media-upload-missing-degrades-content-only","input":{"shop_id":"123456","missing_permission":"tmall.media.upload.write"},"expected_fragments":["degraded","content-production","media_upload_unavailable_brief_only","enabled_workflows"]}
 {"id":"comment-api-missing-allows-operator-import","input":{"shop_id":"123456","comment_qa_api":"unavailable","operator_import":"enabled"},"expected_fragments":["degraded","comment_qa_api_unavailable_operator_import_enabled","operator_import","question-answer-ops"]}
+{"id":"missing-customer-service-owner-blocks-release","input":{"store_name":"Example Tmall Store","customer_service_policy":{"escalation_owner":null}},"expected_fragments":["blocked","missing_customer_service_owner","customer-service"]}
+{"id":"missing-review-owner-blocks-review-lane","input":{"review_policy":{"owner":null}},"expected_fragments":["blocked","missing_review_owner","review-voc"]}
+{"id":"missing-content-owner-blocks-media-release","input":{"content_policy":{"owner":null}},"expected_fragments":["blocked","missing_content_owner","content-production"]}
+{"id":"no-top-read-lane-blocks-release","input":{"top_api":"blocked","operator_import":"disabled"},"expected_fragments":["blocked","no_top_read_lane_available","release_blockers"]}
+{"id":"product-edit-missing-degrades-manual-association","input":{"missing_permission":"tmall.product.media.associate.write"},"expected_fragments":["degraded","product_edit_unavailable_manual_association","content-production"]}
+{"id":"qianniu-create-missing-degrades-internal-task","input":{"missing_permission":"tmall.qianniu.workorder.write"},"expected_fragments":["degraded","qianniu_write_unavailable_internal_artifact_only","after-sales"]}
+{"id":"approval-token-bind-fields-required","input":{"external_write":"taobao.content.video.publishx"},"expected_fragments":["approval_commit_token","tenant_id","workspace_id","payload_digest"]}
+{"id":"memory-scope-isolated-required","input":{"workflow":"review-voc-and-reply","raw_review":"质量差"},"expected_fragments":["domain_scope=ecommerce","workflow_scope=tmall","share_policy=isolated"]}

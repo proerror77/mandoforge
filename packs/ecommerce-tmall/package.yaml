@@ -314,6 +314,9 @@ policies:
   - id: tool-scope
     path: policies/tool_scope.yaml
     required: true
+  - id: eval-quality-gate
+    path: policies/eval_quality_gate.yaml
+    required: true
 evals:
   - id: ecommerce-tmall-regression
     path: evals/golden_cases.jsonl
@@ -334,6 +337,9 @@ release_gates:
     required: true
   - id: connector-readiness
     gate_type: connector_quality
+    required: true
+  - id: eval-quality-gate
+    gate_type: policy
     required: true
 onboarding:
   workflow: profile-onboarding

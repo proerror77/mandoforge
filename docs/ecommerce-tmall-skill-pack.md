@@ -197,3 +197,10 @@ The dedicated validator test is:
 ```bash
 cargo test -p mandoforge-api validates_ecommerce_tmall_domain_pack_fixture -- --nocapture
 ```
+
+The ecommerce regression gate uses `packs/ecommerce-tmall/evals/golden_cases.jsonl`
+and `packs/ecommerce-tmall/policies/eval_quality_gate.yaml`. The golden set must
+cover at least 50 representative cases across customer service, Q&A/comment
+operations, review VOC, negative-review rescue, after-sales, content production,
+connector readiness, onboarding, prompt-injection resistance, approval safety,
+evidence citation, memory isolation, and content compliance.
