@@ -6,16 +6,45 @@ steps:
     output_schema: order-context
   - agent: touchpoint-analyzer
     handoff_intent: classify-customer-service-intent
+    required_profiles:
+      - service-playbook
+      - store
+      - risk-policy
     skills:
       - tmall-service-risk-classifier
+    output:
+      required_fields:
+        - intent
+        - touchpoint
+        - cited_facts
+        - missing_facts
+        - risk_tier
   - agent: response-writer
     handoff_intent: draft-customer-reply
     output_schema: customer-reply-draft
+    required_profiles:
+      - service-playbook
+      - output-style
     skills:
       - tmall-customer-reply-drafter
+    checks:
+      - no_unsupported_delivery_time
+      - no_unsupported_refund_promise
+      - no_unsupported_compensation_promise
+      - no_unsupported_product_effect
+      - cites_policy_or_connector_fact
 approval:
   required_before_external_write: true
   required_before_customer_message_send: true
+escalation:
+  critical_intents:
+    - platform_dispute
+    - harassment_or_abuse
+  high_intents:
+    - refund_request
+    - return_request
+    - complaint
+    - logistics_delay
 output:
   draft_only: true
   provenance_required: true

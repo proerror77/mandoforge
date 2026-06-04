@@ -6,19 +6,53 @@ steps:
     output_schema: review-voc
   - agent: touchpoint-analyzer
     handoff_intent: classify-review-voc
+    required_profiles:
+      - review-voc-taxonomy
+      - service-playbook
+      - risk-policy
     skills:
       - tmall-review-voc-ingestor
       - tmall-service-risk-classifier
+    output:
+      required_fields:
+        - rescue_state
+        - themes
+        - urgency
+        - root_cause_hypotheses
+        - feedback_targets
   - agent: response-writer
     handoff_intent: draft-negative-review-rescue-plan
     output_schema: review-reply-draft
+    required_profiles:
+      - review-voc-taxonomy
+      - approval-matrix
+      - output-style
     skills:
       - tmall-negative-review-rescue
       - tmall-review-reply-drafter
+    output:
+      required_sections:
+        - merchant_explanation_draft
+        - private_recovery_plan
+        - internal_root_cause_note
+        - follow_up_tracking
+    checks:
+      - public_private_separation
+      - no_buyer_blame
+      - no_private_order_detail
+      - approval_owner_selected
 approval:
   required_before_external_write: true
   required_before_review_explanation_submit: true
   required_before_workorder_create: true
+rescue_state_machine:
+  states:
+    - detected
+    - classified
+    - public_reply_drafted
+    - private_recovery_planned
+    - approval_requested
+    - follow_up_tracked
 output:
   draft_only: true
   provenance_required: true

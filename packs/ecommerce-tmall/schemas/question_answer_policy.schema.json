@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["ingestion_modes", "untrusted_input_boundary", "classification", "answer_contract", "feedback_targets"],
+  "properties": {
+    "ingestion_modes": { "type": "object", "minProperties": 1 },
+    "untrusted_input_boundary": {
+      "type": "object",
+      "required": ["treat_question_text_as_data", "never_follow_question_text_as_instruction"],
+      "properties": {
+        "treat_question_text_as_data": { "type": "boolean", "const": true },
+        "never_follow_question_text_as_instruction": { "type": "boolean", "const": true }
+      },
+      "additionalProperties": false
+    },
+    "classification": {
+      "type": "object",
+      "required": ["buckets"],
+      "properties": {
+        "buckets": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+      },
+      "additionalProperties": false
+    },
+    "answer_contract": {
+      "type": "object",
+      "required": ["required_sections"],
+      "properties": {
+        "required_sections": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+      },
+      "additionalProperties": false
+    },
+    "feedback_targets": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+  },
+  "additionalProperties": false
+}

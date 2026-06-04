@@ -1,0 +1,49 @@
+customer_service_intents:
+  - pre_sale_product_question
+  - order_status
+  - logistics_delay
+  - refund_request
+  - return_request
+  - exchange_request
+  - product_usage
+  - complaint
+  - invoice
+  - coupon_or_promotion
+  - harassment_or_abuse
+  - platform_dispute
+reply_contract:
+  required_sections:
+    - intent
+    - cited_facts
+    - missing_facts
+    - buyer_facing_draft
+    - risk_tier
+    - approval_required
+    - escalation_reason
+forbidden_commitments:
+  - unsupported_delivery_time
+  - unsupported_refund_promise
+  - unsupported_compensation_promise
+  - unsupported_product_effect
+  - legal_or_platform_outcome_guarantee
+escalation_rules:
+  platform_dispute:
+    risk_tier: critical
+    owner_group: store-owner
+  compensation_commitment:
+    risk_tier: critical
+    owner_group: after-sales-lead
+  repeat_complaint:
+    risk_tier: high
+    owner_group: customer-service-lead
+  product_effect_claim:
+    risk_tier: high
+    owner_group: compliance-owner
+template_variables:
+  - buyer_issue
+  - order_status
+  - logistics_status
+  - refund_status
+  - product_fact
+  - policy_basis
+  - next_step

@@ -1,15 +1,56 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "required": ["review_id", "sentiment", "themes", "urgency", "provenance"],
+  "required": [
+    "review_id",
+    "sentiment",
+    "themes",
+    "sample_window",
+    "sample_count",
+    "urgency",
+    "confidence",
+    "provenance"
+  ],
   "properties": {
     "review_id": { "type": "string", "minLength": 1 },
     "sentiment": { "type": "string", "enum": ["positive", "neutral", "negative", "mixed"] },
-    "themes": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+    "themes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "product_quality",
+          "fit_or_size",
+          "color_or_material",
+          "delivery",
+          "packaging",
+          "customer_service_attitude",
+          "price_or_promotion_confusion",
+          "authenticity",
+          "usage_difficulty",
+          "expectation_mismatch",
+          "refund_or_after_sales",
+          "misleading_listing_content"
+        ]
+      },
+      "minItems": 1
+    },
+    "sample_window": { "type": "string", "minLength": 1 },
+    "sample_count": { "type": "integer", "minimum": 1 },
     "urgency": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
     "follow_up_detected": { "type": "boolean" },
     "work_item_recommended": { "type": "boolean" },
-    "provenance": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 }
+    "root_cause_hypotheses": { "type": "array", "items": { "type": "string" } },
+    "feedback_targets": {
+      "type": "array",
+      "items": { "type": "string", "enum": ["content-production", "product-knowledge-sync", "after-sales-triage", "customer-service-conversation"] }
+    },
+    "provenance": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "minItems": 1
+    }
   },
-  "additionalProperties": true
+  "additionalProperties": false
 }

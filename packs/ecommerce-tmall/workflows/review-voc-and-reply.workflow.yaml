@@ -6,13 +6,33 @@ steps:
     output_schema: review-voc
   - agent: touchpoint-analyzer
     handoff_intent: classify-review-voc
+    required_profiles:
+      - review-voc-taxonomy
+      - risk-policy
     skills:
       - tmall-review-voc-ingestor
+    output:
+      required_fields:
+        - sentiment
+        - themes
+        - sample_window
+        - sample_count
+        - confidence
+        - feedback_targets
   - agent: response-writer
     handoff_intent: draft-review-explanation
     output_schema: review-reply-draft
+    required_profiles:
+      - review-voc-taxonomy
+      - output-style
     skills:
       - tmall-review-reply-drafter
+    checks:
+      - factual
+      - short
+      - non_defensive
+      - no_buyer_blame
+      - no_private_order_detail
 approval:
   required_before_external_write: true
   required_before_review_explanation_submit: true

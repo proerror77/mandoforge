@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["customer_service_intents", "reply_contract", "forbidden_commitments", "escalation_rules", "template_variables"],
+  "properties": {
+    "customer_service_intents": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+    "reply_contract": {
+      "type": "object",
+      "required": ["required_sections"],
+      "properties": {
+        "required_sections": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+      },
+      "additionalProperties": false
+    },
+    "forbidden_commitments": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+    "escalation_rules": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["risk_tier", "owner_group"],
+        "properties": {
+          "risk_tier": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+          "owner_group": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "template_variables": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+  },
+  "additionalProperties": false
+}

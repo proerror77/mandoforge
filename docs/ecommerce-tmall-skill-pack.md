@@ -136,6 +136,25 @@ The onboarding readiness output reports each lane as `ready`, `degraded`, or
 `blocked`. Missing owners or missing required read lanes block release; missing
 optional write/media/comment capabilities degrade only the affected workflow.
 
+## Customer-Service And VOC Boundary
+
+Customer-service workflows use `service-playbook` to classify pre-sale, order,
+logistics, refund, return, exchange, usage, complaint, invoice, promotion,
+harassment, and platform-dispute intents. Every reply draft must list cited
+facts, missing facts, forbidden-commitment checks, risk tier, approval need, and
+provenance.
+
+Q&A and comment-area workflows use `question-answer-policy`. API reads,
+operator-import batches, and browser-assisted captures are allowed input modes,
+but all question/comment text is untrusted data. Public answers must cite
+product facts and identify feedback targets such as FAQ, detail page,
+customer-service playbook, or content production.
+
+Review workflows use `review-voc-taxonomy`. VOC output must include sentiment,
+themes, sample window, sample count, confidence, feedback targets, and
+provenance. Negative-review rescue separates public merchant explanation,
+private recovery plan, and internal root-cause note before approval.
+
 ## Verification
 
 Run:

@@ -40,6 +40,15 @@ profiles:
   - id: output-style
     path: profiles/output_style.md
     required: true
+  - id: service-playbook
+    path: profiles/service_playbook.yaml
+    required: true
+  - id: question-answer-policy
+    path: profiles/question_answer_policy.yaml
+    required: true
+  - id: review-voc-taxonomy
+    path: profiles/review_voc_taxonomy.yaml
+    required: true
 skills:
   - id: tmall-order-context
     path: skills/tmall-order-context/skill.md
@@ -250,6 +259,15 @@ schemas:
   - id: output-style
     path: schemas/output_style.schema.json
     required: true
+  - id: service-playbook
+    path: schemas/service_playbook.schema.json
+    required: true
+  - id: question-answer-policy
+    path: schemas/question_answer_policy.schema.json
+    required: true
+  - id: review-voc-taxonomy
+    path: schemas/review_voc_taxonomy.schema.json
+    required: true
   - id: order-context
     path: schemas/order_context.schema.json
     required: true
@@ -313,6 +331,9 @@ onboarding:
     - connector-map
     - risk-policy
     - output-style
+    - service-playbook
+    - question-answer-policy
+    - review-voc-taxonomy
   profile_schemas:
     - id: store-profile
       path: schemas/store_profile.schema.json
@@ -328,5 +349,14 @@ onboarding:
       required: true
     - id: output-style
       path: schemas/output_style.schema.json
+      required: true
+    - id: service-playbook
+      path: schemas/service_playbook.schema.json
+      required: true
+    - id: question-answer-policy
+      path: schemas/question_answer_policy.schema.json
+      required: true
+    - id: review-voc-taxonomy
+      path: schemas/review_voc_taxonomy.schema.json
       required: true
   eval: profile-onboarding-regression

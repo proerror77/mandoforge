@@ -1,14 +1,60 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "required": ["review_id", "merchant_explanation_draft", "risk_tier", "approval_required", "provenance"],
+  "required": [
+    "review_id",
+    "rescue_state",
+    "merchant_explanation_draft",
+    "private_recovery_plan",
+    "internal_root_cause_note",
+    "risk_tier",
+    "approval_required",
+    "style_checks",
+    "provenance"
+  ],
   "properties": {
     "review_id": { "type": "string", "minLength": 1 },
+    "rescue_state": {
+      "type": "string",
+      "enum": ["detected", "classified", "public_reply_drafted", "private_recovery_planned", "approval_requested", "follow_up_tracked"]
+    },
     "merchant_explanation_draft": { "type": "string", "minLength": 1 },
+    "private_recovery_plan": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "internal_root_cause_note": { "type": "string", "minLength": 1 },
     "rescue_actions": { "type": "array", "items": { "type": "string" } },
     "risk_tier": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
     "approval_required": { "type": "boolean" },
-    "provenance": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 }
+    "style_checks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["rule", "passed"],
+        "properties": {
+          "rule": { "type": "string", "minLength": 1 },
+          "passed": { "type": "boolean" },
+          "reason": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "follow_up_tracking": {
+      "type": "object",
+      "properties": {
+        "owner_group": { "type": "string" },
+        "due_at": { "type": "string" },
+        "success_signal": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "provenance": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "minItems": 1
+    }
   },
-  "additionalProperties": true
+  "additionalProperties": false
 }

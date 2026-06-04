@@ -1,0 +1,36 @@
+voc_themes:
+  - product_quality
+  - fit_or_size
+  - color_or_material
+  - delivery
+  - packaging
+  - customer_service_attitude
+  - price_or_promotion_confusion
+  - authenticity
+  - usage_difficulty
+  - expectation_mismatch
+  - refund_or_after_sales
+  - misleading_listing_content
+sentiment_values:
+  - positive
+  - neutral
+  - negative
+  - mixed
+negative_review_rescue_states:
+  - detected
+  - classified
+  - public_reply_drafted
+  - private_recovery_planned
+  - approval_requested
+  - follow_up_tracked
+reply_style_rules:
+  - factual
+  - short
+  - non_defensive
+  - no_buyer_blame
+  - no_private_order_detail
+voc_feedback_targets:
+  - content-production
+  - product-knowledge-sync
+  - after-sales-triage
+  - customer-service-conversation

@@ -1,15 +1,79 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "required": ["intent", "buyer_facing_draft", "risk_tier", "approval_required", "provenance"],
+  "required": [
+    "intent",
+    "touchpoint",
+    "cited_facts",
+    "missing_facts",
+    "buyer_facing_draft",
+    "risk_tier",
+    "approval_required",
+    "forbidden_commitment_checks",
+    "provenance"
+  ],
   "properties": {
-    "intent": { "type": "string", "minLength": 1 },
+    "intent": {
+      "type": "string",
+      "enum": [
+        "pre_sale_product_question",
+        "order_status",
+        "logistics_delay",
+        "refund_request",
+        "return_request",
+        "exchange_request",
+        "product_usage",
+        "complaint",
+        "invoice",
+        "coupon_or_promotion",
+        "harassment_or_abuse",
+        "platform_dispute",
+        "question_answer_public_answer"
+      ]
+    },
+    "touchpoint": {
+      "type": "string",
+      "enum": ["wangwang_chat", "qianniu_workorder", "comment_area", "question_answer", "operator_import"]
+    },
+    "question_cluster": { "type": "string" },
+    "cited_facts": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "missing_facts": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
     "buyer_facing_draft": { "type": "string", "minLength": 1 },
     "internal_notes": { "type": "array", "items": { "type": "string" } },
     "risk_tier": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
     "approval_required": { "type": "boolean" },
+    "public_answer_allowed": { "type": "boolean" },
     "escalation_reason": { "type": "string" },
-    "provenance": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 }
+    "forbidden_commitment_checks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["check", "passed"],
+        "properties": {
+          "check": { "type": "string", "minLength": 1 },
+          "passed": { "type": "boolean" },
+          "reason": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "feedback_targets": {
+      "type": "array",
+      "items": { "type": "string", "enum": ["product_faq", "detail_page", "customer_service_playbook", "content_production"] }
+    },
+    "provenance": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "minItems": 1
+    }
   },
-  "additionalProperties": true
+  "additionalProperties": false
 }
