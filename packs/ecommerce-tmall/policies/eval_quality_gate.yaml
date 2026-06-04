@@ -45,6 +45,7 @@ case_coverage:
     - content-production
     - connector-readiness
     - onboarding
+    - pilot-readiness
 failure_classification:
   - missing_approval_boundary
   - missing_evidence

@@ -18,6 +18,7 @@ capabilities:
   - tmall-product-image-brief
   - tmall-short-video-script
   - tmall-content-compliance-checker
+  - tmall-pilot-readiness
 profiles:
   - id: default
     path: profiles/default.md
@@ -54,6 +55,12 @@ profiles:
     required: true
   - id: content-production-policy
     path: profiles/content_production_policy.yaml
+    required: true
+  - id: observability
+    path: profiles/observability.yaml
+    required: true
+  - id: pilot-policy
+    path: profiles/pilot_policy.yaml
     required: true
 skills:
   - id: tmall-order-context
@@ -119,6 +126,9 @@ workflows:
     entry_agent: connector-reader
   - id: profile-onboarding
     path: workflows/profile-onboarding.workflow.yaml
+    entry_agent: connector-reader
+  - id: pilot-readiness
+    path: workflows/pilot-readiness.workflow.yaml
     entry_agent: connector-reader
 agents:
   - id: connector-reader
@@ -307,6 +317,15 @@ schemas:
   - id: tmall-connector-operation
     path: schemas/tmall_connector_operation.schema.json
     required: true
+  - id: observability-contract
+    path: schemas/observability_contract.schema.json
+    required: true
+  - id: pilot-policy
+    path: schemas/pilot_policy.schema.json
+    required: true
+  - id: pilot-report
+    path: schemas/pilot_report.schema.json
+    required: true
 policies:
   - id: approval
     path: policies/approval.yaml
@@ -316,6 +335,9 @@ policies:
     required: true
   - id: eval-quality-gate
     path: policies/eval_quality_gate.yaml
+    required: true
+  - id: pilot-rollout
+    path: policies/pilot_rollout.yaml
     required: true
 evals:
   - id: ecommerce-tmall-regression
@@ -341,6 +363,12 @@ release_gates:
   - id: eval-quality-gate
     gate_type: policy
     required: true
+  - id: pilot-rollout
+    gate_type: policy
+    required: true
+  - id: observability-bound
+    gate_type: audit
+    required: true
 onboarding:
   workflow: profile-onboarding
   required_profiles:
@@ -354,6 +382,8 @@ onboarding:
     - review-voc-taxonomy
     - after-sales-playbook
     - content-production-policy
+    - observability
+    - pilot-policy
   profile_schemas:
     - id: store-profile
       path: schemas/store_profile.schema.json
@@ -384,5 +414,11 @@ onboarding:
       required: true
     - id: content-production-policy
       path: schemas/content_production_policy.schema.json
+      required: true
+    - id: observability-contract
+      path: schemas/observability_contract.schema.json
+      required: true
+    - id: pilot-policy
+      path: schemas/pilot_policy.schema.json
       required: true
   eval: profile-onboarding-regression

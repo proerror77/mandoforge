@@ -43,6 +43,7 @@ their shop has an approved channel.
   - `product-knowledge-sync`
   - `content-production`
   - `profile-onboarding`
+  - `pilot-readiness`
 
 ## API Boundary
 
@@ -182,6 +183,37 @@ visual handoff assets, compliance checks, approval owner, and upload target.
 Media upload, product-media association, product-claim changes, and promotion
 price/discount claims require approval.
 
+## Audit And Pilot Boundary
+
+The pack includes an observability contract in
+`packs/ecommerce-tmall/profiles/observability.yaml`. Buyer-facing and
+platform-facing work must emit traceable audit events for connector reads, draft
+creation, approval requests, approval decisions, external writes, skipped
+writes, and degraded connector paths. The required dashboards are workflow
+volume, approval latency, blocked lanes, failure reasons, high-risk case count,
+external write traceability, shadow-pilot quality, and degraded connector
+impact.
+
+Pilot rollout is governed by `packs/ecommerce-tmall/profiles/pilot_policy.yaml`
+and `packs/ecommerce-tmall/policies/pilot_rollout.yaml`.
+
+- Shadow pilot mode disables all external writes. It compares agent drafts
+  against human operator decisions across customer service, review/VOC,
+  comments/Q&A, after-sales, product knowledge, and content production.
+- Controlled pilot mode is approval-only and initially allows only QianNiu task
+  creation and review explanations. Refund actions, media upload, video publish,
+  and product edits stay blocked until a later production policy explicitly
+  enables them.
+- Stop conditions include unsupported refund or compensation promises, buyer
+  private-data leaks, approval-token mismatch, product claims without evidence,
+  cross-domain memory writes, and external writes without trace.
+
+The `pilot-readiness` workflow produces a typed pilot exit report using
+`packs/ecommerce-tmall/schemas/pilot_report.schema.json`. The report must list
+enabled capabilities, blocked capabilities, degraded connector paths, observed
+error classes, human comparison summary, unsafe output review, approval latency,
+and follow-up requirements before any rollout promotion.
+
 ## Verification
 
 Run:
@@ -200,7 +232,11 @@ cargo test -p mandoforge-api validates_ecommerce_tmall_domain_pack_fixture -- --
 
 The ecommerce regression gate uses `packs/ecommerce-tmall/evals/golden_cases.jsonl`
 and `packs/ecommerce-tmall/policies/eval_quality_gate.yaml`. The golden set must
-cover at least 50 representative cases across customer service, Q&A/comment
+cover at least 55 representative cases across customer service, Q&A/comment
 operations, review VOC, negative-review rescue, after-sales, content production,
 connector readiness, onboarding, prompt-injection resistance, approval safety,
-evidence citation, memory isolation, and content compliance.
+evidence citation, memory isolation, content compliance, audit traceability, and
+pilot rollout safety.
+
+The pilot gate additionally requires the observability and pilot-rollout
+contracts to be present in `packs/ecommerce-tmall/package.yaml` release gates.

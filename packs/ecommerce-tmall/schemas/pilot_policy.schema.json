@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["pilot_modes", "exit_criteria", "stop_conditions", "pilot_exit_report"],
+  "properties": {
+    "pilot_modes": {
+      "type": "object",
+      "required": ["shadow", "controlled"],
+      "properties": {
+        "shadow": {
+          "type": "object",
+          "required": ["external_writes_enabled", "allowed_workflows", "required_before_start", "comparison_required"],
+          "properties": {
+            "external_writes_enabled": { "const": false },
+            "allowed_workflows": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+            "required_before_start": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+            "comparison_required": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+          },
+          "additionalProperties": false
+        },
+        "controlled": {
+          "type": "object",
+          "required": ["external_writes_enabled", "allowed_write_operations", "blocked_write_operations", "required_before_start"],
+          "properties": {
+            "external_writes_enabled": { "type": "string", "enum": ["approval_only"] },
+            "allowed_write_operations": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "blocked_write_operations": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "required_before_start": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "exit_criteria": {
+      "type": "object",
+      "required": ["shadow", "controlled"],
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": {
+          "type": ["number", "integer"]
+        }
+      }
+    },
+    "stop_conditions": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "pilot_exit_report": {
+      "type": "object",
+      "required": ["required_sections"],
+      "properties": {
+        "required_sections": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

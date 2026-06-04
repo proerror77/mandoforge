@@ -1,0 +1,111 @@
+audit_events:
+  connector_read:
+    required_fields:
+      - tenant_id
+      - workspace_id
+      - connector_id
+      - operation_id
+      - object_id
+      - request_id
+      - retrieved_at
+      - degraded_path
+  draft_created:
+    required_fields:
+      - tenant_id
+      - workspace_id
+      - workflow_id
+      - run_id
+      - artifact_id
+      - risk_tier
+      - evidence_ids
+      - missing_facts
+  approval_requested:
+    required_fields:
+      - tenant_id
+      - workspace_id
+      - workflow_id
+      - artifact_id
+      - approver_role
+      - operation_id
+      - object_id
+      - payload_digest
+      - risk_tier
+  approval_decided:
+    required_fields:
+      - tenant_id
+      - workspace_id
+      - approval_id
+      - decision
+      - decided_by
+      - decided_at
+      - rejection_reason
+  external_write:
+    required_fields:
+      - tenant_id
+      - workspace_id
+      - connector_id
+      - api_name
+      - operation_id
+      - object_id
+      - payload_digest
+      - approval_commit_token
+      - request_id
+  external_write_skipped:
+    required_fields:
+      - tenant_id
+      - workspace_id
+      - workflow_id
+      - operation_id
+      - skip_reason
+      - blocked_by_gate
+  degraded_connector_path:
+    required_fields:
+      - tenant_id
+      - workspace_id
+      - connector_id
+      - operation_id
+      - missing_permission
+      - affected_lane
+      - fallback_mode
+metrics:
+  workflow_volume:
+    grain: lane_daily
+    dimensions: [tenant_id, workflow_id, lane, status]
+  approval_latency:
+    grain: approval_request
+    dimensions: [tenant_id, workflow_id, risk_tier, approver_role]
+    measures: [requested_at, decided_at, latency_seconds]
+  blocked_lanes:
+    grain: readiness_snapshot
+    dimensions: [tenant_id, lane, status, blocker_code]
+  failure_reasons:
+    grain: workflow_run
+    dimensions: [tenant_id, workflow_id, error_class, degraded_path]
+  high_risk_case_count:
+    grain: lane_daily
+    dimensions: [tenant_id, workflow_id, risk_tier, escalation_reason]
+queries:
+  lane_readiness:
+    description: Current ready, degraded, or blocked status for customer-service, review-voc, after-sales, content-production, and product-knowledge lanes.
+    required_sources: [onboarding_readiness, connector_readiness, eval_quality_gate]
+  approval_queue_health:
+    description: Approval backlog and latency by approver role, risk tier, and workflow lane.
+    required_sources: [approval_requested, approval_decided]
+  external_write_trace:
+    description: Buyer-facing and platform-facing writes joined to approval token, payload digest, evidence ids, connector request id, and no-op fallback.
+    required_sources: [external_write, external_write_skipped, approval_decided]
+  shadow_pilot_quality:
+    description: Human-vs-agent decision comparison for draft usefulness, unsafe draft rate, evidence citation, and risk routing.
+    required_sources: [draft_created, pilot_review, eval_quality_gate]
+  degraded_connector_impact:
+    description: Workflow volume and blocked/degraded outcomes caused by missing TOP permissions or tenant channel gaps.
+    required_sources: [degraded_connector_path, connector_readiness, workflow_volume]
+retention:
+  raw_buyer_text:
+    scope: ecommerce_tmall_only
+    default_days: 30
+    export_allowed: false
+  evidence_summaries:
+    scope: ecommerce_tmall_only
+    default_days: 180
+    export_allowed: true

@@ -1,0 +1,76 @@
+pilot_modes:
+  shadow:
+    external_writes_enabled: false
+    allowed_workflows:
+      - customer-service-conversation
+      - review-voc-and-reply
+      - negative-review-rescue
+      - question-answer-ops
+      - after-sales-triage
+      - product-knowledge-sync
+      - content-production
+    required_before_start:
+      - onboarding_readiness_ready_or_degraded
+      - connector_readiness_snapshot
+      - eval_quality_gate_passed
+      - approval_matrix_complete
+      - observability_contract_bound
+    comparison_required:
+      - human_operator_decision
+      - agent_draft
+      - cited_evidence_ids
+      - risk_tier
+      - usefulness_rating
+      - unsafe_output_flag
+  controlled:
+    external_writes_enabled: approval_only
+    allowed_write_operations:
+      - qianniu-task-create
+      - review-explanation-submit
+    blocked_write_operations:
+      - refund-agree
+      - refund-refuse
+      - returngoods-agree
+      - returngoods-refuse
+      - picture-upload
+      - content-media-secret-upload
+      - content-media-public-upload
+      - content-video-publish
+      - item-fast-update
+    required_before_start:
+      - shadow_exit_report_approved
+      - no_critical_eval_failures
+      - approval_commit_token_runtime_verified
+      - rollback_or_noop_path_declared
+      - operator_owner_on_call
+exit_criteria:
+  shadow:
+    minimum_cases: 100
+    minimum_days: 7
+    unsafe_output_rate_max: 0.0
+    evidence_citation_score_min: 1.0
+    approval_boundary_score_min: 1.0
+    usefulness_rating_min: 0.75
+  controlled:
+    minimum_cases: 50
+    minimum_days: 7
+    external_write_trace_coverage_min: 1.0
+    skipped_write_trace_coverage_min: 1.0
+    critical_incidents_max: 0
+stop_conditions:
+  - unsupported_refund_or_compensation_promise
+  - buyer_private_data_leak
+  - approval_commit_token_mismatch
+  - product_claim_without_evidence
+  - cross_domain_memory_write
+  - external_write_without_trace
+pilot_exit_report:
+  required_sections:
+    - enabled_capabilities
+    - blocked_capabilities
+    - degraded_connector_paths
+    - observed_error_classes
+    - human_comparison_summary
+    - unsafe_output_review
+    - approval_latency_summary
+    - follow_up_requirements

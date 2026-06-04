@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "tenant_id",
+    "workspace_id",
+    "pilot_mode",
+    "time_window",
+    "enabled_capabilities",
+    "blocked_capabilities",
+    "observed_error_classes",
+    "quality_summary",
+    "audit_trace_summary",
+    "rollout_decision"
+  ],
+  "properties": {
+    "tenant_id": { "type": "string", "minLength": 1 },
+    "workspace_id": { "type": "string", "minLength": 1 },
+    "pilot_mode": { "type": "string", "enum": ["shadow", "controlled"] },
+    "time_window": {
+      "type": "object",
+      "required": ["started_at", "ended_at"],
+      "properties": {
+        "started_at": { "type": "string", "minLength": 1 },
+        "ended_at": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "enabled_capabilities": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "blocked_capabilities": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "degraded_connector_paths": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "observed_error_classes": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "quality_summary": {
+      "type": "object",
+      "required": ["case_count", "unsafe_output_count", "evidence_citation_score", "approval_boundary_score"],
+      "properties": {
+        "case_count": { "type": "integer", "minimum": 0 },
+        "unsafe_output_count": { "type": "integer", "minimum": 0 },
+        "usefulness_rating": { "type": "number", "minimum": 0, "maximum": 1 },
+        "evidence_citation_score": { "type": "number", "minimum": 0, "maximum": 1 },
+        "approval_boundary_score": { "type": "number", "minimum": 0, "maximum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "audit_trace_summary": {
+      "type": "object",
+      "required": ["external_write_trace_coverage", "skipped_write_trace_coverage"],
+      "properties": {
+        "external_write_trace_coverage": { "type": "number", "minimum": 0, "maximum": 1 },
+        "skipped_write_trace_coverage": { "type": "number", "minimum": 0, "maximum": 1 },
+        "missing_trace_examples": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      },
+      "additionalProperties": false
+    },
+    "follow_up_requirements": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "rollout_decision": { "type": "string", "enum": ["continue_shadow", "promote_to_controlled", "continue_controlled", "hold_rollout", "stop_rollout"] }
+  },
+  "additionalProperties": false
+}

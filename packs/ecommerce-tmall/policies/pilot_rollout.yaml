@@ -1,0 +1,41 @@
+release_gates:
+  observability-bound:
+    required: true
+    checks:
+      - all_audit_events_have_required_fields
+      - buyer_facing_actions_trace_to_evidence
+      - skipped_external_writes_are_recorded
+      - degraded_connector_paths_are_visible
+  shadow-pilot-ready:
+    required: true
+    checks:
+      - external_writes_disabled
+      - eval_quality_gate_passed
+      - onboarding_readiness_ready_or_degraded
+      - human_comparison_fields_present
+  controlled-pilot-ready:
+    required: true
+    checks:
+      - shadow_exit_report_approved
+      - approval_commit_token_runtime_verified
+      - allowed_write_operations_limited
+      - rollback_or_noop_path_declared
+hard_blocks:
+  - external_write_without_approval_commit_token
+  - unsupported_customer_commitment
+  - raw_buyer_text_cross_domain_memory_write
+  - missing_connector_or_approval_trace
+  - unsafe_output_in_shadow_pilot
+allowed_controlled_writes:
+  - qianniu-task-create
+  - review-explanation-submit
+blocked_until_later_policy:
+  - refund-agree
+  - refund-refuse
+  - returngoods-agree
+  - returngoods-refuse
+  - picture-upload
+  - content-media-secret-upload
+  - content-media-public-upload
+  - content-video-publish
+  - item-fast-update
