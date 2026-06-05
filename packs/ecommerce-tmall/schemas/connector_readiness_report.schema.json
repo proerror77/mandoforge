@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["connector_id", "tenant_binding", "overall_status", "operation_statuses", "lane_impacts", "release_blockers"],
+  "properties": {
+    "connector_id": { "type": "string", "minLength": 1 },
+    "tenant_binding": {
+      "type": "object",
+      "required": ["tenant_id", "workspace_id", "shop_id", "seller_nick"],
+      "properties": {
+        "tenant_id": { "type": "string", "minLength": 1 },
+        "workspace_id": { "type": "string", "minLength": 1 },
+        "shop_id": { "type": "string", "minLength": 1 },
+        "seller_nick": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "overall_status": { "type": "string", "enum": ["ready", "degraded", "blocked"] },
+    "credential_status": { "type": "string", "enum": ["ready", "degraded", "blocked"] },
+    "operation_statuses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["operation_id", "api_name", "permission", "status"],
+        "properties": {
+          "operation_id": { "type": "string", "minLength": 1 },
+          "api_name": { "type": "string", "minLength": 1 },
+          "permission": { "type": "string", "minLength": 1 },
+          "status": { "type": "string", "enum": ["ready", "degraded", "blocked"] },
+          "last_probe_at": { "type": "string" },
+          "sample_count": { "type": "integer", "minimum": 0 },
+          "error_class": { "type": "string" },
+          "evidence_refs": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+        },
+        "additionalProperties": false
+      }
+    },
+    "lane_impacts": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["status", "enabled_workflows", "blocked_workflows", "degraded_reason"],
+        "properties": {
+          "status": { "type": "string", "enum": ["ready", "degraded", "blocked"] },
+          "enabled_workflows": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "blocked_workflows": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "degraded_reason": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "release_blockers": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "manual_followups": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+  },
+  "additionalProperties": false
+}

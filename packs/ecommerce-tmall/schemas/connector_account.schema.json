@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["accounts"],
+  "properties": {
+    "accounts": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["connector_id", "provider", "tenant_binding", "auth_binding", "readiness_inputs", "safety"],
+        "properties": {
+          "connector_id": { "type": "string", "minLength": 1 },
+          "provider": { "type": "string", "minLength": 1 },
+          "tenant_binding": {
+            "type": "object",
+            "required": ["tenant_id", "workspace_id", "shop_id", "seller_nick"],
+            "properties": {
+              "tenant_id": { "type": "string", "minLength": 1 },
+              "workspace_id": { "type": "string", "minLength": 1 },
+              "shop_id": { "type": "string", "minLength": 1 },
+              "seller_nick": { "type": "string", "minLength": 1 }
+            },
+            "additionalProperties": false
+          },
+          "auth_binding": {
+            "type": "object",
+            "required": ["auth_type", "secret_refs", "session_owner", "rotation_policy"],
+            "properties": {
+              "auth_type": { "type": "string", "enum": ["top-session"] },
+              "secret_refs": {
+                "type": "object",
+                "required": ["app_key", "app_secret", "session"],
+                "properties": {
+                  "app_key": { "type": "string", "minLength": 1 },
+                  "app_secret": { "type": "string", "minLength": 1 },
+                  "session": { "type": "string", "minLength": 1 }
+                },
+                "additionalProperties": false
+              },
+              "session_owner": { "type": "string", "minLength": 1 },
+              "rotation_policy": { "type": "string", "minLength": 1 }
+            },
+            "additionalProperties": false
+          },
+          "readiness_inputs": {
+            "type": "object",
+            "required": ["required_sample_window_hours", "sample_read_operations", "required_write_operations"],
+            "properties": {
+              "required_sample_window_hours": { "type": "integer", "minimum": 1 },
+              "sample_read_operations": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "required_write_operations": {
+                "type": "array",
+                "items": { "type": "string", "minLength": 1 }
+              }
+            },
+            "additionalProperties": false
+          },
+          "safety": {
+            "type": "object",
+            "required": ["store_secret_values", "approval_commit_token_required", "payload_digest_required", "treat_connector_payloads_as_untrusted_data"],
+            "properties": {
+              "store_secret_values": { "type": "boolean" },
+              "approval_commit_token_required": { "type": "boolean" },
+              "payload_digest_required": { "type": "boolean" },
+              "treat_connector_payloads_as_untrusted_data": { "type": "boolean" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

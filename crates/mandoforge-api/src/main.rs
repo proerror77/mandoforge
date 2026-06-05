@@ -2755,6 +2755,14 @@ struct WorkflowPackConnectorQualityInput {
     server_id: Option<Uuid>,
     #[serde(default)]
     tool_name: Option<String>,
+    #[serde(default)]
+    tenant_binding: Option<WorkflowPackConnectorTenantBindingInput>,
+    #[serde(default)]
+    secret_refs: BTreeMap<String, String>,
+    #[serde(default)]
+    operation_statuses: Vec<WorkflowPackConnectorOperationStatusInput>,
+    #[serde(default)]
+    lane_impacts: BTreeMap<String, WorkflowPackConnectorLaneImpactInput>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2763,6 +2771,78 @@ struct WorkflowPackConnectorQualityAssessmentRequest {
     connectors: Vec<WorkflowPackConnectorQualityInput>,
     #[serde(default)]
     reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct WorkflowPackConnectorTenantBindingInput {
+    #[serde(default)]
+    tenant_id: Option<String>,
+    #[serde(default)]
+    workspace_id: Option<String>,
+    #[serde(default)]
+    shop_id: Option<String>,
+    #[serde(default)]
+    seller_nick: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WorkflowPackConnectorOperationStatusInput {
+    operation_id: String,
+    #[serde(default)]
+    api_name: Option<String>,
+    #[serde(default)]
+    permission: Option<String>,
+    status: String,
+    #[serde(default)]
+    last_probe_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    sample_count: Option<usize>,
+    #[serde(default)]
+    error_class: Option<String>,
+    #[serde(default)]
+    evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct WorkflowPackConnectorLaneImpact {
+    status: String,
+    enabled_workflows: Vec<String>,
+    blocked_workflows: Vec<String>,
+    degraded_reason: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct WorkflowPackConnectorLaneImpactInput {
+    status: String,
+    #[serde(default)]
+    enabled_workflows: Vec<String>,
+    #[serde(default)]
+    blocked_workflows: Vec<String>,
+    #[serde(default)]
+    degraded_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkflowPackConnectorSecretRefStatus {
+    alias: String,
+    reference: String,
+    status: String,
+    catalog_ref: Option<String>,
+    blockers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkflowPackConnectorOperationStatus {
+    operation_id: String,
+    api_name: Option<String>,
+    permission: Option<String>,
+    operation_type: Option<String>,
+    status: String,
+    last_probe_at: Option<DateTime<Utc>>,
+    sample_count: Option<usize>,
+    error_class: Option<String>,
+    evidence_refs: Vec<String>,
+    blockers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2783,6 +2863,11 @@ struct WorkflowPackConnectorQualityResult {
     bound_server_name: Option<String>,
     bound_server_health_status: Option<String>,
     bound_tool_name: Option<String>,
+    tenant_binding_status: Option<String>,
+    credential_status: Option<String>,
+    secret_ref_statuses: Vec<WorkflowPackConnectorSecretRefStatus>,
+    operation_statuses: Vec<WorkflowPackConnectorOperationStatus>,
+    lane_impacts: BTreeMap<String, WorkflowPackConnectorLaneImpact>,
     blockers: Vec<String>,
 }
 
@@ -26416,7 +26501,8 @@ async fn assess_workflow_pack_connector_quality(
     installation: &WorkflowPackInstallation,
     input: WorkflowPackConnectorQualityAssessmentRequest,
 ) -> Result<WorkflowPackConnectorQualityAssessment, AppError> {
-    let (manifest, _package_dir) = workflow_pack_manifest_and_dir_from_installation(installation)?;
+    let (manifest, package_dir) = workflow_pack_manifest_and_dir_from_installation(installation)?;
+    let secret_records = state.list_secret_records().await?;
     let checked_at = Utc::now();
     let mut input_connectors = HashMap::new();
     for connector in input.connectors {
@@ -26453,6 +26539,11 @@ async fn assess_workflow_pack_connector_quality(
                 bound_server_name: None,
                 bound_server_health_status: None,
                 bound_tool_name: None,
+                tenant_binding_status: None,
+                credential_status: None,
+                secret_ref_statuses: Vec::new(),
+                operation_statuses: Vec::new(),
+                lane_impacts: BTreeMap::new(),
                 blockers: vec![blocker.clone()],
             });
             blockers.push(format!("connector {}: {}", connector.id, blocker));
@@ -26470,6 +26561,11 @@ async fn assess_workflow_pack_connector_quality(
                 bound_server_name: None,
                 bound_server_health_status: None,
                 bound_tool_name: None,
+                tenant_binding_status: None,
+                credential_status: None,
+                secret_ref_statuses: Vec::new(),
+                operation_statuses: Vec::new(),
+                lane_impacts: BTreeMap::new(),
                 blockers: vec![blocker.clone()],
             });
             blockers.push(format!("connector {}: {}", connector.id, blocker));
@@ -26487,6 +26583,125 @@ async fn assess_workflow_pack_connector_quality(
             .map(ToString::to_string);
         let mut passing_sample_count = 0usize;
         let mut connector_blockers = Vec::new();
+        let mut connector_warnings = Vec::new();
+        let required_tenant_fields =
+            workflow_pack_connector_required_tenant_fields(&manifest, &package_dir, connector)?;
+        let tenant_binding_status = if required_tenant_fields.is_empty() {
+            None
+        } else {
+            let mut missing_fields = Vec::new();
+            for field in &required_tenant_fields {
+                if !workflow_pack_connector_tenant_field_present(
+                    input_connector.tenant_binding.as_ref(),
+                    field,
+                ) {
+                    missing_fields.push(field.clone());
+                }
+            }
+            if missing_fields.is_empty() {
+                Some("ready".to_string())
+            } else {
+                for field in missing_fields {
+                    connector_blockers.push(format!("tenant binding missing {}", field));
+                }
+                Some("blocked".to_string())
+            }
+        };
+
+        let mut required_secret_refs =
+            workflow_pack_connector_required_secret_refs(&manifest, &package_dir, connector)?;
+        for (alias, reference) in &input_connector.secret_refs {
+            let trimmed_alias = alias.trim();
+            let trimmed_reference = reference.trim();
+            if trimmed_alias.is_empty() || trimmed_reference.is_empty() {
+                return Err(AppError::bad_request(format!(
+                    "connector {} secret_refs must use non-empty aliases and references",
+                    connector.id
+                )));
+            }
+            required_secret_refs.insert(trimmed_alias.to_string(), trimmed_reference.to_string());
+        }
+        let secret_ref_statuses = workflow_pack_connector_secret_ref_statuses(
+            &connector.id,
+            &required_secret_refs,
+            &secret_records,
+        );
+        for secret_ref in &secret_ref_statuses {
+            if secret_ref.status != "ready" {
+                connector_blockers.extend(secret_ref.blockers.iter().cloned());
+            }
+        }
+        let credential_status = if secret_ref_statuses.is_empty() {
+            None
+        } else if secret_ref_statuses
+            .iter()
+            .all(|secret_ref| secret_ref.status == "ready")
+        {
+            Some("ready".to_string())
+        } else {
+            Some("blocked".to_string())
+        };
+
+        let operation_contracts =
+            workflow_pack_connector_operation_contracts(&package_dir, connector)?;
+        let lane_requirements =
+            workflow_pack_connector_lane_requirements(&manifest, &package_dir, connector)?;
+        let operation_statuses = workflow_pack_connector_operation_statuses(
+            connector,
+            &operation_contracts,
+            &lane_requirements,
+            &input_connector.operation_statuses,
+        )?;
+        for operation in &operation_statuses {
+            connector_blockers.extend(operation.blockers.iter().cloned());
+            if operation.status == "degraded" {
+                connector_warnings
+                    .push(format!("operation {} is degraded", operation.operation_id));
+            }
+        }
+        let mut lane_impacts =
+            workflow_pack_connector_lane_impacts(&lane_requirements, &operation_statuses);
+        for (lane_id, impact) in &input_connector.lane_impacts {
+            let lane_id = lane_id.trim();
+            if lane_id.is_empty() {
+                return Err(AppError::bad_request(format!(
+                    "connector {} lane_impacts must use non-empty lane ids",
+                    connector.id
+                )));
+            }
+            match lane_impacts.get(lane_id) {
+                Some(computed) if computed.status != impact.status => {
+                    connector_blockers.push(format!(
+                        "lane {} impact status {} does not match computed status {}",
+                        lane_id, impact.status, computed.status
+                    ))
+                }
+                Some(_) => {}
+                None => {
+                    lane_impacts.insert(
+                        lane_id.to_string(),
+                        WorkflowPackConnectorLaneImpact {
+                            status: impact.status.trim().to_string(),
+                            enabled_workflows: impact.enabled_workflows.clone(),
+                            blocked_workflows: impact.blocked_workflows.clone(),
+                            degraded_reason: impact
+                                .degraded_reason
+                                .clone()
+                                .unwrap_or_default()
+                                .trim()
+                                .to_string(),
+                        },
+                    );
+                }
+            }
+        }
+        for (lane_id, impact) in &lane_impacts {
+            match impact.status.as_str() {
+                "blocked" => connector_blockers.push(format!("lane {} is blocked", lane_id)),
+                "degraded" => connector_warnings.push(format!("lane {} is degraded", lane_id)),
+                _ => {}
+            }
+        }
         if let (Some(team_id), Some(server_id)) =
             (input_connector.team_id, input_connector.server_id)
         {
@@ -26624,9 +26839,11 @@ async fn assess_workflow_pack_connector_quality(
         }
         connector_blockers.sort();
         connector_blockers.dedup();
-        let status = if connector_blockers.is_empty() {
+        let status = if connector_blockers.is_empty() && connector_warnings.is_empty() {
             ready_connector_count += 1;
             "ready".to_string()
+        } else if connector_blockers.is_empty() {
+            "degraded".to_string()
         } else {
             blockers.extend(
                 connector_blockers
@@ -26646,6 +26863,11 @@ async fn assess_workflow_pack_connector_quality(
             bound_server_name,
             bound_server_health_status,
             bound_tool_name,
+            tenant_binding_status,
+            credential_status,
+            secret_ref_statuses,
+            operation_statuses,
+            lane_impacts,
             blockers: connector_blockers,
         });
     }
@@ -26657,7 +26879,13 @@ async fn assess_workflow_pack_connector_quality(
         installation_id: installation.id,
         pack_id: installation.pack_id.clone(),
         version: installation.version.clone(),
-        status: if blockers.is_empty() {
+        status: if blockers.is_empty()
+            && connector_results
+                .iter()
+                .any(|connector| connector.status == "degraded")
+        {
+            "degraded".to_string()
+        } else if blockers.is_empty() {
             "ready".to_string()
         } else {
             "blocked".to_string()
@@ -26668,6 +26896,515 @@ async fn assess_workflow_pack_connector_quality(
         blockers,
         checked_at,
     })
+}
+
+#[derive(Debug, Clone)]
+struct WorkflowPackConnectorOperationContract {
+    api_name: Option<String>,
+    permission: Option<String>,
+    operation_type: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct WorkflowPackConnectorLaneRequirement {
+    lane_id: String,
+    required_operations: BTreeSet<String>,
+    optional_operations: BTreeSet<String>,
+    controlled_write_operations: BTreeSet<String>,
+}
+
+fn workflow_pack_connector_required_secret_refs(
+    manifest: &workflow_pack::WorkflowPackManifest,
+    package_dir: &FsPath,
+    connector: &workflow_pack::ConnectorRef,
+) -> Result<BTreeMap<String, String>, AppError> {
+    let mut refs =
+        workflow_pack_connector_account_secret_refs(manifest, package_dir, &connector.id)?;
+    if !refs.is_empty() {
+        return Ok(refs);
+    }
+
+    let Some(connector_file) = workflow_pack_connector_file(package_dir, connector)? else {
+        return Ok(refs);
+    };
+    if let Some(required_secrets) = workflow_pack_connector_yaml_array(
+        &connector_file,
+        &connector.id,
+        &["auth", "required_secrets"],
+    )
+    .or_else(|| {
+        workflow_pack_connector_yaml_array(
+            &connector_file,
+            &connector.id,
+            &["readiness_probes", "credential_probe", "required_secrets"],
+        )
+    }) {
+        for secret in required_secrets {
+            refs.insert(secret.clone(), secret);
+        }
+    }
+    Ok(refs)
+}
+
+fn workflow_pack_connector_account_secret_refs(
+    manifest: &workflow_pack::WorkflowPackManifest,
+    package_dir: &FsPath,
+    connector_id: &str,
+) -> Result<BTreeMap<String, String>, AppError> {
+    let Some(account_profile) =
+        workflow_pack_profile_value(manifest, package_dir, "connector-account")?
+    else {
+        return Ok(BTreeMap::new());
+    };
+    let Some(secret_refs) = account_profile
+        .get("accounts")
+        .and_then(Value::as_object)
+        .and_then(|accounts| accounts.get(connector_id))
+        .and_then(|account| account.get("auth_binding"))
+        .and_then(|auth| auth.get("secret_refs"))
+        .and_then(Value::as_object)
+    else {
+        return Ok(BTreeMap::new());
+    };
+    let mut refs = BTreeMap::new();
+    for (alias, reference) in secret_refs {
+        if let Some(reference) = reference
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            refs.insert(alias.trim().to_string(), reference.to_string());
+        }
+    }
+    Ok(refs)
+}
+
+fn workflow_pack_connector_secret_ref_statuses(
+    connector_id: &str,
+    required_secret_refs: &BTreeMap<String, String>,
+    secret_records: &[SecretRecord],
+) -> Vec<WorkflowPackConnectorSecretRefStatus> {
+    required_secret_refs
+        .iter()
+        .map(|(alias, reference)| {
+            let matched = secret_records.iter().find(|record| {
+                record.name == *reference
+                    || record.key == *reference
+                    || secret_record_ref(record) == *reference
+                    || format!("{}#{}", record.path, record.key) == *reference
+            });
+            match matched {
+                Some(record) if record.status == "active" => WorkflowPackConnectorSecretRefStatus {
+                    alias: alias.clone(),
+                    reference: reference.clone(),
+                    status: "ready".to_string(),
+                    catalog_ref: Some(secret_record_ref(record)),
+                    blockers: Vec::new(),
+                },
+                Some(record) => WorkflowPackConnectorSecretRefStatus {
+                    alias: alias.clone(),
+                    reference: reference.clone(),
+                    status: "blocked".to_string(),
+                    catalog_ref: Some(secret_record_ref(record)),
+                    blockers: vec![format!(
+                        "connector {} secret {} catalog record is {}",
+                        connector_id, reference, record.status
+                    )],
+                },
+                None => WorkflowPackConnectorSecretRefStatus {
+                    alias: alias.clone(),
+                    reference: reference.clone(),
+                    status: "blocked".to_string(),
+                    catalog_ref: None,
+                    blockers: vec![format!(
+                        "connector {} secret {} is missing from Vault catalog",
+                        connector_id, reference
+                    )],
+                },
+            }
+        })
+        .collect()
+}
+
+fn workflow_pack_connector_required_tenant_fields(
+    manifest: &workflow_pack::WorkflowPackManifest,
+    package_dir: &FsPath,
+    connector: &workflow_pack::ConnectorRef,
+) -> Result<BTreeSet<String>, AppError> {
+    let mut fields = BTreeSet::new();
+    if let Some(account_profile) =
+        workflow_pack_profile_value(manifest, package_dir, "connector-account")?
+    {
+        if let Some(tenant_binding) = account_profile
+            .get("accounts")
+            .and_then(Value::as_object)
+            .and_then(|accounts| accounts.get(&connector.id))
+            .and_then(|account| account.get("tenant_binding"))
+            .and_then(Value::as_object)
+        {
+            fields.extend(tenant_binding.keys().map(ToString::to_string));
+        }
+    }
+
+    if let Some(connector_file) = workflow_pack_connector_file(package_dir, connector)? {
+        if let Some(required_fields) = workflow_pack_connector_yaml_array(
+            &connector_file,
+            &connector.id,
+            &["readiness_probes", "tenant_scope_probe", "required_fields"],
+        ) {
+            fields.extend(required_fields);
+        }
+    }
+    Ok(fields)
+}
+
+fn workflow_pack_connector_tenant_field_present(
+    tenant_binding: Option<&WorkflowPackConnectorTenantBindingInput>,
+    field: &str,
+) -> bool {
+    let Some(tenant_binding) = tenant_binding else {
+        return false;
+    };
+    let value = match field {
+        "tenant_id" => tenant_binding.tenant_id.as_deref(),
+        "workspace_id" => tenant_binding.workspace_id.as_deref(),
+        "shop_id" => tenant_binding.shop_id.as_deref(),
+        "seller_nick" => tenant_binding.seller_nick.as_deref(),
+        _ => None,
+    };
+    value.map(str::trim).is_some_and(|value| !value.is_empty())
+}
+
+fn workflow_pack_connector_operation_contracts(
+    package_dir: &FsPath,
+    connector: &workflow_pack::ConnectorRef,
+) -> Result<BTreeMap<String, WorkflowPackConnectorOperationContract>, AppError> {
+    let Some(connector_file) = workflow_pack_connector_file(package_dir, connector)? else {
+        return Ok(BTreeMap::new());
+    };
+    let Some(connector_value) = workflow_pack_connector_yaml_entry(&connector_file, &connector.id)
+    else {
+        return Ok(BTreeMap::new());
+    };
+    let mut contracts = BTreeMap::new();
+    for (field, operation_type) in [("read_operations", "read"), ("write_operations", "write")] {
+        let Some(operations) = connector_value.get(field).and_then(Value::as_array) else {
+            continue;
+        };
+        for operation in operations {
+            let Some(operation_id) = operation
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            contracts.insert(
+                operation_id.to_string(),
+                WorkflowPackConnectorOperationContract {
+                    api_name: operation
+                        .get("api_name")
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string),
+                    permission: operation
+                        .get("permission")
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string),
+                    operation_type: operation_type.to_string(),
+                },
+            );
+        }
+    }
+    Ok(contracts)
+}
+
+fn workflow_pack_connector_lane_requirements(
+    manifest: &workflow_pack::WorkflowPackManifest,
+    package_dir: &FsPath,
+    connector: &workflow_pack::ConnectorRef,
+) -> Result<Vec<WorkflowPackConnectorLaneRequirement>, AppError> {
+    let Some(connector_map) = workflow_pack_profile_value(manifest, package_dir, "connector-map")?
+    else {
+        return Ok(Vec::new());
+    };
+    let Some(lanes) = connector_map
+        .get("workflow_lanes")
+        .and_then(Value::as_object)
+    else {
+        return Ok(Vec::new());
+    };
+    let operation_contracts = workflow_pack_connector_operation_contracts(package_dir, connector)?;
+    let operation_ids: BTreeSet<_> = operation_contracts.keys().cloned().collect();
+    Ok(lanes
+        .iter()
+        .map(|(lane_id, lane)| WorkflowPackConnectorLaneRequirement {
+            lane_id: lane_id.clone(),
+            required_operations: workflow_pack_string_set(lane.get("required_read_operations"))
+                .intersection(&operation_ids)
+                .cloned()
+                .collect(),
+            optional_operations: workflow_pack_string_set(lane.get("optional_read_operations"))
+                .intersection(&operation_ids)
+                .cloned()
+                .collect(),
+            controlled_write_operations: workflow_pack_string_set(
+                lane.get("controlled_write_operations"),
+            )
+            .intersection(&operation_ids)
+            .cloned()
+            .collect(),
+        })
+        .collect())
+}
+
+fn workflow_pack_connector_operation_statuses(
+    connector: &workflow_pack::ConnectorRef,
+    operation_contracts: &BTreeMap<String, WorkflowPackConnectorOperationContract>,
+    lane_requirements: &[WorkflowPackConnectorLaneRequirement],
+    input_statuses: &[WorkflowPackConnectorOperationStatusInput],
+) -> Result<Vec<WorkflowPackConnectorOperationStatus>, AppError> {
+    let mut required_operations = BTreeSet::new();
+    for lane in lane_requirements {
+        required_operations.extend(lane.required_operations.iter().cloned());
+    }
+    let mut statuses = BTreeMap::new();
+    for input in input_statuses {
+        let operation_id = input.operation_id.trim();
+        if operation_id.is_empty() {
+            return Err(AppError::bad_request(format!(
+                "connector {} operation_statuses must use non-empty operation_id",
+                connector.id
+            )));
+        }
+        let status = input.status.trim();
+        if !matches!(status, "ready" | "degraded" | "blocked") {
+            return Err(AppError::bad_request(format!(
+                "connector {} operation {} status must be ready, degraded, or blocked",
+                connector.id, operation_id
+            )));
+        }
+        let contract = operation_contracts.get(operation_id);
+        let mut blockers = Vec::new();
+        if contract.is_none() {
+            blockers.push(format!(
+                "connector {} operation {} is not declared in connector contract",
+                connector.id, operation_id
+            ));
+        }
+        if required_operations.contains(operation_id) && status != "ready" {
+            blockers.push(format!(
+                "connector {} required read operation {} is {}",
+                connector.id, operation_id, status
+            ));
+        }
+        statuses.insert(
+            operation_id.to_string(),
+            WorkflowPackConnectorOperationStatus {
+                operation_id: operation_id.to_string(),
+                api_name: input
+                    .api_name
+                    .clone()
+                    .or_else(|| contract.and_then(|contract| contract.api_name.clone())),
+                permission: input
+                    .permission
+                    .clone()
+                    .or_else(|| contract.and_then(|contract| contract.permission.clone())),
+                operation_type: contract.map(|contract| contract.operation_type.clone()),
+                status: status.to_string(),
+                last_probe_at: input.last_probe_at,
+                sample_count: input.sample_count,
+                error_class: input.error_class.clone(),
+                evidence_refs: input.evidence_refs.clone(),
+                blockers,
+            },
+        );
+    }
+    for operation_id in required_operations {
+        if !statuses.contains_key(&operation_id) {
+            let contract = operation_contracts.get(&operation_id);
+            statuses.insert(
+                operation_id.clone(),
+                WorkflowPackConnectorOperationStatus {
+                    operation_id: operation_id.clone(),
+                    api_name: contract.and_then(|contract| contract.api_name.clone()),
+                    permission: contract.and_then(|contract| contract.permission.clone()),
+                    operation_type: contract.map(|contract| contract.operation_type.clone()),
+                    status: "blocked".to_string(),
+                    last_probe_at: None,
+                    sample_count: None,
+                    error_class: Some("missing_probe".to_string()),
+                    evidence_refs: Vec::new(),
+                    blockers: vec![format!(
+                        "connector {} required read operation {} is missing readiness evidence",
+                        connector.id, operation_id
+                    )],
+                },
+            );
+        }
+    }
+    Ok(statuses.into_values().collect())
+}
+
+fn workflow_pack_connector_lane_impacts(
+    lane_requirements: &[WorkflowPackConnectorLaneRequirement],
+    operation_statuses: &[WorkflowPackConnectorOperationStatus],
+) -> BTreeMap<String, WorkflowPackConnectorLaneImpact> {
+    let status_by_operation: BTreeMap<_, _> = operation_statuses
+        .iter()
+        .map(|operation| (operation.operation_id.as_str(), operation.status.as_str()))
+        .collect();
+    lane_requirements
+        .iter()
+        .map(|lane| {
+            let blocked_required: Vec<_> = lane
+                .required_operations
+                .iter()
+                .filter(|operation_id| {
+                    status_by_operation.get(operation_id.as_str()) != Some(&"ready")
+                })
+                .cloned()
+                .collect();
+            let degraded_optional: Vec<_> = lane
+                .optional_operations
+                .iter()
+                .chain(lane.controlled_write_operations.iter())
+                .filter(|operation_id| {
+                    matches!(
+                        status_by_operation.get(operation_id.as_str()),
+                        Some(&"degraded" | &"blocked")
+                    )
+                })
+                .cloned()
+                .collect();
+            let (status, degraded_reason) = if !blocked_required.is_empty() {
+                (
+                    "blocked".to_string(),
+                    format!(
+                        "missing required operations: {}",
+                        blocked_required.join(", ")
+                    ),
+                )
+            } else if !degraded_optional.is_empty() {
+                (
+                    "degraded".to_string(),
+                    format!(
+                        "optional or controlled operations degraded: {}",
+                        degraded_optional.join(", ")
+                    ),
+                )
+            } else {
+                ("ready".to_string(), String::new())
+            };
+            (
+                lane.lane_id.clone(),
+                WorkflowPackConnectorLaneImpact {
+                    status: status.clone(),
+                    enabled_workflows: if status == "blocked" {
+                        Vec::new()
+                    } else {
+                        vec![lane.lane_id.clone()]
+                    },
+                    blocked_workflows: if status == "blocked" {
+                        vec![lane.lane_id.clone()]
+                    } else {
+                        Vec::new()
+                    },
+                    degraded_reason,
+                },
+            )
+        })
+        .collect()
+}
+
+fn workflow_pack_profile_value(
+    manifest: &workflow_pack::WorkflowPackManifest,
+    package_dir: &FsPath,
+    profile_id: &str,
+) -> Result<Option<Value>, AppError> {
+    let Some(profile) = manifest
+        .profiles
+        .iter()
+        .find(|profile| profile.id == profile_id)
+    else {
+        return Ok(None);
+    };
+    let content = std::fs::read_to_string(package_dir.join(&profile.path)).with_context(|| {
+        format!(
+            "failed to read workflow pack profile {} at {}",
+            profile.id, profile.path
+        )
+    })?;
+    serde_yaml::from_str::<Value>(&content)
+        .map(Some)
+        .map_err(|error| AppError::bad_request(error.to_string()))
+}
+
+fn workflow_pack_connector_file(
+    package_dir: &FsPath,
+    connector: &workflow_pack::ConnectorRef,
+) -> Result<Option<Value>, AppError> {
+    let path = package_dir.join(&connector.path);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(&path).with_context(|| {
+        format!(
+            "failed to read workflow pack connector {} at {}",
+            connector.id, connector.path
+        )
+    })?;
+    serde_yaml::from_str::<Value>(&content)
+        .map(Some)
+        .map_err(|error| AppError::bad_request(error.to_string()))
+}
+
+fn workflow_pack_connector_yaml_entry<'a>(
+    connector_file: &'a Value,
+    connector_id: &str,
+) -> Option<&'a Value> {
+    connector_file
+        .get("connectors")
+        .and_then(Value::as_array)
+        .and_then(|connectors| {
+            connectors.iter().find(|candidate| {
+                candidate
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id == connector_id)
+            })
+        })
+}
+
+fn workflow_pack_connector_yaml_array(
+    connector_file: &Value,
+    connector_id: &str,
+    path: &[&str],
+) -> Option<Vec<String>> {
+    let mut cursor = workflow_pack_connector_yaml_entry(connector_file, connector_id)?;
+    for segment in path {
+        cursor = cursor.get(*segment)?;
+    }
+    Some(workflow_pack_string_vec(Some(cursor)))
+}
+
+fn workflow_pack_string_set(value: Option<&Value>) -> BTreeSet<String> {
+    workflow_pack_string_vec(value).into_iter().collect()
+}
+
+fn workflow_pack_string_vec(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn json_field_present(value: Option<&Value>) -> bool {
@@ -69845,6 +70582,267 @@ not json
                 && log.resource_id == Some(installed.id)
                 && log.details["status"] == json!("ready")
         }));
+    }
+
+    #[tokio::test]
+    async fn ecommerce_tmall_connector_quality_checks_account_secrets_and_lane_readiness() {
+        let app = test_app().await;
+        let installed: WorkflowPackInstallation = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-packs/install",
+                json!({"manifest_path": ecommerce_tmall_manifest_path_string()}),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+
+        let connector_payload = |picture_upload_status: &str| {
+            json!({
+                "connectors": [
+                    {
+                        "id": "tmall-top",
+                        "tenant_binding": {
+                            "tenant_id": "tenant-tmall-1",
+                            "workspace_id": "workspace-tmall-1",
+                            "shop_id": "shop-1001",
+                            "seller_nick": "mando-flagship"
+                        },
+                        "samples": [
+                            {
+                                "object_id": "trade-1",
+                                "retrieved_at": Utc::now().to_rfc3339(),
+                                "citation_url": "https://eco.taobao.com/router/rest?request_id=req-1",
+                                "metadata": {
+                                    "api_name": "taobao.trades.sold.get",
+                                    "shop_id": "shop-1001",
+                                    "retrieved_at": Utc::now().to_rfc3339(),
+                                    "request_id": "req-1"
+                                },
+                                "content": {
+                                    "object_type": "trade",
+                                    "object_id": "trade-1",
+                                    "summary": "recent paid order"
+                                }
+                            },
+                            {
+                                "object_id": "review-1",
+                                "retrieved_at": Utc::now().to_rfc3339(),
+                                "citation_url": "https://eco.taobao.com/router/rest?request_id=req-2",
+                                "metadata": {
+                                    "api_name": "tmall.traderate.feeds.get",
+                                    "shop_id": "shop-1001",
+                                    "retrieved_at": Utc::now().to_rfc3339(),
+                                    "request_id": "req-2"
+                                },
+                                "content": {
+                                    "object_type": "review",
+                                    "object_id": "review-1",
+                                    "summary": "review feed item"
+                                }
+                            },
+                            {
+                                "object_id": "item-1",
+                                "retrieved_at": Utc::now().to_rfc3339(),
+                                "citation_url": "https://eco.taobao.com/router/rest?request_id=req-3",
+                                "metadata": {
+                                    "api_name": "taobao.item.seller.get",
+                                    "shop_id": "shop-1001",
+                                    "retrieved_at": Utc::now().to_rfc3339(),
+                                    "request_id": "req-3"
+                                },
+                                "content": {
+                                    "object_type": "item",
+                                    "object_id": "item-1",
+                                    "summary": "product detail item"
+                                }
+                            }
+                        ],
+                        "operation_statuses": [
+                            {
+                                "operation_id": "order-trade-list-read",
+                                "status": "ready",
+                                "last_probe_at": Utc::now().to_rfc3339(),
+                                "sample_count": 1,
+                                "evidence_refs": ["trade-1"]
+                            },
+                            {
+                                "operation_id": "item-detail-read",
+                                "status": "ready",
+                                "last_probe_at": Utc::now().to_rfc3339(),
+                                "sample_count": 1,
+                                "evidence_refs": ["item-1"]
+                            },
+                            {
+                                "operation_id": "review-feed-read",
+                                "status": "ready",
+                                "last_probe_at": Utc::now().to_rfc3339(),
+                                "sample_count": 1,
+                                "evidence_refs": ["review-1"]
+                            },
+                            {
+                                "operation_id": "refund-list-read",
+                                "status": "ready",
+                                "last_probe_at": Utc::now().to_rfc3339(),
+                                "sample_count": 1,
+                                "evidence_refs": ["refund-list-1"]
+                            },
+                            {
+                                "operation_id": "refund-detail-read",
+                                "status": "ready",
+                                "last_probe_at": Utc::now().to_rfc3339(),
+                                "sample_count": 1,
+                                "evidence_refs": ["refund-detail-1"]
+                            },
+                            {
+                                "operation_id": "picture-upload",
+                                "status": picture_upload_status,
+                                "last_probe_at": Utc::now().to_rfc3339(),
+                                "sample_count": 0,
+                                "error_class": "insufficient_app_permission",
+                                "evidence_refs": ["permission-probe-picture-upload"]
+                            }
+                        ]
+                    }
+                ],
+                "reason": "tmall connector account readiness"
+            })
+        };
+
+        let blocked: WorkflowPackConnectorQualityAssessment = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!(
+                    "/api/workflow-packs/installations/{}/connectors/quality/assess",
+                    installed.id
+                ),
+                connector_payload("blocked"),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(blocked.status, "blocked");
+        let blocked_result = &blocked.connector_results[0];
+        assert_eq!(blocked_result.id, "tmall-top");
+        assert_eq!(
+            blocked_result.tenant_binding_status.as_deref(),
+            Some("ready")
+        );
+        assert_eq!(blocked_result.credential_status.as_deref(), Some("blocked"));
+        assert!(blocked_result.secret_ref_statuses.iter().any(|secret| {
+            secret.reference == "TMALL_TOP_SESSION" && secret.status == "blocked"
+        }));
+        assert!(
+            blocked
+                .blockers
+                .iter()
+                .any(|blocker| blocker.contains("TMALL_TOP_APP_KEY"))
+        );
+
+        for (name, path, key) in [
+            ("TMALL_TOP_APP_KEY", "connectors/tmall-top", "app_key"),
+            ("TMALL_TOP_APP_SECRET", "connectors/tmall-top", "app_secret"),
+            ("TMALL_TOP_SESSION", "connectors/tmall-top", "session"),
+        ] {
+            let _: SecretRecord = request_json(
+                app.clone(),
+                json_request_with_headers(
+                    "POST",
+                    "/api/vault/secrets",
+                    json!({
+                        "name": name,
+                        "path": path,
+                        "key": key,
+                        "scope_type": "tenant"
+                    }),
+                    &[("x-mandoforge-roles", "admin")],
+                ),
+            )
+            .await;
+        }
+
+        let degraded: WorkflowPackConnectorQualityAssessment = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!(
+                    "/api/workflow-packs/installations/{}/connectors/quality/assess",
+                    installed.id
+                ),
+                connector_payload("blocked"),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(degraded.status, "degraded");
+        let degraded_result = &degraded.connector_results[0];
+        assert_eq!(degraded_result.credential_status.as_deref(), Some("ready"));
+        assert!(
+            degraded_result
+                .secret_ref_statuses
+                .iter()
+                .all(|secret| secret.status == "ready")
+        );
+        assert_eq!(
+            degraded_result
+                .lane_impacts
+                .get("content-production")
+                .map(|impact| impact.status.as_str()),
+            Some("degraded")
+        );
+        assert!(degraded_result.blockers.is_empty());
+
+        let ready: WorkflowPackConnectorQualityAssessment = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!(
+                    "/api/workflow-packs/installations/{}/connectors/quality/assess",
+                    installed.id
+                ),
+                connector_payload("ready"),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(ready.status, "ready");
+        assert_eq!(ready.ready_connector_count, 1);
+        assert_eq!(ready.connector_results[0].status, "ready");
+        assert_eq!(
+            ready.connector_results[0]
+                .lane_impacts
+                .get("content-production")
+                .map(|impact| impact.status.as_str()),
+            Some("ready")
+        );
+
+        let output = serde_json::to_string(&ready).expect("ready output serializes");
+        for raw_secret in [
+            "raw-top-app-key-value",
+            "raw-top-app-secret-value",
+            "raw-top-session-value",
+        ] {
+            assert!(!output.contains(raw_secret));
+        }
+        let audit_logs: Vec<AuditLog> = request_json(
+            app,
+            Request::builder()
+                .uri("/api/audit-logs")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let audit_payload = serde_json::to_string(&audit_logs).expect("audit logs serialize");
+        for raw_secret in [
+            "raw-top-app-key-value",
+            "raw-top-app-secret-value",
+            "raw-top-session-value",
+        ] {
+            assert!(!audit_payload.contains(raw_secret));
+        }
     }
 
     #[test]

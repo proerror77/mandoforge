@@ -27,5 +27,6 @@ rg -q '^  lane_scope:' packs/ecommerce-tmall/workflows
 
 cargo test -p mandoforge-api validates_ecommerce_tmall_domain_pack_fixture -- --nocapture
 cargo test -p mandoforge-api ecommerce_tmall_pack_stages_semantic_context_os_contract -- --nocapture
+cargo test -p mandoforge-api ecommerce_tmall_connector_quality_checks_account_secrets_and_lane_readiness -- --nocapture
 
 echo "ecommerce Tmall Context OS semantic contract ok"

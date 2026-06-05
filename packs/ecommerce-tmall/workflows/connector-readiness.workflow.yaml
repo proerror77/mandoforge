@@ -1,0 +1,48 @@
+id: connector-readiness
+entry_agent: connector-reader
+semantic_scopes:
+  domain_scope: ecommerce
+  workflow_scope: tmall
+  lane_scope: connector-readiness
+  share_policy: isolated
+steps:
+  - agent: connector-reader
+    task: read tenant connector account binding, secret references, sample probe evidence, and connector operation contracts
+    required_profiles:
+      - connector-account
+      - connector-map
+    output_schema: connector-readiness-report
+  - agent: touchpoint-analyzer
+    handoff_intent: classify-connector-readiness
+    required_profiles:
+      - connector-account
+      - connector-map
+      - store
+    required_schemas:
+      - tmall-connector-operation
+    skills:
+      - tmall-connector-readiness
+    output:
+      required_fields:
+        - credential_status
+        - operation_statuses
+        - lane_impacts
+        - release_blockers
+  - agent: response-writer
+    handoff_intent: draft-connector-readiness-report
+    output_schema: connector-readiness-report
+    required_profiles:
+      - connector-account
+      - connector-map
+      - output-style
+    checks:
+      - no_raw_secret_value_rendered
+      - blocked_operations_mapped_to_lanes
+      - degraded_lanes_explain_manual_fallback
+      - external_write_approval_binding_declared
+readiness:
+  required_before_release: true
+  required_before_controlled_external_write: true
+output:
+  draft_only: true
+  provenance_required: true

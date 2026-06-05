@@ -1,0 +1,36 @@
+accounts:
+  tmall-top:
+    connector_id: tmall-top
+    provider: alibaba-top
+    tenant_binding:
+      tenant_id: required
+      workspace_id: required
+      shop_id: required
+      seller_nick: required
+    auth_binding:
+      auth_type: top-session
+      secret_refs:
+        app_key: TMALL_TOP_APP_KEY
+        app_secret: TMALL_TOP_APP_SECRET
+        session: TMALL_TOP_SESSION
+      session_owner: tenant_operator
+      rotation_policy: rotate before TOP session expiry or when shop authorization changes
+    readiness_inputs:
+      required_sample_window_hours: 24
+      sample_read_operations:
+        - order-trade-list-read
+        - review-feed-read
+        - refund-list-read
+        - item-detail-read
+      required_write_operations:
+        - review-explanation-submit
+        - refund-agree
+        - refund-refuse
+        - qianniu-task-create
+        - picture-upload
+        - item-fast-update
+    safety:
+      store_secret_values: false
+      approval_commit_token_required: true
+      payload_digest_required: true
+      treat_connector_payloads_as_untrusted_data: true

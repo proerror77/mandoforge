@@ -40,6 +40,12 @@ profiles:
   - id: connector-map
     path: profiles/connector_map.yaml
     required: true
+  - id: connector-account
+    path: profiles/connector_account.yaml
+    required: true
+  - id: ontology-seed
+    path: profiles/ontology_seed.yaml
+    required: true
   - id: risk-policy
     path: profiles/risk_policy.yaml
     required: true
@@ -107,7 +113,13 @@ skills:
   - id: tmall-content-compliance-checker
     path: skills/tmall-content-compliance-checker/skill.md
     required: true
+  - id: tmall-connector-readiness
+    path: skills/tmall-connector-readiness/skill.md
+    required: true
 workflows:
+  - id: connector-readiness
+    path: workflows/connector-readiness.workflow.yaml
+    entry_agent: connector-reader
   - id: customer-service-conversation
     path: workflows/customer-service-conversation.workflow.yaml
     entry_agent: connector-reader
@@ -151,6 +163,7 @@ agents:
           - classify-question-answer-gap
           - classify-product-knowledge-gap
           - classify-pilot-readiness
+          - classify-connector-readiness
         risk_level: medium
         approval_required: false
         schema: schemas/handoff.schema.json
@@ -169,6 +182,7 @@ agents:
           - draft-negative-review-rescue-plan
           - draft-after-sales-plan
           - draft-pilot-exit-report
+          - draft-connector-readiness-report
         risk_level: high
         approval_required: true
         schema: schemas/handoff.schema.json
@@ -276,6 +290,12 @@ schemas:
   - id: connector-map
     path: schemas/connector_map.schema.json
     required: true
+  - id: connector-account
+    path: schemas/connector_account.schema.json
+    required: true
+  - id: ontology-seed
+    path: schemas/ontology_seed.schema.json
+    required: true
   - id: risk-policy
     path: schemas/risk_policy.schema.json
     required: true
@@ -323,6 +343,9 @@ schemas:
     required: true
   - id: tmall-connector-operation
     path: schemas/tmall_connector_operation.schema.json
+    required: true
+  - id: connector-readiness-report
+    path: schemas/connector_readiness_report.schema.json
     required: true
   - id: observability-contract
     path: schemas/observability_contract.schema.json
@@ -382,6 +405,8 @@ onboarding:
     - store
     - approval-matrix
     - connector-map
+    - connector-account
+    - ontology-seed
     - risk-policy
     - output-style
     - service-playbook
@@ -400,6 +425,12 @@ onboarding:
       required: true
     - id: connector-map
       path: schemas/connector_map.schema.json
+      required: true
+    - id: connector-account
+      path: schemas/connector_account.schema.json
+      required: true
+    - id: ontology-seed
+      path: schemas/ontology_seed.schema.json
       required: true
     - id: risk-policy
       path: schemas/risk_policy.schema.json

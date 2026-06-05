@@ -77,6 +77,22 @@ channel_capabilities:
     status: permission_bound
     default_mode: approved_connector_write
 workflow_lanes:
+  connector-readiness:
+    required_capabilities:
+      - tmall.order.read
+      - tmall.product.read
+    optional_capabilities:
+      - tmall.review.read
+      - tmall.refund.read
+      - tmall.qianniu.workorder.read
+    required_read_operations:
+      - order-trade-list-read
+      - item-detail-read
+    optional_read_operations:
+      - review-feed-read
+      - refund-list-read
+      - qianniu-task-list-read
+    controlled_write_operations: []
   customer-service:
     required_capabilities:
       - tmall.order.read
@@ -84,11 +100,24 @@ workflow_lanes:
     optional_capabilities:
       - tmall.refund.read
       - tmall.qianniu.workorder.write
+    required_read_operations:
+      - order-trade-list-read
+      - item-detail-read
+    optional_read_operations:
+      - refund-list-read
+    controlled_write_operations:
+      - qianniu-task-create
   review-voc:
     required_capabilities:
       - tmall.review.read
     optional_capabilities:
       - tmall.review.explain.write
+    required_read_operations:
+      - review-feed-read
+    optional_read_operations:
+      - order-trade-list-read
+    controlled_write_operations:
+      - review-explanation-submit
   after-sales:
     required_capabilities:
       - tmall.refund.read
@@ -96,6 +125,18 @@ workflow_lanes:
     optional_capabilities:
       - tmall.refund.action.write
       - tmall.qianniu.workorder.write
+    required_read_operations:
+      - refund-list-read
+      - refund-detail-read
+      - order-trade-list-read
+    optional_read_operations:
+      - qianniu-task-list-read
+    controlled_write_operations:
+      - refund-agree
+      - refund-refuse
+      - returngoods-agree
+      - returngoods-refuse
+      - qianniu-task-create
   content-production:
     required_capabilities:
       - tmall.product.read
@@ -103,3 +144,49 @@ workflow_lanes:
       - tmall.review.read
       - tmall.media.upload.write
       - tmall.product.media.associate.write
+    required_read_operations:
+      - item-detail-read
+    optional_read_operations:
+      - review-feed-read
+    controlled_write_operations:
+      - picture-upload
+      - content-media-secret-upload
+      - content-media-public-upload
+      - content-video-publish
+      - item-fast-update
+  product-knowledge:
+    required_capabilities:
+      - tmall.product.read
+    optional_capabilities:
+      - tmall.review.read
+    required_read_operations:
+      - item-detail-read
+    optional_read_operations:
+      - review-feed-read
+    controlled_write_operations: []
+  question-answer:
+    required_capabilities:
+      - tmall.product.read
+    optional_capabilities:
+      - tmall.review.read
+    required_read_operations:
+      - item-detail-read
+    optional_read_operations:
+      - review-feed-read
+    controlled_write_operations:
+      - qianniu-task-create
+  negative-review-rescue:
+    required_capabilities:
+      - tmall.review.read
+      - tmall.order.read
+    optional_capabilities:
+      - tmall.review.explain.write
+      - tmall.qianniu.workorder.write
+    required_read_operations:
+      - review-feed-read
+      - order-trade-list-read
+    optional_read_operations:
+      - refund-list-read
+    controlled_write_operations:
+      - review-explanation-submit
+      - qianniu-task-create

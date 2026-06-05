@@ -23,6 +23,13 @@ Required sections:
 - Channel capability map: TOP read/write availability, QianNiu task
   availability, operator-import batch availability, browser-assisted import
   availability, media upload permission, and product-edit permission.
+- Connector account binding: `connector_id`, TOP auth type, `shop_id`,
+  `seller_nick`, required secret reference names, readiness probe evidence, and
+  rotation policy. The store profile must reference secret names only; raw
+  secrets remain outside the pack.
+- Ontology seed: tenant-approved object and relation types for orders, products,
+  refunds, reviews, Q&A, content assets, connector operations, and approval
+  commits.
 - Campaign calendar: promotion name, active window, affected SKUs, discount
   terms, customer-service notes, and content restrictions.
 

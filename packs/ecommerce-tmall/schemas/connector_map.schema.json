@@ -97,7 +97,19 @@
         "required": ["required_capabilities", "optional_capabilities"],
         "properties": {
           "required_capabilities": { "type": "array", "items": { "type": "string", "minLength": 1 } },
-          "optional_capabilities": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+          "optional_capabilities": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "required_read_operations": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "optional_read_operations": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "controlled_write_operations": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 }
+          }
         },
         "additionalProperties": false
       }

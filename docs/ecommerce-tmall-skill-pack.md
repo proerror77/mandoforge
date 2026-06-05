@@ -35,6 +35,7 @@ their shop has an approved channel.
   - `content-producer`
   - `tmall-executor`
 - Workflows:
+  - `connector-readiness`
   - `customer-service-conversation`
   - `review-voc-and-reply`
   - `negative-review-rescue`
@@ -51,6 +52,13 @@ The `tmall-top` connector declares the Alibaba TOP/Tmall boundary as a native
 connector requirement. The pack does not embed credentials. A tenant must bind
 store-scoped `TMALL_TOP_APP_KEY`, `TMALL_TOP_APP_SECRET`, and
 `TMALL_TOP_SESSION` secrets before live connector quality can pass.
+
+The pack separates account binding from operation contracts. A tenant fills the
+`connector-account` profile with tenant/workspace/shop ids, seller nick, TOP
+auth mode, secret reference names, probe inputs, and rotation policy. Raw secret
+values remain in the runtime secret store and are not embedded in the pack.
+`connector-map` maps each workflow lane to required read operations, optional
+read operations, and controlled write operations.
 
 Connector readiness is operation-level, not all-or-nothing. A tenant can be
 `ready`, `degraded`, or `blocked` per lane depending on credential binding, shop
@@ -106,6 +114,10 @@ Each workflow also adds a `lane_scope` such as `customer-service`,
 `pilot-readiness` so Context OS packets can retrieve lane-specific objects
 without sharing raw buyer data across unrelated domains.
 
+The `ontology-seed` profile declares initial Tmall object and relation types for
+store, connector account, connector operation, order, refund case, review,
+product, Q&A question, content asset, and approval commit semantics.
+
 The pack must not share raw buyer messages, review text, refund records, or
 customer-service history with unrelated Legal, Social Media, or other domain
 memory. Cross-domain reuse should happen only through approved tenant-common
@@ -137,11 +149,17 @@ release:
   capabilities, campaign calendar, and escalation owners.
 - Approval matrix with workflow owners and approval commit-token bind fields.
 - Connector map with readiness probes and degraded-lane behavior.
+- Connector account profile with tenant/workspace/shop binding, seller nick,
+  TOP auth mode, secret reference names, session rotation policy, and readiness
+  probe inputs.
+- Ontology seed with tenant-approved object types, relation types, retrieval
+  defaults, and prompt boundary.
 - Risk policy and output style.
 
 The onboarding readiness output reports each lane as `ready`, `degraded`, or
 `blocked`. Missing owners or missing required read lanes block release; missing
 optional write/media/comment capabilities degrade only the affected workflow.
+Connector readiness must map operation status to lane impact before release.
 
 ## Customer-Service And VOC Boundary
 
