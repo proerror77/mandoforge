@@ -1,5 +1,10 @@
 id: after-sales-triage
 entry_agent: connector-reader
+semantic_scopes:
+  domain_scope: ecommerce
+  workflow_scope: tmall
+  lane_scope: after-sales
+  share_policy: isolated
 steps:
   - agent: connector-reader
     task: read refund, return, logistics, order, product, and platform-intervention evidence

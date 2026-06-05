@@ -1,5 +1,10 @@
 id: question-answer-ops
 entry_agent: connector-reader
+semantic_scopes:
+  domain_scope: ecommerce
+  workflow_scope: tmall
+  lane_scope: question-answer
+  share_policy: isolated
 steps:
   - agent: connector-reader
     task: read Q&A/comment-area question signals and product knowledge, or accept operator-imported question batches when API coverage is unavailable
@@ -14,6 +19,8 @@ steps:
     handoff_intent: classify-question-answer-gap
     required_profiles:
       - question-answer-policy
+      - store
+    required_schemas:
       - product-knowledge
     skills:
       - tmall-question-answer-ops

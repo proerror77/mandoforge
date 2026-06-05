@@ -196,7 +196,7 @@ fn App() -> Html {
         semantic_search: use_polling::<Value>("/api/semantic-search", 5_000),
         semantic_graph: use_polling::<SemanticGraphSnapshot>("/api/semantic-graph", 5_000),
         semantic_workbench: use_polling::<Value>(
-            "/api/semantic-workbench?domain_scope=legal",
+            "/api/semantic-workbench?domain_scope=ecommerce&workflow_scope=tmall",
             5_000,
         ),
         semantic_reflection_queue: use_polling::<SemanticReflectionQueue>(
@@ -771,7 +771,11 @@ fn SemanticView(props: &SemanticProps) -> Html {
             </Panel>
             <Panel title="Objects">
                 <Rows empty="No semantic objects." rows={props.data.semantic_objects.data.iter().take(10).map(|object| {
-                    (object.status.clone(), label_or(&object.title, &object.object_key).to_string(), format!("{} / {}", object.object_type, object.trust_level))
+                    (
+                        object.status.clone(),
+                        label_or(&object.title, &object.object_key).to_string(),
+                        format!("{} / {} / {}", object.object_type, object.trust_level, semantic_scope_summary(&object.semantic_scopes))
+                    )
                 }).collect::<Vec<_>>()} />
             </Panel>
             <Panel title="Governance">
@@ -798,7 +802,11 @@ fn PacksView(props: &DataProps) -> Html {
             </Panel>
             <Panel title="Installations">
                 <Rows empty="No pack installations." rows={props.data.workflow_pack_installations.data.iter().take(12).map(|pack| {
-                    (pack.status.clone(), label_or(&pack.pack_id, "pack").to_string(), label_or(&pack.version, "version").to_string())
+                    (
+                        pack.status.clone(),
+                        label_or(&pack.pack_id, "pack").to_string(),
+                        format!("{} / {} / {}", label_or(&pack.kind, "kind"), label_or(&pack.version, "version"), semantic_scope_summary(&pack.manifest["semantic_scopes"]))
+                    )
                 }).collect::<Vec<_>>()} />
             </Panel>
             <Panel title="Marketplace">
@@ -1313,7 +1321,7 @@ fn PackMosaic(props: &PackMosaicProps) -> Html {
                     <article class={classes!("mosaic-tile", status_tone(&pack.status))} key={pack.id.clone()}>
                         <span>{ index + 1 }</span>
                         <strong>{ label_or(&pack.pack_id, "pack") }</strong>
-                        <small>{ label_or(&pack.version, "version") }</small>
+                        <small>{ semantic_scope_summary(&pack.manifest["semantic_scopes"]) }</small>
                     </article>
                 }) }
                 { if props.installations.is_empty() {
@@ -1608,6 +1616,33 @@ fn short_id(id: &str) -> String {
 
 fn compact_json(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "unserializable".to_string())
+}
+
+fn semantic_scope_summary(scopes: &Value) -> String {
+    let Some(object) = scopes.as_object() else {
+        return "unscoped".to_string();
+    };
+    let parts = [
+        "domain_scope",
+        "workflow_scope",
+        "lane_scope",
+        "share_policy",
+        "memory_scope",
+    ]
+    .into_iter()
+    .filter_map(|key| {
+        object
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| value.to_string())
+    })
+    .collect::<Vec<_>>();
+    if parts.is_empty() {
+        "unscoped".to_string()
+    } else {
+        parts.join(" / ")
+    }
 }
 
 fn pretty_json(value: &Value) -> String {

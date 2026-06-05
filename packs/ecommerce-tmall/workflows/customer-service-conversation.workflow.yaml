@@ -1,5 +1,10 @@
 id: customer-service-conversation
 entry_agent: connector-reader
+semantic_scopes:
+  domain_scope: ecommerce
+  workflow_scope: tmall
+  lane_scope: customer-service
+  share_policy: isolated
 steps:
   - agent: connector-reader
     task: read customer message, order context, product knowledge, refund state, and relevant policy

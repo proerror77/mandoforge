@@ -19,6 +19,7 @@ Every pack manifest must declare:
 - `kind`: `WorkflowPack` or `DomainPack`.
 - `id`, `name`, `version`, and `description`.
 - Capabilities.
+- DomainPack semantic scopes: `domain_scope`, `workflow_scope`, and `share_policy`.
 - Profiles, skills, workflows, agents, connectors, schemas, policies, evals, and release gates.
 - Onboarding workflow, required tenant profiles, profile schemas, and an onboarding eval.
 
@@ -31,6 +32,8 @@ The validator enforces the initial Stage 3 safety floor:
 - At least one workflow, agent, connector, required eval gate, and required release gate must exist.
 - At least one profile, skill, schema, and policy must exist.
 - The onboarding workflow must reference a declared workflow.
+- DomainPacks must declare manifest-level semantic scopes with non-empty `domain_scope`, `workflow_scope`, and `share_policy`.
+- DomainPack workflow files must also declare semantic scopes, including lane-specific scopes when the pack separates operational lanes.
 - Onboarding required profiles must reference declared profile ids.
 - Onboarding profile schemas must be relative, existing files.
 - The onboarding eval must reference a declared eval.
@@ -43,6 +46,7 @@ The validator enforces the initial Stage 3 safety floor:
 - Writer agents cannot declare external-write tool scopes.
 - Handoffs must target declared agents.
 - Handoffs must declare enum-like intents.
+- Workflow file step references must resolve to declared agents, profiles, schemas, skills, and handoff intents.
 - High-risk handoffs must require approval.
 - Eval gate scores must be between `0` and `1`.
 
@@ -76,7 +80,7 @@ The initial Stage 3 update API implements the immutable-version contract:
 
 ### Stage
 
-Stage should materialize draft workflow definitions, agent versions, connector definitions, policy revisions, eval suites, and profile requirements in a non-production state. Workflow bindings must carry the materialized `WorkflowDefinition` id as `target_id`, and workflow schedule runtime objects must reference that definition id. Staging must preserve tenant scope and must not bypass provider, tool, approval, MCP, or audit governance.
+Stage should materialize draft workflow definitions, agent versions, connector definitions, policy revisions, eval suites, and profile requirements in a non-production state. Workflow bindings must carry the materialized `WorkflowDefinition` id as `target_id`, and workflow schedule runtime objects must reference that definition id. DomainPack semantic scopes must be preserved in workflow bindings, workflow schedules, workflow definitions, root task grants, and semantic-layer projections. Staging must preserve tenant scope and must not bypass provider, tool, approval, MCP, or audit governance.
 
 ### Onboarding Assessment
 
@@ -134,6 +138,8 @@ scripts/verify-workflow-pack-manifest.sh
 ```
 
 The gate currently runs Rust validator tests against the AI Governance Pack fixture and checks that the external JSON Schema and package manifest are present.
+
+The Tmall DomainPack fixture is also covered by the Rust validator so workflow-level semantic scope and reference contracts are exercised, not only manifest shape.
 
 The Whiskey evidence gate exercises the API lifecycle end to end:
 

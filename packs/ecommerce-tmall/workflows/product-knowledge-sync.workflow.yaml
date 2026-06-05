@@ -1,5 +1,10 @@
 id: product-knowledge-sync
 entry_agent: connector-reader
+semantic_scopes:
+  domain_scope: ecommerce
+  workflow_scope: tmall
+  lane_scope: product-knowledge
+  share_policy: isolated
 steps:
   - agent: connector-reader
     task: read item, SKU, media, attribute, FAQ, activity, and policy source data

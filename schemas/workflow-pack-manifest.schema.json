@@ -50,6 +50,9 @@
       "items": { "$ref": "#/$defs/slug" },
       "uniqueItems": true
     },
+    "semantic_scopes": {
+      "$ref": "#/$defs/semantic_scopes"
+    },
     "profiles": {
       "type": "array",
       "minItems": 1,
@@ -112,6 +115,22 @@
           { "pattern": "^/" },
           { "pattern": "(^|/)\\.\\.(/|$)" }
         ]
+      }
+    },
+    "semantic_scopes": {
+      "type": "object",
+      "required": ["domain_scope", "workflow_scope", "share_policy"],
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      },
+      "properties": {
+        "domain_scope": { "$ref": "#/$defs/slug" },
+        "workflow_scope": { "$ref": "#/$defs/slug" },
+        "share_policy": {
+          "enum": ["isolated", "tenant_shared", "domain_shared"]
+        },
+        "pack_id": { "$ref": "#/$defs/slug" }
       }
     },
     "file_ref": {

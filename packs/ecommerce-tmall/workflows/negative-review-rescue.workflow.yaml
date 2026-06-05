@@ -1,5 +1,10 @@
 id: negative-review-rescue
 entry_agent: connector-reader
+semantic_scopes:
+  domain_scope: ecommerce
+  workflow_scope: tmall
+  lane_scope: negative-review-rescue
+  share_policy: isolated
 steps:
   - agent: connector-reader
     task: read negative review, follow-up review, order context, refund status, and product knowledge

@@ -802,12 +802,13 @@ fn normalize_semantic_source_status(value: &str) -> Result<String, AppError> {
 fn normalize_semantic_object_type(value: &str) -> Result<String, AppError> {
     let normalized = value.trim().to_ascii_lowercase().replace('-', "_");
     match normalized.as_str() {
-        "decision" | "runbook" | "code_module" | "workflow" | "policy" | "memory" | "artifact"
+        "agent" | "connector" | "decision" | "eval" | "profile" | "release_gate" | "runbook"
+        | "schema" | "skill" | "code_module" | "workflow" | "policy" | "memory" | "artifact"
         | "project" | "repo" | "service" | "pack" | "work_item" | "ontology_expansion" => {
             Ok(normalized)
         }
         _ => Err(AppError::bad_request(
-            "semantic object_type must be decision, runbook, code_module, workflow, policy, memory, artifact, project, repo, service, pack, work_item, or ontology_expansion",
+            "semantic object_type must be agent, connector, decision, eval, profile, release_gate, runbook, schema, skill, code_module, workflow, policy, memory, artifact, project, repo, service, pack, work_item, or ontology_expansion",
         )),
     }
 }
@@ -815,7 +816,8 @@ fn normalize_semantic_object_type(value: &str) -> Result<String, AppError> {
 fn normalize_semantic_entity_type(value: &str) -> Result<String, AppError> {
     let normalized = value.trim().to_ascii_lowercase().replace('-', "_");
     match normalized.as_str() {
-        "agent" | "project" | "repo" | "service" | "workflow" | "policy" | "pack" | "memory"
+        "agent" | "connector" | "eval" | "profile" | "release_gate" | "schema" | "skill"
+        | "project" | "repo" | "service" | "workflow" | "policy" | "pack" | "memory"
         | "artifact" | "session" | "manager_plan" | "runtime_profile" | "semantic_source"
         | "semantic_object" => Ok(normalized),
         _ => Err(AppError::bad_request(

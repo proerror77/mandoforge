@@ -100,6 +100,12 @@ Product knowledge and VOC writebacks must remain scoped to:
 - `workflow_scope=tmall`
 - `share_policy=isolated`
 
+The pack manifest and each workflow declare these semantic scopes explicitly.
+Each workflow also adds a `lane_scope` such as `customer-service`,
+`review-voc`, `after-sales`, `content-production`, `product-knowledge`, or
+`pilot-readiness` so Context OS packets can retrieve lane-specific objects
+without sharing raw buyer data across unrelated domains.
+
 The pack must not share raw buyer messages, review text, refund records, or
 customer-service history with unrelated Legal, Social Media, or other domain
 memory. Cross-domain reuse should happen only through approved tenant-common

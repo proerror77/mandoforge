@@ -1,5 +1,10 @@
 id: profile-onboarding
 entry_agent: connector-reader
+semantic_scopes:
+  domain_scope: ecommerce
+  workflow_scope: tmall
+  lane_scope: profile-onboarding
+  share_policy: isolated
 outputs:
   - store
   - approval-matrix

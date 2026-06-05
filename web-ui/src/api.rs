@@ -224,6 +224,10 @@ pub struct SemanticObject {
     pub freshness: String,
     #[serde(default)]
     pub status: String,
+    #[serde(default)]
+    pub semantic_scopes: Value,
+    #[serde(default)]
+    pub source_uri: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
@@ -353,7 +357,11 @@ pub struct WorkflowPackInstallation {
     #[serde(default)]
     pub pack_id: String,
     #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
     pub version: String,
+    #[serde(default)]
+    pub manifest: Value,
     #[serde(default)]
     pub status: String,
 }

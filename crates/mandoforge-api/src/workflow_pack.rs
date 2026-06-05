@@ -20,6 +20,8 @@ pub struct WorkflowPackManifest {
     #[serde(default)]
     pub capabilities: Vec<String>,
     #[serde(default)]
+    pub semantic_scopes: BTreeMap<String, String>,
+    #[serde(default)]
     pub profiles: Vec<PackFileRef>,
     #[serde(default)]
     pub skills: Vec<PackFileRef>,
@@ -218,6 +220,31 @@ struct ToolScopePolicy {
     roles: BTreeMap<String, ToolScope>,
 }
 
+#[derive(Debug, Deserialize)]
+struct WorkflowFileContract {
+    id: String,
+    entry_agent: String,
+    #[serde(default)]
+    semantic_scopes: BTreeMap<String, String>,
+    #[serde(default)]
+    steps: Vec<WorkflowStepContract>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowStepContract {
+    agent: String,
+    #[serde(default)]
+    handoff_intent: Option<String>,
+    #[serde(default)]
+    required_profiles: Vec<String>,
+    #[serde(default)]
+    required_schemas: Vec<String>,
+    #[serde(default)]
+    skills: Vec<String>,
+    #[serde(default)]
+    output_schema: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct WorkflowPackValidationReport {
     pub pack_id: String,
@@ -272,6 +299,12 @@ impl WorkflowPackManifest {
                     workflow.entry_agent
                 );
             }
+            self.validate_workflow_file_contract(
+                workflow,
+                package_dir,
+                &agent_ids,
+                &ids_by_section,
+            )?;
             file_count += 1;
         }
 
@@ -353,6 +386,9 @@ impl WorkflowPackManifest {
         for capability in &self.capabilities {
             validate_id("capabilities", capability)?;
         }
+        if self.kind == PackKind::DomainPack {
+            validate_domain_semantic_scopes("manifest semantic_scopes", &self.semantic_scopes)?;
+        }
         Ok(())
     }
 
@@ -413,6 +449,137 @@ impl WorkflowPackManifest {
         }
 
         Ok(agent_ids)
+    }
+
+    fn validate_workflow_file_contract(
+        &self,
+        workflow: &WorkflowRef,
+        package_dir: &Path,
+        agent_ids: &BTreeSet<String>,
+        ids_by_section: &BTreeMap<&'static str, BTreeSet<String>>,
+    ) -> Result<()> {
+        let input = fs::read_to_string(package_dir.join(&workflow.path))?;
+        let contract: WorkflowFileContract = serde_yaml::from_str(&input)?;
+        if contract.id != workflow.id {
+            bail!(
+                "workflow file {} id {} must match manifest workflow {}",
+                workflow.path,
+                contract.id,
+                workflow.id
+            );
+        }
+        if contract.entry_agent != workflow.entry_agent {
+            bail!(
+                "workflow file {} entry_agent {} must match manifest entry_agent {}",
+                workflow.path,
+                contract.entry_agent,
+                workflow.entry_agent
+            );
+        }
+        if self.kind == PackKind::DomainPack {
+            validate_domain_semantic_scopes(
+                &format!("workflow {} semantic_scopes", workflow.id),
+                &contract.semantic_scopes,
+            )?;
+        }
+        if contract.steps.is_empty() {
+            bail!("workflow {} must declare steps", workflow.id);
+        }
+
+        let mut previous_agent: Option<&str> = None;
+        for (index, step) in contract.steps.iter().enumerate() {
+            if !agent_ids.contains(&step.agent) {
+                bail!(
+                    "workflow {} step {} references missing agent {}",
+                    workflow.id,
+                    index + 1,
+                    step.agent
+                );
+            }
+            if index == 0 && step.agent != workflow.entry_agent {
+                bail!(
+                    "workflow {} first step agent {} must match entry_agent {}",
+                    workflow.id,
+                    step.agent,
+                    workflow.entry_agent
+                );
+            }
+            for profile_id in &step.required_profiles {
+                validate_id("workflow required profile", profile_id)?;
+                if !contains_id(ids_by_section, "profiles", profile_id) {
+                    bail!(
+                        "workflow {} step {} required_profile {} must reference a declared profile",
+                        workflow.id,
+                        index + 1,
+                        profile_id
+                    );
+                }
+            }
+            for schema_id in step
+                .required_schemas
+                .iter()
+                .chain(step.output_schema.iter())
+            {
+                validate_id("workflow schema", schema_id)?;
+                if !contains_id(ids_by_section, "schemas", schema_id) {
+                    bail!(
+                        "workflow {} step {} schema {} must reference a declared schema",
+                        workflow.id,
+                        index + 1,
+                        schema_id
+                    );
+                }
+            }
+            for skill_id in &step.skills {
+                validate_id("workflow skill", skill_id)?;
+                if !contains_id(ids_by_section, "skills", skill_id) {
+                    bail!(
+                        "workflow {} step {} skill {} must reference a declared skill",
+                        workflow.id,
+                        index + 1,
+                        skill_id
+                    );
+                }
+            }
+            if let Some(intent) = step.handoff_intent.as_deref() {
+                let Some(source_agent) = previous_agent else {
+                    bail!(
+                        "workflow {} first step cannot declare handoff_intent {}",
+                        workflow.id,
+                        intent
+                    );
+                };
+                validate_id("workflow handoff_intent", intent)?;
+                if !self.agent_handoff_allows_intent(source_agent, &step.agent, intent) {
+                    bail!(
+                        "workflow {} handoff {} -> {} must declare intent {} in manifest",
+                        workflow.id,
+                        source_agent,
+                        step.agent,
+                        intent
+                    );
+                }
+            }
+            previous_agent = Some(&step.agent);
+        }
+        Ok(())
+    }
+
+    fn agent_handoff_allows_intent(
+        &self,
+        source_agent: &str,
+        target_agent: &str,
+        intent: &str,
+    ) -> bool {
+        self.agents
+            .iter()
+            .find(|agent| agent.id == source_agent)
+            .is_some_and(|agent| {
+                agent.handoffs.iter().any(|handoff| {
+                    handoff.target_agent == target_agent
+                        && handoff.intents.iter().any(|declared| declared == intent)
+                })
+            })
     }
 
     fn load_tool_scope_policy(&self, package_dir: &Path) -> Result<ToolScopePolicy> {
@@ -777,6 +944,22 @@ fn contains_id(
     ids_by_section
         .get(section)
         .is_some_and(|ids| ids.contains(id))
+}
+
+fn validate_domain_semantic_scopes(
+    label: &str,
+    semantic_scopes: &BTreeMap<String, String>,
+) -> Result<()> {
+    for required_key in ["domain_scope", "workflow_scope", "share_policy"] {
+        let value = semantic_scopes
+            .get(required_key)
+            .map(|value| value.trim())
+            .unwrap_or_default();
+        if value.is_empty() {
+            bail!("{label} must declare non-empty {required_key}");
+        }
+    }
+    Ok(())
 }
 
 fn validate_id(section: &str, id: &str) -> Result<()> {

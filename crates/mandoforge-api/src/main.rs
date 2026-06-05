@@ -24222,6 +24222,9 @@ async fn stage_workflow_pack_installation_route(
     let runtime_objects = state
         .create_workflow_pack_runtime_objects(runtime_objects)
         .await?;
+    let semantic_projection =
+        project_workflow_pack_semantic_layer(&state, &installation, &bindings, &runtime_objects)
+            .await?;
     record_workflow_pack_installation_audit(
         &state,
         &installation,
@@ -24244,6 +24247,7 @@ async fn stage_workflow_pack_installation_route(
                 .iter()
                 .map(|object| object.object_type.clone())
                 .collect::<BTreeSet<_>>(),
+            "semantic_projection": semantic_projection,
         }),
     )
     .await?;
@@ -24999,6 +25003,8 @@ struct WorkflowPackWorkflowFile {
     #[serde(default)]
     handoff_rules: Value,
     #[serde(default = "empty_json_object")]
+    semantic_scopes: Value,
+    #[serde(default = "empty_json_object")]
     semantic_synthesis_schedule: Value,
 }
 
@@ -25073,6 +25079,7 @@ async fn workflow_pack_materialize_workflow_definitions(
         let runtime_capability_contract =
             workflow_pack_workflow_runtime_capability_contract(&workflow_file)?;
         let event_ingestion_policy = workflow_pack_workflow_event_ingestion_policy(&workflow_file)?;
+        let semantic_scopes = workflow_pack_workflow_semantic_scopes(&manifest, &workflow_file)?;
         validate_workflow_execution_binding(
             &execution_strategy,
             runtime_adapter.as_deref(),
@@ -25114,7 +25121,11 @@ async fn workflow_pack_materialize_workflow_definitions(
                 input_schema_ref: workflow_file.input_schema_ref.clone(),
                 output_schema_ref: workflow_pack_workflow_output_schema_ref(&workflow_file),
                 step_graph,
-                handoff_rules: workflow_pack_workflow_handoff_rules(workflow, &workflow_file),
+                handoff_rules: workflow_pack_workflow_handoff_rules(
+                    workflow,
+                    &workflow_file,
+                    &semantic_scopes,
+                ),
                 execution_strategy,
                 runtime_adapter,
                 runtime_mode,
@@ -25343,14 +25354,31 @@ fn workflow_pack_workflow_event_ingestion_policy(
     normalize_event_ingestion_policy(value)
 }
 
+fn workflow_pack_workflow_semantic_scopes(
+    manifest: &workflow_pack::WorkflowPackManifest,
+    workflow_file: &WorkflowPackWorkflowFile,
+) -> Result<Value, AppError> {
+    if !workflow_file.semantic_scopes.is_object() {
+        return Err(AppError::bad_request(
+            "workflow pack workflow semantic_scopes must be a JSON object",
+        ));
+    }
+    let pack_scopes = json!(manifest.semantic_scopes);
+    Ok(merge_semantic_scopes(
+        &pack_scopes,
+        &workflow_file.semantic_scopes,
+    ))
+}
+
 fn workflow_pack_workflow_handoff_rules(
     workflow: &workflow_pack::WorkflowRef,
     workflow_file: &WorkflowPackWorkflowFile,
+    semantic_scopes: &Value,
 ) -> Value {
-    if workflow_file.handoff_rules.is_object() {
-        return workflow_file.handoff_rules.clone();
-    }
-    json!({
+    let mut rules = if workflow_file.handoff_rules.is_object() {
+        workflow_file.handoff_rules.clone()
+    } else {
+        json!({
         "source": "workflow_pack_file",
         "workflow_id": workflow.id,
         "entry_agent": workflow.entry_agent,
@@ -25358,6 +25386,51 @@ fn workflow_pack_workflow_handoff_rules(
         "approval": workflow_file.approval.clone(),
         "output": workflow_file.output.clone(),
         "outputs": workflow_file.outputs.clone()
+        })
+    };
+    if let Value::Object(rules_object) = &mut rules {
+        let root_task_grant = rules_object
+            .entry("root_task_grant".to_string())
+            .or_insert_with(empty_json_object);
+        if !root_task_grant.is_object() {
+            *root_task_grant = empty_json_object();
+        }
+        if let Some(root_task_grant) = root_task_grant.as_object_mut() {
+            root_task_grant
+                .entry("semantic_scopes".to_string())
+                .or_insert_with(|| semantic_scopes.clone());
+            root_task_grant
+                .entry("memory_scope".to_string())
+                .or_insert_with(workflow_pack_root_task_grant_memory_scope);
+        }
+    }
+    rules
+}
+
+fn workflow_pack_root_task_grant_memory_scope() -> Value {
+    json!({
+        "mode": "snapshot_only",
+        "allowed_scope_keys": ["domain_scope", "workflow_scope", "lane_scope", "share_policy", "pack_id"],
+        "allowed_object_types": [
+            "pack",
+            "workflow",
+            "agent",
+            "connector",
+            "profile",
+            "schema",
+            "skill",
+            "policy",
+            "eval",
+            "release_gate",
+            "memory"
+        ],
+        "allowed_source_types": ["workflow_pack", "memory"],
+        "allowed_object_ids": [],
+        "minimum_trust_level": "source_attested",
+        "max_objects": 12,
+        "approval_memory_allowed": false,
+        "handoff_memory_allowed": false,
+        "writeback_allowed": false
     })
 }
 
@@ -25372,8 +25445,10 @@ fn workflow_pack_materialized_bindings(
 
     for workflow in &manifest.workflows {
         let workflow_file = workflow_pack_load_workflow_file(&package_dir, workflow)?;
+        let semantic_scopes = workflow_pack_workflow_semantic_scopes(&manifest, &workflow_file)?;
         let mut materialized_payload = json!({
             "entry_agent": workflow.entry_agent,
+            "semantic_scopes": semantic_scopes,
             "source_digest": workflow_pack_source_digest(&package_dir, &workflow.path)?,
         });
         if workflow_file
@@ -25607,6 +25682,7 @@ fn workflow_pack_runtime_objects_from_bindings(
                         "workflow_id": binding.binding_key.clone(),
                         "workflow_definition_id": binding.target_id,
                         "entry_agent": binding.materialized_payload.get("entry_agent").cloned(),
+                        "semantic_scopes": binding.materialized_payload.get("semantic_scopes").cloned(),
                         "source_path": binding.source_path.clone(),
                         "source_digest": binding.materialized_payload.get("source_digest").cloned(),
                         "schedule_policy": {
@@ -25681,6 +25757,464 @@ fn workflow_pack_runtime_objects_from_bindings(
             .then(left.object_key.cmp(&right.object_key))
     });
     Ok(objects)
+}
+
+async fn project_workflow_pack_semantic_layer(
+    state: &AppState,
+    installation: &WorkflowPackInstallation,
+    bindings: &[WorkflowPackBinding],
+    runtime_objects: &[WorkflowPackRuntimeObject],
+) -> Result<Value, AppError> {
+    let (manifest, package_dir) = workflow_pack_manifest_and_dir_from_installation(installation)?;
+    let source_uri = format!("mandoforge://workflow-packs/{}", installation.id);
+    let source = workflow_pack_get_or_create_semantic_source(
+        state,
+        CreateSemanticSource {
+            source_type: "workflow_pack".to_string(),
+            source_uri: source_uri.clone(),
+            display_name: format!("{} {}", manifest.name, installation.version),
+            owner_type: Some("workflow_pack_installation".to_string()),
+            owner_id: Some(installation.id),
+            metadata: json!({
+                "pack_id": installation.pack_id,
+                "version": installation.version,
+                "kind": workflow_pack_kind_label(&manifest.kind),
+                "status": installation.status,
+            }),
+            provenance: json!({
+                "source": "workflow_pack.staged",
+                "installation_id": installation.id,
+                "projected_at": Utc::now(),
+            }),
+            freshness: json!({"status": "current"}),
+            status: "active".to_string(),
+            last_ingested_at: Some(Utc::now()),
+        },
+    )
+    .await?;
+    let pack_scopes = json!(manifest.semantic_scopes);
+    let pack_object = workflow_pack_get_or_create_semantic_object(
+        state,
+        CreateSemanticObject {
+            source_id: Some(source.id),
+            object_type: "pack".to_string(),
+            object_key: format!("workflow_pack:{}:pack", installation.id),
+            title: manifest.name.clone(),
+            summary: manifest.description.clone(),
+            content: json!({
+                "installation_id": installation.id,
+                "pack_id": manifest.id,
+                "version": manifest.version,
+                "kind": workflow_pack_kind_label(&manifest.kind),
+                "capabilities": manifest.capabilities,
+                "workflow_count": manifest.workflows.len(),
+                "agent_count": manifest.agents.len(),
+                "connector_count": manifest.connectors.len(),
+            }),
+            semantic_scopes: pack_scopes.clone(),
+            source_uri: Some(source_uri.clone()),
+            provenance: json!({"source": "workflow_pack_manifest", "path": "package.yaml"}),
+            trust_level: "source_attested".to_string(),
+            freshness: "current".to_string(),
+            status: "active".to_string(),
+        },
+    )
+    .await?;
+
+    let mut object_count = 1usize;
+    let mut link_count = 0usize;
+    let mut component_objects = BTreeMap::<String, SemanticObject>::new();
+    for (object_type, id, path, title) in workflow_pack_semantic_component_refs(&manifest) {
+        let object = workflow_pack_get_or_create_semantic_object(
+            state,
+            CreateSemanticObject {
+                source_id: Some(source.id),
+                object_type: object_type.clone(),
+                object_key: format!("workflow_pack:{}:{}:{}", installation.id, object_type, id),
+                title,
+                summary: format!(
+                    "{} {} declared by workflow pack {}.",
+                    object_type, id, manifest.id
+                ),
+                content: json!({
+                    "installation_id": installation.id,
+                    "pack_id": manifest.id,
+                    "component_type": object_type,
+                    "component_id": id,
+                    "path": path,
+                }),
+                semantic_scopes: pack_scopes.clone(),
+                source_uri: Some(format!(
+                    "mandoforge://workflow-packs/{}/{}",
+                    installation.id, path
+                )),
+                provenance: json!({"source": "workflow_pack_manifest", "path": path}),
+                trust_level: "source_attested".to_string(),
+                freshness: "current".to_string(),
+                status: "active".to_string(),
+            },
+        )
+        .await?;
+        link_count += workflow_pack_create_semantic_link_if_absent(
+            state,
+            &pack_object,
+            "contains",
+            &object,
+            json!({"source": "workflow_pack_manifest", "component_type": object_type}),
+        )
+        .await?;
+        component_objects.insert(
+            format!(
+                "{}:{}",
+                object.object_type.clone(),
+                object
+                    .content
+                    .get("component_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+            ),
+            object,
+        );
+        object_count += 1;
+    }
+
+    let bindings_by_key = bindings
+        .iter()
+        .filter(|binding| binding.binding_type == "workflow")
+        .map(|binding| (binding.binding_key.as_str(), binding))
+        .collect::<HashMap<_, _>>();
+    let runtime_objects_by_key = runtime_objects
+        .iter()
+        .filter(|object| object.object_type == "workflow_schedule")
+        .map(|object| (object.object_key.as_str(), object))
+        .collect::<HashMap<_, _>>();
+
+    for workflow in &manifest.workflows {
+        let workflow_file = workflow_pack_load_workflow_file(&package_dir, workflow)?;
+        let workflow_scopes = workflow_pack_workflow_semantic_scopes(&manifest, &workflow_file)?;
+        let binding = bindings_by_key.get(workflow.id.as_str()).copied();
+        let runtime_object = runtime_objects_by_key
+            .get(format!("workflow:{}:schedule", workflow.id).as_str())
+            .copied();
+        let workflow_object = workflow_pack_get_or_create_semantic_object(
+            state,
+            CreateSemanticObject {
+                source_id: Some(source.id),
+                object_type: "workflow".to_string(),
+                object_key: format!("workflow_pack:{}:workflow:{}", installation.id, workflow.id),
+                title: workflow_file
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| workflow.id.clone()),
+                summary: format!(
+                    "Workflow {} enters through {} and runs {} declared step(s).",
+                    workflow.id,
+                    workflow.entry_agent,
+                    workflow_file.steps.len()
+                ),
+                content: json!({
+                    "installation_id": installation.id,
+                    "pack_id": manifest.id,
+                    "workflow_id": workflow.id,
+                    "entry_agent": workflow.entry_agent,
+                    "path": workflow.path,
+                    "binding_id": binding.map(|binding| binding.id),
+                    "workflow_definition_id": binding.and_then(|binding| binding.target_id),
+                    "runtime_object_id": runtime_object.map(|object| object.id),
+                    "steps": workflow_file.steps,
+                }),
+                semantic_scopes: workflow_scopes,
+                source_uri: Some(format!(
+                    "mandoforge://workflow-packs/{}/{}",
+                    installation.id, workflow.path
+                )),
+                provenance: json!({"source": "workflow_pack_workflow_file", "path": workflow.path}),
+                trust_level: "source_attested".to_string(),
+                freshness: "current".to_string(),
+                status: "active".to_string(),
+            },
+        )
+        .await?;
+        object_count += 1;
+        link_count += workflow_pack_create_semantic_link_if_absent(
+            state,
+            &pack_object,
+            "contains_workflow",
+            &workflow_object,
+            json!({"source": "workflow_pack_manifest", "workflow_id": workflow.id}),
+        )
+        .await?;
+        link_count += workflow_pack_link_workflow_dependencies(
+            state,
+            &workflow_object,
+            workflow,
+            &workflow_file,
+            &component_objects,
+            &manifest.connectors,
+        )
+        .await?;
+    }
+
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "system",
+            Some(installation.id),
+            "workflow_pack.semantic_layer_projected",
+            "workflow_pack_installation",
+            Some(installation.id),
+            json!({
+                "installation_id": installation.id,
+                "pack_id": installation.pack_id,
+                "source_id": source.id,
+                "object_count": object_count,
+                "link_count": link_count,
+            }),
+        ))
+        .await?;
+    Ok(json!({
+        "source_id": source.id,
+        "object_count": object_count,
+        "link_count": link_count,
+    }))
+}
+
+async fn workflow_pack_get_or_create_semantic_source(
+    state: &AppState,
+    input: CreateSemanticSource,
+) -> Result<SemanticSource, AppError> {
+    let source_uri = input.source_uri.clone();
+    if let Some(source) = state
+        .list_semantic_sources()
+        .await?
+        .into_iter()
+        .find(|source| source.source_uri.eq_ignore_ascii_case(&source_uri))
+    {
+        return Ok(source);
+    }
+    match state.create_semantic_source(input).await {
+        Ok(source) => Ok(source),
+        Err(error) if error.message.contains("already exists") => state
+            .list_semantic_sources()
+            .await?
+            .into_iter()
+            .find(|source| source.source_uri.eq_ignore_ascii_case(&source_uri))
+            .ok_or(error),
+        Err(error) => Err(error),
+    }
+}
+
+async fn workflow_pack_get_or_create_semantic_object(
+    state: &AppState,
+    input: CreateSemanticObject,
+) -> Result<SemanticObject, AppError> {
+    let object_key = input.object_key.clone();
+    if let Some(object) = state
+        .list_semantic_objects()
+        .await?
+        .into_iter()
+        .find(|object| object.object_key.eq_ignore_ascii_case(&object_key))
+    {
+        return Ok(object);
+    }
+    match state.create_semantic_object(input).await {
+        Ok(object) => Ok(object),
+        Err(error) if error.message.contains("already exists") => state
+            .list_semantic_objects()
+            .await?
+            .into_iter()
+            .find(|object| object.object_key.eq_ignore_ascii_case(&object_key))
+            .ok_or(error),
+        Err(error) => Err(error),
+    }
+}
+
+async fn workflow_pack_create_semantic_link_if_absent(
+    state: &AppState,
+    from: &SemanticObject,
+    relation_type: &str,
+    to: &SemanticObject,
+    metadata: Value,
+) -> Result<usize, AppError> {
+    let from_id = from.id.to_string();
+    let to_id = to.id.to_string();
+    if state.list_semantic_links().await?.into_iter().any(|link| {
+        link.status == "active"
+            && link.from_entity_id == from_id
+            && link.to_entity_id == to_id
+            && link.relation_type == relation_type
+    }) {
+        return Ok(0);
+    }
+    match state
+        .create_semantic_link(CreateSemanticLink {
+            from_entity_type: from.object_type.clone(),
+            from_entity_id: from_id,
+            relation_type: relation_type.to_string(),
+            to_entity_type: to.object_type.clone(),
+            to_entity_id: to_id,
+            metadata,
+            provenance: json!({
+                "source": "workflow_pack.semantic_layer_projected",
+                "projected_at": Utc::now(),
+            }),
+            confidence: 1.0,
+            status: "active".to_string(),
+        })
+        .await
+    {
+        Ok(_) => Ok(1),
+        Err(error) if error.message.contains("already exists") => Ok(0),
+        Err(error) => Err(error),
+    }
+}
+
+fn workflow_pack_semantic_component_refs(
+    manifest: &workflow_pack::WorkflowPackManifest,
+) -> Vec<(String, String, String, String)> {
+    let mut refs = Vec::new();
+    refs.extend(manifest.agents.iter().map(|agent| {
+        (
+            "agent".to_string(),
+            agent.id.clone(),
+            agent.path.clone(),
+            format!("{} agent", agent.id),
+        )
+    }));
+    refs.extend(manifest.connectors.iter().map(|connector| {
+        (
+            "connector".to_string(),
+            connector.id.clone(),
+            connector.path.clone(),
+            format!("{} connector", connector.id),
+        )
+    }));
+    refs.extend(manifest.profiles.iter().map(|profile| {
+        (
+            "profile".to_string(),
+            profile.id.clone(),
+            profile.path.clone(),
+            format!("{} profile", profile.id),
+        )
+    }));
+    refs.extend(manifest.schemas.iter().map(|schema| {
+        (
+            "schema".to_string(),
+            schema.id.clone(),
+            schema.path.clone(),
+            format!("{} schema", schema.id),
+        )
+    }));
+    refs.extend(manifest.skills.iter().map(|skill| {
+        (
+            "skill".to_string(),
+            skill.id.clone(),
+            skill.path.clone(),
+            format!("{} skill", skill.id),
+        )
+    }));
+    refs.extend(manifest.policies.iter().map(|policy| {
+        (
+            "policy".to_string(),
+            policy.id.clone(),
+            policy.path.clone(),
+            format!("{} policy", policy.id),
+        )
+    }));
+    refs.extend(manifest.evals.iter().map(|eval| {
+        (
+            "eval".to_string(),
+            eval.id.clone(),
+            eval.path.clone(),
+            format!("{} eval", eval.id),
+        )
+    }));
+    refs.extend(manifest.release_gates.iter().map(|gate| {
+        (
+            "release_gate".to_string(),
+            gate.id.clone(),
+            "package.yaml".to_string(),
+            format!("{} release gate", gate.id),
+        )
+    }));
+    refs
+}
+
+async fn workflow_pack_link_workflow_dependencies(
+    state: &AppState,
+    workflow_object: &SemanticObject,
+    workflow: &workflow_pack::WorkflowRef,
+    workflow_file: &WorkflowPackWorkflowFile,
+    component_objects: &BTreeMap<String, SemanticObject>,
+    connectors: &[workflow_pack::ConnectorRef],
+) -> Result<usize, AppError> {
+    let mut link_count = 0usize;
+    let mut linked = BTreeSet::<String>::new();
+    linked.insert(format!("agent:{}", workflow.entry_agent));
+    for step in &workflow_file.steps {
+        if let Some(agent) = workflow_pack_workflow_step_string(step, "agent") {
+            linked.insert(format!("agent:{agent}"));
+        }
+        for profile in workflow_pack_workflow_step_string_array(step, "required_profiles") {
+            linked.insert(format!("profile:{profile}"));
+        }
+        for schema in workflow_pack_workflow_step_string_array(step, "required_schemas") {
+            linked.insert(format!("schema:{schema}"));
+        }
+        if let Some(schema) = workflow_pack_workflow_step_string(step, "output_schema") {
+            linked.insert(format!("schema:{schema}"));
+        }
+        for skill in workflow_pack_workflow_step_string_array(step, "skills") {
+            linked.insert(format!("skill:{skill}"));
+        }
+    }
+    for connector in connectors {
+        linked.insert(format!("connector:{}", connector.id));
+    }
+    for dependency_key in linked {
+        let Some(dependency) = component_objects.get(&dependency_key) else {
+            continue;
+        };
+        let relation_type = dependency_key
+            .split_once(':')
+            .map(|(kind, _)| match kind {
+                "agent" => "uses_agent",
+                "connector" => "uses_connector",
+                "profile" => "requires_profile",
+                "schema" => "requires_schema",
+                "skill" => "uses_skill",
+                _ => "references",
+            })
+            .unwrap_or("references");
+        link_count += workflow_pack_create_semantic_link_if_absent(
+            state,
+            workflow_object,
+            relation_type,
+            dependency,
+            json!({
+                "source": "workflow_pack_workflow_file",
+                "workflow_id": workflow.id,
+                "dependency_key": dependency_key,
+            }),
+        )
+        .await?;
+    }
+    Ok(link_count)
+}
+
+fn workflow_pack_workflow_step_string_array(step: &Value, key: &str) -> Vec<String> {
+    step.get(key)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn workflow_pack_semantic_synthesis_schedule_spec(
@@ -28246,10 +28780,14 @@ async fn build_context_packet(
     let agent = state.get_agent(session.agent_id).await?;
     let handoff_assignment_context =
         effective_handoff_assignment_context(state, session_id).await?;
-    let effective_semantic_scopes = handoff_assignment_context
+    let base_semantic_scopes = handoff_assignment_context
         .as_ref()
         .map(|assignment| assignment.semantic_scopes.clone())
         .unwrap_or_else(|| agent.semantic_scopes.clone());
+    let effective_semantic_scopes = context_task_grant
+        .as_ref()
+        .map(|grant| merge_semantic_scopes(&base_semantic_scopes, &grant.semantic_scopes))
+        .unwrap_or(base_semantic_scopes);
     let effective_runtime_profile_id = handoff_assignment_context
         .as_ref()
         .and_then(|assignment| assignment.runtime_profile_id)
@@ -28323,7 +28861,13 @@ async fn build_context_packet(
         "policy_reminder_count": policy_reminders.len(),
         "freshness_warning_count": freshness_warnings.len(),
         "semantic_scope_keys": semantic_scope_keys(&effective_semantic_scopes),
-        "effective_context_source": if handoff_assignment_context.is_some() { "agent_handoff_assignment" } else { "agent" },
+        "effective_context_source": if context_task_grant.is_some() {
+            "task_grant"
+        } else if handoff_assignment_context.is_some() {
+            "agent_handoff_assignment"
+        } else {
+            "agent"
+        },
     });
     Ok(ContextPacket {
         id: Uuid::new_v4(),
@@ -28659,6 +29203,10 @@ async fn retrieve_context_packet_semantic_objects(
     objects.sort_by(|left, right| {
         semantic_object_rank(right)
             .cmp(&semantic_object_rank(left))
+            .then_with(|| {
+                semantic_object_scope_specificity(right, semantic_scopes)
+                    .cmp(&semantic_object_scope_specificity(left, semantic_scopes))
+            })
             .then_with(|| left.object_key.cmp(&right.object_key))
     });
     objects.truncate(12);
@@ -28834,6 +29382,33 @@ fn semantic_object_rank(object: &ContextPacketSemanticObject) -> i32 {
         _ => 0,
     };
     freshness_score + trust_score
+}
+
+fn semantic_object_scope_specificity(
+    object: &ContextPacketSemanticObject,
+    semantic_scopes: &Value,
+) -> usize {
+    let Some(object_scopes) = object.semantic_scopes.as_object() else {
+        return 0;
+    };
+    let Some(context_scopes) = semantic_scopes.as_object() else {
+        return 0;
+    };
+    object_scopes
+        .iter()
+        .filter(|(key, object_value)| {
+            let Some(object_scope) = object_value.as_str().map(str::trim) else {
+                return false;
+            };
+            if object_scope.is_empty() {
+                return false;
+            }
+            context_scopes
+                .get(*key)
+                .and_then(Value::as_str)
+                .is_some_and(|context_scope| context_scope.trim() == object_scope)
+        })
+        .count()
 }
 
 fn render_execution_context(
@@ -29209,17 +29784,26 @@ const REQUIRED_SEMANTIC_SCOPE_KEYS: [&str; 6] = [
     "memory_scope",
 ];
 
+const REQUIRED_DOMAIN_SEMANTIC_SCOPE_KEYS: [&str; 3] =
+    ["domain_scope", "workflow_scope", "share_policy"];
+
 fn missing_semantic_scope_keys(scopes: &Value) -> Vec<String> {
-    REQUIRED_SEMANTIC_SCOPE_KEYS
+    let required_keys: &[&str] =
+        if scopes.get("domain_scope").is_some() || scopes.get("share_policy").is_some() {
+            &REQUIRED_DOMAIN_SEMANTIC_SCOPE_KEYS
+        } else {
+            &REQUIRED_SEMANTIC_SCOPE_KEYS
+        };
+    required_keys
         .into_iter()
         .filter(|key| {
             scopes
-                .get(key)
+                .get(*key)
                 .and_then(Value::as_str)
                 .map(|value| value.trim().is_empty())
                 .unwrap_or(true)
         })
-        .map(str::to_string)
+        .map(|key| (*key).to_string())
         .collect()
 }
 
@@ -63438,6 +64022,251 @@ not json
     }
 
     #[tokio::test]
+    async fn ecommerce_tmall_pack_stages_semantic_context_os_contract() {
+        let app = test_app().await;
+        let installed: WorkflowPackInstallation = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-packs/install",
+                json!({"manifest_path": ecommerce_tmall_manifest_path_string()}),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(installed.pack_id, "ecommerce-tmall");
+        assert_eq!(installed.kind, "DomainPack");
+        assert_eq!(
+            installed.manifest["semantic_scopes"]["domain_scope"],
+            json!("ecommerce")
+        );
+
+        let staged: WorkflowPackInstallation = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/workflow-packs/installations/{}/stage", installed.id),
+                json!({"reason": "tmall semantic context os verification"}),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(staged.status, "staged");
+
+        let staged_bindings: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/workflow-packs/installations/{}/bindings",
+                    installed.id
+                ))
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let customer_service_binding = staged_bindings
+            .iter()
+            .find(|binding| {
+                binding["binding_type"] == json!("workflow")
+                    && binding["binding_key"] == json!("customer-service-conversation")
+            })
+            .expect("customer service workflow binding");
+        assert_eq!(
+            customer_service_binding["materialized_payload"]["semantic_scopes"]["domain_scope"],
+            json!("ecommerce")
+        );
+        assert_eq!(
+            customer_service_binding["materialized_payload"]["semantic_scopes"]["workflow_scope"],
+            json!("tmall")
+        );
+        assert_eq!(
+            customer_service_binding["materialized_payload"]["semantic_scopes"]["lane_scope"],
+            json!("customer-service")
+        );
+        let workflow_definition_id = customer_service_binding["target_id"]
+            .as_str()
+            .expect("workflow definition target id")
+            .to_string();
+
+        let workflow_definition: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/workflow-definitions/{workflow_definition_id}"
+                ))
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(
+            workflow_definition["handoff_rules"]["root_task_grant"]["semantic_scopes"]["lane_scope"],
+            json!("customer-service")
+        );
+
+        let runtime_objects: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/workflow-packs/installations/{}/runtime-objects",
+                    installed.id
+                ))
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(runtime_objects.iter().any(|object| {
+            object["runtime_kind"] == json!("workflow_schedule")
+                && object["object_key"] == json!("workflow:customer-service-conversation:schedule")
+                && object["spec"]["semantic_scopes"]["domain_scope"] == json!("ecommerce")
+                && object["spec"]["semantic_scopes"]["lane_scope"] == json!("customer-service")
+        }));
+
+        let semantic_objects: Vec<SemanticObject> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/semantic-objects")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(semantic_objects.iter().any(|object| {
+            object.object_type == "workflow"
+                && object.object_key
+                    == format!(
+                        "workflow_pack:{}:workflow:customer-service-conversation",
+                        installed.id
+                    )
+                && object.semantic_scopes["domain_scope"] == json!("ecommerce")
+                && object.semantic_scopes["lane_scope"] == json!("customer-service")
+        }));
+        assert!(semantic_objects.iter().any(|object| {
+            object.object_type == "connector"
+                && object.object_key
+                    == format!("workflow_pack:{}:connector:tmall-top", installed.id)
+                && object.semantic_scopes["workflow_scope"] == json!("tmall")
+        }));
+
+        let semantic_workbench: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/semantic-workbench?domain_scope=ecommerce&workflow_scope=tmall")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(
+            semantic_workbench["graph"]["node_count"]
+                .as_u64()
+                .is_some_and(|count| count >= 9)
+        );
+
+        let released: WorkflowPackInstallation = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/workflow-packs/installations/{}/release", installed.id),
+                json!({
+                    "eval_gate_status": "passed",
+                    "release_gate_status": "passed",
+                    "reason": "tmall context os contract passed",
+                    "gate_evidence": {
+                        "eval_run_id": "eval-tmall-semantic-1",
+                        "release_gate_id": "tmall-context-os"
+                    }
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(released.status, "released");
+
+        let run: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-runs",
+                json!({
+                    "workflow_definition_id": workflow_definition_id,
+                    "title": "tmall customer service semantic context"
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        let session_id = run["primary_session_id"].as_str().expect("session id");
+        let root_task_grant_id = run["root_task_grant_id"]
+            .as_str()
+            .expect("root task grant id");
+        let grants: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/workflow-runs/{}/task-grants",
+                    run["id"].as_str().unwrap()
+                ))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(grants.iter().any(|grant| {
+            grant["id"] == json!(root_task_grant_id)
+                && grant["semantic_scopes"]["domain_scope"] == json!("ecommerce")
+                && grant["semantic_scopes"]["workflow_scope"] == json!("tmall")
+                && grant["semantic_scopes"]["lane_scope"] == json!("customer-service")
+        }));
+
+        let context_packet: ContextPacket = request_json(
+            app,
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{session_id}/context-packet"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(
+            context_packet.semantic_scopes["lane_scope"],
+            json!("customer-service")
+        );
+        let retrieved_keys = context_packet
+            .retrieved_objects
+            .iter()
+            .map(|object| {
+                format!(
+                    "{}:{}:{}",
+                    object.object_type, object.object_key, object.semantic_scopes
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            context_packet.retrieved_objects.iter().any(|object| {
+                object.object_type == "workflow"
+                    && object.object_key
+                        == format!(
+                            "workflow_pack:{}:workflow:customer-service-conversation",
+                            installed.id
+                        )
+            }),
+            "expected customer-service workflow object in context packet scopes {:?}; retrieved {:?}",
+            context_packet.semantic_scopes,
+            retrieved_keys
+        );
+        assert!(
+            context_packet
+                .source_refs
+                .iter()
+                .any(|source| source.source_type == "semantic_source")
+        );
+    }
+
+    #[tokio::test]
     async fn workflow_definition_rejects_invalid_graph_before_persisting() {
         let app = test_app().await;
         let agents: Vec<Agent> = request_json(
@@ -84021,6 +84850,17 @@ not json
                 .join("packs/ai-governance/package.yaml"),
         )
         .expect("AI governance manifest exists")
+        .display()
+        .to_string()
+    }
+
+    fn ecommerce_tmall_manifest_path_string() -> String {
+        std::fs::canonicalize(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("packs/ecommerce-tmall/package.yaml"),
+        )
+        .expect("ecommerce Tmall manifest exists")
         .display()
         .to_string()
     }

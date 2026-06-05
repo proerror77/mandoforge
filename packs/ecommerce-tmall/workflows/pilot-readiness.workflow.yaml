@@ -1,5 +1,10 @@
 id: pilot-readiness
 entry_agent: connector-reader
+semantic_scopes:
+  domain_scope: ecommerce
+  workflow_scope: tmall
+  lane_scope: pilot-readiness
+  share_policy: isolated
 steps:
   - agent: connector-reader
     task: read onboarding readiness, connector readiness, eval quality gate, audit events, workflow volumes, approval queue, and pilot comparison artifacts

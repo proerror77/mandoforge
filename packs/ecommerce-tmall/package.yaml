@@ -4,6 +4,11 @@ id: ecommerce-tmall
 name: Tmall Ecommerce Operations Pack
 version: 0.1.0
 description: Draft-first Tmall store operations workflows for customer service, reviews, after-sales, product knowledge, and content production.
+semantic_scopes:
+  domain_scope: ecommerce
+  workflow_scope: tmall
+  share_policy: isolated
+  pack_id: ecommerce-tmall
 capabilities:
   - tmall-order-context
   - tmall-product-knowledge-sync
@@ -145,6 +150,7 @@ agents:
           - classify-after-sales-risk
           - classify-question-answer-gap
           - classify-product-knowledge-gap
+          - classify-pilot-readiness
         risk_level: medium
         approval_required: false
         schema: schemas/handoff.schema.json
@@ -162,6 +168,7 @@ agents:
           - draft-review-explanation
           - draft-negative-review-rescue-plan
           - draft-after-sales-plan
+          - draft-pilot-exit-report
         risk_level: high
         approval_required: true
         schema: schemas/handoff.schema.json
