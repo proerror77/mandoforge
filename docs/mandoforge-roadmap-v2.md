@@ -16,6 +16,27 @@ Data / Semantic Foundation
 
 The current repo implements that plan from the runtime upward. Stage 1-3 prove the governed runtime, queue, Remote Computer, and Pack substrate. Stage 4 returns to the original Agent OS control-plane design by making Manager Agent, Managed Agents, runtime profiles, handoffs, and a minimal semantic kernel first-class. Stage 5 expands the minimal semantic kernel into the full Context OS.
 
+## External Harness Reference
+
+The `agents-best-practices` reference aligns with this roadmap's control-plane
+stance: the model proposes actions, while the harness validates, authorizes,
+executes, records, and returns observations.
+
+MandoForge should treat that pattern as an Agent OS invariant:
+
+- Workflow Packs and Domain Packs define domain intent, agent roles, tool
+  scopes, connector needs, policies, evals, and release gates.
+- The MandoForge runtime owns schema validation, permission decisions,
+  approval records, execution boundaries, audit logs, artifacts, budget
+  enforcement, and replayable observations.
+- Generated workflow plans, ontology proposals, connector data, and retrieved
+  content are data or draft artifacts. They do not become trusted policy or
+  active tenant behavior until the runtime validates and gates them.
+- Higher autonomy should be added only after the simpler managed-session loop
+  shows measured gaps through traces, evals, and operator review.
+
+Reference: <https://github.com/DenisSergeevitch/agents-best-practices>
+
 ## Layer Model
 
 MandoForge should be understood as an Agent OS substrate, not as a single vertical agent.

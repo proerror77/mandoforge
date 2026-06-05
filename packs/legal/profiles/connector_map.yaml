@@ -1,0 +1,8 @@
+connectors:
+  legal-knowledge-base:
+    scope: workspace
+    required_permissions:
+      - document.search
+      - document.read
+      - email.read
+      - calendar.read

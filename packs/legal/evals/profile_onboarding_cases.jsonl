@@ -1,0 +1,2 @@
+{"id":"missing-playbook-blocks-readiness","input":{"organization":"Example Co","legal_playbook":"PLACEHOLDER"},"expected":{"ready":false,"blockers":["legal-playbook"]}}
+{"id":"approved-profiles-ready","input":{"organization":"Example Co","legal_playbook":"approved","approval_matrix":"approved","connector_map":"approved","risk_policy":"approved","output_style":"approved"},"expected":{"ready":true}}

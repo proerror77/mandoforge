@@ -227,6 +227,8 @@ struct WorkflowFileContract {
     #[serde(default)]
     semantic_scopes: BTreeMap<String, String>,
     #[serde(default)]
+    observability: Option<WorkflowObservabilityContract>,
+    #[serde(default)]
     steps: Vec<WorkflowStepContract>,
 }
 
@@ -243,6 +245,49 @@ struct WorkflowStepContract {
     skills: Vec<String>,
     #[serde(default)]
     output_schema: Option<String>,
+    #[serde(default)]
+    observability: Option<WorkflowStepObservabilityContract>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowObservabilityContract {
+    #[serde(default)]
+    expected_events: Vec<String>,
+    #[serde(default)]
+    required_evidence: Vec<String>,
+    #[serde(default)]
+    budget: Option<WorkflowBudgetContract>,
+    #[serde(default)]
+    failure_policy: Option<WorkflowFailurePolicyContract>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowBudgetContract {
+    #[serde(default)]
+    max_turns: Option<i64>,
+    #[serde(default)]
+    max_tool_calls: Option<i64>,
+    #[serde(default)]
+    max_runtime_seconds: Option<i64>,
+    #[serde(default)]
+    max_cost_usd_micros: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowFailurePolicyContract {
+    #[serde(default)]
+    status_values: Vec<String>,
+    #[serde(default)]
+    report_fields: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowStepObservabilityContract {
+    step_key: String,
+    #[serde(default)]
+    expected_events: Vec<String>,
+    #[serde(default)]
+    required_evidence: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -481,12 +526,14 @@ impl WorkflowPackManifest {
                 &format!("workflow {} semantic_scopes", workflow.id),
                 &contract.semantic_scopes,
             )?;
+            self.validate_domain_workflow_observability(workflow.id.as_str(), &contract)?;
         }
         if contract.steps.is_empty() {
             bail!("workflow {} must declare steps", workflow.id);
         }
 
         let mut previous_agent: Option<&str> = None;
+        let mut step_keys = BTreeSet::new();
         for (index, step) in contract.steps.iter().enumerate() {
             if !agent_ids.contains(&step.agent) {
                 bail!(
@@ -560,8 +607,122 @@ impl WorkflowPackManifest {
                     );
                 }
             }
+            if self.kind == PackKind::DomainPack {
+                self.validate_domain_workflow_step_observability(
+                    workflow.id.as_str(),
+                    index + 1,
+                    step,
+                    &mut step_keys,
+                )?;
+            }
             previous_agent = Some(&step.agent);
         }
+        Ok(())
+    }
+
+    fn validate_domain_workflow_observability(
+        &self,
+        workflow_id: &str,
+        contract: &WorkflowFileContract,
+    ) -> Result<()> {
+        let observability = contract.observability.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("domain workflow {} must declare observability", workflow_id)
+        })?;
+        validate_non_empty_string_list(
+            &format!("workflow {} observability.expected_events", workflow_id),
+            &observability.expected_events,
+        )?;
+        validate_non_empty_string_list(
+            &format!("workflow {} observability.required_evidence", workflow_id),
+            &observability.required_evidence,
+        )?;
+        let budget = observability.budget.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("workflow {} observability must declare budget", workflow_id)
+        })?;
+        validate_positive_optional_budget(workflow_id, "max_turns", budget.max_turns)?;
+        validate_positive_optional_budget(workflow_id, "max_tool_calls", budget.max_tool_calls)?;
+        validate_positive_optional_budget(
+            workflow_id,
+            "max_runtime_seconds",
+            budget.max_runtime_seconds,
+        )?;
+        validate_positive_optional_budget(
+            workflow_id,
+            "max_cost_usd_micros",
+            budget.max_cost_usd_micros,
+        )?;
+        if budget.max_turns.is_none()
+            && budget.max_tool_calls.is_none()
+            && budget.max_runtime_seconds.is_none()
+            && budget.max_cost_usd_micros.is_none()
+        {
+            bail!(
+                "workflow {} observability budget must declare at least one limit",
+                workflow_id
+            );
+        }
+        let failure_policy = observability.failure_policy.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "workflow {} observability must declare failure_policy",
+                workflow_id
+            )
+        })?;
+        validate_non_empty_string_list(
+            &format!(
+                "workflow {} observability.failure_policy.status_values",
+                workflow_id
+            ),
+            &failure_policy.status_values,
+        )?;
+        validate_non_empty_string_list(
+            &format!(
+                "workflow {} observability.failure_policy.report_fields",
+                workflow_id
+            ),
+            &failure_policy.report_fields,
+        )?;
+        Ok(())
+    }
+
+    fn validate_domain_workflow_step_observability(
+        &self,
+        workflow_id: &str,
+        step_index: usize,
+        step: &WorkflowStepContract,
+        step_keys: &mut BTreeSet<String>,
+    ) -> Result<()> {
+        let observability = step.observability.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "workflow {} step {} must declare observability",
+                workflow_id,
+                step_index
+            )
+        })?;
+        validate_id(
+            "workflow step observability step_key",
+            &observability.step_key,
+        )?;
+        if !step_keys.insert(observability.step_key.clone()) {
+            bail!(
+                "workflow {} step observability step_key {} must be unique",
+                workflow_id,
+                observability.step_key
+            );
+        }
+        validate_non_empty_string_list(
+            &format!(
+                "workflow {} step {} observability.expected_events",
+                workflow_id, step_index
+            ),
+            &observability.expected_events,
+        )?;
+        validate_non_empty_string_list(
+            &format!(
+                "workflow {} step {} observability.required_evidence",
+                workflow_id, step_index
+            ),
+            &observability.required_evidence,
+        )?;
         Ok(())
     }
 
@@ -962,6 +1123,33 @@ fn validate_domain_semantic_scopes(
     Ok(())
 }
 
+fn validate_non_empty_string_list(label: &str, values: &[String]) -> Result<()> {
+    if values.is_empty() {
+        bail!("{label} must not be empty");
+    }
+    for value in values {
+        if value.trim().is_empty() {
+            bail!("{label} must not contain empty values");
+        }
+    }
+    Ok(())
+}
+
+fn validate_positive_optional_budget(
+    workflow_id: &str,
+    field_name: &str,
+    value: Option<i64>,
+) -> Result<()> {
+    if value.is_some_and(|value| value <= 0) {
+        bail!(
+            "workflow {} observability budget {} must be greater than 0",
+            workflow_id,
+            field_name
+        );
+    }
+    Ok(())
+}
+
 fn validate_id(section: &str, id: &str) -> Result<()> {
     let valid = !id.is_empty()
         && id
@@ -1039,6 +1227,12 @@ mod tests {
             .join("packs/ecommerce-tmall/package.yaml")
     }
 
+    fn legal_manifest_path() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("packs/legal/package.yaml")
+    }
+
     #[test]
     fn validates_ai_governance_workflow_pack_fixture() {
         let report = validate_workflow_pack_manifest_path(&fixture_manifest_path())
@@ -1063,6 +1257,104 @@ mod tests {
         assert_eq!(report.connector_count, 1);
         assert_eq!(report.required_eval_gate_count, 2);
         assert!(report.validated_file_count >= 30);
+    }
+
+    #[test]
+    fn validates_legal_domain_pack_fixture() {
+        let report = validate_workflow_pack_manifest_path(&legal_manifest_path())
+            .expect("Legal domain pack fixture should validate");
+
+        assert_eq!(report.pack_id, "legal");
+        assert_eq!(report.schema_version, SUPPORTED_SCHEMA_VERSION);
+        assert_eq!(report.agent_count, 3);
+        assert_eq!(report.connector_count, 1);
+        assert_eq!(report.required_eval_gate_count, 2);
+        assert!(report.validated_file_count >= 30);
+    }
+
+    #[test]
+    fn rejects_domain_workflow_without_observability_contract() {
+        let manifest = WorkflowPackManifest {
+            schema_version: SUPPORTED_SCHEMA_VERSION.to_string(),
+            kind: PackKind::DomainPack,
+            id: "domain-pack".to_string(),
+            name: "Domain Pack".to_string(),
+            version: "0.1.0".to_string(),
+            description: "domain pack".to_string(),
+            capabilities: vec!["review".to_string()],
+            semantic_scopes: BTreeMap::new(),
+            profiles: vec![],
+            skills: vec![],
+            workflows: vec![],
+            agents: vec![],
+            connectors: vec![],
+            schemas: vec![],
+            policies: vec![],
+            evals: vec![],
+            release_gates: vec![],
+            onboarding: None,
+        };
+        let workflow = WorkflowFileContract {
+            id: "review".to_string(),
+            entry_agent: "reader".to_string(),
+            semantic_scopes: BTreeMap::new(),
+            observability: None,
+            steps: vec![],
+        };
+
+        let error = manifest
+            .validate_domain_workflow_observability("review", &workflow)
+            .expect_err("domain workflow without observability must fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("domain workflow review must declare observability")
+        );
+    }
+
+    #[test]
+    fn rejects_domain_workflow_step_without_observability_contract() {
+        let manifest = WorkflowPackManifest {
+            schema_version: SUPPORTED_SCHEMA_VERSION.to_string(),
+            kind: PackKind::DomainPack,
+            id: "domain-pack".to_string(),
+            name: "Domain Pack".to_string(),
+            version: "0.1.0".to_string(),
+            description: "domain pack".to_string(),
+            capabilities: vec!["review".to_string()],
+            semantic_scopes: BTreeMap::new(),
+            profiles: vec![],
+            skills: vec![],
+            workflows: vec![],
+            agents: vec![],
+            connectors: vec![],
+            schemas: vec![],
+            policies: vec![],
+            evals: vec![],
+            release_gates: vec![],
+            onboarding: None,
+        };
+        let step = WorkflowStepContract {
+            agent: "reader".to_string(),
+            handoff_intent: None,
+            required_profiles: vec![],
+            required_schemas: vec![],
+            skills: vec![],
+            output_schema: None,
+            observability: None,
+        };
+        let mut step_keys = BTreeSet::new();
+
+        let error = manifest
+            .validate_domain_workflow_step_observability("review", 1, &step, &mut step_keys)
+            .expect_err("domain workflow step without observability must fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("workflow review step 1 must declare observability")
+        );
     }
 
     #[test]

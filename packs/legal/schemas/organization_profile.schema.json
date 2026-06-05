@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["organization_name", "jurisdictions", "legal_owner_team"],
+  "properties": {
+    "organization_name": { "type": "string", "minLength": 1 },
+    "jurisdictions": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "legal_owner_team": { "type": "string", "minLength": 1 }
+  },
+  "additionalProperties": true
+}

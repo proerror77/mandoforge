@@ -1,0 +1,9 @@
+approvals:
+  high:
+    required_role: legal-approver
+    escalation_role: general-counsel
+  medium:
+    required_role: legal-reviewer
+    escalation_role: legal-approver
+  low:
+    required_role: legal-reviewer

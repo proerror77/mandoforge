@@ -5,11 +5,64 @@ semantic_scopes:
   workflow_scope: tmall
   lane_scope: pilot-readiness
   share_policy: isolated
+observability:
+  expected_events:
+    - workflow.run.started
+    - workflow.step.started
+    - workflow.step.completed
+    - workflow.run.completed
+  required_evidence:
+    - session_events
+    - workflow_step_runs
+    - context_packet
+    - tool_call_refs
+    - artifact_refs
+    - approval_refs
+  budget:
+    max_turns: 12
+    max_tool_calls: 24
+    max_runtime_seconds: 900
+    max_cost_usd_micros: 5000000
+  failure_policy:
+    status_values:
+      - completed
+      - blocked
+      - failed
+      - approval_required
+    report_fields:
+      - completed_steps
+      - failed_steps
+      - evidence_gaps
+      - approval_gaps
+      - next_safe_action
+
 steps:
   - agent: connector-reader
+    observability:
+      step_key: step-1-connector-reader
+      expected_events:
+        - workflow.step.started
+        - context_packet.generated
+        - workflow.step.completed
+      required_evidence:
+        - context_packet
+        - tool_call_refs
+        - source_refs
+        - artifact_refs
     task: read onboarding readiness, connector readiness, eval quality gate, audit events, workflow volumes, approval queue, and pilot comparison artifacts
     output_schema: pilot-report
   - agent: touchpoint-analyzer
+    observability:
+      step_key: step-2-touchpoint-analyzer
+      expected_events:
+        - workflow.step.started
+        - context_packet.generated
+        - workflow.step.completed
+      required_evidence:
+        - context_packet
+        - tool_call_refs
+        - source_refs
+        - artifact_refs
     handoff_intent: classify-pilot-readiness
     required_profiles:
       - observability
@@ -25,6 +78,17 @@ steps:
         - quality_summary
         - audit_trace_summary
   - agent: response-writer
+    observability:
+      step_key: step-3-response-writer
+      expected_events:
+        - workflow.step.started
+        - context_packet.generated
+        - workflow.step.completed
+      required_evidence:
+        - context_packet
+        - tool_call_refs
+        - source_refs
+        - artifact_refs
     handoff_intent: draft-pilot-exit-report
     output_schema: pilot-report
     required_profiles:

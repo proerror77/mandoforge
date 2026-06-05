@@ -1,10 +1,10 @@
 id: profile-onboarding
-entry_agent: connector-reader
+entry_agent: reader
 semantic_scopes:
-  domain_scope: ecommerce
-  workflow_scope: tmall
-  lane_scope: profile-onboarding
+  domain_scope: legal
+  workflow_scope: profile-onboarding
   share_policy: isolated
+  lane_scope: onboarding
 observability:
   expected_events:
     - workflow.run.started
@@ -37,15 +37,16 @@ observability:
       - next_safe_action
 
 outputs:
-  - store
+  - organization
+  - legal-playbook
   - approval-matrix
   - connector-map
   - risk-policy
   - output-style
 steps:
-  - agent: connector-reader
+  - agent: reader
     observability:
-      step_key: step-1-connector-reader
+      step_key: step-1-reader
       expected_events:
         - workflow.step.started
         - context_packet.generated
@@ -55,10 +56,14 @@ steps:
         - tool_call_refs
         - source_refs
         - artifact_refs
-    task: collect Tmall store identity, channel capabilities, connector permissions, source references, and policy documents
-  - agent: touchpoint-analyzer
+    required_schemas:
+      - organization-profile
+      - legal-playbook
+      - connector-map
+    task: collect tenant legal context, approved playbook sources, and connector references
+  - agent: analyzer
     observability:
-      step_key: step-2-touchpoint-analyzer
+      step_key: step-2-analyzer
       expected_events:
         - workflow.step.started
         - context_packet.generated
@@ -68,10 +73,19 @@ steps:
         - tool_call_refs
         - source_refs
         - artifact_refs
-    task: normalize store operations context into store, approval, connector, risk, and output-style profile schemas
-  - agent: response-writer
+    handoff_intent: normalize-legal-onboarding
+    required_schemas:
+      - organization-profile
+      - legal-playbook
+      - approval-matrix
+      - connector-map
+      - risk-policy
+      - output-style
+      - handoff
+    task: normalize context into governed profile schemas
+  - agent: writer
     observability:
-      step_key: step-3-response-writer
+      step_key: step-3-writer
       expected_events:
         - workflow.step.started
         - context_packet.generated
@@ -81,31 +95,19 @@ steps:
         - tool_call_refs
         - source_refs
         - artifact_refs
-    task: draft tenant profiles as versioned artifacts and produce onboarding readiness by workflow lane
-readiness:
-  output_schema: onboarding-readiness
-  required_lanes:
-    - customer-service
-    - review-voc
-    - after-sales
-    - content-production
-    - product-knowledge
-  status_values:
-    - ready
-    - degraded
-    - blocked
-  blockers:
-    - missing_store_identity
-    - missing_customer_service_owner
-    - missing_after_sales_owner
-    - missing_review_owner
-    - missing_content_owner
-    - missing_external_write_approver
-    - no_top_read_lane_available
-  degraded_reasons:
-    - comment_qa_api_unavailable_operator_import_enabled
-    - media_upload_unavailable_brief_only
-    - product_edit_unavailable_manual_association
-    - qianniu_write_unavailable_internal_artifact_only
+    handoff_intent: draft-legal-profile-assets
+    required_schemas:
+      - organization-profile
+      - legal-playbook
+      - approval-matrix
+      - connector-map
+      - risk-policy
+      - output-style
+      - handoff
+    task: draft tenant profile assets for approval
 approval:
   required_before_release: true
+  required_before_legal_decision: true
+output:
+  draft_only: true
+  provenance_required: true

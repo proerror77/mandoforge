@@ -1,0 +1,232 @@
+schema_version: workflowpack.mandoforge.dev/v1
+kind: DomainPack
+id: legal
+name: Legal Knowledge Work Pack
+version: 0.1.0
+description: Draft-only legal knowledge workflows adapted for governed enterprise review.
+capabilities:
+  - review-contract
+  - triage-nda
+  - vendor-check
+  - legal-brief
+semantic_scopes:
+  domain_scope: legal
+  workflow_scope: legal-knowledge-work
+  share_policy: isolated
+profiles:
+  - id: default
+    path: profiles/default.md
+    required: true
+  - id: onboarding
+    path: profiles/onboarding.md
+    required: true
+  - id: organization
+    path: profiles/organization.md
+    required: true
+  - id: legal-playbook
+    path: profiles/legal_playbook.md
+    required: true
+  - id: approval-matrix
+    path: profiles/approval_matrix.yaml
+    required: true
+  - id: connector-map
+    path: profiles/connector_map.yaml
+    required: true
+  - id: risk-policy
+    path: profiles/risk_policy.yaml
+    required: true
+  - id: output-style
+    path: profiles/output_style.md
+    required: true
+skills:
+  - id: review-contract
+    path: skills/review-contract/skill.md
+    required: true
+  - id: triage-nda
+    path: skills/triage-nda/skill.md
+    required: true
+  - id: vendor-check
+    path: skills/vendor-check/skill.md
+    required: true
+  - id: legal-brief
+    path: skills/legal-brief/skill.md
+    required: true
+workflows:
+  - id: review-contract
+    path: workflows/review-contract.workflow.yaml
+    entry_agent: reader
+  - id: triage-nda
+    path: workflows/triage-nda.workflow.yaml
+    entry_agent: reader
+  - id: vendor-check
+    path: workflows/vendor-check.workflow.yaml
+    entry_agent: reader
+  - id: legal-brief
+    path: workflows/legal-brief.workflow.yaml
+    entry_agent: reader
+  - id: profile-onboarding
+    path: workflows/profile-onboarding.workflow.yaml
+    entry_agent: reader
+agents:
+  - id: reader
+    path: agents/reader.agent.yaml
+    role: reader
+    tool_scope:
+      read:
+        - connector.read
+        - file.read
+    handoffs:
+      - target_agent: analyzer
+        intents:
+          - classify-contract-risk
+          - classify-nda-risk
+          - classify-vendor-agreement-status
+          - classify-legal-brief-context
+          - normalize-legal-onboarding
+        risk_level: medium
+        approval_required: false
+        schema: schemas/handoff.schema.json
+  - id: analyzer
+    path: agents/analyzer.agent.yaml
+    role: analyzer
+    tool_scope:
+      read:
+        - profile.read
+        - schema.read
+    handoffs:
+      - target_agent: writer
+        intents:
+          - draft-contract-review
+          - draft-nda-triage
+          - draft-vendor-status
+          - draft-legal-brief
+          - draft-legal-profile-assets
+        risk_level: high
+        approval_required: true
+        schema: schemas/handoff.schema.json
+  - id: writer
+    path: agents/writer.agent.yaml
+    role: writer
+    tool_scope:
+      read:
+        - profile.read
+      write:
+        - artifact.write
+connectors:
+  - id: legal-knowledge-base
+    kind: mcp
+    path: connectors/mcp.yaml
+    required_permissions:
+      - document.search
+      - document.read
+      - email.read
+      - calendar.read
+    writes:
+      enabled: false
+      approval_required: true
+    provenance:
+      required: true
+    tenant_scope:
+      tenant_id: required
+      workspace_id: required
+    prompt_injection_boundary:
+      treat_results_as_data: true
+    data_quality:
+      min_sample_count: 1
+      max_age_hours: 168
+      citation_required: true
+      required_metadata_fields:
+        - source_id
+        - reference
+        - retrieval_actor
+      required_content_fields:
+        - title
+        - snippet
+schemas:
+  - id: contract-review
+    path: schemas/contract_review.schema.json
+    required: true
+  - id: nda-triage
+    path: schemas/nda_triage.schema.json
+    required: true
+  - id: vendor-status
+    path: schemas/vendor_status.schema.json
+    required: true
+  - id: legal-brief
+    path: schemas/legal_brief.schema.json
+    required: true
+  - id: handoff
+    path: schemas/handoff.schema.json
+    required: true
+  - id: organization-profile
+    path: schemas/organization_profile.schema.json
+    required: true
+  - id: legal-playbook
+    path: schemas/legal_playbook.schema.json
+    required: true
+  - id: approval-matrix
+    path: schemas/approval_matrix.schema.json
+    required: true
+  - id: connector-map
+    path: schemas/connector_map.schema.json
+    required: true
+  - id: risk-policy
+    path: schemas/risk_policy.schema.json
+    required: true
+  - id: output-style
+    path: schemas/output_style.schema.json
+    required: true
+policies:
+  - id: approval
+    path: policies/approval.yaml
+    required: true
+  - id: tool-scope
+    path: policies/tool_scope.yaml
+    required: true
+evals:
+  - id: legal-regression
+    path: evals/golden_cases.jsonl
+    gate:
+      required: true
+      min_score: 1.0
+  - id: profile-onboarding-regression
+    path: evals/profile_onboarding_cases.jsonl
+    gate:
+      required: true
+      min_score: 1.0
+release_gates:
+  - id: pack-regression
+    gate_type: eval
+    required: true
+  - id: approval-policy
+    gate_type: policy
+    required: true
+onboarding:
+  workflow: profile-onboarding
+  required_profiles:
+    - organization
+    - legal-playbook
+    - approval-matrix
+    - connector-map
+    - risk-policy
+    - output-style
+  profile_schemas:
+    - id: organization-profile
+      path: schemas/organization_profile.schema.json
+      required: true
+    - id: legal-playbook
+      path: schemas/legal_playbook.schema.json
+      required: true
+    - id: approval-matrix
+      path: schemas/approval_matrix.schema.json
+      required: true
+    - id: connector-map
+      path: schemas/connector_map.schema.json
+      required: true
+    - id: risk-policy
+      path: schemas/risk_policy.schema.json
+      required: true
+    - id: output-style
+      path: schemas/output_style.schema.json
+      required: true
+  eval: profile-onboarding-regression

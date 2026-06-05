@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["topic", "summary", "evidence_refs", "approval_items", "draft_only"],
+  "properties": {
+    "topic": { "type": "string", "minLength": 1 },
+    "summary": { "type": "string", "minLength": 1 },
+    "source_refs": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "evidence_refs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["source_id", "connector_id", "retrieved_at", "citation", "confidence", "context_packet_id"],
+        "properties": {
+          "source_id": { "type": "string", "minLength": 1 },
+          "connector_id": { "type": "string", "minLength": 1 },
+          "retrieved_at": { "type": "string", "minLength": 1 },
+          "citation": { "type": "string", "minLength": 1 },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "context_packet_id": { "type": "string", "minLength": 1 },
+          "used_by_issue_id": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "approval_items": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "draft_only": { "type": "boolean", "const": true }
+  },
+  "additionalProperties": true
+}

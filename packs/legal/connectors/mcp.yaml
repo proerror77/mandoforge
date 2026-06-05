@@ -1,0 +1,21 @@
+connectors:
+  - id: legal-knowledge-base
+    type: mcp
+    categories:
+      - cloud-storage
+      - email
+      - calendar
+      - project-tracker
+      - e-signature
+    permissions:
+      - document.search
+      - document.read
+      - email.read
+      - calendar.read
+    writes:
+      enabled: false
+    provenance:
+      required: true
+    prompt_injection_boundary:
+      treat_results_as_data: true
+    notes: Configure tenant-approved MCP servers for Box, Egnyte, Microsoft 365, Google Workspace, Atlassian, DocuSign, or equivalent legal systems.

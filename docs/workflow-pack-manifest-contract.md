@@ -4,6 +4,30 @@ This is the Stage 3 contract for installable Workflow Packs and Domain Packs.
 
 The first implementation is intentionally contract-first: it validates package shape, file references, connector trust boundaries, worker roles, handoff rules, eval gates, and release gates before any runtime install API is allowed to mutate tenant behavior.
 
+## Agent Harness Alignment
+
+This contract follows the provider-neutral harness rule from
+`agents-best-practices`: models and pack authors may propose actions, workflow
+plans, connector bindings, and domain policies, but the MandoForge runtime owns
+validation, authorization, execution, audit, and observation.
+
+For Workflow Packs, that means:
+
+- A pack manifest is not runtime authority by itself. It is a versioned package
+  proposal that must pass manifest validation, policy gates, eval gates,
+  connector readiness, and release approval before tenant behavior changes.
+- Workflow plans and handoffs must be durable runtime objects, not hidden prompt
+  state. They need declared scope, allowed tools, risk class, verification
+  strategy, budget, and replayable evidence.
+- Connectors and retrieved data are treated as data, not instructions. They must
+  carry provenance, tenant/workspace scope, prompt-injection boundaries, and
+  quality evidence before agent outputs can rely on them.
+- Draft and commit stay separate for risky behavior. External writes,
+  privileged actions, destructive changes, financial operations, and high-risk
+  handoffs require approval or explicit policy gates outside the model.
+
+Reference: <https://github.com/DenisSergeevitch/agents-best-practices>
+
 ## Files
 
 - Manifest schema: `schemas/workflow-pack-manifest.schema.json`
@@ -34,6 +58,8 @@ The validator enforces the initial Stage 3 safety floor:
 - The onboarding workflow must reference a declared workflow.
 - DomainPacks must declare manifest-level semantic scopes with non-empty `domain_scope`, `workflow_scope`, and `share_policy`.
 - DomainPack workflow files must also declare semantic scopes, including lane-specific scopes when the pack separates operational lanes.
+- DomainPack workflow files must declare workflow-level observability with expected events, required evidence, at least one positive budget limit, and failure-report fields.
+- DomainPack workflow steps must declare step-level observability with a unique `step_key`, expected events, and required evidence.
 - Onboarding required profiles must reference declared profile ids.
 - Onboarding profile schemas must be relative, existing files.
 - The onboarding eval must reference a declared eval.

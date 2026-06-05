@@ -5,11 +5,64 @@ semantic_scopes:
   workflow_scope: tmall
   lane_scope: content-production
   share_policy: isolated
+observability:
+  expected_events:
+    - workflow.run.started
+    - workflow.step.started
+    - workflow.step.completed
+    - workflow.run.completed
+  required_evidence:
+    - session_events
+    - workflow_step_runs
+    - context_packet
+    - tool_call_refs
+    - artifact_refs
+    - approval_refs
+  budget:
+    max_turns: 12
+    max_tool_calls: 24
+    max_runtime_seconds: 900
+    max_cost_usd_micros: 5000000
+  failure_policy:
+    status_values:
+      - completed
+      - blocked
+      - failed
+      - approval_required
+    report_fields:
+      - completed_steps
+      - failed_steps
+      - evidence_gaps
+      - approval_gaps
+      - next_safe_action
+
 steps:
   - agent: connector-reader
+    observability:
+      step_key: step-1-connector-reader
+      expected_events:
+        - workflow.step.started
+        - context_packet.generated
+        - workflow.step.completed
+      required_evidence:
+        - context_packet
+        - tool_call_refs
+        - source_refs
+        - artifact_refs
     task: read product knowledge, review VOC, customer-service FAQ gaps, after-sales themes, and activity context
     output_schema: content-brief
   - agent: touchpoint-analyzer
+    observability:
+      step_key: step-2-touchpoint-analyzer
+      expected_events:
+        - workflow.step.started
+        - context_packet.generated
+        - workflow.step.completed
+      required_evidence:
+        - context_packet
+        - tool_call_refs
+        - source_refs
+        - artifact_refs
     handoff_intent: classify-product-knowledge-gap
     required_profiles:
       - content-production-policy
@@ -26,6 +79,17 @@ steps:
         - claims
         - evidence_source
   - agent: content-producer
+    observability:
+      step_key: step-3-content-producer
+      expected_events:
+        - workflow.step.started
+        - context_packet.generated
+        - workflow.step.completed
+      required_evidence:
+        - context_packet
+        - tool_call_refs
+        - source_refs
+        - artifact_refs
     handoff_intent: draft-content-brief
     output_schema: content-brief
     required_profiles:

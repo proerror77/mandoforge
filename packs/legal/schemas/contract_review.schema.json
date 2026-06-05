@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["classification", "issues", "evidence_refs", "draft_only"],
+  "properties": {
+    "classification": { "type": "string", "enum": ["green", "yellow", "red"] },
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["title", "severity", "basis"],
+        "properties": {
+          "title": { "type": "string", "minLength": 1 },
+          "severity": { "type": "string", "enum": ["green", "yellow", "red"] },
+          "basis": { "type": "string", "minLength": 1 },
+          "suggested_language": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "source_refs": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "evidence_refs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["source_id", "connector_id", "retrieved_at", "citation", "confidence", "context_packet_id"],
+        "properties": {
+          "source_id": { "type": "string", "minLength": 1 },
+          "connector_id": { "type": "string", "minLength": 1 },
+          "retrieved_at": { "type": "string", "minLength": 1 },
+          "citation": { "type": "string", "minLength": 1 },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "context_packet_id": { "type": "string", "minLength": 1 },
+          "used_by_issue_id": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "draft_only": { "type": "boolean", "const": true }
+  },
+  "additionalProperties": true
+}

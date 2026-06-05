@@ -1,0 +1,3 @@
+id: analyzer
+role: analyzer
+instructions: Compare extracted facts against the legal playbook, risk policy, connector map, and schemas. Classify issues without making legal decisions.

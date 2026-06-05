@@ -1,0 +1,15 @@
+risk_tiers:
+  high:
+    approval_required: true
+    approver_role: legal-approver
+  medium:
+    approval_required: true
+    approver_role: legal-reviewer
+external_writes:
+  default: blocked
+  signature_request: blocked
+  email_send: blocked
+legal_decisions:
+  final_approval: blocked
+  legal_advice: blocked
+  draft_only: true
