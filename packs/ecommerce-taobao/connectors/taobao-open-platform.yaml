@@ -9,6 +9,14 @@ connectors:
       implementation: mandoforge.native_connectors.alibaba_top.taobao
       live_execution: approval_commit_only
       dry_run_supported: true
+      live_runtime:
+        enable_env: MANDOFORGE_NATIVE_CONNECTOR_LIVE_ENABLED
+        base_url_default: https://eco.taobao.com/router/rest
+        secret_source: environment_or_vault_ref
+        required_env:
+          - TAOBAO_TOP_APP_KEY
+          - TAOBAO_TOP_APP_SECRET
+          - TAOBAO_TOP_SESSION
     auth:
       type: top-session
       required_secrets:

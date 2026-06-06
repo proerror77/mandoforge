@@ -41,6 +41,7 @@ mod execution;
 mod execution_queue;
 mod execution_queue_broker;
 mod mcp_gateway;
+mod native_connectors;
 mod observability;
 mod policy;
 mod provider;
