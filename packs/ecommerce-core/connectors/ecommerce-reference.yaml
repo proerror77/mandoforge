@@ -2,6 +2,12 @@ connectors:
   - id: ecommerce-reference
     type: native
     provider: mandoforge-reference
+    adapter_contract:
+      adapter_id: ecommerce-reference-adapter
+      runtime: native.connector.call
+      implementation: mandoforge.native_connectors.ecommerce_reference
+      live_execution: disabled_until_credentials_verified
+      dry_run_supported: true
     auth:
       type: configured-secret-refs
       required_secrets:
@@ -9,8 +15,12 @@ connectors:
         - PLATFORM_API_SECRET
     read_operations:
       - id: reference-schema-read
+        api_name: mandoforge.ecommerce.reference.schema.read
         permission: ecommerce.reference.read
         object_types: [store, product, order, refund_case, review]
+        request_contract:
+          required_fields: [tenant_id, workspace_id, platform]
+          optional_fields: [workflow_scope]
         response_contract:
           required_fields: [object_type, object_id, summary]
           evidence_id_field: object_id

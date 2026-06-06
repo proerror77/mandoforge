@@ -16,5 +16,6 @@ connector_account:
     - taobao.refund.read
     - taobao.review.read
     - taobao.review.reply.write
+    - taobao.refund.action.write
   environment: sandbox
   readiness_status: blocked_until_configured

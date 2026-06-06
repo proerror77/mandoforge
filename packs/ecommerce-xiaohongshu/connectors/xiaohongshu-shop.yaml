@@ -2,23 +2,75 @@ connectors:
   - id: xiaohongshu-shop
     type: native
     provider: xiaohongshu-open-platform
+    adapter_contract:
+      adapter_id: xiaohongshu-shop-adapter
+      runtime: native.connector.call
+      implementation: mandoforge.native_connectors.xiaohongshu_shop
+      live_execution: approval_commit_only
+      dry_run_supported: true
     auth:
       type: oauth-access-token
       required_secrets: [XHS_APP_ID, XHS_APP_SECRET, XHS_ACCESS_TOKEN]
     read_operations:
       - id: order-list-read
+        api_name: xhs.shop.order.list
         permission: xhs.shop.order.read
         object_types: [xiaohongshu_order]
+        request_contract:
+          required_fields: [shop_id, start_time, end_time, page_token]
+          optional_fields: [order_status, page_size]
+        response_contract:
+          required_fields: [order_id, order_status, product_id, created_at]
+          evidence_id_field: order_id
       - id: product-list-read
+        api_name: xhs.shop.product.list
         permission: xhs.shop.product.read
         object_types: [xiaohongshu_product]
+        request_contract:
+          required_fields: [shop_id, page_token]
+          optional_fields: [status, page_size]
+        response_contract:
+          required_fields: [product_id, title, status, updated_at]
+          evidence_id_field: product_id
       - id: comment-list-read
+        api_name: xhs.shop.comment.list
         permission: xhs.shop.comment.read
         object_types: [xiaohongshu_comment]
+        request_contract:
+          required_fields: [shop_id, start_time, end_time, page_token]
+          optional_fields: [product_id, note_id, page_size]
+        response_contract:
+          required_fields: [comment_id, content, created_at, source_type]
+          evidence_id_field: comment_id
+      - id: after-sales-list-read
+        api_name: xhs.shop.aftersales.list
+        permission: xhs.shop.after-sales.read
+        object_types: [xiaohongshu_after_sales_case]
+        request_contract:
+          required_fields: [shop_id, start_time, end_time, page_token]
+          optional_fields: [status, page_size]
+        response_contract:
+          required_fields: [case_id, order_id, status, reason, updated_at]
+          evidence_id_field: case_id
     write_operations:
       - id: comment-reply-submit
+        api_name: xhs.shop.comment.reply
         permission: xhs.shop.comment.reply.write
         approval_required: true
+        request_contract:
+          required_fields: [comment_id, reply_text]
+          forbidden_fields: [buyer_phone, buyer_address, raw_private_message]
+        response_contract:
+          required_fields: [success, request_id]
+      - id: after-sales-refund-approve
+        api_name: xhs.shop.aftersales.refund.approve
+        permission: xhs.shop.after-sales.action.write
+        approval_required: true
+        request_contract:
+          required_fields: [case_id, order_id, approval_reason]
+          forbidden_fields: [unsupported_policy_exception, buyer_private_data]
+        response_contract:
+          required_fields: [success, request_id]
     readiness_probes:
       credential_probe:
         required_secrets: [XHS_APP_ID, XHS_APP_SECRET, XHS_ACCESS_TOKEN]

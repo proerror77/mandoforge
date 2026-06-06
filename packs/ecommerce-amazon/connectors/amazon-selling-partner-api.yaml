@@ -2,23 +2,75 @@ connectors:
   - id: amazon-selling-partner-api
     type: native
     provider: amazon-sp-api
+    adapter_contract:
+      adapter_id: amazon-selling-partner-api-adapter
+      runtime: native.connector.call
+      implementation: mandoforge.native_connectors.amazon_sp_api
+      live_execution: approval_commit_only
+      dry_run_supported: true
     auth:
       type: spapi-lwa-aws
       required_secrets: [AMAZON_LWA_CLIENT_ID, AMAZON_LWA_CLIENT_SECRET, AMAZON_LWA_REFRESH_TOKEN, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY]
     read_operations:
       - id: orders-read
+        api_name: spapi.orders.v0.getOrders
         permission: amazon.spapi.orders.read
         object_types: [amazon_order]
+        request_contract:
+          required_fields: [marketplace_ids, created_after, created_before]
+          optional_fields: [order_statuses, next_token]
+        response_contract:
+          required_fields: [amazon_order_id, order_status, purchase_date, marketplace_id]
+          evidence_id_field: amazon_order_id
       - id: listings-read
+        api_name: spapi.listings.items.getListingsItem
         permission: amazon.spapi.listings.read
         object_types: [amazon_listing]
+        request_contract:
+          required_fields: [seller_id, sku, marketplace_ids]
+          optional_fields: [included_data]
+        response_contract:
+          required_fields: [sku, asin, product_type, attributes, status]
+          evidence_id_field: sku
       - id: returns-read
+        api_name: spapi.returns.getReturns
         permission: amazon.spapi.returns.read
         object_types: [amazon_return_case]
+        request_contract:
+          required_fields: [marketplace_id, created_after, created_before]
+          optional_fields: [status, next_token]
+        response_contract:
+          required_fields: [return_id, amazon_order_id, status, reason]
+          evidence_id_field: return_id
+      - id: reports-read
+        api_name: spapi.reports.getReports
+        permission: amazon.spapi.reports.read
+        object_types: [amazon_review_signal]
+        request_contract:
+          required_fields: [marketplace_ids, report_types, created_after, created_before]
+          optional_fields: [processing_statuses, next_token]
+        response_contract:
+          required_fields: [report_id, report_type, processing_status, created_time]
+          evidence_id_field: report_id
     write_operations:
       - id: listing-content-update
+        api_name: spapi.listings.items.patchListingsItem
         permission: amazon.spapi.listings.write
         approval_required: true
+        request_contract:
+          required_fields: [seller_id, sku, marketplace_ids, patches]
+          forbidden_fields: [price_change_without_campaign_approval, unsupported_product_claim, restricted_product_attribute]
+        response_contract:
+          required_fields: [submission_id, status]
+      - id: return-case-approve
+        api_name: spapi.returns.approveReturn
+        permission: amazon.spapi.returns.write
+        approval_required: true
+        request_contract:
+          required_fields: [return_id, amazon_order_id, approval_reason]
+          forbidden_fields: [unsupported_policy_exception, buyer_private_data]
+        response_contract:
+          required_fields: [success, request_id]
     readiness_probes:
       credential_probe:
         required_secrets: [AMAZON_LWA_CLIENT_ID, AMAZON_LWA_CLIENT_SECRET, AMAZON_LWA_REFRESH_TOKEN, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY]

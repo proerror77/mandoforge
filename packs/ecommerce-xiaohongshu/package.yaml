@@ -9,9 +9,18 @@ semantic_scopes:
   workflow_scope: xiaohongshu
   share_policy: isolated
   pack_id: ecommerce-xiaohongshu
+extends:
+  - id: ecommerce-core
+    version: 0.1.0
+    required: true
+    semantic_scopes:
+      domain_scope: ecommerce
+      workflow_scope: core
+      share_policy: domain_shared
 capabilities:
   - xiaohongshu-connector-readiness
   - xiaohongshu-comment-reply
+  - xiaohongshu-after-sales-triage
 profiles:
   - id: default
     path: profiles/default.md
@@ -35,9 +44,21 @@ skills:
   - id: xiaohongshu-connector-readiness
     path: skills/xiaohongshu-connector-readiness/skill.md
     required: true
+  - id: xiaohongshu-review-reply
+    path: skills/xiaohongshu-review-reply/skill.md
+    required: true
+  - id: xiaohongshu-after-sales-triage
+    path: skills/xiaohongshu-after-sales-triage/skill.md
+    required: true
 workflows:
   - id: connector-readiness
     path: workflows/connector-readiness.workflow.yaml
+    entry_agent: connector-reader
+  - id: review-reply
+    path: workflows/review-reply.workflow.yaml
+    entry_agent: connector-reader
+  - id: after-sales-triage
+    path: workflows/after-sales-triage.workflow.yaml
     entry_agent: connector-reader
 agents:
   - id: connector-reader
@@ -47,7 +68,7 @@ agents:
       read: [connector.read]
     handoffs:
       - target_agent: platform-analyzer
-        intents: [classify-connector-readiness]
+        intents: [classify-connector-readiness, classify-review-voc, classify-after-sales-risk]
         risk_level: medium
         approval_required: false
         schema: schemas/handoff.schema.json
@@ -58,7 +79,7 @@ agents:
       read: [profile.read, schema.read]
     handoffs:
       - target_agent: response-writer
-        intents: [draft-connector-readiness-report]
+        intents: [draft-connector-readiness-report, draft-review-reply, draft-after-sales-plan]
         risk_level: high
         approval_required: true
         schema: schemas/handoff.schema.json
@@ -78,6 +99,7 @@ connectors:
       - xhs.shop.after-sales.read
       - xhs.shop.comment.read
       - xhs.shop.comment.reply.write
+      - xhs.shop.after-sales.action.write
     writes:
       enabled: true
       approval_required: true
@@ -97,6 +119,9 @@ connectors:
 actions:
   - id: reply-shop-comment
     path: actions/reply-shop-comment.action.yaml
+    required: true
+  - id: approve-after-sales-refund
+    path: actions/approve-after-sales-refund.action.yaml
     required: true
 schemas:
   - id: handoff
@@ -119,6 +144,12 @@ schemas:
     required: true
   - id: action-type
     path: schemas/action_type.schema.json
+    required: true
+  - id: review-reply-draft
+    path: schemas/review_reply_draft.schema.json
+    required: true
+  - id: after-sales-triage
+    path: schemas/after_sales_triage.schema.json
     required: true
 policies:
   - id: approval

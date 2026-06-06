@@ -25700,6 +25700,24 @@ fn workflow_pack_materialized_bindings(
     let now = Utc::now();
     let mut bindings = Vec::new();
 
+    for extension in &manifest.extends {
+        bindings.push(new_workflow_pack_binding(
+            installation,
+            "pack_extension",
+            &extension.id,
+            None,
+            "workflow_pack_dependency",
+            status,
+            json!({
+                "id": extension.id,
+                "version": extension.version,
+                "required": extension.required,
+                "semantic_scopes": extension.semantic_scopes,
+            }),
+            now,
+        ));
+    }
+
     for workflow in &manifest.workflows {
         let workflow_file = workflow_pack_load_workflow_file(&package_dir, workflow)?;
         let semantic_scopes = workflow_pack_workflow_semantic_scopes(&manifest, &workflow_file)?;
@@ -26008,6 +26026,23 @@ fn workflow_pack_runtime_objects_from_bindings(
                 }),
                 now,
             )),
+            "pack_extension" => objects.push(new_workflow_pack_runtime_object(
+                installation,
+                binding,
+                "pack_dependency",
+                &format!("pack-extension:{}:dependency", binding.binding_key),
+                "workflow_pack_dependency",
+                status,
+                json!({
+                    "binding_id": binding.id,
+                    "extends_pack_id": binding.binding_key.clone(),
+                    "version": binding.materialized_payload.get("version").cloned(),
+                    "required": binding.materialized_payload.get("required").cloned(),
+                    "semantic_scopes": binding.materialized_payload.get("semantic_scopes").cloned(),
+                    "provider_specific_validation": "resolved_by_workflow_pack_validator"
+                }),
+                now,
+            )),
             "agent" => objects.push(new_workflow_pack_runtime_object(
                 installation,
                 binding,
@@ -26107,6 +26142,7 @@ async fn project_workflow_pack_semantic_layer(
                 "pack_id": manifest.id,
                 "version": manifest.version,
                 "kind": workflow_pack_kind_label(&manifest.kind),
+                "extends": manifest.extends,
                 "capabilities": manifest.capabilities,
                 "workflow_count": manifest.workflows.len(),
                 "agent_count": manifest.agents.len(),

@@ -7,6 +7,6 @@ connector_account:
   seller_id: required
   auth_mode: oauth-access-token
   credential_secret_refs: [XHS_APP_ID, XHS_APP_SECRET, XHS_ACCESS_TOKEN]
-  permission_scopes: [xhs.shop.order.read, xhs.shop.product.read, xhs.shop.after-sales.read, xhs.shop.comment.read, xhs.shop.comment.reply.write]
+  permission_scopes: [xhs.shop.order.read, xhs.shop.product.read, xhs.shop.after-sales.read, xhs.shop.comment.read, xhs.shop.comment.reply.write, xhs.shop.after-sales.action.write]
   environment: sandbox
   readiness_status: blocked_until_configured

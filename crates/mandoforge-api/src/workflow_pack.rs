@@ -22,6 +22,8 @@ pub struct WorkflowPackManifest {
     #[serde(default)]
     pub semantic_scopes: BTreeMap<String, String>,
     #[serde(default)]
+    pub extends: Vec<PackExtensionRef>,
+    #[serde(default)]
     pub profiles: Vec<PackFileRef>,
     #[serde(default)]
     pub skills: Vec<PackFileRef>,
@@ -58,6 +60,17 @@ pub struct PackFileRef {
     pub path: String,
     #[serde(default)]
     pub required: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct PackExtensionRef {
+    pub id: String,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub semantic_scopes: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -332,6 +345,93 @@ struct ActionApprovalContract {
     payload_digest_required: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct ConnectorFileContract {
+    #[serde(default)]
+    connectors: Vec<ConnectorFileEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConnectorFileEntry {
+    id: String,
+    #[serde(default)]
+    provider: String,
+    #[serde(default)]
+    auth: Option<ConnectorAuthContract>,
+    #[serde(default)]
+    read_operations: Vec<ConnectorOperationContract>,
+    #[serde(default)]
+    write_operations: Vec<ConnectorOperationContract>,
+    #[serde(default)]
+    readiness_probes: serde_yaml::Value,
+    #[serde(default)]
+    approval_commit_binding: Option<ConnectorApprovalCommitBindingContract>,
+    #[serde(default)]
+    prompt_injection_boundary: Option<ConnectorPromptBoundaryContract>,
+    #[serde(default)]
+    adapter_contract: Option<ConnectorAdapterContract>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConnectorAuthContract {
+    #[serde(default)]
+    required_secrets: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConnectorOperationContract {
+    id: String,
+    #[serde(default)]
+    api_name: Option<String>,
+    permission: String,
+    #[serde(default)]
+    object_types: Vec<String>,
+    #[serde(default)]
+    approval_required: bool,
+    request_contract: ConnectorRequestContract,
+    response_contract: ConnectorResponseContract,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConnectorRequestContract {
+    #[serde(default)]
+    required_fields: Vec<String>,
+    #[serde(default)]
+    forbidden_fields: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConnectorResponseContract {
+    #[serde(default)]
+    required_fields: Vec<String>,
+    #[serde(default)]
+    evidence_id_field: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConnectorApprovalCommitBindingContract {
+    #[serde(default)]
+    required_for_write_operations: bool,
+    #[serde(default)]
+    bind_fields: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConnectorPromptBoundaryContract {
+    #[serde(default)]
+    treat_results_as_data: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConnectorAdapterContract {
+    adapter_id: String,
+    runtime: String,
+    implementation: String,
+    live_execution: String,
+    #[serde(default)]
+    dry_run_supported: bool,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct WorkflowPackValidationReport {
     pub pack_id: String,
@@ -352,6 +452,7 @@ impl WorkflowPackManifest {
 
         let mut ids_by_section: BTreeMap<&'static str, BTreeSet<String>> = BTreeMap::new();
         let mut file_count = 0usize;
+        self.validate_extensions(package_dir)?;
 
         for item in &self.profiles {
             validate_ref("profiles", item, package_dir, &mut ids_by_section)?;
@@ -402,6 +503,9 @@ impl WorkflowPackManifest {
 
         for connector in &self.connectors {
             self.validate_connector(connector, package_dir, &mut ids_by_section)?;
+            if matches!(&connector.kind, ConnectorKind::Native) {
+                self.validate_connector_file_contract(connector, package_dir)?;
+            }
             file_count += 1;
         }
 
@@ -480,6 +584,35 @@ impl WorkflowPackManifest {
         }
         if self.kind == PackKind::DomainPack {
             validate_domain_semantic_scopes("manifest semantic_scopes", &self.semantic_scopes)?;
+        }
+        Ok(())
+    }
+
+    fn validate_extensions(&self, package_dir: &Path) -> Result<()> {
+        for extension in &self.extends {
+            validate_id("extends", &extension.id)?;
+            if let Some(version) = extension.version.as_deref() {
+                validate_semver_like(version)?;
+            }
+            if !extension.semantic_scopes.is_empty() {
+                validate_domain_semantic_scopes(
+                    &format!("extends {} semantic_scopes", extension.id),
+                    &extension.semantic_scopes,
+                )?;
+            }
+            if extension.required {
+                let Some(packs_root) = package_dir.parent() else {
+                    bail!("extends {} cannot resolve packs root", extension.id);
+                };
+                let extended_manifest = packs_root.join(&extension.id).join("package.yaml");
+                if !extended_manifest.is_file() {
+                    bail!(
+                        "extends {} requires sibling pack manifest {}",
+                        extension.id,
+                        extended_manifest.display()
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -919,6 +1052,274 @@ impl WorkflowPackManifest {
                         connector.id
                     );
                 }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_connector_file_contract(
+        &self,
+        connector: &ConnectorRef,
+        package_dir: &Path,
+    ) -> Result<()> {
+        let input = fs::read_to_string(package_dir.join(&connector.path))?;
+        let contract: ConnectorFileContract = serde_yaml::from_str(&input)?;
+        let connector_file = contract
+            .connectors
+            .iter()
+            .find(|entry| entry.id == connector.id)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "connector file {} must declare connector {}",
+                    connector.path,
+                    connector.id
+                )
+            })?;
+        if connector_file.provider.trim().is_empty() {
+            bail!("connector {} must declare provider", connector.id);
+        }
+        let adapter = connector_file.adapter_contract.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("connector {} must declare adapter_contract", connector.id)
+        })?;
+        validate_id("connector adapter_id", &adapter.adapter_id)?;
+        if adapter.runtime != "native.connector.call" {
+            bail!(
+                "connector {} adapter_contract.runtime must be native.connector.call",
+                connector.id
+            );
+        }
+        if adapter.implementation.trim().is_empty() {
+            bail!(
+                "connector {} adapter_contract must declare implementation",
+                connector.id
+            );
+        }
+        if !matches!(
+            adapter.live_execution.as_str(),
+            "disabled_until_credentials_verified" | "approval_commit_only"
+        ) {
+            bail!(
+                "connector {} adapter_contract.live_execution must be disabled_until_credentials_verified or approval_commit_only",
+                connector.id
+            );
+        }
+        if !adapter.dry_run_supported {
+            bail!(
+                "connector {} adapter_contract must support dry_run",
+                connector.id
+            );
+        }
+        let auth = connector_file
+            .auth
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("connector {} must declare auth", connector.id))?;
+        validate_non_empty_string_list(
+            &format!("connector {} auth.required_secrets", connector.id),
+            &auth.required_secrets,
+        )?;
+        if connector_file.read_operations.is_empty() {
+            bail!("connector {} must declare read_operations", connector.id);
+        }
+        let required_permissions = connector
+            .required_permissions
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let mut operation_ids = BTreeSet::new();
+        for operation in &connector_file.read_operations {
+            self.validate_connector_operation(
+                connector,
+                operation,
+                "read_operations",
+                &required_permissions,
+                &mut operation_ids,
+                true,
+            )?;
+            if operation
+                .response_contract
+                .evidence_id_field
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                bail!(
+                    "connector {} read operation {} must declare response_contract.evidence_id_field",
+                    connector.id,
+                    operation.id
+                );
+            }
+        }
+        for operation in &connector_file.write_operations {
+            self.validate_connector_operation(
+                connector,
+                operation,
+                "write_operations",
+                &required_permissions,
+                &mut operation_ids,
+                false,
+            )?;
+            if !operation.approval_required {
+                bail!(
+                    "connector {} write operation {} must require approval",
+                    connector.id,
+                    operation.id
+                );
+            }
+            if operation.request_contract.forbidden_fields.is_empty() {
+                bail!(
+                    "connector {} write operation {} must declare request_contract.forbidden_fields",
+                    connector.id,
+                    operation.id
+                );
+            }
+        }
+        self.validate_connector_readiness_probes(connector, &connector_file.readiness_probes)?;
+        let prompt_boundary = connector_file
+            .prompt_injection_boundary
+            .as_ref()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "connector {} file must declare prompt_injection_boundary",
+                    connector.id
+                )
+            })?;
+        if !prompt_boundary.treat_results_as_data {
+            bail!(
+                "connector {} file must treat connector results as data",
+                connector.id
+            );
+        }
+        if connector.writes.enabled {
+            if connector_file.write_operations.is_empty() {
+                bail!(
+                    "connector {} writes enabled but file has no write_operations",
+                    connector.id
+                );
+            }
+            let approval = connector_file
+                .approval_commit_binding
+                .as_ref()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "connector {} writes require approval_commit_binding",
+                        connector.id
+                    )
+                })?;
+            if !approval.required_for_write_operations {
+                bail!(
+                    "connector {} approval_commit_binding must be required for write operations",
+                    connector.id
+                );
+            }
+            for required_field in [
+                "tenant_id",
+                "workspace_id",
+                "connector_id",
+                "operation_id",
+                "object_id",
+                "payload_digest",
+                "approval_commit_token",
+            ] {
+                if !approval
+                    .bind_fields
+                    .iter()
+                    .any(|field| field == required_field)
+                {
+                    bail!(
+                        "connector {} approval_commit_binding missing {}",
+                        connector.id,
+                        required_field
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_connector_operation(
+        &self,
+        connector: &ConnectorRef,
+        operation: &ConnectorOperationContract,
+        section: &str,
+        required_permissions: &BTreeSet<&str>,
+        operation_ids: &mut BTreeSet<String>,
+        require_object_types: bool,
+    ) -> Result<()> {
+        validate_id(
+            &format!("connector {} operation", connector.id),
+            &operation.id,
+        )?;
+        if !operation_ids.insert(operation.id.clone()) {
+            bail!(
+                "connector {} operation id {} must be unique",
+                connector.id,
+                operation.id
+            );
+        }
+        if operation
+            .api_name
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .is_empty()
+        {
+            bail!(
+                "connector {} {} operation {} must declare api_name",
+                connector.id,
+                section,
+                operation.id
+            );
+        }
+        if !required_permissions.contains(operation.permission.as_str()) {
+            bail!(
+                "connector {} operation {} permission {} must be declared in manifest required_permissions",
+                connector.id,
+                operation.id,
+                operation.permission
+            );
+        }
+        if require_object_types {
+            validate_non_empty_string_list(
+                &format!(
+                    "connector {} operation {} object_types",
+                    connector.id, operation.id
+                ),
+                &operation.object_types,
+            )?;
+        }
+        validate_non_empty_string_list(
+            &format!(
+                "connector {} operation {} request_contract.required_fields",
+                connector.id, operation.id
+            ),
+            &operation.request_contract.required_fields,
+        )?;
+        validate_non_empty_string_list(
+            &format!(
+                "connector {} operation {} response_contract.required_fields",
+                connector.id, operation.id
+            ),
+            &operation.response_contract.required_fields,
+        )?;
+        Ok(())
+    }
+
+    fn validate_connector_readiness_probes(
+        &self,
+        connector: &ConnectorRef,
+        readiness_probes: &serde_yaml::Value,
+    ) -> Result<()> {
+        let object = readiness_probes.as_mapping().ok_or_else(|| {
+            anyhow::anyhow!("connector {} must declare readiness_probes", connector.id)
+        })?;
+        for key in ["credential_probe", "tenant_scope_probe", "permission_probe"] {
+            if !object.contains_key(serde_yaml::Value::String(key.to_string())) {
+                bail!(
+                    "connector {} readiness_probes missing {}",
+                    connector.id,
+                    key
+                );
             }
         }
         Ok(())
@@ -1433,6 +1834,7 @@ mod tests {
             description: "domain pack".to_string(),
             capabilities: vec!["review".to_string()],
             semantic_scopes: BTreeMap::new(),
+            extends: vec![],
             profiles: vec![],
             skills: vec![],
             workflows: vec![],
@@ -1475,6 +1877,7 @@ mod tests {
             description: "domain pack".to_string(),
             capabilities: vec!["review".to_string()],
             semantic_scopes: BTreeMap::new(),
+            extends: vec![],
             profiles: vec![],
             skills: vec![],
             workflows: vec![],

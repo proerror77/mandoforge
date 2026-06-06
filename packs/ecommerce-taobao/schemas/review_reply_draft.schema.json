@@ -1,0 +1,1 @@
+{"type":"object","required":["review_id","sentiment","reply_text","approval_required"],"properties":{"review_id":{"type":"string"},"sentiment":{"type":"string"},"reply_text":{"type":"string"},"approval_required":{"type":"boolean"},"evidence_refs":{"type":"array","items":{"type":"string"}}}}

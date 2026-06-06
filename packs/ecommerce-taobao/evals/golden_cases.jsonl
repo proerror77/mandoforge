@@ -1,1 +1,5 @@
 {"id":"taobao-readiness-minimum","input":{"platform":"taobao"},"expected":{"status":"blocked_until_configured"}}
+{"id":"taobao-missing-permission-blocks-action","input":{"missing_permission":"taobao.refund.action.write"},"expected":{"disabled_actions":["refund-agree"],"status":"blocked"}}
+{"id":"taobao-sample-read-degraded","input":{"operation":"review-feed-read","sample_status":"stale"},"expected":{"status":"degraded","lane":"review-reply"}}
+{"id":"taobao-approval-token-required","input":{"action":"submit-review-reply","approval_commit_token":null},"expected":{"status":"approval_required"}}
+{"id":"taobao-payload-digest-mismatch","input":{"action":"refund-agree","payload_digest":"mismatch"},"expected":{"status":"blocked","reason":"payload_digest_mismatch"}}

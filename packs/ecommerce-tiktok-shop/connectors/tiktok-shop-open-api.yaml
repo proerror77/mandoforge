@@ -2,23 +2,75 @@ connectors:
   - id: tiktok-shop-open-api
     type: native
     provider: tiktok-shop-open-api
+    adapter_contract:
+      adapter_id: tiktok-shop-open-api-adapter
+      runtime: native.connector.call
+      implementation: mandoforge.native_connectors.tiktok_shop_open_api
+      live_execution: approval_commit_only
+      dry_run_supported: true
     auth:
       type: oauth-access-token
       required_secrets: [TIKTOK_SHOP_APP_KEY, TIKTOK_SHOP_APP_SECRET, TIKTOK_SHOP_ACCESS_TOKEN]
     read_operations:
       - id: order-list-read
+        api_name: tiktok.shop.orders.search
         permission: tiktok.shop.order.read
         object_types: [tiktok_shop_order]
+        request_contract:
+          required_fields: [shop_id, region, create_time_from, create_time_to, page_token]
+          optional_fields: [order_status, page_size]
+        response_contract:
+          required_fields: [order_id, status, buyer_user_id, create_time]
+          evidence_id_field: order_id
       - id: product-list-read
+        api_name: tiktok.shop.products.search
         permission: tiktok.shop.product.read
         object_types: [tiktok_shop_product]
+        request_contract:
+          required_fields: [shop_id, region, page_token]
+          optional_fields: [status, page_size]
+        response_contract:
+          required_fields: [product_id, title, status, update_time]
+          evidence_id_field: product_id
       - id: review-list-read
+        api_name: tiktok.shop.reviews.search
         permission: tiktok.shop.review.read
         object_types: [tiktok_shop_review]
+        request_contract:
+          required_fields: [shop_id, region, create_time_from, create_time_to, page_token]
+          optional_fields: [product_id, rating, page_size]
+        response_contract:
+          required_fields: [review_id, product_id, rating, content, create_time]
+          evidence_id_field: review_id
+      - id: return-list-read
+        api_name: tiktok.shop.returns.search
+        permission: tiktok.shop.return.read
+        object_types: [tiktok_shop_return_case]
+        request_contract:
+          required_fields: [shop_id, region, update_time_from, update_time_to, page_token]
+          optional_fields: [return_status, page_size]
+        response_contract:
+          required_fields: [return_id, order_id, status, reason, update_time]
+          evidence_id_field: return_id
     write_operations:
       - id: review-reply-submit
+        api_name: tiktok.shop.review.reply
         permission: tiktok.shop.review.reply.write
         approval_required: true
+        request_contract:
+          required_fields: [review_id, reply_text]
+          forbidden_fields: [buyer_phone, buyer_address, raw_private_message]
+        response_contract:
+          required_fields: [success, request_id]
+      - id: return-refund-approve
+        api_name: tiktok.shop.return.refund.approve
+        permission: tiktok.shop.return.action.write
+        approval_required: true
+        request_contract:
+          required_fields: [return_id, order_id, approval_reason]
+          forbidden_fields: [unsupported_policy_exception, buyer_private_data]
+        response_contract:
+          required_fields: [success, request_id]
     readiness_probes:
       credential_probe:
         required_secrets: [TIKTOK_SHOP_APP_KEY, TIKTOK_SHOP_APP_SECRET, TIKTOK_SHOP_ACCESS_TOKEN]

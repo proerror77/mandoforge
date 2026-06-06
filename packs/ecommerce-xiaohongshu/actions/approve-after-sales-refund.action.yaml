@@ -1,0 +1,25 @@
+id: approve-after-sales-refund
+object_type: xiaohongshu_after_sales_case
+connector_id: xiaohongshu-shop
+operation_id: after-sales-refund-approve
+side_effect_class: marketplace_refund_write
+parameters:
+  - name: case_id
+    type: ObjectReference<xiaohongshu_after_sales_case>
+    required: true
+  - name: approval_reason
+    type: String
+    required: true
+validations:
+  rules:
+    - after-sales case belongs to tenant-bound shop_id
+    - refund evidence satisfies after-sales policy
+    - approval payload digest matches case_id, operation_id, and approval_reason
+effects:
+  native_connector_call: native.connector.call
+  audit_event: xiaohongshu.action.approve_after_sales_refund
+approval:
+  approval_required: true
+  approver_role: admin
+  approval_commit_token_required: true
+  payload_digest_required: true

@@ -1,0 +1,51 @@
+id: review-reply
+entry_agent: connector-reader
+semantic_scopes:
+  domain_scope: ecommerce
+  workflow_scope: amazon
+  lane_scope: review-reply
+  share_policy: isolated
+observability:
+  expected_events: [workflow.run.started, workflow.step.started, workflow.step.completed, workflow.run.completed]
+  required_evidence: [session_events, workflow_step_runs, context_packet, artifact_refs, approval_refs]
+  budget:
+    max_turns: 10
+    max_tool_calls: 20
+    max_runtime_seconds: 720
+  failure_policy:
+    status_values: [completed, blocked, failed, approval_required]
+    report_fields: [completed_steps, evidence_gaps, approval_gaps, next_safe_action]
+steps:
+  - agent: connector-reader
+    task: read Amazon review signal, report, listing, and order evidence
+    required_profiles: [connector-account, connector-map]
+    output_schema: review-reply-draft
+    observability:
+      step_key: step-1-connector-reader
+      expected_events: [workflow.step.started, context_packet.generated, workflow.step.completed]
+      required_evidence: [context_packet, source_refs]
+  - agent: platform-analyzer
+    handoff_intent: classify-review-voc
+    task: classify review signal and recommend support or listing follow-up
+    required_profiles: [store, ontology-seed]
+    required_schemas: [review-reply-draft]
+    skills: [amazon-review-signal-triage]
+    observability:
+      step_key: step-2-platform-analyzer
+      expected_events: [workflow.step.started, context_packet.generated, workflow.step.completed]
+      required_evidence: [context_packet, artifact_refs]
+  - agent: response-writer
+    handoff_intent: draft-review-reply
+    task: draft Amazon follow-up recommendation and approval binding summary
+    required_profiles: [store, connector-account]
+    output_schema: review-reply-draft
+    observability:
+      step_key: step-3-response-writer
+      expected_events: [workflow.step.started, workflow.step.completed]
+      required_evidence: [artifact_refs, approval_refs]
+approval:
+  required_before_external_write: true
+  required_before_listing_content_update: true
+output:
+  draft_only: true
+  provenance_required: true

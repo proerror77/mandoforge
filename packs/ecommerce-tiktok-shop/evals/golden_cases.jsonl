@@ -1,1 +1,5 @@
 {"id":"tiktok-shop-readiness-minimum","input":{"platform":"tiktok-shop"},"expected":{"status":"blocked_until_configured"}}
+{"id":"tiktok-shop-missing-permission-blocks-action","input":{"missing_permission":"tiktok.shop.return.action.write"},"expected":{"disabled_actions":["approve-return-refund"],"status":"blocked"}}
+{"id":"tiktok-shop-sample-read-degraded","input":{"operation":"review-list-read","sample_status":"stale"},"expected":{"status":"degraded","lane":"review-reply"}}
+{"id":"tiktok-shop-approval-token-required","input":{"action":"reply-review","approval_commit_token":null},"expected":{"status":"approval_required"}}
+{"id":"tiktok-shop-payload-digest-mismatch","input":{"action":"approve-return-refund","payload_digest":"mismatch"},"expected":{"status":"blocked","reason":"payload_digest_mismatch"}}

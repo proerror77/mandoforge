@@ -6,4 +6,5 @@ connector_map:
         - order-list-read
         - item-detail-read
         - review-feed-read
+        - refund-list-read
       blocked_behavior: disable_platform_actions

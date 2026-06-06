@@ -1,1 +1,5 @@
 {"id":"xiaohongshu-readiness-minimum","input":{"platform":"xiaohongshu"},"expected":{"status":"blocked_until_configured"}}
+{"id":"xiaohongshu-missing-permission-blocks-action","input":{"missing_permission":"xhs.shop.after-sales.action.write"},"expected":{"disabled_actions":["approve-after-sales-refund"],"status":"blocked"}}
+{"id":"xiaohongshu-sample-read-degraded","input":{"operation":"comment-list-read","sample_status":"stale"},"expected":{"status":"degraded","lane":"review-reply"}}
+{"id":"xiaohongshu-approval-token-required","input":{"action":"reply-shop-comment","approval_commit_token":null},"expected":{"status":"approval_required"}}
+{"id":"xiaohongshu-payload-digest-mismatch","input":{"action":"approve-after-sales-refund","payload_digest":"mismatch"},"expected":{"status":"blocked","reason":"payload_digest_mismatch"}}

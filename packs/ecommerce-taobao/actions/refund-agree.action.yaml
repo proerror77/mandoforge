@@ -1,0 +1,25 @@
+id: refund-agree
+object_type: taobao_refund_case
+connector_id: taobao-open-platform
+operation_id: refund-agree
+side_effect_class: marketplace_refund_write
+parameters:
+  - name: refund_id
+    type: ObjectReference<taobao_refund_case>
+    required: true
+  - name: approval_reason
+    type: String
+    required: true
+validations:
+  rules:
+    - refund case belongs to tenant-bound shop_id
+    - refund case evidence satisfies after-sales policy
+    - approval payload digest matches refund_id, operation_id, and approval_reason
+effects:
+  native_connector_call: native.connector.call
+  audit_event: taobao.action.refund_agree
+approval:
+  approval_required: true
+  approver_role: admin
+  approval_commit_token_required: true
+  payload_digest_required: true

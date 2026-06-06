@@ -9,9 +9,18 @@ semantic_scopes:
   workflow_scope: taobao
   share_policy: isolated
   pack_id: ecommerce-taobao
+extends:
+  - id: ecommerce-core
+    version: 0.1.0
+    required: true
+    semantic_scopes:
+      domain_scope: ecommerce
+      workflow_scope: core
+      share_policy: domain_shared
 capabilities:
   - taobao-connector-readiness
   - taobao-review-reply
+  - taobao-after-sales-triage
 profiles:
   - id: default
     path: profiles/default.md
@@ -35,9 +44,21 @@ skills:
   - id: taobao-connector-readiness
     path: skills/taobao-connector-readiness/skill.md
     required: true
+  - id: taobao-review-reply
+    path: skills/taobao-review-reply/skill.md
+    required: true
+  - id: taobao-after-sales-triage
+    path: skills/taobao-after-sales-triage/skill.md
+    required: true
 workflows:
   - id: connector-readiness
     path: workflows/connector-readiness.workflow.yaml
+    entry_agent: connector-reader
+  - id: review-reply
+    path: workflows/review-reply.workflow.yaml
+    entry_agent: connector-reader
+  - id: after-sales-triage
+    path: workflows/after-sales-triage.workflow.yaml
     entry_agent: connector-reader
 agents:
   - id: connector-reader
@@ -50,6 +71,8 @@ agents:
       - target_agent: platform-analyzer
         intents:
           - classify-connector-readiness
+          - classify-review-voc
+          - classify-after-sales-risk
         risk_level: medium
         approval_required: false
         schema: schemas/handoff.schema.json
@@ -64,6 +87,8 @@ agents:
       - target_agent: response-writer
         intents:
           - draft-connector-readiness-report
+          - draft-review-reply
+          - draft-after-sales-plan
         risk_level: high
         approval_required: true
         schema: schemas/handoff.schema.json
@@ -85,6 +110,7 @@ connectors:
       - taobao.refund.read
       - taobao.review.read
       - taobao.review.reply.write
+      - taobao.refund.action.write
     writes:
       enabled: true
       approval_required: true
@@ -113,6 +139,9 @@ actions:
   - id: submit-review-reply
     path: actions/submit-review-reply.action.yaml
     required: true
+  - id: refund-agree
+    path: actions/refund-agree.action.yaml
+    required: true
 schemas:
   - id: handoff
     path: schemas/handoff.schema.json
@@ -134,6 +163,12 @@ schemas:
     required: true
   - id: action-type
     path: schemas/action_type.schema.json
+    required: true
+  - id: review-reply-draft
+    path: schemas/review_reply_draft.schema.json
+    required: true
+  - id: after-sales-triage
+    path: schemas/after_sales_triage.schema.json
     required: true
 policies:
   - id: approval

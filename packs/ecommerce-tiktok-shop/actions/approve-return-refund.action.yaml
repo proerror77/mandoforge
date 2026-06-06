@@ -1,0 +1,25 @@
+id: approve-return-refund
+object_type: tiktok_shop_return_case
+connector_id: tiktok-shop-open-api
+operation_id: return-refund-approve
+side_effect_class: marketplace_refund_write
+parameters:
+  - name: return_id
+    type: ObjectReference<tiktok_shop_return_case>
+    required: true
+  - name: approval_reason
+    type: String
+    required: true
+validations:
+  rules:
+    - return case belongs to tenant-bound shop_id and region
+    - return evidence satisfies after-sales policy
+    - approval payload digest matches return_id, operation_id, and approval_reason
+effects:
+  native_connector_call: native.connector.call
+  audit_event: tiktok_shop.action.approve_return_refund
+approval:
+  approval_required: true
+  approver_role: admin
+  approval_commit_token_required: true
+  payload_digest_required: true

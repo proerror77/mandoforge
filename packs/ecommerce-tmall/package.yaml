@@ -9,6 +9,14 @@ semantic_scopes:
   workflow_scope: tmall
   share_policy: isolated
   pack_id: ecommerce-tmall
+extends:
+  - id: ecommerce-core
+    version: 0.1.0
+    required: true
+    semantic_scopes:
+      domain_scope: ecommerce
+      workflow_scope: core
+      share_policy: domain_shared
 capabilities:
   - tmall-order-context
   - tmall-product-knowledge-sync

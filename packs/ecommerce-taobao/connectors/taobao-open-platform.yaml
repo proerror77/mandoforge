@@ -3,6 +3,12 @@ connectors:
     type: native
     provider: alibaba-top
     base_url: https://eco.taobao.com/router/rest
+    adapter_contract:
+      adapter_id: taobao-open-platform-adapter
+      runtime: native.connector.call
+      implementation: mandoforge.native_connectors.alibaba_top.taobao
+      live_execution: approval_commit_only
+      dry_run_supported: true
     auth:
       type: top-session
       required_secrets:
@@ -14,19 +20,62 @@ connectors:
         api_name: taobao.trades.sold.get
         permission: taobao.order.read
         object_types: [taobao_order]
+        request_contract:
+          required_fields: [start_created, end_created, fields]
+          optional_fields: [status, page_no, page_size]
+        response_contract:
+          required_fields: [tid, status, buyer_nick, created, payment, orders]
+          evidence_id_field: tid
       - id: item-detail-read
         api_name: taobao.item.seller.get
         permission: taobao.product.read
         object_types: [taobao_product]
+        request_contract:
+          required_fields: [num_iid, fields]
+          optional_fields: [nick]
+        response_contract:
+          required_fields: [num_iid, title, cid, price, skus]
+          evidence_id_field: num_iid
       - id: review-feed-read
         api_name: taobao.traderates.get
         permission: taobao.review.read
         object_types: [taobao_review]
+        request_contract:
+          required_fields: [start_date, end_date, page_no, page_size]
+          optional_fields: [rate_type, result]
+        response_contract:
+          required_fields: [rate_id, tid, oid, content, result, created]
+          evidence_id_field: rate_id
+      - id: refund-list-read
+        api_name: taobao.refunds.receive.get
+        permission: taobao.refund.read
+        object_types: [taobao_refund_case]
+        request_contract:
+          required_fields: [start_modified, end_modified, fields]
+          optional_fields: [status, page_no, page_size]
+        response_contract:
+          required_fields: [refund_id, tid, oid, status, reason, modified]
+          evidence_id_field: refund_id
     write_operations:
       - id: review-reply-submit
         api_name: taobao.traderate.explain.add
         permission: taobao.review.reply.write
         approval_required: true
+        request_contract:
+          required_fields: [oid, tid, reply]
+          forbidden_fields: [buyer_phone, buyer_address, raw_private_message]
+        response_contract:
+          required_fields: [success, request_id]
+      - id: refund-agree
+        api_name: taobao.rp.refunds.agree
+        permission: taobao.refund.action.write
+        approval_required: true
+        request_contract:
+          required_fields: [refund_id, tid, oid]
+          optional_fields: [refund_phase, version]
+          forbidden_fields: [unsupported_policy_exception, buyer_private_data]
+        response_contract:
+          required_fields: [success, request_id]
     readiness_probes:
       credential_probe:
         required_secrets: [TAOBAO_TOP_APP_KEY, TAOBAO_TOP_APP_SECRET, TAOBAO_TOP_SESSION]

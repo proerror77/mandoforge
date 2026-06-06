@@ -1,1 +1,5 @@
 {"id":"amazon-readiness-minimum","input":{"platform":"amazon"},"expected":{"status":"blocked_until_configured"}}
+{"id":"amazon-missing-permission-blocks-action","input":{"missing_permission":"amazon.spapi.returns.write"},"expected":{"disabled_actions":["approve-return-case"],"status":"blocked"}}
+{"id":"amazon-sample-read-degraded","input":{"operation":"reports-read","sample_status":"stale"},"expected":{"status":"degraded","lane":"review-reply"}}
+{"id":"amazon-approval-token-required","input":{"action":"update-listing-content","approval_commit_token":null},"expected":{"status":"approval_required"}}
+{"id":"amazon-payload-digest-mismatch","input":{"action":"approve-return-case","payload_digest":"mismatch"},"expected":{"status":"blocked","reason":"payload_digest_mismatch"}}

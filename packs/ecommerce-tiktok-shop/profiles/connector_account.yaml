@@ -8,6 +8,6 @@ connector_account:
   region: required
   auth_mode: oauth-access-token
   credential_secret_refs: [TIKTOK_SHOP_APP_KEY, TIKTOK_SHOP_APP_SECRET, TIKTOK_SHOP_ACCESS_TOKEN]
-  permission_scopes: [tiktok.shop.order.read, tiktok.shop.product.read, tiktok.shop.return.read, tiktok.shop.review.read, tiktok.shop.review.reply.write]
+  permission_scopes: [tiktok.shop.order.read, tiktok.shop.product.read, tiktok.shop.return.read, tiktok.shop.review.read, tiktok.shop.review.reply.write, tiktok.shop.return.action.write]
   environment: sandbox
   readiness_status: blocked_until_configured

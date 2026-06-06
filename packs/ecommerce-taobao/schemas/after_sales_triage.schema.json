@@ -1,0 +1,1 @@
+{"type":"object","required":["case_id","recommended_action","evidence_gaps","approval_required"],"properties":{"case_id":{"type":"string"},"recommended_action":{"type":"string"},"evidence_gaps":{"type":"array","items":{"type":"string"}},"approval_required":{"type":"boolean"},"approval_bind_fields":{"type":"array","items":{"type":"string"}}}}

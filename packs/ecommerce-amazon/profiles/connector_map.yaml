@@ -2,5 +2,5 @@ connector_map:
   connector_id: amazon-selling-partner-api
   lanes:
     connector-readiness:
-      required_operations: [orders-read, listings-read, returns-read]
+      required_operations: [orders-read, listings-read, returns-read, reports-read]
       blocked_behavior: disable_platform_actions

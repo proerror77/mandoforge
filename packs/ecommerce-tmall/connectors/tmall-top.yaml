@@ -3,6 +3,12 @@ connectors:
     type: native
     provider: alibaba-top
     base_url: https://eco.taobao.com/router/rest
+    adapter_contract:
+      adapter_id: tmall-top-adapter
+      runtime: native.connector.call
+      implementation: mandoforge.native_connectors.alibaba_top.tmall
+      live_execution: approval_commit_only
+      dry_run_supported: true
     auth:
       type: top-session
       required_secrets:
@@ -87,6 +93,7 @@ connectors:
         request_contract:
           required_fields: [refund_id, tid, oid]
           optional_fields: [refund_phase, version]
+          forbidden_fields: [unsupported_policy_exception, buyer_private_data]
         response_contract:
           required_fields: [success, request_id]
       - id: refund-refuse
@@ -105,6 +112,7 @@ connectors:
         request_contract:
           required_fields: [refund_id, tid, oid, return_address_id]
           optional_fields: [refund_phase, version]
+          forbidden_fields: [unsupported_policy_exception, buyer_private_data]
         response_contract:
           required_fields: [success, request_id]
       - id: returngoods-refuse
@@ -123,6 +131,7 @@ connectors:
         request_contract:
           required_fields: [title, content, assignee]
           optional_fields: [biz_id, priority, due_at]
+          forbidden_fields: [raw_secret_value, buyer_private_data]
         response_contract:
           required_fields: [task_id, request_id]
       - id: picture-upload
@@ -132,6 +141,7 @@ connectors:
         request_contract:
           required_fields: [picture_category_id, image_bytes, image_name]
           optional_fields: [title, client_type]
+          forbidden_fields: [unsupported_product_claim, buyer_private_data]
         response_contract:
           required_fields: [picture_id, picture_url, request_id]
       - id: content-media-secret-upload
@@ -141,6 +151,7 @@ connectors:
         request_contract:
           required_fields: [media_type, media_bytes, title]
           optional_fields: [description, cover_url]
+          forbidden_fields: [unsupported_product_claim, buyer_private_data]
         response_contract:
           required_fields: [media_id, request_id]
       - id: content-media-public-upload
@@ -150,6 +161,7 @@ connectors:
         request_contract:
           required_fields: [media_type, media_bytes, title]
           optional_fields: [description, cover_url]
+          forbidden_fields: [unsupported_product_claim, buyer_private_data]
         response_contract:
           required_fields: [media_id, request_id]
       - id: content-video-publish
@@ -159,6 +171,7 @@ connectors:
         request_contract:
           required_fields: [media_id, title, publish_channel]
           optional_fields: [cover_url, item_ids]
+          forbidden_fields: [unsupported_product_claim, buyer_private_data]
         response_contract:
           required_fields: [video_id, request_id]
       - id: item-fast-update

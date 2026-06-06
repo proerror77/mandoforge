@@ -1,0 +1,1 @@
+{"type":"object","required":["signal_id","sentiment","recommended_follow_up","approval_required"],"properties":{"signal_id":{"type":"string"},"sentiment":{"type":"string"},"recommended_follow_up":{"type":"string"},"approval_required":{"type":"boolean"},"evidence_refs":{"type":"array","items":{"type":"string"}}}}

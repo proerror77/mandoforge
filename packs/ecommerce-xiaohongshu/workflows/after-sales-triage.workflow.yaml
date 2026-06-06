@@ -1,0 +1,51 @@
+id: after-sales-triage
+entry_agent: connector-reader
+semantic_scopes:
+  domain_scope: ecommerce
+  workflow_scope: xiaohongshu
+  lane_scope: after-sales
+  share_policy: isolated
+observability:
+  expected_events: [workflow.run.started, workflow.step.started, workflow.step.completed, workflow.run.completed]
+  required_evidence: [session_events, workflow_step_runs, context_packet, artifact_refs, approval_refs]
+  budget:
+    max_turns: 10
+    max_tool_calls: 20
+    max_runtime_seconds: 720
+  failure_policy:
+    status_values: [completed, blocked, failed, approval_required]
+    report_fields: [completed_steps, evidence_gaps, approval_gaps, next_safe_action]
+steps:
+  - agent: connector-reader
+    task: read Xiaohongshu after-sales, order, product, and policy evidence
+    required_profiles: [connector-account, connector-map]
+    output_schema: after-sales-triage
+    observability:
+      step_key: step-1-connector-reader
+      expected_events: [workflow.step.started, context_packet.generated, workflow.step.completed]
+      required_evidence: [context_packet, source_refs]
+  - agent: platform-analyzer
+    handoff_intent: classify-after-sales-risk
+    task: classify after-sales risk, missing evidence, and approval gates
+    required_profiles: [store, ontology-seed]
+    required_schemas: [after-sales-triage]
+    skills: [xiaohongshu-after-sales-triage]
+    observability:
+      step_key: step-2-platform-analyzer
+      expected_events: [workflow.step.started, context_packet.generated, workflow.step.completed]
+      required_evidence: [context_packet, artifact_refs]
+  - agent: response-writer
+    handoff_intent: draft-after-sales-plan
+    task: draft after-sales plan and refund approval binding summary
+    required_profiles: [store, connector-account]
+    output_schema: after-sales-triage
+    observability:
+      step_key: step-3-response-writer
+      expected_events: [workflow.step.started, workflow.step.completed]
+      required_evidence: [artifact_refs, approval_refs]
+approval:
+  required_before_external_write: true
+  required_before_after_sales_refund_approve: true
+output:
+  draft_only: true
+  provenance_required: true

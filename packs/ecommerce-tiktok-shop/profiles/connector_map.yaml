@@ -2,5 +2,5 @@ connector_map:
   connector_id: tiktok-shop-open-api
   lanes:
     connector-readiness:
-      required_operations: [order-list-read, product-list-read, review-list-read]
+      required_operations: [order-list-read, product-list-read, review-list-read, return-list-read]
       blocked_behavior: disable_platform_actions
