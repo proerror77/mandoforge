@@ -8,6 +8,22 @@ connectors:
       implementation: mandoforge.native_connectors.amazon_sp_api
       live_execution: approval_commit_only
       dry_run_supported: true
+      live_runtime:
+        enable_env: MANDOFORGE_NATIVE_CONNECTOR_LIVE_ENABLED
+        base_url_env: MANDOFORGE_AMAZON_SPAPI_BASE_URL
+        base_url_default: https://sellingpartnerapi-na.amazon.com
+        endpoint_path_arg: payload.__adapter_endpoint_path
+        secret_source: environment_or_vault_ref
+        required_env:
+          - AMAZON_SPAPI_ACCESS_TOKEN
+          - AMAZON_LWA_CLIENT_ID
+          - AMAZON_LWA_CLIENT_SECRET
+          - AMAZON_LWA_REFRESH_TOKEN
+          - AWS_ACCESS_KEY_ID
+          - AWS_SECRET_ACCESS_KEY
+        notes:
+          - AMAZON_SPAPI_ACCESS_TOKEN may be supplied by a separate LWA refresh-token rotation job.
+          - Live HTTP calls are AWS SigV4 signed with service execute-api.
     auth:
       type: spapi-lwa-aws
       required_secrets: [AMAZON_LWA_CLIENT_ID, AMAZON_LWA_CLIENT_SECRET, AMAZON_LWA_REFRESH_TOKEN, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY]

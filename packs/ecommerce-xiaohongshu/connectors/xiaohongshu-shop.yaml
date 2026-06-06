@@ -8,6 +8,16 @@ connectors:
       implementation: mandoforge.native_connectors.xiaohongshu_shop
       live_execution: approval_commit_only
       dry_run_supported: true
+      live_runtime:
+        enable_env: MANDOFORGE_NATIVE_CONNECTOR_LIVE_ENABLED
+        base_url_env: MANDOFORGE_XHS_BASE_URL
+        base_url_default: https://ark.xiaohongshu.com
+        endpoint_path_arg: payload.__adapter_endpoint_path
+        secret_source: environment_or_vault_ref
+        required_env:
+          - XHS_APP_ID
+          - XHS_APP_SECRET
+          - XHS_ACCESS_TOKEN
     auth:
       type: oauth-access-token
       required_secrets: [XHS_APP_ID, XHS_APP_SECRET, XHS_ACCESS_TOKEN]

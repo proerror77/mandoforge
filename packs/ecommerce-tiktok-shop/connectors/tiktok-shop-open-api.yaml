@@ -8,6 +8,16 @@ connectors:
       implementation: mandoforge.native_connectors.tiktok_shop_open_api
       live_execution: approval_commit_only
       dry_run_supported: true
+      live_runtime:
+        enable_env: MANDOFORGE_NATIVE_CONNECTOR_LIVE_ENABLED
+        base_url_env: MANDOFORGE_TIKTOK_SHOP_BASE_URL
+        base_url_default: https://open-api.tiktokglobalshop.com
+        endpoint_path_arg: payload.__adapter_endpoint_path
+        secret_source: environment_or_vault_ref
+        required_env:
+          - TIKTOK_SHOP_APP_KEY
+          - TIKTOK_SHOP_APP_SECRET
+          - TIKTOK_SHOP_ACCESS_TOKEN
     auth:
       type: oauth-access-token
       required_secrets: [TIKTOK_SHOP_APP_KEY, TIKTOK_SHOP_APP_SECRET, TIKTOK_SHOP_ACCESS_TOKEN]
