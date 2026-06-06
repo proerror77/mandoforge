@@ -816,6 +816,13 @@ fn PacksView(props: &DataProps) -> Html {
                     ("Bindings".to_string(), "via /api/workflow-packs/installations/{id}/bindings".to_string()),
                     ("Runtime objects".to_string(), "via /api/workflow-packs/installations/{id}/runtime-objects".to_string()),
                 ]} />
+                <Rows empty="No marketplace packs." rows={props.data.workflow_pack_marketplace.data.packs.iter().map(|pack| {
+                    (
+                        pack.status.clone(),
+                        label_or(&pack.name, &pack.id).to_string(),
+                        format!("{} / {} / {}", label_or(&pack.kind, "kind"), label_or(&pack.version, "version"), pack.description.clone())
+                    )
+                }).collect::<Vec<_>>()} />
             </Panel>
             <Panel title="Onboarding">
                 <JsonPreview value={Value::Array(props.data.capability_discovery.data.capabilities.clone())} />
@@ -1325,7 +1332,15 @@ fn PackMosaic(props: &PackMosaicProps) -> Html {
                     </article>
                 }) }
                 { if props.installations.is_empty() {
-                    html! { { for (0..8).map(|index| html! { <i class="mosaic-placeholder" style={format!("--tone: {};", index)}></i> }) } }
+                    html! {
+                        { for props.marketplace.packs.iter().take(8).enumerate().map(|(index, pack)| html! {
+                            <article class={classes!("mosaic-tile", status_tone(&pack.status))} key={pack.id.clone()}>
+                                <span>{ index + 1 }</span>
+                                <strong>{ label_or(&pack.name, &pack.id) }</strong>
+                                <small>{ format!("{} / {}", label_or(&pack.kind, "kind"), label_or(&pack.version, "version")) }</small>
+                            </article>
+                        }) }
+                    }
                 } else {
                     html! {}
                 }}

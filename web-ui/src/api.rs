@@ -371,7 +371,27 @@ pub struct WorkflowPackMarketplace {
     #[serde(default)]
     pub status: String,
     #[serde(default)]
-    pub packs: Vec<Value>,
+    pub packs: Vec<WorkflowPackMarketplacePack>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct WorkflowPackMarketplacePack {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub manifest_path: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub validation: Value,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
