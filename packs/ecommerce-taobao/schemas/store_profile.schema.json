@@ -1,0 +1,1 @@
+{"type":"object","required":["tenant_id","workspace_id","shop_id","seller_nick"],"properties":{"tenant_id":{"type":"string"},"workspace_id":{"type":"string"},"shop_id":{"type":"string"},"seller_nick":{"type":"string"},"environment":{"type":"string"}}}

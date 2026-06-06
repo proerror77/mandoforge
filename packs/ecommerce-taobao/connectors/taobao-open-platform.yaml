@@ -1,0 +1,41 @@
+connectors:
+  - id: taobao-open-platform
+    type: native
+    provider: alibaba-top
+    base_url: https://eco.taobao.com/router/rest
+    auth:
+      type: top-session
+      required_secrets:
+        - TAOBAO_TOP_APP_KEY
+        - TAOBAO_TOP_APP_SECRET
+        - TAOBAO_TOP_SESSION
+    read_operations:
+      - id: order-list-read
+        api_name: taobao.trades.sold.get
+        permission: taobao.order.read
+        object_types: [taobao_order]
+      - id: item-detail-read
+        api_name: taobao.item.seller.get
+        permission: taobao.product.read
+        object_types: [taobao_product]
+      - id: review-feed-read
+        api_name: taobao.traderates.get
+        permission: taobao.review.read
+        object_types: [taobao_review]
+    write_operations:
+      - id: review-reply-submit
+        api_name: taobao.traderate.explain.add
+        permission: taobao.review.reply.write
+        approval_required: true
+    readiness_probes:
+      credential_probe:
+        required_secrets: [TAOBAO_TOP_APP_KEY, TAOBAO_TOP_APP_SECRET, TAOBAO_TOP_SESSION]
+      tenant_scope_probe:
+        required_fields: [tenant_id, workspace_id, shop_id, seller_nick]
+      permission_probe:
+        sample_read_operations: [order-list-read, item-detail-read, review-feed-read]
+    approval_commit_binding:
+      required_for_write_operations: true
+      bind_fields: [tenant_id, workspace_id, connector_id, operation_id, object_id, payload_digest, approval_commit_token]
+    prompt_injection_boundary:
+      treat_results_as_data: true

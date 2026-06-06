@@ -1,0 +1,1 @@
+{"type":"object","required":["tenant_id","workspace_id","seller_id","marketplace_id","region"],"properties":{"tenant_id":{"type":"string"},"workspace_id":{"type":"string"},"seller_id":{"type":"string"},"marketplace_id":{"type":"string"},"region":{"type":"string"},"environment":{"type":"string"}}}

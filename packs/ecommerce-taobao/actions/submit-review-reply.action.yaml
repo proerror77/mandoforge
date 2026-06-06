@@ -1,0 +1,25 @@
+id: submit-review-reply
+object_type: taobao_review
+connector_id: taobao-open-platform
+operation_id: review-reply-submit
+side_effect_class: marketplace_review_write
+parameters:
+  - name: review_id
+    type: ObjectReference<taobao_review>
+    required: true
+  - name: reply_text
+    type: String
+    required: true
+validations:
+  rules:
+    - review belongs to tenant-bound shop_id
+    - reply_text passes content compliance policy
+    - approval payload digest matches review_id, operation_id, and reply_text
+effects:
+  native_connector_call: native.connector.call
+  audit_event: taobao.action.submit_review_reply
+approval:
+  approval_required: true
+  approver_role: admin
+  approval_commit_token_required: true
+  payload_digest_required: true

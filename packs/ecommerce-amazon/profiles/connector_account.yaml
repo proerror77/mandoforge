@@ -1,0 +1,13 @@
+connector_account:
+  platform: amazon
+  connector_id: amazon-selling-partner-api
+  tenant_id: required
+  workspace_id: required
+  seller_id: required
+  marketplace_id: required
+  region: required
+  auth_mode: spapi-lwa-aws
+  credential_secret_refs: [AMAZON_LWA_CLIENT_ID, AMAZON_LWA_CLIENT_SECRET, AMAZON_LWA_REFRESH_TOKEN, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY]
+  permission_scopes: [amazon.spapi.orders.read, amazon.spapi.listings.read, amazon.spapi.returns.read, amazon.spapi.reports.read, amazon.spapi.listings.write]
+  environment: sandbox
+  readiness_status: blocked_until_configured

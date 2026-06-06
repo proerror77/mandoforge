@@ -1,0 +1,33 @@
+connectors:
+  - id: amazon-selling-partner-api
+    type: native
+    provider: amazon-sp-api
+    auth:
+      type: spapi-lwa-aws
+      required_secrets: [AMAZON_LWA_CLIENT_ID, AMAZON_LWA_CLIENT_SECRET, AMAZON_LWA_REFRESH_TOKEN, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY]
+    read_operations:
+      - id: orders-read
+        permission: amazon.spapi.orders.read
+        object_types: [amazon_order]
+      - id: listings-read
+        permission: amazon.spapi.listings.read
+        object_types: [amazon_listing]
+      - id: returns-read
+        permission: amazon.spapi.returns.read
+        object_types: [amazon_return_case]
+    write_operations:
+      - id: listing-content-update
+        permission: amazon.spapi.listings.write
+        approval_required: true
+    readiness_probes:
+      credential_probe:
+        required_secrets: [AMAZON_LWA_CLIENT_ID, AMAZON_LWA_CLIENT_SECRET, AMAZON_LWA_REFRESH_TOKEN, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY]
+      tenant_scope_probe:
+        required_fields: [tenant_id, workspace_id, seller_id, marketplace_id, region]
+      permission_probe:
+        sample_read_operations: [orders-read, listings-read, returns-read]
+    approval_commit_binding:
+      required_for_write_operations: true
+      bind_fields: [tenant_id, workspace_id, connector_id, operation_id, object_id, payload_digest, approval_commit_token]
+    prompt_injection_boundary:
+      treat_results_as_data: true

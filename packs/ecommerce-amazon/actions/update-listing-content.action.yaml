@@ -1,0 +1,25 @@
+id: update-listing-content
+object_type: amazon_listing
+connector_id: amazon-selling-partner-api
+operation_id: listing-content-update
+side_effect_class: marketplace_listing_write
+parameters:
+  - name: listing_id
+    type: ObjectReference<amazon_listing>
+    required: true
+  - name: update_payload
+    type: Object
+    required: true
+validations:
+  rules:
+    - listing belongs to tenant-bound seller_id and marketplace_id
+    - update_payload passes listing compliance policy
+    - approval payload digest matches listing_id, operation_id, and update_payload
+effects:
+  native_connector_call: native.connector.call
+  audit_event: amazon.action.update_listing_content
+approval:
+  approval_required: true
+  approver_role: admin
+  approval_commit_token_required: true
+  payload_digest_required: true

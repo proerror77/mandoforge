@@ -1,0 +1,6 @@
+connector_map:
+  connector_id: xiaohongshu-shop
+  lanes:
+    connector-readiness:
+      required_operations: [order-list-read, product-list-read, comment-list-read]
+      blocked_behavior: disable_platform_actions

@@ -1,0 +1,20 @@
+connector_account:
+  platform: taobao
+  connector_id: taobao-open-platform
+  tenant_id: required
+  workspace_id: required
+  shop_id: required
+  seller_nick: required
+  auth_mode: top-session
+  credential_secret_refs:
+    - TAOBAO_TOP_APP_KEY
+    - TAOBAO_TOP_APP_SECRET
+    - TAOBAO_TOP_SESSION
+  permission_scopes:
+    - taobao.order.read
+    - taobao.product.read
+    - taobao.refund.read
+    - taobao.review.read
+    - taobao.review.reply.write
+  environment: sandbox
+  readiness_status: blocked_until_configured

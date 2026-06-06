@@ -1,0 +1,1 @@
+{"id":"amazon-readiness-minimum","input":{"platform":"amazon"},"expected":{"status":"blocked_until_configured"}}

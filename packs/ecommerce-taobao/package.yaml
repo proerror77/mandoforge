@@ -1,0 +1,181 @@
+schema_version: workflowpack.mandoforge.dev/v1
+kind: DomainPack
+id: ecommerce-taobao
+name: Taobao Ecommerce Operations Pack
+version: 0.1.0
+description: Draft-first Taobao marketplace pack skeleton for connector readiness, ontology projection, and approval-gated review actions.
+semantic_scopes:
+  domain_scope: ecommerce
+  workflow_scope: taobao
+  share_policy: isolated
+  pack_id: ecommerce-taobao
+capabilities:
+  - taobao-connector-readiness
+  - taobao-review-reply
+profiles:
+  - id: default
+    path: profiles/default.md
+    required: true
+  - id: onboarding
+    path: profiles/onboarding.md
+    required: true
+  - id: store
+    path: profiles/store.md
+    required: true
+  - id: connector-account
+    path: profiles/connector_account.yaml
+    required: true
+  - id: connector-map
+    path: profiles/connector_map.yaml
+    required: true
+  - id: ontology-seed
+    path: profiles/ontology_seed.yaml
+    required: true
+skills:
+  - id: taobao-connector-readiness
+    path: skills/taobao-connector-readiness/skill.md
+    required: true
+workflows:
+  - id: connector-readiness
+    path: workflows/connector-readiness.workflow.yaml
+    entry_agent: connector-reader
+agents:
+  - id: connector-reader
+    path: agents/connector-reader.agent.yaml
+    role: reader
+    tool_scope:
+      read:
+        - connector.read
+    handoffs:
+      - target_agent: platform-analyzer
+        intents:
+          - classify-connector-readiness
+        risk_level: medium
+        approval_required: false
+        schema: schemas/handoff.schema.json
+  - id: platform-analyzer
+    path: agents/platform-analyzer.agent.yaml
+    role: analyzer
+    tool_scope:
+      read:
+        - profile.read
+        - schema.read
+    handoffs:
+      - target_agent: response-writer
+        intents:
+          - draft-connector-readiness-report
+        risk_level: high
+        approval_required: true
+        schema: schemas/handoff.schema.json
+  - id: response-writer
+    path: agents/response-writer.agent.yaml
+    role: writer
+    tool_scope:
+      read:
+        - profile.read
+      write:
+        - artifact.write
+connectors:
+  - id: taobao-open-platform
+    kind: native
+    path: connectors/taobao-open-platform.yaml
+    required_permissions:
+      - taobao.order.read
+      - taobao.product.read
+      - taobao.refund.read
+      - taobao.review.read
+      - taobao.review.reply.write
+    writes:
+      enabled: true
+      approval_required: true
+    provenance:
+      required: true
+    tenant_scope:
+      tenant_id: required
+      workspace_id: required
+    prompt_injection_boundary:
+      treat_results_as_data: true
+    data_quality:
+      min_sample_count: 3
+      max_age_hours: 24
+      citation_required: true
+      required_metadata_fields:
+        - api_name
+        - shop_id
+        - seller_nick
+        - retrieved_at
+        - request_id
+      required_content_fields:
+        - object_type
+        - object_id
+        - summary
+actions:
+  - id: submit-review-reply
+    path: actions/submit-review-reply.action.yaml
+    required: true
+schemas:
+  - id: handoff
+    path: schemas/handoff.schema.json
+    required: true
+  - id: store-profile
+    path: schemas/store_profile.schema.json
+    required: true
+  - id: connector-account
+    path: schemas/connector_account.schema.json
+    required: true
+  - id: connector-map
+    path: schemas/connector_map.schema.json
+    required: true
+  - id: ontology-seed
+    path: schemas/ontology_seed.schema.json
+    required: true
+  - id: connector-readiness-report
+    path: schemas/connector_readiness_report.schema.json
+    required: true
+  - id: action-type
+    path: schemas/action_type.schema.json
+    required: true
+policies:
+  - id: approval
+    path: policies/approval.yaml
+    required: true
+  - id: tool-scope
+    path: policies/tool_scope.yaml
+    required: true
+evals:
+  - id: ecommerce-taobao-regression
+    path: evals/golden_cases.jsonl
+    gate:
+      required: true
+      min_score: 1.0
+release_gates:
+  - id: pack-regression
+    gate_type: eval
+    required: true
+  - id: connector-readiness
+    gate_type: connector_quality
+    required: true
+  - id: approval-policy
+    gate_type: policy
+    required: true
+onboarding:
+  workflow: connector-readiness
+  required_profiles:
+    - store
+    - connector-account
+    - connector-map
+    - ontology-seed
+  profile_schemas:
+    - id: store-profile
+      path: schemas/store_profile.schema.json
+      required: true
+    - id: connector-account
+      path: schemas/connector_account.schema.json
+      required: true
+    - id: connector-map
+      path: schemas/connector_map.schema.json
+      required: true
+    - id: ontology-seed
+      path: schemas/ontology_seed.schema.json
+      required: true
+  eval: ecommerce-taobao-regression

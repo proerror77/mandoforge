@@ -277,6 +277,19 @@ connectors:
         - object_type
         - object_id
         - summary
+actions:
+  - id: submit-review-explanation
+    path: actions/submit-review-explanation.action.yaml
+    required: true
+  - id: create-qianniu-workorder
+    path: actions/create-qianniu-workorder.action.yaml
+    required: true
+  - id: refund-agree
+    path: actions/refund-agree.action.yaml
+    required: true
+  - id: refund-refuse
+    path: actions/refund-refuse.action.yaml
+    required: true
 schemas:
   - id: handoff
     path: schemas/handoff.schema.json
@@ -346,6 +359,9 @@ schemas:
     required: true
   - id: connector-readiness-report
     path: schemas/connector_readiness_report.schema.json
+    required: true
+  - id: action-type
+    path: schemas/action_type.schema.json
     required: true
   - id: observability-contract
     path: schemas/observability_contract.schema.json

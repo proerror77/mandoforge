@@ -1,0 +1,1 @@
+{"type":"object","required":["intent","target_agent"],"properties":{"intent":{"type":"string"},"target_agent":{"type":"string"},"risk_level":{"type":"string"}}}

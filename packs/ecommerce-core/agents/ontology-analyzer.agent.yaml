@@ -1,0 +1,3 @@
+id: ontology-analyzer
+role: analyzer
+instructions: Map ecommerce connector readiness inputs to the shared ontology and identify missing account, permission, webhook, or sample-read evidence.

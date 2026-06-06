@@ -1,0 +1,5 @@
+approval:
+  external_write_default: required
+  approval_commit_token_required: true
+  payload_digest_required: true
+  raw_secret_rendering: forbidden

@@ -24,6 +24,9 @@ rg -q '^  domain_scope: ecommerce$' packs/ecommerce-tmall/package.yaml
 rg -q '^  workflow_scope: tmall$' packs/ecommerce-tmall/package.yaml
 rg -q '^  share_policy: isolated$' packs/ecommerce-tmall/package.yaml
 rg -q '^  lane_scope:' packs/ecommerce-tmall/workflows
+rg -q '^actions:' packs/ecommerce-tmall/package.yaml
+rg -q '^  - id: submit-review-explanation$' packs/ecommerce-tmall/package.yaml
+rg -q '^[[:space:]]+- id: tmall_review$' packs/ecommerce-tmall/profiles/ontology_seed.yaml
 
 cargo test -p mandoforge-api validates_ecommerce_tmall_domain_pack_fixture -- --nocapture
 cargo test -p mandoforge-api ecommerce_tmall_pack_stages_semantic_context_os_contract -- --nocapture

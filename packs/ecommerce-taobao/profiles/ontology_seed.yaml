@@ -1,0 +1,42 @@
+ontology:
+  domain_scope: ecommerce
+  workflow_scope: taobao
+  share_policy: isolated
+  object_types:
+    - id: taobao_store
+      source: store-profile
+      summary: Taobao shop identity, seller nick, tenant scope, and operating policy
+    - id: taobao_connector_account
+      source: connector-account
+      summary: TOP session secret references, permission scopes, and readiness status
+    - id: taobao_product
+      source: item-detail-read
+      summary: Taobao item, SKU, catalog attributes, and listing policy facts
+    - id: taobao_order
+      source: order-list-read
+      summary: trade, order, buyer-facing context, payment, and fulfillment evidence
+    - id: taobao_refund_case
+      source: refund-list-read
+      summary: refund or return case with status, reason, evidence, and allowed actions
+    - id: taobao_review
+      source: review-feed-read
+      summary: review, rating, reply state, and VOC tags
+    - id: taobao_approval_commit
+      source: approval-policy
+      summary: approval token, payload digest, operation id, object id, and executor binding
+  relation_types:
+    - id: belongs-to-store
+      from: [taobao_product, taobao_order, taobao_refund_case, taobao_review]
+      to: [taobao_store]
+    - id: references-product
+      from: [taobao_order, taobao_refund_case, taobao_review]
+      to: [taobao_product]
+    - id: references-order
+      from: [taobao_refund_case, taobao_review]
+      to: [taobao_order]
+    - id: uses-connector-account
+      from: [taobao_store]
+      to: [taobao_connector_account]
+    - id: requires-approval-commit
+      from: [taobao_review, taobao_refund_case]
+      to: [taobao_approval_commit]

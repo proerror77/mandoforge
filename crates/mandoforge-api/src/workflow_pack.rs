@@ -32,6 +32,8 @@ pub struct WorkflowPackManifest {
     #[serde(default)]
     pub connectors: Vec<ConnectorRef>,
     #[serde(default)]
+    pub actions: Vec<PackFileRef>,
+    #[serde(default)]
     pub schemas: Vec<PackFileRef>,
     #[serde(default)]
     pub policies: Vec<PackFileRef>,
@@ -290,6 +292,46 @@ struct WorkflowStepObservabilityContract {
     required_evidence: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ActionTypeContract {
+    id: String,
+    object_type: String,
+    connector_id: String,
+    operation_id: String,
+    side_effect_class: String,
+    #[serde(default)]
+    parameters: Vec<ActionParameterContract>,
+    validations: ActionValidationContract,
+    effects: ActionEffectsContract,
+    approval: ActionApprovalContract,
+}
+
+#[derive(Debug, Deserialize)]
+struct ActionParameterContract {
+    name: String,
+    #[serde(default)]
+    required: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ActionValidationContract {
+    #[serde(default)]
+    rules: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ActionEffectsContract {
+    native_connector_call: String,
+    audit_event: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ActionApprovalContract {
+    approval_required: bool,
+    approval_commit_token_required: bool,
+    payload_digest_required: bool,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct WorkflowPackValidationReport {
     pub pack_id: String,
@@ -325,6 +367,11 @@ impl WorkflowPackManifest {
         }
         for item in &self.policies {
             validate_ref("policies", item, package_dir, &mut ids_by_section)?;
+            file_count += 1;
+        }
+        for action in &self.actions {
+            validate_ref("actions", action, package_dir, &mut ids_by_section)?;
+            self.validate_action_type_file(action, package_dir)?;
             file_count += 1;
         }
         let tool_scope_policy = self.load_tool_scope_policy(package_dir)?;
@@ -877,6 +924,80 @@ impl WorkflowPackManifest {
         Ok(())
     }
 
+    fn validate_action_type_file(&self, action: &PackFileRef, package_dir: &Path) -> Result<()> {
+        let input = fs::read_to_string(package_dir.join(&action.path))?;
+        let contract: ActionTypeContract = serde_yaml::from_str(&input)?;
+        if contract.id != action.id {
+            bail!(
+                "action file {} id {} must match manifest action {}",
+                action.path,
+                contract.id,
+                action.id
+            );
+        }
+        validate_id("actions", &contract.id)?;
+        if contract.object_type.trim().is_empty() {
+            bail!("action {} must declare object_type", contract.id);
+        }
+        validate_id("action connector_id", &contract.connector_id)?;
+        validate_id("action operation_id", &contract.operation_id)?;
+        if !self
+            .connectors
+            .iter()
+            .any(|connector| connector.id == contract.connector_id)
+        {
+            bail!(
+                "action {} references missing connector {}",
+                contract.id,
+                contract.connector_id
+            );
+        }
+        if contract.side_effect_class.trim().is_empty() {
+            bail!("action {} must declare side_effect_class", contract.id);
+        }
+        if contract.parameters.is_empty() {
+            bail!("action {} must declare parameters", contract.id);
+        }
+        if !contract
+            .parameters
+            .iter()
+            .any(|parameter| parameter.required)
+        {
+            bail!(
+                "action {} must declare at least one required parameter",
+                contract.id
+            );
+        }
+        for parameter in &contract.parameters {
+            if parameter.name.trim().is_empty() {
+                bail!("action {} parameter name must not be empty", contract.id);
+            }
+        }
+        validate_non_empty_string_list(
+            &format!("action {} validations.rules", contract.id),
+            &contract.validations.rules,
+        )?;
+        if contract.effects.native_connector_call != "native.connector.call" {
+            bail!(
+                "action {} effects.native_connector_call must be native.connector.call",
+                contract.id
+            );
+        }
+        if contract.effects.audit_event.trim().is_empty() {
+            bail!("action {} effects.audit_event is required", contract.id);
+        }
+        if !contract.approval.approval_required {
+            bail!("action {} must require approval", contract.id);
+        }
+        if !contract.approval.approval_commit_token_required {
+            bail!("action {} must require approval_commit_token", contract.id);
+        }
+        if !contract.approval.payload_digest_required {
+            bail!("action {} must require payload_digest", contract.id);
+        }
+        Ok(())
+    }
+
     fn validate_evals(
         &self,
         package_dir: &Path,
@@ -1227,6 +1348,14 @@ mod tests {
             .join("packs/ecommerce-tmall/package.yaml")
     }
 
+    fn ecommerce_manifest_path(pack_id: &str) -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("packs")
+            .join(pack_id)
+            .join("package.yaml")
+    }
+
     fn legal_manifest_path() -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
@@ -1260,6 +1389,27 @@ mod tests {
     }
 
     #[test]
+    fn validates_ecommerce_expansion_domain_pack_fixtures() {
+        for pack_id in [
+            "ecommerce-core",
+            "ecommerce-taobao",
+            "ecommerce-xiaohongshu",
+            "ecommerce-tiktok-shop",
+            "ecommerce-amazon",
+        ] {
+            let report = validate_workflow_pack_manifest_path(&ecommerce_manifest_path(pack_id))
+                .unwrap_or_else(|error| panic!("{pack_id} should validate: {error}"));
+
+            assert_eq!(report.pack_id, pack_id);
+            assert_eq!(report.schema_version, SUPPORTED_SCHEMA_VERSION);
+            assert_eq!(report.agent_count, 3);
+            assert_eq!(report.connector_count, 1);
+            assert_eq!(report.required_eval_gate_count, 1);
+            assert!(report.validated_file_count >= 20);
+        }
+    }
+
+    #[test]
     fn validates_legal_domain_pack_fixture() {
         let report = validate_workflow_pack_manifest_path(&legal_manifest_path())
             .expect("Legal domain pack fixture should validate");
@@ -1288,6 +1438,7 @@ mod tests {
             workflows: vec![],
             agents: vec![],
             connectors: vec![],
+            actions: vec![],
             schemas: vec![],
             policies: vec![],
             evals: vec![],
@@ -1329,6 +1480,7 @@ mod tests {
             workflows: vec![],
             agents: vec![],
             connectors: vec![],
+            actions: vec![],
             schemas: vec![],
             policies: vec![],
             evals: vec![],

@@ -11316,6 +11316,13 @@ fn ontology_registry() -> OntologyRegistry {
         version: "core-v0.1".to_string(),
         object_types: vec![
             ontology_object_type(
+                "action",
+                "Workflow-pack action contract component that can materialize into an executable ontology ActionType.",
+                Some("action"),
+                None,
+                "approval, connector, and audit policy boundary",
+            ),
+            ontology_object_type(
                 "agent",
                 "Configured worker persona that can receive governed workflow tasks.",
                 Some("agent"),
@@ -11342,6 +11349,13 @@ fn ontology_registry() -> OntologyRegistry {
                 None,
                 None,
                 "domain and customer isolation policy",
+            ),
+            ontology_object_type(
+                "connector",
+                "External platform or internal adapter configured for governed workflow access.",
+                Some("connector"),
+                None,
+                "credential, API, and side-effect approval boundary",
             ),
             ontology_object_type(
                 "decision",
@@ -11463,11 +11477,32 @@ fn ontology_registry() -> OntologyRegistry {
                 "workflow graph and task-grant policy",
             ),
             ontology_object_type(
+                "ontology_action_type",
+                "Operational ontology action contract with parameters, validations, approval, effects, and audit requirements.",
+                Some("ontology_action_type"),
+                Some("domain"),
+                "action approval and connector side-effect boundary",
+            ),
+            ontology_object_type(
                 "ontology_expansion",
                 "Proposed domain ontology addition that must be reviewed before promotion.",
                 Some("semantic_object"),
                 Some("domain"),
                 "semantic ontology governance boundary",
+            ),
+            ontology_object_type(
+                "ontology_object_type",
+                "Domain object type declared by a workflow pack ontology seed.",
+                Some("ontology_object_type"),
+                Some("domain"),
+                "domain semantic model governance boundary",
+            ),
+            ontology_object_type(
+                "ontology_relation_type",
+                "Domain relation type declared by a workflow pack ontology seed.",
+                Some("ontology_relation_type"),
+                Some("domain"),
+                "domain semantic relation governance boundary",
             ),
         ],
         relation_types: vec![
@@ -11507,6 +11542,34 @@ fn ontology_registry() -> OntologyRegistry {
                 "memory conflict governance",
             ),
             ontology_relation_type(
+                "acts_on_object_type",
+                "ontology_action_type",
+                "ontology_object_type",
+                "ActionType is scoped to a declared domain object type.",
+                "action target governance",
+            ),
+            ontology_relation_type(
+                "declares_action_type",
+                "pack",
+                "ontology_action_type",
+                "Workflow pack declares an operational ontology ActionType.",
+                "pack action contract boundary",
+            ),
+            ontology_relation_type(
+                "declares_ontology_object_type",
+                "pack",
+                "ontology_object_type",
+                "Workflow pack declares a domain ontology object type.",
+                "pack ontology contract boundary",
+            ),
+            ontology_relation_type(
+                "declares_ontology_relation_type",
+                "pack",
+                "ontology_relation_type",
+                "Workflow pack declares a domain ontology relation type.",
+                "pack ontology contract boundary",
+            ),
+            ontology_relation_type(
                 "defines_scope_for",
                 "semantic_object",
                 "workflow",
@@ -11528,6 +11591,27 @@ fn ontology_registry() -> OntologyRegistry {
                 "agent task-grant boundary",
             ),
             ontology_relation_type(
+                "materializes_action_type",
+                "action",
+                "ontology_action_type",
+                "Pack action component materializes into an ontology ActionType.",
+                "action contract projection boundary",
+            ),
+            ontology_relation_type(
+                "relation_from_object_type",
+                "ontology_relation_type",
+                "ontology_object_type",
+                "Ontology relation type can originate from this object type.",
+                "domain relation governance",
+            ),
+            ontology_relation_type(
+                "relation_to_object_type",
+                "ontology_relation_type",
+                "ontology_object_type",
+                "Ontology relation type can target this object type.",
+                "domain relation governance",
+            ),
+            ontology_relation_type(
                 "requires",
                 "workflow",
                 "policy",
@@ -11547,6 +11631,13 @@ fn ontology_registry() -> OntologyRegistry {
                 "semantic_object",
                 "One semantic object replaces an older object.",
                 "memory freshness governance",
+            ),
+            ontology_relation_type(
+                "uses_connector",
+                "ontology_action_type",
+                "connector",
+                "ActionType uses a configured connector for governed platform effects.",
+                "connector side-effect governance",
             ),
         ],
     }
@@ -18143,7 +18234,13 @@ async fn plan_workflow_pack_config_wizard(
 fn workflow_pack_marketplace_manifest_paths() -> Vec<String> {
     vec![
         "packs/ai-governance/package.yaml".to_string(),
+        "packs/ecommerce-amazon/package.yaml".to_string(),
+        "packs/ecommerce-core/package.yaml".to_string(),
+        "packs/ecommerce-taobao/package.yaml".to_string(),
+        "packs/ecommerce-tiktok-shop/package.yaml".to_string(),
         "packs/ecommerce-tmall/package.yaml".to_string(),
+        "packs/ecommerce-xiaohongshu/package.yaml".to_string(),
+        "packs/legal/package.yaml".to_string(),
     ]
 }
 
@@ -25263,6 +25360,81 @@ fn workflow_pack_load_workflow_file(
     })
 }
 
+fn workflow_pack_load_action_type_file(
+    package_dir: &FsPath,
+    action: &workflow_pack::PackFileRef,
+) -> Result<Value, AppError> {
+    let path = package_dir.join(&action.path);
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("read workflow pack action {}", action.path))?;
+    let value = serde_yaml::from_str::<Value>(&content).map_err(|error| {
+        AppError::bad_request(format!(
+            "workflow pack action {} is invalid YAML: {error}",
+            action.path
+        ))
+    })?;
+    if !value.is_object() {
+        return Err(AppError::bad_request(format!(
+            "workflow pack action {} must be a YAML object",
+            action.path
+        )));
+    }
+    if value.get("id").and_then(Value::as_str) != Some(action.id.as_str()) {
+        return Err(AppError::bad_request(format!(
+            "workflow pack action {} id must match manifest action {}",
+            action.path, action.id
+        )));
+    }
+    Ok(value)
+}
+
+fn workflow_pack_load_yaml_value(
+    package_dir: &FsPath,
+    relative_path: &str,
+    label: &str,
+) -> Result<Value, AppError> {
+    let content = std::fs::read_to_string(package_dir.join(relative_path))
+        .with_context(|| format!("read workflow pack {label} {}", relative_path))?;
+    serde_yaml::from_str::<Value>(&content).map_err(|error| {
+        AppError::bad_request(format!(
+            "workflow pack {label} {} is invalid YAML: {error}",
+            relative_path
+        ))
+    })
+}
+
+fn workflow_pack_value_string(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn workflow_pack_value_array<'a>(value: &'a Value, key: &str) -> &'a [Value] {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
+fn workflow_pack_value_string_array(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn workflow_pack_workflow_step_graph(
     workflow: &workflow_pack::WorkflowRef,
     workflow_file: &WorkflowPackWorkflowFile,
@@ -25594,6 +25766,28 @@ fn workflow_pack_materialized_bindings(
             now,
         ));
     }
+    for action in &manifest.actions {
+        let action_type = workflow_pack_load_action_type_file(&package_dir, action)?;
+        bindings.push(new_workflow_pack_binding(
+            installation,
+            "action",
+            &action.id,
+            Some(&action.path),
+            "ontology_action_type",
+            status,
+            json!({
+                "action_type": action_type,
+                "object_type": workflow_pack_value_string(&action_type, "object_type"),
+                "connector_id": workflow_pack_value_string(&action_type, "connector_id"),
+                "operation_id": workflow_pack_value_string(&action_type, "operation_id"),
+                "side_effect_class": workflow_pack_value_string(&action_type, "side_effect_class"),
+                "approval": action_type.get("approval").cloned(),
+                "effects": action_type.get("effects").cloned(),
+                "source_digest": workflow_pack_source_digest(&package_dir, &action.path)?,
+            }),
+            now,
+        ));
+    }
     for policy in &manifest.policies {
         bindings.push(new_workflow_pack_binding(
             installation,
@@ -25833,6 +26027,28 @@ fn workflow_pack_runtime_objects_from_bindings(
                 }),
                 now,
             )),
+            "action" => objects.push(new_workflow_pack_runtime_object(
+                installation,
+                binding,
+                "action_type",
+                &format!("action:{}:contract", binding.binding_key),
+                "ontology_action_type",
+                status,
+                json!({
+                    "binding_id": binding.id,
+                    "action_id": binding.binding_key.clone(),
+                    "object_type": binding.materialized_payload.get("object_type").cloned(),
+                    "connector_id": binding.materialized_payload.get("connector_id").cloned(),
+                    "operation_id": binding.materialized_payload.get("operation_id").cloned(),
+                    "side_effect_class": binding.materialized_payload.get("side_effect_class").cloned(),
+                    "approval": binding.materialized_payload.get("approval").cloned(),
+                    "effects": binding.materialized_payload.get("effects").cloned(),
+                    "source_path": binding.source_path.clone(),
+                    "source_digest": binding.materialized_payload.get("source_digest").cloned(),
+                    "provider_specific_validation": "deferred_to_action_runtime"
+                }),
+                now,
+            )),
             _ => {}
         }
     }
@@ -25963,6 +26179,34 @@ async fn project_workflow_pack_semantic_layer(
         object_count += 1;
     }
 
+    let ontology_projection = workflow_pack_project_ontology_seed(
+        state,
+        &source,
+        &pack_object,
+        installation,
+        &manifest,
+        &package_dir,
+        &pack_scopes,
+    )
+    .await?;
+    object_count += ontology_projection.object_count;
+    link_count += ontology_projection.link_count;
+
+    let action_projection = workflow_pack_project_action_types(
+        state,
+        &source,
+        &pack_object,
+        installation,
+        &manifest,
+        &package_dir,
+        &pack_scopes,
+        &component_objects,
+        &ontology_projection.object_type_objects,
+    )
+    .await?;
+    object_count += action_projection.object_count;
+    link_count += action_projection.link_count;
+
     let bindings_by_key = bindings
         .iter()
         .filter(|binding| binding.binding_type == "workflow")
@@ -26054,6 +26298,9 @@ async fn project_workflow_pack_semantic_layer(
                 "source_id": source.id,
                 "object_count": object_count,
                 "link_count": link_count,
+                "ontology_object_type_count": ontology_projection.object_type_objects.len(),
+                "ontology_relation_type_count": ontology_projection.relation_type_count,
+                "action_type_count": action_projection.action_type_count,
             }),
         ))
         .await?;
@@ -26061,7 +26308,287 @@ async fn project_workflow_pack_semantic_layer(
         "source_id": source.id,
         "object_count": object_count,
         "link_count": link_count,
+        "ontology_object_type_count": ontology_projection.object_type_objects.len(),
+        "ontology_relation_type_count": ontology_projection.relation_type_count,
+        "action_type_count": action_projection.action_type_count,
     }))
+}
+
+struct WorkflowPackOntologyProjection {
+    object_count: usize,
+    link_count: usize,
+    relation_type_count: usize,
+    object_type_objects: BTreeMap<String, SemanticObject>,
+}
+
+struct WorkflowPackActionProjection {
+    object_count: usize,
+    link_count: usize,
+    action_type_count: usize,
+}
+
+async fn workflow_pack_project_ontology_seed(
+    state: &AppState,
+    source: &SemanticSource,
+    pack_object: &SemanticObject,
+    installation: &WorkflowPackInstallation,
+    manifest: &workflow_pack::WorkflowPackManifest,
+    package_dir: &FsPath,
+    pack_scopes: &Value,
+) -> Result<WorkflowPackOntologyProjection, AppError> {
+    let Some(profile) = manifest
+        .profiles
+        .iter()
+        .find(|profile| profile.id == "ontology-seed")
+    else {
+        return Ok(WorkflowPackOntologyProjection {
+            object_count: 0,
+            link_count: 0,
+            relation_type_count: 0,
+            object_type_objects: BTreeMap::new(),
+        });
+    };
+    let seed = workflow_pack_load_yaml_value(package_dir, &profile.path, "ontology seed")?;
+    let ontology = seed.get("ontology").unwrap_or(&seed);
+    let mut object_count = 0usize;
+    let mut link_count = 0usize;
+    let mut object_type_objects = BTreeMap::new();
+    for object_type in workflow_pack_value_array(ontology, "object_types") {
+        let Some(id) = workflow_pack_value_string(object_type, "id") else {
+            continue;
+        };
+        let summary = workflow_pack_value_string(object_type, "summary")
+            .unwrap_or_else(|| format!("Ontology object type {id}."));
+        let object = workflow_pack_get_or_create_semantic_object(
+            state,
+            CreateSemanticObject {
+                source_id: Some(source.id),
+                object_type: "ontology_object_type".to_string(),
+                object_key: format!(
+                    "workflow_pack:{}:ontology-object-type:{}",
+                    installation.id, id
+                ),
+                title: id.clone(),
+                summary,
+                content: json!({
+                    "installation_id": installation.id,
+                    "pack_id": manifest.id,
+                    "ontology_object_type_id": id,
+                    "source": object_type.get("source").cloned(),
+                    "definition": object_type,
+                }),
+                semantic_scopes: pack_scopes.clone(),
+                source_uri: Some(format!(
+                    "mandoforge://workflow-packs/{}/{}#object_types/{}",
+                    installation.id, profile.path, id
+                )),
+                provenance: json!({"source": "ontology_seed", "path": profile.path}),
+                trust_level: "source_attested".to_string(),
+                freshness: "current".to_string(),
+                status: "active".to_string(),
+            },
+        )
+        .await?;
+        link_count += workflow_pack_create_semantic_link_if_absent(
+            state,
+            pack_object,
+            "declares_ontology_object_type",
+            &object,
+            json!({"source": "ontology_seed", "object_type_id": id}),
+        )
+        .await?;
+        object_type_objects.insert(id, object);
+        object_count += 1;
+    }
+
+    let mut relation_type_count = 0usize;
+    for relation_type in workflow_pack_value_array(ontology, "relation_types") {
+        let Some(id) = workflow_pack_value_string(relation_type, "id") else {
+            continue;
+        };
+        let object = workflow_pack_get_or_create_semantic_object(
+            state,
+            CreateSemanticObject {
+                source_id: Some(source.id),
+                object_type: "ontology_relation_type".to_string(),
+                object_key: format!(
+                    "workflow_pack:{}:ontology-relation-type:{}",
+                    installation.id, id
+                ),
+                title: id.clone(),
+                summary: format!("Ontology relation type {id}."),
+                content: json!({
+                    "installation_id": installation.id,
+                    "pack_id": manifest.id,
+                    "ontology_relation_type_id": id,
+                    "from": relation_type.get("from").cloned(),
+                    "to": relation_type.get("to").cloned(),
+                    "definition": relation_type,
+                }),
+                semantic_scopes: pack_scopes.clone(),
+                source_uri: Some(format!(
+                    "mandoforge://workflow-packs/{}/{}#relation_types/{}",
+                    installation.id, profile.path, id
+                )),
+                provenance: json!({"source": "ontology_seed", "path": profile.path}),
+                trust_level: "source_attested".to_string(),
+                freshness: "current".to_string(),
+                status: "active".to_string(),
+            },
+        )
+        .await?;
+        link_count += workflow_pack_create_semantic_link_if_absent(
+            state,
+            pack_object,
+            "declares_ontology_relation_type",
+            &object,
+            json!({"source": "ontology_seed", "relation_type_id": id}),
+        )
+        .await?;
+        for from_id in workflow_pack_value_string_array(relation_type.get("from")) {
+            if let Some(from_object) = object_type_objects.get(&from_id) {
+                link_count += workflow_pack_create_semantic_link_if_absent(
+                    state,
+                    &object,
+                    "relation_from_object_type",
+                    from_object,
+                    json!({"source": "ontology_seed", "relation_type_id": id}),
+                )
+                .await?;
+            }
+        }
+        for to_id in workflow_pack_value_string_array(relation_type.get("to")) {
+            if let Some(to_object) = object_type_objects.get(&to_id) {
+                link_count += workflow_pack_create_semantic_link_if_absent(
+                    state,
+                    &object,
+                    "relation_to_object_type",
+                    to_object,
+                    json!({"source": "ontology_seed", "relation_type_id": id}),
+                )
+                .await?;
+            }
+        }
+        relation_type_count += 1;
+        object_count += 1;
+    }
+
+    Ok(WorkflowPackOntologyProjection {
+        object_count,
+        link_count,
+        relation_type_count,
+        object_type_objects,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn workflow_pack_project_action_types(
+    state: &AppState,
+    source: &SemanticSource,
+    pack_object: &SemanticObject,
+    installation: &WorkflowPackInstallation,
+    manifest: &workflow_pack::WorkflowPackManifest,
+    package_dir: &FsPath,
+    pack_scopes: &Value,
+    component_objects: &BTreeMap<String, SemanticObject>,
+    ontology_object_types: &BTreeMap<String, SemanticObject>,
+) -> Result<WorkflowPackActionProjection, AppError> {
+    let mut object_count = 0usize;
+    let mut link_count = 0usize;
+    let mut action_type_count = 0usize;
+    for action in &manifest.actions {
+        let action_type = workflow_pack_load_action_type_file(package_dir, action)?;
+        let action_object = workflow_pack_get_or_create_semantic_object(
+            state,
+            CreateSemanticObject {
+                source_id: Some(source.id),
+                object_type: "ontology_action_type".to_string(),
+                object_key: format!(
+                    "workflow_pack:{}:action-type:{}",
+                    installation.id, action.id
+                ),
+                title: action.id.clone(),
+                summary: format!(
+                    "ActionType {} acts on {} through connector operation {}.",
+                    action.id,
+                    workflow_pack_value_string(&action_type, "object_type")
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    workflow_pack_value_string(&action_type, "operation_id")
+                        .unwrap_or_else(|| "unknown".to_string())
+                ),
+                content: json!({
+                    "installation_id": installation.id,
+                    "pack_id": manifest.id,
+                    "action_id": action.id,
+                    "path": action.path,
+                    "definition": action_type,
+                }),
+                semantic_scopes: pack_scopes.clone(),
+                source_uri: Some(format!(
+                    "mandoforge://workflow-packs/{}/{}",
+                    installation.id, action.path
+                )),
+                provenance: json!({"source": "workflow_pack_action_type", "path": action.path}),
+                trust_level: "source_attested".to_string(),
+                freshness: "current".to_string(),
+                status: "active".to_string(),
+            },
+        )
+        .await?;
+        object_count += 1;
+        action_type_count += 1;
+        link_count += workflow_pack_create_semantic_link_if_absent(
+            state,
+            pack_object,
+            "declares_action_type",
+            &action_object,
+            json!({"source": "workflow_pack_action_type", "action_id": action.id}),
+        )
+        .await?;
+        if let Some(component) = component_objects.get(&format!("action:{}", action.id)) {
+            link_count += workflow_pack_create_semantic_link_if_absent(
+                state,
+                component,
+                "materializes_action_type",
+                &action_object,
+                json!({"source": "workflow_pack_action_type", "action_id": action.id}),
+            )
+            .await?;
+        }
+        if let Some(object_type_id) = workflow_pack_value_string(&action_type, "object_type") {
+            if let Some(object_type) = ontology_object_types.get(&object_type_id) {
+                link_count += workflow_pack_create_semantic_link_if_absent(
+                    state,
+                    &action_object,
+                    "acts_on_object_type",
+                    object_type,
+                    json!({"source": "workflow_pack_action_type", "action_id": action.id}),
+                )
+                .await?;
+            }
+        }
+        if let Some(connector_id) = workflow_pack_value_string(&action_type, "connector_id") {
+            if let Some(connector) = component_objects.get(&format!("connector:{connector_id}")) {
+                link_count += workflow_pack_create_semantic_link_if_absent(
+                    state,
+                    &action_object,
+                    "uses_connector",
+                    connector,
+                    json!({
+                        "source": "workflow_pack_action_type",
+                        "action_id": action.id,
+                        "operation_id": workflow_pack_value_string(&action_type, "operation_id"),
+                    }),
+                )
+                .await?;
+            }
+        }
+    }
+    Ok(WorkflowPackActionProjection {
+        object_count,
+        link_count,
+        action_type_count,
+    })
 }
 
 async fn workflow_pack_get_or_create_semantic_source(
@@ -26172,6 +26699,14 @@ fn workflow_pack_semantic_component_refs(
             connector.id.clone(),
             connector.path.clone(),
             format!("{} connector", connector.id),
+        )
+    }));
+    refs.extend(manifest.actions.iter().map(|action| {
+        (
+            "action".to_string(),
+            action.id.clone(),
+            action.path.clone(),
+            format!("{} action type", action.id),
         )
     }));
     refs.extend(manifest.profiles.iter().map(|profile| {
@@ -63469,6 +64004,13 @@ not json
                 .iter()
                 .any(|pack| { pack["id"] == "ecommerce-tmall" })
         );
+        assert!(
+            marketplace["packs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|pack| { pack["id"] == "legal" })
+        );
 
         let wizard: Value = request_json(
             app,
@@ -64860,6 +65402,14 @@ not json
                 && object["spec"]["semantic_scopes"]["domain_scope"] == json!("ecommerce")
                 && object["spec"]["semantic_scopes"]["lane_scope"] == json!("customer-service")
         }));
+        assert!(runtime_objects.iter().any(|object| {
+            object["runtime_kind"] == json!("ontology_action_type")
+                && object["object_key"] == json!("action:submit-review-explanation:contract")
+                && object["spec"]["object_type"] == json!("tmall_review")
+                && object["spec"]["connector_id"] == json!("tmall-top")
+                && object["spec"]["operation_id"] == json!("review-explanation-submit")
+                && object["spec"]["approval"]["approval_commit_token_required"] == json!(true)
+        }));
 
         let semantic_objects: Vec<SemanticObject> = request_json(
             app.clone(),
@@ -64885,6 +65435,60 @@ not json
                 && object.object_key
                     == format!("workflow_pack:{}:connector:tmall-top", installed.id)
                 && object.semantic_scopes["workflow_scope"] == json!("tmall")
+        }));
+        let review_object_type = semantic_objects
+            .iter()
+            .find(|object| {
+                object.object_type == "ontology_object_type"
+                    && object.object_key
+                        == format!(
+                            "workflow_pack:{}:ontology-object-type:tmall_review",
+                            installed.id
+                        )
+            })
+            .expect("tmall_review ontology object type");
+        let refund_relation_type = semantic_objects
+            .iter()
+            .find(|object| {
+                object.object_type == "ontology_relation_type"
+                    && object.object_key
+                        == format!(
+                            "workflow_pack:{}:ontology-relation-type:references_order",
+                            installed.id
+                        )
+            })
+            .expect("references_order ontology relation type");
+        let submit_review_action = semantic_objects
+            .iter()
+            .find(|object| {
+                object.object_type == "ontology_action_type"
+                    && object.object_key
+                        == format!(
+                            "workflow_pack:{}:action-type:submit-review-explanation",
+                            installed.id
+                        )
+                    && object.content["definition"]["approval"]["payload_digest_required"]
+                        == json!(true)
+            })
+            .expect("submit-review-explanation ontology action type");
+
+        let semantic_links: Vec<SemanticLink> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/semantic-links")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert!(semantic_links.iter().any(|link| {
+            link.from_entity_id == submit_review_action.id.to_string()
+                && link.to_entity_id == review_object_type.id.to_string()
+                && link.relation_type == "acts_on_object_type"
+        }));
+        assert!(semantic_links.iter().any(|link| {
+            link.from_entity_id == refund_relation_type.id.to_string()
+                && link.relation_type == "relation_to_object_type"
         }));
 
         let semantic_workbench: Value = request_json(
@@ -65001,6 +65605,166 @@ not json
                 .iter()
                 .any(|source| source.source_type == "semantic_source")
         );
+    }
+
+    #[tokio::test]
+    async fn ecommerce_expansion_packs_stage_semantic_context_os_skeletons() {
+        let app = test_app().await;
+        for (
+            pack_id,
+            workflow_scope,
+            expected_object_type,
+            expected_relation_type,
+            expected_action,
+        ) in [
+            (
+                "ecommerce-core",
+                "core",
+                "ecommerce_store",
+                "belongs-to-store",
+                None,
+            ),
+            (
+                "ecommerce-taobao",
+                "taobao",
+                "taobao_review",
+                "references-order",
+                Some("submit-review-reply"),
+            ),
+            (
+                "ecommerce-xiaohongshu",
+                "xiaohongshu",
+                "xiaohongshu_comment",
+                "comment-on-note",
+                Some("reply-shop-comment"),
+            ),
+            (
+                "ecommerce-tiktok-shop",
+                "tiktok-shop",
+                "tiktok_shop_review",
+                "references-order",
+                Some("reply-review"),
+            ),
+            (
+                "ecommerce-amazon",
+                "amazon",
+                "amazon_listing",
+                "references-listing",
+                Some("update-listing-content"),
+            ),
+        ] {
+            let installed: WorkflowPackInstallation = request_json(
+                app.clone(),
+                json_request_with_headers(
+                    "POST",
+                    "/api/workflow-packs/install",
+                    json!({"manifest_path": ecommerce_manifest_path_string(pack_id)}),
+                    &[("x-mandoforge-roles", "admin")],
+                ),
+            )
+            .await;
+            assert_eq!(installed.pack_id, pack_id);
+            assert_eq!(installed.kind, "DomainPack");
+            assert_eq!(
+                installed.manifest["semantic_scopes"]["workflow_scope"],
+                json!(workflow_scope)
+            );
+
+            let staged: WorkflowPackInstallation = request_json(
+                app.clone(),
+                json_request_with_headers(
+                    "POST",
+                    &format!("/api/workflow-packs/installations/{}/stage", installed.id),
+                    json!({"reason": "ecommerce expansion semantic skeleton verification"}),
+                    &[("x-mandoforge-roles", "admin")],
+                ),
+            )
+            .await;
+            assert_eq!(staged.status, "staged");
+
+            let runtime_objects: Vec<Value> = request_json(
+                app.clone(),
+                Request::builder()
+                    .uri(format!(
+                        "/api/workflow-packs/installations/{}/runtime-objects",
+                        installed.id
+                    ))
+                    .header("x-mandoforge-roles", "admin")
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await;
+            assert!(
+                runtime_objects.iter().any(|object| {
+                    object["runtime_kind"] == json!("workflow_schedule")
+                        && object["object_key"] == json!("workflow:connector-readiness:schedule")
+                        && object["spec"]["semantic_scopes"]["domain_scope"] == json!("ecommerce")
+                        && object["spec"]["semantic_scopes"]["workflow_scope"]
+                            == json!(workflow_scope)
+                }),
+                "{pack_id} should materialize connector-readiness workflow schedule"
+            );
+            if let Some(action_id) = expected_action {
+                assert!(
+                    runtime_objects.iter().any(|object| {
+                        object["runtime_kind"] == json!("ontology_action_type")
+                            && object["object_key"] == json!(format!("action:{action_id}:contract"))
+                            && object["spec"]["approval"]["payload_digest_required"] == json!(true)
+                    }),
+                    "{pack_id} should materialize ActionType {action_id}"
+                );
+            }
+
+            let semantic_objects: Vec<SemanticObject> = request_json(
+                app.clone(),
+                Request::builder()
+                    .uri("/api/semantic-objects")
+                    .header("x-mandoforge-roles", "admin")
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await;
+            assert!(
+                semantic_objects.iter().any(|object| {
+                    object.object_type == "ontology_object_type"
+                        && object.object_key
+                            == format!(
+                                "workflow_pack:{}:ontology-object-type:{}",
+                                installed.id, expected_object_type
+                            )
+                }),
+                "{pack_id} should project ontology object type {expected_object_type}"
+            );
+            assert!(
+                semantic_objects.iter().any(|object| {
+                    object.object_type == "ontology_relation_type"
+                        && object.object_key
+                            == format!(
+                                "workflow_pack:{}:ontology-relation-type:{}",
+                                installed.id, expected_relation_type
+                            )
+                }),
+                "{pack_id} should project ontology relation type {expected_relation_type}"
+            );
+
+            let semantic_workbench: Value = request_json(
+                app.clone(),
+                Request::builder()
+                    .uri(format!(
+                        "/api/semantic-workbench?domain_scope=ecommerce&workflow_scope={workflow_scope}"
+                    ))
+                    .header("x-mandoforge-roles", "admin")
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await;
+            assert!(
+                semantic_workbench["graph"]["node_count"]
+                    .as_u64()
+                    .is_some_and(|count| count >= 3),
+                "{pack_id} should appear in semantic workbench"
+            );
+        }
     }
 
     #[tokio::test]
@@ -85859,6 +86623,19 @@ not json
                 .join("packs/ecommerce-tmall/package.yaml"),
         )
         .expect("ecommerce Tmall manifest exists")
+        .display()
+        .to_string()
+    }
+
+    fn ecommerce_manifest_path_string(pack_id: &str) -> String {
+        std::fs::canonicalize(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("packs")
+                .join(pack_id)
+                .join("package.yaml"),
+        )
+        .expect("ecommerce manifest exists")
         .display()
         .to_string()
     }

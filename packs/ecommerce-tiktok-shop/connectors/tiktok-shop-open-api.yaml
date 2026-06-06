@@ -1,0 +1,33 @@
+connectors:
+  - id: tiktok-shop-open-api
+    type: native
+    provider: tiktok-shop-open-api
+    auth:
+      type: oauth-access-token
+      required_secrets: [TIKTOK_SHOP_APP_KEY, TIKTOK_SHOP_APP_SECRET, TIKTOK_SHOP_ACCESS_TOKEN]
+    read_operations:
+      - id: order-list-read
+        permission: tiktok.shop.order.read
+        object_types: [tiktok_shop_order]
+      - id: product-list-read
+        permission: tiktok.shop.product.read
+        object_types: [tiktok_shop_product]
+      - id: review-list-read
+        permission: tiktok.shop.review.read
+        object_types: [tiktok_shop_review]
+    write_operations:
+      - id: review-reply-submit
+        permission: tiktok.shop.review.reply.write
+        approval_required: true
+    readiness_probes:
+      credential_probe:
+        required_secrets: [TIKTOK_SHOP_APP_KEY, TIKTOK_SHOP_APP_SECRET, TIKTOK_SHOP_ACCESS_TOKEN]
+      tenant_scope_probe:
+        required_fields: [tenant_id, workspace_id, shop_id, seller_id, region]
+      permission_probe:
+        sample_read_operations: [order-list-read, product-list-read, review-list-read]
+    approval_commit_binding:
+      required_for_write_operations: true
+      bind_fields: [tenant_id, workspace_id, connector_id, operation_id, object_id, payload_digest, approval_commit_token]
+    prompt_injection_boundary:
+      treat_results_as_data: true

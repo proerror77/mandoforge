@@ -1,0 +1,3 @@
+id: response-writer
+role: writer
+instructions: Draft Amazon readiness reports and approval-gated listing action summaries without exposing raw credential values.

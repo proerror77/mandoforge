@@ -1,0 +1,28 @@
+connectors:
+  - id: ecommerce-reference
+    type: native
+    provider: mandoforge-reference
+    auth:
+      type: configured-secret-refs
+      required_secrets:
+        - PLATFORM_API_KEY
+        - PLATFORM_API_SECRET
+    read_operations:
+      - id: reference-schema-read
+        permission: ecommerce.reference.read
+        object_types: [store, product, order, refund_case, review]
+        response_contract:
+          required_fields: [object_type, object_id, summary]
+          evidence_id_field: object_id
+    readiness_probes:
+      credential_probe:
+        required_secrets:
+          - PLATFORM_API_KEY
+          - PLATFORM_API_SECRET
+      tenant_scope_probe:
+        required_fields: [tenant_id, workspace_id, account_id]
+      permission_probe:
+        sample_read_operations:
+          - reference-schema-read
+    prompt_injection_boundary:
+      treat_results_as_data: true

@@ -1,0 +1,33 @@
+connectors:
+  - id: xiaohongshu-shop
+    type: native
+    provider: xiaohongshu-open-platform
+    auth:
+      type: oauth-access-token
+      required_secrets: [XHS_APP_ID, XHS_APP_SECRET, XHS_ACCESS_TOKEN]
+    read_operations:
+      - id: order-list-read
+        permission: xhs.shop.order.read
+        object_types: [xiaohongshu_order]
+      - id: product-list-read
+        permission: xhs.shop.product.read
+        object_types: [xiaohongshu_product]
+      - id: comment-list-read
+        permission: xhs.shop.comment.read
+        object_types: [xiaohongshu_comment]
+    write_operations:
+      - id: comment-reply-submit
+        permission: xhs.shop.comment.reply.write
+        approval_required: true
+    readiness_probes:
+      credential_probe:
+        required_secrets: [XHS_APP_ID, XHS_APP_SECRET, XHS_ACCESS_TOKEN]
+      tenant_scope_probe:
+        required_fields: [tenant_id, workspace_id, shop_id, seller_id]
+      permission_probe:
+        sample_read_operations: [order-list-read, product-list-read, comment-list-read]
+    approval_commit_binding:
+      required_for_write_operations: true
+      bind_fields: [tenant_id, workspace_id, connector_id, operation_id, object_id, payload_digest, approval_commit_token]
+    prompt_injection_boundary:
+      treat_results_as_data: true

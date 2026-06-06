@@ -1,0 +1,4 @@
+approval:
+  default_for_external_write: required
+  core_pack_write_policy: reference_only
+  audit_event_required: true

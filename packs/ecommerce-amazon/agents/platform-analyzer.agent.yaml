@@ -1,0 +1,3 @@
+id: platform-analyzer
+role: analyzer
+instructions: Classify Amazon SP-API connector readiness and identify missing credentials, region, marketplace binding, permissions, role setup, or sample-read evidence.

@@ -1,0 +1,9 @@
+connector_map:
+  connector_id: taobao-open-platform
+  lanes:
+    connector-readiness:
+      required_operations:
+        - order-list-read
+        - item-detail-read
+        - review-feed-read
+      blocked_behavior: disable_platform_actions

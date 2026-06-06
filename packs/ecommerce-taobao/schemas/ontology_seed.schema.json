@@ -1,0 +1,1 @@
+{"type":"object","required":["ontology"],"properties":{"ontology":{"type":"object"}}}

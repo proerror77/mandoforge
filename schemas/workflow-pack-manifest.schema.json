@@ -78,6 +78,11 @@
       "minItems": 1,
       "items": { "$ref": "#/$defs/connector_ref" }
     },
+    "actions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/file_ref" },
+      "uniqueItems": true
+    },
     "schemas": {
       "type": "array",
       "minItems": 1,

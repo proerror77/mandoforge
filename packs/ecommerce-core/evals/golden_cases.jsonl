@@ -1,0 +1,1 @@
+{"id":"core-readiness-minimum","input":{"platform":"reference"},"expected":{"status":"blocked_until_configured"}}

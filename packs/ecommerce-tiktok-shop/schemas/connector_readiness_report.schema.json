@@ -1,0 +1,1 @@
+{"type":"object","required":["status","missing_inputs","disabled_actions","next_safe_action"],"properties":{"status":{"type":"string"},"missing_inputs":{"type":"array","items":{"type":"string"}},"disabled_actions":{"type":"array","items":{"type":"string"}},"next_safe_action":{"type":"string"}}}

@@ -1,0 +1,3 @@
+id: platform-analyzer
+role: analyzer
+instructions: Classify TikTok Shop connector readiness and identify missing credentials, region, seller binding, permission, webhook, or sample-read evidence.

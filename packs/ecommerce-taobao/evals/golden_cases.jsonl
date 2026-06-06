@@ -1,0 +1,1 @@
+{"id":"taobao-readiness-minimum","input":{"platform":"taobao"},"expected":{"status":"blocked_until_configured"}}

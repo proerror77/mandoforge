@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["id", "object_type", "connector_id", "operation_id", "side_effect_class", "parameters", "validations", "effects", "approval"],
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "object_type": { "type": "string", "minLength": 1 },
+    "connector_id": { "type": "string", "minLength": 1 },
+    "operation_id": { "type": "string", "minLength": 1 },
+    "side_effect_class": { "type": "string", "minLength": 1 },
+    "parameters": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["name", "type", "required"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "type": { "type": "string", "minLength": 1 },
+          "required": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "validations": {
+      "type": "object",
+      "required": ["rules"],
+      "properties": {
+        "rules": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      },
+      "additionalProperties": false
+    },
+    "effects": {
+      "type": "object",
+      "required": ["native_connector_call", "audit_event"],
+      "properties": {
+        "native_connector_call": { "const": "native.connector.call" },
+        "audit_event": { "type": "string", "minLength": 1 },
+        "creates_links": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      },
+      "additionalProperties": false
+    },
+    "approval": {
+      "type": "object",
+      "required": ["approval_required", "approver_role", "approval_commit_token_required", "payload_digest_required"],
+      "properties": {
+        "approval_required": { "const": true },
+        "approver_role": { "type": "string", "minLength": 1 },
+        "approval_commit_token_required": { "const": true },
+        "payload_digest_required": { "const": true }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,32 @@
+id: refund-refuse
+object_type: tmall_refund_case
+connector_id: tmall-top
+operation_id: refund-refuse
+side_effect_class: marketplace_refund_write
+parameters:
+  - name: refund_id
+    type: ObjectReference<tmall_refund_case>
+    required: true
+  - name: order_id
+    type: ObjectReference<tmall_order>
+    required: true
+  - name: refuse_message
+    type: String
+    required: true
+validations:
+  rules:
+    - refund case belongs to tenant-bound shop_id
+    - refund case status allows refuse operation
+    - refuse_message is grounded in approved refund policy
+    - refuse_message does not include unsupported policy claims or buyer private data
+    - approval payload digest matches refund_id, order_id, operation_id, and refuse_message
+effects:
+  native_connector_call: native.connector.call
+  audit_event: tmall.action.refund_refuse
+  creates_links:
+    - action_type requires_approval_commit approval_commit
+approval:
+  approval_required: true
+  approver_role: admin
+  approval_commit_token_required: true
+  payload_digest_required: true

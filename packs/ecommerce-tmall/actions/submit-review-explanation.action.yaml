@@ -1,0 +1,31 @@
+id: submit-review-explanation
+object_type: tmall_review
+connector_id: tmall-top
+operation_id: review-explanation-submit
+side_effect_class: marketplace_review_write
+parameters:
+  - name: review_id
+    type: ObjectReference<tmall_review>
+    required: true
+  - name: reply_text
+    type: String
+    required: true
+  - name: reason
+    type: String
+    required: true
+validations:
+  rules:
+    - review belongs to tenant-bound shop_id
+    - reply_text passes content compliance policy
+    - reply_text does not include buyer private data
+    - approval payload digest matches review_id, operation_id, and reply_text
+effects:
+  native_connector_call: native.connector.call
+  audit_event: tmall.action.submit_review_explanation
+  creates_links:
+    - action_type requires_approval_commit approval_commit
+approval:
+  approval_required: true
+  approver_role: admin
+  approval_commit_token_required: true
+  payload_digest_required: true

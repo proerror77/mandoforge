@@ -1,0 +1,34 @@
+id: create-qianniu-workorder
+object_type: tmall_order
+connector_id: tmall-top
+operation_id: qianniu-task-create
+side_effect_class: marketplace_workorder_write
+parameters:
+  - name: order_id
+    type: ObjectReference<tmall_order>
+    required: true
+  - name: title
+    type: String
+    required: true
+  - name: content
+    type: String
+    required: true
+  - name: assignee
+    type: String
+    required: true
+validations:
+  rules:
+    - order belongs to tenant-bound shop_id
+    - content excludes buyer private data unless policy explicitly permits
+    - assignee is allowed by approval matrix
+    - approval payload digest matches order_id, operation_id, title, content, and assignee
+effects:
+  native_connector_call: native.connector.call
+  audit_event: tmall.action.create_qianniu_workorder
+  creates_links:
+    - action_type requires_approval_commit approval_commit
+approval:
+  approval_required: true
+  approver_role: operator
+  approval_commit_token_required: true
+  payload_digest_required: true

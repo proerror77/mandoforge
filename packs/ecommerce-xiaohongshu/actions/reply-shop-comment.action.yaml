@@ -1,0 +1,25 @@
+id: reply-shop-comment
+object_type: xiaohongshu_comment
+connector_id: xiaohongshu-shop
+operation_id: comment-reply-submit
+side_effect_class: marketplace_comment_write
+parameters:
+  - name: comment_id
+    type: ObjectReference<xiaohongshu_comment>
+    required: true
+  - name: reply_text
+    type: String
+    required: true
+validations:
+  rules:
+    - comment belongs to tenant-bound shop_id
+    - reply_text passes content compliance policy
+    - approval payload digest matches comment_id, operation_id, and reply_text
+effects:
+  native_connector_call: native.connector.call
+  audit_event: xiaohongshu.action.reply_shop_comment
+approval:
+  approval_required: true
+  approver_role: admin
+  approval_commit_token_required: true
+  payload_digest_required: true

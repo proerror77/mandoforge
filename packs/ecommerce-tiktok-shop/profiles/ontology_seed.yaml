@@ -1,0 +1,45 @@
+ontology:
+  domain_scope: ecommerce
+  workflow_scope: tiktok-shop
+  share_policy: isolated
+  object_types:
+    - id: tiktok_shop_store
+      source: store-profile
+      summary: TikTok Shop identity, seller id, region, tenant scope, and operating policy
+    - id: tiktok_shop_connector_account
+      source: connector-account
+      summary: app secret refs, OAuth token binding, permission scopes, region, and readiness status
+    - id: tiktok_shop_product
+      source: product-list-read
+      summary: product, SKU, listing, catalog attributes, media, and compliance facts
+    - id: tiktok_shop_order
+      source: order-list-read
+      summary: order, buyer-facing context, payment, fulfillment, and evidence
+    - id: tiktok_shop_return_case
+      source: return-list-read
+      summary: return, refund, dispute, evidence, and allowed actions
+    - id: tiktok_shop_review
+      source: review-list-read
+      summary: review, rating, reply state, product reference, and VOC tags
+    - id: tiktok_shop_content_asset
+      source: content-read
+      summary: short video, live, creator, or product content asset
+    - id: tiktok_shop_approval_commit
+      source: approval-policy
+      summary: approval token, payload digest, operation id, object id, and executor binding
+  relation_types:
+    - id: belongs-to-store
+      from: [tiktok_shop_product, tiktok_shop_order, tiktok_shop_return_case, tiktok_shop_review, tiktok_shop_content_asset]
+      to: [tiktok_shop_store]
+    - id: references-product
+      from: [tiktok_shop_order, tiktok_shop_return_case, tiktok_shop_review, tiktok_shop_content_asset]
+      to: [tiktok_shop_product]
+    - id: references-order
+      from: [tiktok_shop_return_case, tiktok_shop_review]
+      to: [tiktok_shop_order]
+    - id: uses-connector-account
+      from: [tiktok_shop_store]
+      to: [tiktok_shop_connector_account]
+    - id: requires-approval-commit
+      from: [tiktok_shop_review, tiktok_shop_return_case, tiktok_shop_content_asset]
+      to: [tiktok_shop_approval_commit]

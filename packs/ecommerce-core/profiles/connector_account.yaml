@@ -1,0 +1,12 @@
+connector_account:
+  platform: ecommerce-core
+  tenant_id: required
+  workspace_id: required
+  account_id: required
+  credential_secret_refs:
+    - platform_api_key
+    - platform_api_secret
+  permission_scopes:
+    - ecommerce.reference.read
+  environment: sandbox
+  readiness_status: blocked_until_configured

@@ -1,0 +1,45 @@
+ontology:
+  domain_scope: ecommerce
+  workflow_scope: xiaohongshu
+  share_policy: isolated
+  object_types:
+    - id: xiaohongshu_store
+      source: store-profile
+      summary: Xiaohongshu shop identity, seller id, tenant scope, and operating policy
+    - id: xiaohongshu_connector_account
+      source: connector-account
+      summary: app secret refs, OAuth token binding, permission scopes, and readiness status
+    - id: xiaohongshu_product
+      source: product-list-read
+      summary: shop product, SKU, category, claims, and listing facts
+    - id: xiaohongshu_order
+      source: order-list-read
+      summary: order, buyer-facing context, payment, fulfillment, and evidence
+    - id: xiaohongshu_after_sales_case
+      source: after-sales-read
+      summary: after-sales case, reason, evidence, status, and allowed actions
+    - id: xiaohongshu_comment
+      source: comment-list-read
+      summary: note, product, or shop comment with reply state and VOC tags
+    - id: xiaohongshu_note
+      source: note-read
+      summary: commerce note content, product associations, media, and creator context
+    - id: xiaohongshu_approval_commit
+      source: approval-policy
+      summary: approval token, payload digest, operation id, object id, and executor binding
+  relation_types:
+    - id: belongs-to-store
+      from: [xiaohongshu_product, xiaohongshu_order, xiaohongshu_after_sales_case, xiaohongshu_comment, xiaohongshu_note]
+      to: [xiaohongshu_store]
+    - id: references-product
+      from: [xiaohongshu_order, xiaohongshu_after_sales_case, xiaohongshu_comment, xiaohongshu_note]
+      to: [xiaohongshu_product]
+    - id: comment-on-note
+      from: [xiaohongshu_comment]
+      to: [xiaohongshu_note]
+    - id: uses-connector-account
+      from: [xiaohongshu_store]
+      to: [xiaohongshu_connector_account]
+    - id: requires-approval-commit
+      from: [xiaohongshu_comment, xiaohongshu_after_sales_case]
+      to: [xiaohongshu_approval_commit]

@@ -1,0 +1,42 @@
+ontology:
+  domain_scope: ecommerce
+  workflow_scope: amazon
+  share_policy: isolated
+  object_types:
+    - id: amazon_seller_account
+      source: store-profile
+      summary: Amazon seller account, marketplace id, region, tenant scope, and operating policy
+    - id: amazon_connector_account
+      source: connector-account
+      summary: SP-API LWA/AWS secret refs, marketplace binding, permission scopes, and readiness status
+    - id: amazon_listing
+      source: listings-read
+      summary: listing, ASIN, SKU, title, bullets, media, price context, and compliance facts
+    - id: amazon_order
+      source: orders-read
+      summary: order, buyer-facing context, fulfillment, payment state, and evidence
+    - id: amazon_return_case
+      source: returns-read
+      summary: return, refund, dispute, reason, evidence, and allowed actions
+    - id: amazon_review_signal
+      source: reports-read
+      summary: review or voice-of-customer signal sourced from reports or authorized review data
+    - id: amazon_approval_commit
+      source: approval-policy
+      summary: approval token, payload digest, operation id, object id, and executor binding
+  relation_types:
+    - id: belongs-to-seller
+      from: [amazon_listing, amazon_order, amazon_return_case, amazon_review_signal]
+      to: [amazon_seller_account]
+    - id: references-listing
+      from: [amazon_order, amazon_return_case, amazon_review_signal]
+      to: [amazon_listing]
+    - id: references-order
+      from: [amazon_return_case]
+      to: [amazon_order]
+    - id: uses-connector-account
+      from: [amazon_seller_account]
+      to: [amazon_connector_account]
+    - id: requires-approval-commit
+      from: [amazon_listing, amazon_return_case]
+      to: [amazon_approval_commit]

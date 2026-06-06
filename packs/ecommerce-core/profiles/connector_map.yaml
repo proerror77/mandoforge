@@ -1,0 +1,7 @@
+connector_map:
+  connector_id: ecommerce-reference
+  lanes:
+    connector-readiness:
+      required_operations:
+        - reference-schema-read
+      blocked_behavior: operator_input_required

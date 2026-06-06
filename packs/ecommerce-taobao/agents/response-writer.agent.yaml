@@ -1,0 +1,3 @@
+id: response-writer
+role: writer
+instructions: Draft Taobao readiness reports and approval-gated action summaries without exposing raw credential values.

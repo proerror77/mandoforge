@@ -1,0 +1,3 @@
+id: platform-analyzer
+role: analyzer
+instructions: Classify Taobao connector readiness, missing permissions, missing shop binding fields, and action lanes that must remain disabled.

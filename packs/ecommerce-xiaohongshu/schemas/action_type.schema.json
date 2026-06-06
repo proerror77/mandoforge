@@ -1,0 +1,1 @@
+{"type":"object","required":["id","object_type","connector_id","operation_id","parameters","validations","effects","approval"],"properties":{"id":{"type":"string"},"object_type":{"type":"string"},"connector_id":{"type":"string"},"operation_id":{"type":"string"},"parameters":{"type":"array"},"validations":{"type":"object"},"effects":{"type":"object"},"approval":{"type":"object"}}}
