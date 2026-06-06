@@ -39,6 +39,110 @@ slugify() {
   printf '%s' "$1" | sed -E 's#^/##; s#[/:]+#-#g; s#[^A-Za-z0-9._-]+#-#g'
 }
 
+manifest_top_value() {
+  local key="$1"
+  awk -v key="$key" '
+    $1 == key ":" {
+      sub("^[^:]+:[[:space:]]*", "")
+      print
+      exit
+    }
+  ' "$MANIFEST_PATH"
+}
+
+manifest_onboarding_required_profiles() {
+  awk '
+    /^onboarding:/ {
+      in_onboarding = 1
+      next
+    }
+    in_onboarding && /^[^[:space:]]/ {
+      exit
+    }
+    in_onboarding && /^[[:space:]]{2}required_profiles:/ {
+      in_profiles = 1
+      next
+    }
+    in_profiles && /^[[:space:]]{2}[A-Za-z0-9_-]+:/ {
+      exit
+    }
+    in_profiles && /^[[:space:]]*-[[:space:]]*/ {
+      line = $0
+      sub(/^[[:space:]]*-[[:space:]]*/, "", line)
+      gsub(/[[:space:]]+$/, "", line)
+      print line
+    }
+  ' "$MANIFEST_PATH"
+}
+
+manifest_profile_path() {
+  local profile_id="$1"
+  awk -v profile_id="$profile_id" '
+    /^profiles:/ {
+      in_profiles = 1
+      next
+    }
+    in_profiles && /^[^[:space:]]/ {
+      exit
+    }
+    in_profiles && /^[[:space:]]{2}- id:/ {
+      current = $3
+      next
+    }
+    in_profiles && current == profile_id && /^[[:space:]]{4}path:/ {
+      print $2
+      exit
+    }
+  ' "$MANIFEST_PATH"
+}
+
+manifest_first_connector_id() {
+  awk '
+    /^connectors:/ {
+      in_connectors = 1
+      next
+    }
+    in_connectors && /^[^[:space:]]/ {
+      exit
+    }
+    in_connectors && /^[[:space:]]{2}- id:/ {
+      print $3
+      exit
+    }
+  ' "$MANIFEST_PATH"
+}
+
+manifest_connector_permissions() {
+  local connector_id="$1"
+  awk -v connector_id="$connector_id" '
+    /^connectors:/ {
+      in_connectors = 1
+      next
+    }
+    in_connectors && /^[^[:space:]]/ {
+      exit
+    }
+    in_connectors && /^[[:space:]]{2}- id:/ {
+      current = $3
+      in_permissions = 0
+      next
+    }
+    in_connectors && current == connector_id && /^[[:space:]]{4}required_permissions:/ {
+      in_permissions = 1
+      next
+    }
+    in_permissions && /^[[:space:]]{4}[A-Za-z0-9_-]+:/ {
+      exit
+    }
+    in_permissions && /^[[:space:]]*-[[:space:]]*/ {
+      line = $0
+      sub(/^[[:space:]]*-[[:space:]]*/, "", line)
+      gsub(/[[:space:]]+$/, "", line)
+      print line
+    }
+  ' "$MANIFEST_PATH"
+}
+
 write_request() {
   local target="$1"
   local payload="$2"
@@ -133,6 +237,32 @@ require_cmd jq
 require_cmd awk
 mkdir -p "$EVIDENCE_DIR"
 
+MANIFEST_DIR="$(dirname "$MANIFEST_PATH")"
+PACK_ID="$(manifest_top_value id)"
+PACK_NAME="$(manifest_top_value name)"
+CONNECTOR_ID="$(manifest_first_connector_id)"
+ONBOARDING_PROFILE_IDS=()
+while IFS= read -r profile_id; do
+  [[ -n "$profile_id" ]] && ONBOARDING_PROFILE_IDS+=("$profile_id")
+done < <(manifest_onboarding_required_profiles)
+CONNECTOR_REQUIRED_PERMISSIONS=()
+while IFS= read -r permission; do
+  [[ -n "$permission" ]] && CONNECTOR_REQUIRED_PERMISSIONS+=("$permission")
+done < <(manifest_connector_permissions "$CONNECTOR_ID")
+if [[ -z "$PACK_ID" || -z "$CONNECTOR_ID" || "${#ONBOARDING_PROFILE_IDS[@]}" -eq 0 || "${#CONNECTOR_REQUIRED_PERMISSIONS[@]}" -eq 0 ]]; then
+  echo "workflow pack evidence gate could not derive pack/profile/connector contract from $MANIFEST_PATH" >&2
+  exit 1
+fi
+ONBOARDING_PROFILE_COUNT="${#ONBOARDING_PROFILE_IDS[@]}"
+CONNECTOR_COUNT="1"
+CONNECTOR_REQUIRED_PERMISSIONS_JSON="$(printf '%s\n' "${CONNECTOR_REQUIRED_PERMISSIONS[@]}" | jq -R . | jq -sc '.')"
+BLOCKED_PROFILE_ID="${WORKFLOW_PACK_BLOCKED_PROFILE_ID:-${ONBOARDING_PROFILE_IDS[0]}}"
+BLOCKED_PROFILE_PATH="$(manifest_profile_path "$BLOCKED_PROFILE_ID")"
+if [[ -z "$BLOCKED_PROFILE_PATH" || ! -f "$MANIFEST_DIR/$BLOCKED_PROFILE_PATH" ]]; then
+  echo "workflow pack evidence gate could not read blocked onboarding profile $BLOCKED_PROFILE_ID" >&2
+  exit 1
+fi
+
 curl -fsS "$BASE_URL/healthz" >/dev/null
 
 discover_connector_binding() {
@@ -204,7 +334,7 @@ if [[ -z "$UPDATE_MANIFEST_PATH" ]]; then
 fi
 
 manifest_payload="$(jq -nc --arg manifest_path "$MANIFEST_PATH" '{manifest_path: $manifest_path}')"
-update_manifest_payload="$(jq -nc --arg manifest_path "$UPDATE_MANIFEST_PATH" --arg reason "Whiskey WorkflowPack version update proof" '{manifest_path: $manifest_path, reason: $reason}')"
+update_manifest_payload="$(jq -nc --arg manifest_path "$UPDATE_MANIFEST_PATH" --arg pack_name "$PACK_NAME" '{manifest_path: $manifest_path, reason: ($pack_name + " version update proof")}')"
 validate_file="$(fetch_json POST /api/workflow-packs/validate "$manifest_payload")"
 install_file="$(fetch_json POST /api/workflow-packs/install "$manifest_payload")"
 installation_id="$(jq -r '.response.id // empty' "$install_file")"
@@ -215,17 +345,19 @@ fi
 installed_profiles_file="$(fetch_json GET "/api/workflow-packs/installations/$installation_id/onboarding/profiles")"
 
 blocked_onboarding_payload="$(jq -nc \
-  --arg company_content "$(cat "$(dirname "$MANIFEST_PATH")/profiles/company.md")" \
+  --arg profile_id "$BLOCKED_PROFILE_ID" \
+  --arg profile_content "$(cat "$MANIFEST_DIR/$BLOCKED_PROFILE_PATH")" \
+  --arg connector_id "$CONNECTOR_ID" \
   '{
     profiles: [
       {
-        id: "company",
-        content: $company_content
+        id: $profile_id,
+        content: $profile_content
       }
     ],
     connectors: [
       {
-        id: "knowledge-base",
+        id: $connector_id,
         available_permissions: ["document.search"],
         provenance_attested: false,
         tenant_id: "",
@@ -233,7 +365,7 @@ blocked_onboarding_payload="$(jq -nc \
         treats_results_as_data: false
       }
     ],
-    reason: "Whiskey WorkflowPack onboarding blocked proof"
+    reason: "WorkflowPack onboarding blocked proof"
   }')"
 blocked_onboarding_file="$(fetch_json POST "/api/workflow-packs/installations/$installation_id/onboarding/assess" "$blocked_onboarding_payload")"
 
@@ -242,14 +374,14 @@ fetch_json POST "/api/workflow-packs/installations/$installation_id/release" \
   4 >/dev/null
 
 stage_file="$(fetch_json POST "/api/workflow-packs/installations/$installation_id/stage" \
-  '{"reason":"Whiskey WorkflowPack adoption evidence"}')"
+  '{"reason":"WorkflowPack adoption evidence"}')"
 
 fetch_json POST "/api/workflow-packs/installations/$installation_id/release" \
   '{"eval_gate_status":"pending","release_gate_status":"passed","gate_evidence":{"expected_failure":"eval_gate_not_passed"}}' \
   4 >/dev/null
 
 release_file="$(fetch_json POST "/api/workflow-packs/installations/$installation_id/release" \
-  '{"eval_gate_status":"passed","release_gate_status":"passed","gate_evidence":{"source":"workflow-pack-evidence-gate","eval_archive":"whiskey-ai-governance-regression","policy_gate":"approval-policy"},"reason":"Whiskey WorkflowPack adoption release proof"}')"
+  "$(jq -nc --arg pack_id "$PACK_ID" '{"eval_gate_status":"passed","release_gate_status":"passed","gate_evidence":{"source":"workflow-pack-evidence-gate","eval_archive":($pack_id + "-regression"),"policy_gate":"approval-policy"},"reason":"WorkflowPack adoption release proof"}')")"
 get_file="$(fetch_json GET "/api/workflow-packs/installations/$installation_id")"
 list_file="$(fetch_json GET /api/workflow-packs/installations)"
 released_get_file="$EVIDENCE_DIR/api-workflow-packs-installations-$installation_id-before-archive.json"
@@ -257,7 +389,7 @@ released_list_file="$EVIDENCE_DIR/api-workflow-packs-installations-before-archiv
 cp "$get_file" "$released_get_file"
 cp "$list_file" "$released_list_file"
 rollback_file="$(fetch_json POST "/api/workflow-packs/installations/$installation_id/rollback" \
-  '{"reason":"Whiskey WorkflowPack adoption rollback proof","gate_evidence":{"source":"workflow-pack-evidence-gate","rollback_archive":"whiskey-ai-governance-rollback"}}')"
+  "$(jq -nc --arg pack_id "$PACK_ID" '{"reason":"WorkflowPack adoption rollback proof","gate_evidence":{"source":"workflow-pack-evidence-gate","rollback_archive":($pack_id + "-rollback")}}')")"
 rolled_back_get_file="$(fetch_json GET "/api/workflow-packs/installations/$installation_id")"
 rolled_back_list_file="$(fetch_json GET /api/workflow-packs/installations)"
 rolled_back_get_snapshot_file="$EVIDENCE_DIR/api-workflow-packs-installations-$installation_id-after-rollback.json"
@@ -273,55 +405,33 @@ old_after_update_snapshot_file="$EVIDENCE_DIR/api-workflow-packs-installations-$
 list_after_update_snapshot_file="$EVIDENCE_DIR/api-workflow-packs-installations-after-update.json"
 cp "$old_after_update_file" "$old_after_update_snapshot_file"
 cp "$list_after_update_file" "$list_after_update_snapshot_file"
-persisted_profiles_payload="$(jq -nc '{
-  profiles: [
-    {
-      id: "company",
-      content: "# Company Profile\nAcme Financial runs regulated AI adoption reviews with named approval owners and evidence retention."
-    },
-    {
-      id: "department",
-      content: "# Department Profile\nSecurity and risk review AI vendors weekly, with named owners and quarterly governance checkpoints."
-    },
-    {
-      id: "approval-matrix",
-      content: "approvals:\n  high:\n    required_role: approver\n    escalation_role: admin\n  medium:\n    required_role: operator\n  low:\n    required_role: operator\n  external_ai:\n    required_role: approver\n"
-    },
-    {
-      id: "connector-map",
-      content: "connectors:\n  knowledge-base:\n    scope: tenant\n    required_permissions:\n      - document.search\n      - document.read\n    source_system: confluence\n"
-    },
-    {
-      id: "risk-policy",
-      content: "risk_policy:\n  high:\n    approval_required: true\n    external_write_allowed: false\n  medium:\n    approval_required: true\n    external_write_allowed: false\n  low:\n    approval_required: false\n    external_write_allowed: false\n"
-    },
-    {
-      id: "output-style",
-      content: "# Output Style\nUse executive summary first, then evidence table, then draft recommendation."
-    }
-  ],
-  reason: "Whiskey WorkflowPack onboarding asset persistence proof"
+persisted_profiles_payload="$(printf '%s\n' "${ONBOARDING_PROFILE_IDS[@]}" | jq -R . | jq -s --arg pack_name "$PACK_NAME" '{
+  profiles: map({
+    id: .,
+    content: ("# " + . + "\nApproved tenant-specific " + . + " profile for " + $pack_name + ". Includes current owners, policy scope, source references, approval path, and review cadence.")
+  }),
+  reason: "WorkflowPack onboarding asset persistence proof"
 }')"
 persisted_profiles_file="$(fetch_json POST "/api/workflow-packs/installations/$updated_installation_id/onboarding/profiles" "$persisted_profiles_payload")"
 persisted_profiles_list_file="$(fetch_json GET "/api/workflow-packs/installations/$updated_installation_id/onboarding/profiles")"
-ready_onboarding_payload="$(jq -nc '{
+ready_onboarding_payload="$(jq -nc --arg connector_id "$CONNECTOR_ID" --argjson permissions "$CONNECTOR_REQUIRED_PERMISSIONS_JSON" '{
   connectors: [
     {
-      id: "knowledge-base",
-      available_permissions: ["document.search", "document.read"],
+      id: $connector_id,
+      available_permissions: $permissions,
       provenance_attested: true,
       tenant_id: "tenant-demo",
       workspace_id: "workspace-demo",
       treats_results_as_data: true
     }
   ],
-  reason: "Whiskey WorkflowPack onboarding readiness proof"
+  reason: "WorkflowPack onboarding readiness proof"
 }')"
 onboarding_file="$(fetch_json POST "/api/workflow-packs/installations/$updated_installation_id/onboarding/assess" "$ready_onboarding_payload")"
 blocked_connector_quality_payload="$(jq -nc '{
   connectors: [
     {
-      id: "knowledge-base",
+      id: $connector_id,
       samples: [
         {
           object_id: "kb-stale-1",
@@ -336,11 +446,11 @@ blocked_connector_quality_payload="$(jq -nc '{
       ]
     }
   ],
-  reason: "Whiskey WorkflowPack connector quality blocked proof"
+  reason: "WorkflowPack connector quality blocked proof"
 } + (if $team_id == "" or $server_id == "" then {} else {
   connectors: [
     {
-      id: "knowledge-base",
+      id: $connector_id,
       team_id: $team_id,
       server_id: $server_id,
       tool_name: $tool_name,
@@ -358,7 +468,7 @@ blocked_connector_quality_payload="$(jq -nc '{
       ]
     }
   ]
-} end)' --arg team_id "$CONNECTOR_TEAM_ID" --arg server_id "$CONNECTOR_SERVER_ID" --arg tool_name "$CONNECTOR_TOOL_NAME")"
+} end)' --arg connector_id "$CONNECTOR_ID" --arg team_id "$CONNECTOR_TEAM_ID" --arg server_id "$CONNECTOR_SERVER_ID" --arg tool_name "$CONNECTOR_TOOL_NAME")"
 blocked_connector_quality_file="$(fetch_json POST "/api/workflow-packs/installations/$updated_installation_id/connectors/quality/assess" "$blocked_connector_quality_payload")"
 blocked_connector_quality_snapshot_file="$EVIDENCE_DIR/api-workflow-packs-installations-$updated_installation_id-connectors-quality-assess-blocked.json"
 cp "$blocked_connector_quality_file" "$blocked_connector_quality_snapshot_file"
@@ -385,7 +495,7 @@ fi
 ready_connector_quality_payload="$(jq -nc '{
   connectors: [
     {
-      id: "knowledge-base",
+      id: $connector_id,
       samples: [
         {
           object_id: "kb-fresh-1",
@@ -404,11 +514,11 @@ ready_connector_quality_payload="$(jq -nc '{
       ]
     }
   ],
-  reason: "Whiskey WorkflowPack connector quality ready proof"
+  reason: "WorkflowPack connector quality ready proof"
 } + (if $team_id == "" or $server_id == "" then {} else {
   connectors: [
     {
-      id: "knowledge-base",
+      id: $connector_id,
       team_id: $team_id,
       server_id: $server_id,
       tool_name: $tool_name,
@@ -431,6 +541,7 @@ ready_connector_quality_payload="$(jq -nc '{
     }
   ]
 } end)' \
+  --arg connector_id "$CONNECTOR_ID" \
   --arg team_id "$CONNECTOR_TEAM_ID" \
   --arg server_id "$CONNECTOR_SERVER_ID" \
   --arg tool_name "$CONNECTOR_TOOL_NAME" \
@@ -443,7 +554,7 @@ ready_connector_quality_payload="$(jq -nc '{
   --arg snippet "$gateway_live_snippet")"
 connector_quality_file="$(fetch_json POST "/api/workflow-packs/installations/$updated_installation_id/connectors/quality/assess" "$ready_connector_quality_payload")"
 archive_file="$(fetch_json POST "/api/workflow-packs/installations/$installation_id/archive" \
-  '{"reason":"Whiskey WorkflowPack adoption archive proof"}')"
+  '{"reason":"WorkflowPack adoption archive proof"}')"
 archived_get_file="$(fetch_json GET "/api/workflow-packs/installations/$installation_id" "{}" 4)"
 list_after_archive_file="$(fetch_json GET /api/workflow-packs/installations)"
 
@@ -511,7 +622,7 @@ archived_get_status="$(jq -r '.http_status // 0' "$archived_get_file")"
 active_after_archive_count="$(jq -r --arg id "$installation_id" '[.response[]? | select(.id == $id)] | length' "$list_after_archive_file")"
 updated_active_after_archive_count="$(jq -r --arg id "$updated_installation_id" '[.response[]? | select(.id == $id and .status == "installed")] | length' "$list_after_archive_file")"
 
-if [[ "$validation_pack_id" != "ai-governance" ]]; then
+if [[ "$validation_pack_id" != "$PACK_ID" ]]; then
   echo "workflow pack validation returned unexpected pack_id=$validation_pack_id" >&2
   exit 1
 fi
@@ -547,7 +658,7 @@ if [[ "$blocked_onboarding_status" != "blocked" ]]; then
   echo "workflow pack blocked onboarding assessment did not fail closed" >&2
   exit 1
 fi
-if [[ "$installed_default_profile_asset_count" != "6" || "$updated_default_profile_asset_count" != "6" ]]; then
+if [[ "$installed_default_profile_asset_count" != "$ONBOARDING_PROFILE_COUNT" || "$updated_default_profile_asset_count" != "$ONBOARDING_PROFILE_COUNT" ]]; then
   echo "workflow pack install/update did not bootstrap default onboarding profile assets" >&2
   exit 1
 fi
@@ -567,11 +678,11 @@ if [[ "$REQUIRE_CONNECTOR_BINDING" == "1" && ( "$connector_quality_bound_team_id
   echo "workflow pack connector quality assessment did not bind to a real MCP server" >&2
   exit 1
 fi
-if [[ "$connector_quality_status" != "ready" || "$connector_quality_requirement_count" != "1" || "$connector_quality_ready_connector_count" != "1" || "$connector_quality_sample_count" != "1" || "$connector_quality_passing_sample_count" != "1" || "$connector_quality_blocker_count" != "0" ]]; then
+if [[ "$connector_quality_status" != "ready" || "$connector_quality_requirement_count" != "$CONNECTOR_COUNT" || "$connector_quality_ready_connector_count" != "$CONNECTOR_COUNT" || "$connector_quality_sample_count" != "1" || "$connector_quality_passing_sample_count" != "1" || "$connector_quality_blocker_count" != "0" ]]; then
   echo "workflow pack connector quality assessment did not reach ready state" >&2
   exit 1
 fi
-if [[ "$persisted_profile_asset_count" != "6" || "$persisted_profile_list_count" != "6" ]]; then
+if [[ "$persisted_profile_asset_count" != "$ONBOARDING_PROFILE_COUNT" || "$persisted_profile_list_count" != "$ONBOARDING_PROFILE_COUNT" ]]; then
   echo "workflow pack persisted onboarding profile assets did not save cleanly" >&2
   exit 1
 fi
@@ -579,11 +690,11 @@ if [[ "$persisted_profile_saved_min_version" != "2" || "$persisted_profile_saved
   echo "workflow pack persisted onboarding profile versions did not advance past bootstrapped defaults" >&2
   exit 1
 fi
-if [[ "$required_profile_count" != "6" || "$profile_schema_count" != "6" || "$inline_profile_count" != "0" || "$persisted_profile_count" != "6" || "$provided_profile_count" != "6" || "$placeholder_profile_count" != "0" ]]; then
+if [[ "$required_profile_count" != "$ONBOARDING_PROFILE_COUNT" || "$profile_schema_count" != "$ONBOARDING_PROFILE_COUNT" || "$inline_profile_count" != "0" || "$persisted_profile_count" != "$ONBOARDING_PROFILE_COUNT" || "$provided_profile_count" != "$ONBOARDING_PROFILE_COUNT" || "$placeholder_profile_count" != "0" ]]; then
   echo "workflow pack onboarding profile coverage did not match the contract" >&2
   exit 1
 fi
-if [[ "$connector_requirement_count" != "1" || "$ready_connector_count" != "1" || "$onboarding_blocker_count" != "0" ]]; then
+if [[ "$connector_requirement_count" != "$CONNECTOR_COUNT" || "$ready_connector_count" != "$CONNECTOR_COUNT" || "$onboarding_blocker_count" != "0" ]]; then
   echo "workflow pack onboarding connector readiness did not match the contract" >&2
   exit 1
 fi

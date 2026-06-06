@@ -10,4 +10,4 @@ Collect tenant-specific legal positions before release:
 - Risk policy
 - Output style
 
-Placeholder values block readiness until replaced by customer-approved content.
+Packaged defaults are examples only. Readiness requires persisted customer-approved profile assets that replace these defaults and cite the tenant's actual legal sources.
