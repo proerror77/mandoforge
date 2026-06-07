@@ -92,6 +92,8 @@ struct ConsoleData {
     agent_handoff_assignments: ApiState<Vec<Value>>,
     workflow_pack_installations: ApiState<Vec<WorkflowPackInstallation>>,
     stage2_readiness: ApiState<Stage2Readiness>,
+    enterprise_product_readiness: ApiState<EnterpriseProductReadiness>,
+    native_connector_production_readiness: ApiState<Value>,
     observability: ApiState<ObservabilitySummary>,
     capability_discovery: ApiState<CapabilityDiscovery>,
     usage: ApiState<Value>,
@@ -109,6 +111,7 @@ struct ConsoleData {
     semantic_workbench: ApiState<Value>,
     semantic_reflection_queue: ApiState<SemanticReflectionQueue>,
     ontology_registry: ApiState<OntologyRegistry>,
+    ontology_engine_readiness: ApiState<Value>,
     semantic_retrieval_backends: ApiState<Value>,
 }
 
@@ -166,6 +169,14 @@ fn App() -> Html {
             4_000,
         ),
         stage2_readiness: use_polling::<Stage2Readiness>("/api/stage2/readiness", 4_000),
+        enterprise_product_readiness: use_polling::<EnterpriseProductReadiness>(
+            "/api/enterprise-product/readiness",
+            4_000,
+        ),
+        native_connector_production_readiness: use_polling::<Value>(
+            "/api/native-connectors/production-readiness",
+            5_000,
+        ),
         observability: use_polling::<ObservabilitySummary>("/api/observability", 3_000),
         capability_discovery: use_polling::<CapabilityDiscovery>(
             "/api/capability-discovery",
@@ -204,6 +215,10 @@ fn App() -> Html {
             5_000,
         ),
         ontology_registry: use_polling::<OntologyRegistry>("/api/ontology/registry", 6_000),
+        ontology_engine_readiness: use_polling::<Value>(
+            "/api/ontology/engine-readiness",
+            6_000,
+        ),
         semantic_retrieval_backends: use_polling::<Value>(
             "/api/semantic-retrieval/backends",
             6_000,
@@ -755,6 +770,9 @@ fn SemanticView(props: &SemanticProps) -> Html {
                     <button onclick={props.on_build.clone()}>{ "Preview ontology proposal" }</button>
                 </div>
             </Panel>
+            <Panel title="Ontology engine readiness">
+                <JsonPreview value={props.data.ontology_engine_readiness.data.clone()} />
+            </Panel>
             <Panel title="Context compiler">
                 <div class="form-stack">
                     <input
@@ -848,6 +866,12 @@ fn DeployView(props: &DeployProps) -> Html {
             <Panel title="Stage 2 readiness">
                 <ReadinessRadar readiness={props.data.stage2_readiness.data.clone()} observability={props.data.observability.data.clone()} />
             </Panel>
+            <Panel title="Enterprise product readiness">
+                <EnterpriseReadinessPanel readiness={props.data.enterprise_product_readiness.data.clone()} />
+            </Panel>
+            <Panel title="Live connector production">
+                <JsonPreview value={props.data.native_connector_production_readiness.data.clone()} />
+            </Panel>
             <Panel title="Remote computer path">
                 <JsonPreview value={props.data.remote_computer_production_path.data.clone()} />
             </Panel>
@@ -883,6 +907,7 @@ fn VisualCommandDeck(props: &VisualCommandDeckProps) -> Html {
     let workflow_activity = data.workflow_runs.data.len() + data.dynamic_workflow_plans.data.len();
     let semantic_mass =
         data.semantic_graph.data.node_count + data.semantic_graph.data.edge_count;
+    let enterprise_blocked = data.enterprise_product_readiness.data.blocked_lane_count;
 
     html! {
         <section class="visual-command-deck">
@@ -907,8 +932,8 @@ fn VisualCommandDeck(props: &VisualCommandDeckProps) -> Html {
                     <span>{ format!("{:.0}%", readiness * 100.0) }</span>
                 </div>
                 <div>
-                    <strong>{ label_or(&data.stage2_readiness.data.status, "readiness") }</strong>
-                    <small>{ format!("{} semantic signals", semantic_mass) }</small>
+                    <strong>{ label_or(&data.enterprise_product_readiness.data.status, "readiness") }</strong>
+                    <small>{ format!("{enterprise_blocked} enterprise blockers / {semantic_mass} semantic signals") }</small>
                 </div>
             </div>
         </section>
@@ -1383,6 +1408,54 @@ fn ReadinessRadar(props: &ReadinessRadarProps) -> Html {
 }
 
 #[derive(Properties, Clone, PartialEq)]
+struct EnterpriseReadinessPanelProps {
+    readiness: EnterpriseProductReadiness,
+}
+
+#[component]
+fn EnterpriseReadinessPanel(props: &EnterpriseReadinessPanelProps) -> Html {
+    let readiness = &props.readiness;
+    let total = readiness.lane_count.max(readiness.lanes.len()).max(1);
+    let next_action = readiness
+        .next_actions
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "No next action reported.".to_string());
+    html! {
+        <div class="enterprise-readiness">
+            <div class="enterprise-summary">
+                <div>
+                    <span>{ label_or(&readiness.required_evidence_class, "customer_grade") }</span>
+                    <strong>{ label_or(&readiness.status, "blocked") }</strong>
+                    <small>{ label_or(&readiness.message, &next_action) }</small>
+                </div>
+                <div class="enterprise-meters">
+                    <FlowMeter label="Ready" value={readiness.ready_lane_count} max={total} tone="good" />
+                    <FlowMeter label="Pilot" value={readiness.pilot_ready_lane_count} max={total} tone="warn" />
+                    <FlowMeter label="Blocked" value={readiness.blocked_lane_count} max={total} tone={if readiness.blocked_lane_count > 0 { "bad" } else { "good" }} />
+                </div>
+            </div>
+            <div class="enterprise-lanes">
+                { for readiness.lanes.iter().map(|lane| {
+                    let blocker = lane.blockers.first().or_else(|| lane.next_actions.first());
+                    html! {
+                        <article class={classes!("enterprise-lane", status_tone(&lane.status))} key={lane.id.clone()}>
+                            <StatusLogo status={lane.status.clone()} />
+                            <div>
+                                <strong>{ label_or(&lane.title, &lane.id) }</strong>
+                                <span>{ format!("{} -> {}", label_or(&lane.current_evidence_class, "evidence"), label_or(&lane.required_evidence_class, "customer_grade")) }</span>
+                                <small>{ blocker.cloned().unwrap_or_else(|| label_or(&lane.production_target, "target").to_string()) }</small>
+                            </div>
+                            <em>{ label_or(&lane.status, "status") }</em>
+                        </article>
+                    }
+                }) }
+            </div>
+        </div>
+    }
+}
+
+#[derive(Properties, Clone, PartialEq)]
 struct PanelProps {
     title: &'static str,
     children: Children,
@@ -1562,6 +1635,9 @@ fn count_loading(data: &ConsoleData) -> usize {
         data.workflow_runs.status,
         data.task_board.status,
         data.deployment_version.status,
+        data.enterprise_product_readiness.status,
+        data.native_connector_production_readiness.status,
+        data.ontology_engine_readiness.status,
     ]
     .into_iter()
     .filter(|status| *status == LoadStatus::Loading)
@@ -1577,6 +1653,9 @@ fn count_errors(data: &ConsoleData) -> usize {
         data.workflow_runs.status,
         data.task_board.status,
         data.deployment_version.status,
+        data.enterprise_product_readiness.status,
+        data.native_connector_production_readiness.status,
+        data.ontology_engine_readiness.status,
     ]
     .into_iter()
     .filter(|status| *status == LoadStatus::Error)
@@ -1609,9 +1688,12 @@ fn board_column(status: &str) -> &'static str {
 
 fn status_tone(status: &str) -> &'static str {
     match status {
-        "ready" | "completed" | "succeeded" | "active" | "promoted" | "released" => "good",
+        "ready" | "completed" | "succeeded" | "active" | "promoted" | "released"
+        | "enterprise_product_complete" => "good",
         "running" | "queued" | "claimed" | "in_progress" => "info",
-        "pending" | "requires_action" | "review" | "warning" | "attention" => "warn",
+        "pending" | "requires_action" | "review" | "warning" | "attention" | "pilot_ready" => {
+            "warn"
+        }
         "failed" | "blocked" | "critical" | "cancelled" => "bad",
         _ => "neutral",
     }

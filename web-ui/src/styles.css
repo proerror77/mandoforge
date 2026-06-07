@@ -933,6 +933,104 @@ h2 {
   min-height: 170px;
 }
 
+.enterprise-readiness {
+  display: grid;
+  gap: 12px;
+}
+
+.enterprise-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(190px, 0.45fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.enterprise-summary span,
+.enterprise-lane span,
+.enterprise-lane small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.enterprise-summary strong {
+  display: block;
+  margin-top: 4px;
+  color: var(--ink);
+  font-size: 22px;
+  line-height: 1.1;
+}
+
+.enterprise-summary small {
+  display: block;
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.enterprise-meters {
+  display: grid;
+  gap: 8px;
+}
+
+.enterprise-lanes {
+  display: grid;
+  max-height: 360px;
+  overflow: auto;
+  gap: 8px;
+}
+
+.enterprise-lane {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  min-height: 74px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--line-strong);
+  border-radius: 7px;
+  background: #ffffff;
+  padding: 9px 10px;
+}
+
+.enterprise-lane.good {
+  border-left-color: var(--green);
+}
+
+.enterprise-lane.warn {
+  border-left-color: var(--amber);
+}
+
+.enterprise-lane.bad {
+  border-left-color: var(--red);
+}
+
+.enterprise-lane strong {
+  display: block;
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.enterprise-lane span,
+.enterprise-lane small {
+  display: block;
+  overflow: hidden;
+  margin-top: 3px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.enterprise-lane em {
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 900;
+}
+
 .radar-dial {
   width: 132px;
   height: 132px;
@@ -1206,6 +1304,7 @@ h2 {
 
   .deck-gauge,
   .readiness-radar,
+  .enterprise-summary,
   .agent-topology,
   .semantic-map,
   .pack-mosaic {

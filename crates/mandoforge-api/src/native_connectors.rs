@@ -5,6 +5,7 @@ use chrono::Utc;
 use hmac::{Hmac, Mac};
 use md5::{Digest as Md5Digest, Md5};
 use reqwest::header::{HeaderMap, HeaderValue};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::Sha256;
 
@@ -15,6 +16,46 @@ type HmacSha256 = Hmac<Sha256>;
 const LIVE_ENABLED_ENV: &str = "MANDOFORGE_NATIVE_CONNECTOR_LIVE_ENABLED";
 const ECOMMERCE_LIVE_ENABLED_ENV: &str = "MANDOFORGE_ECOMMERCE_LIVE_ADAPTERS_ENABLED";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct NativeConnectorProductionReadiness {
+    pub generated_at: chrono::DateTime<Utc>,
+    pub status: String,
+    pub required_evidence_class: String,
+    pub live_enabled: bool,
+    pub connector_count: usize,
+    pub ready_connector_count: usize,
+    pub blocked_connector_count: usize,
+    pub connectors: Vec<NativeConnectorProductionReadinessItem>,
+    pub next_actions: Vec<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct NativeConnectorProductionReadinessItem {
+    pub connector_id: String,
+    pub provider: String,
+    pub manifest_path: String,
+    pub status: String,
+    pub current_evidence_class: String,
+    pub required_evidence_class: String,
+    pub required_secret_refs: Vec<String>,
+    pub configured_secret_refs: Vec<String>,
+    pub missing_secret_refs: Vec<String>,
+    pub checks: Vec<NativeConnectorProductionReadinessCheck>,
+    pub blockers: Vec<String>,
+    pub next_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct NativeConnectorProductionReadinessCheck {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub evidence: Vec<String>,
+    pub blockers: Vec<String>,
+    pub next_actions: Vec<String>,
+}
 
 #[derive(Debug, Clone)]
 struct NativeConnectorCall {
@@ -45,6 +86,59 @@ pub(crate) fn is_supported_ecommerce_connector(connector_id: &str) -> bool {
             | "xiaohongshu-shop"
             | "amazon-selling-partner-api"
     )
+}
+
+pub(crate) fn build_native_connector_production_readiness() -> NativeConnectorProductionReadiness {
+    let specs = native_connector_production_specs();
+    let live_enabled = env_bool(LIVE_ENABLED_ENV) || env_bool(ECOMMERCE_LIVE_ENABLED_ENV);
+    let connectors = specs
+        .iter()
+        .map(|spec| build_native_connector_readiness_item(spec, live_enabled))
+        .collect::<Vec<_>>();
+    let connector_count = connectors.len();
+    let ready_connector_count = connectors
+        .iter()
+        .filter(|connector| connector.status == "ready")
+        .count();
+    let blocked_connector_count = connectors
+        .iter()
+        .filter(|connector| connector.status == "blocked")
+        .count();
+    let status = if connector_count > 0 && ready_connector_count == connector_count {
+        "ready"
+    } else {
+        "blocked"
+    }
+    .to_string();
+    let next_actions = vec![
+        "configure sandbox and live environment separation for every native ecommerce connector"
+            .to_string(),
+        "add token refresh, rate-limit, retry, reconciliation, and webhook ingestion evidence"
+            .to_string(),
+        "publish compensation or explicit non-compensable policy per write operation".to_string(),
+    ];
+    let message = if status == "ready" {
+        format!(
+            "All {connector_count} native ecommerce connectors have customer-grade production evidence"
+        )
+    } else {
+        format!(
+            "Native connector production readiness is blocked: {ready_connector_count}/{connector_count} connectors are customer-grade ready and {blocked_connector_count} remain blocked"
+        )
+    };
+
+    NativeConnectorProductionReadiness {
+        generated_at: Utc::now(),
+        status,
+        required_evidence_class: "customer_grade".to_string(),
+        live_enabled,
+        connector_count,
+        ready_connector_count,
+        blocked_connector_count,
+        connectors,
+        next_actions,
+        message,
+    }
 }
 
 pub(crate) async fn execute_ecommerce_connector_call(args: &Value) -> Result<Value, AppError> {
@@ -79,6 +173,309 @@ pub(crate) async fn execute_ecommerce_connector_call(args: &Value) -> Result<Val
         "request": request.redacted(),
         "response": response,
     }))
+}
+
+#[derive(Debug, Clone)]
+struct NativeConnectorProductionSpec {
+    connector_id: &'static str,
+    provider: &'static str,
+    manifest_path: &'static str,
+    required_secret_refs: Vec<&'static str>,
+    sandbox_base_url_env: &'static str,
+    live_base_url_env: &'static str,
+    token_refresh_controller_env: &'static str,
+    rate_limit_policy_env: &'static str,
+    reconciliation_controller_env: &'static str,
+    webhook_ingestion_env: &'static str,
+    compensation_policy_env: &'static str,
+}
+
+fn native_connector_production_specs() -> Vec<NativeConnectorProductionSpec> {
+    vec![
+        NativeConnectorProductionSpec {
+            connector_id: "tmall-top",
+            provider: "alibaba-top",
+            manifest_path: "packs/ecommerce-tmall/connectors/tmall-top.yaml",
+            required_secret_refs: vec![
+                "TMALL_TOP_APP_KEY",
+                "TMALL_TOP_APP_SECRET",
+                "TMALL_TOP_SESSION",
+            ],
+            sandbox_base_url_env: "MANDOFORGE_TMALL_TOP_SANDBOX_BASE_URL",
+            live_base_url_env: "MANDOFORGE_TMALL_TOP_LIVE_BASE_URL",
+            token_refresh_controller_env: "MANDOFORGE_TMALL_TOP_TOKEN_REFRESH_CONTROLLER_URL",
+            rate_limit_policy_env: "MANDOFORGE_TMALL_TOP_RATE_LIMIT_POLICY",
+            reconciliation_controller_env: "MANDOFORGE_TMALL_TOP_RECONCILIATION_CONTROLLER_URL",
+            webhook_ingestion_env: "MANDOFORGE_TMALL_TOP_WEBHOOK_INGESTION_URL",
+            compensation_policy_env: "MANDOFORGE_TMALL_TOP_COMPENSATION_POLICY",
+        },
+        NativeConnectorProductionSpec {
+            connector_id: "taobao-open-platform",
+            provider: "alibaba-top",
+            manifest_path: "packs/ecommerce-taobao/connectors/taobao-open-platform.yaml",
+            required_secret_refs: vec![
+                "TAOBAO_TOP_APP_KEY",
+                "TAOBAO_TOP_APP_SECRET",
+                "TAOBAO_TOP_SESSION",
+            ],
+            sandbox_base_url_env: "MANDOFORGE_TAOBAO_TOP_SANDBOX_BASE_URL",
+            live_base_url_env: "MANDOFORGE_TAOBAO_TOP_LIVE_BASE_URL",
+            token_refresh_controller_env: "MANDOFORGE_TAOBAO_TOP_TOKEN_REFRESH_CONTROLLER_URL",
+            rate_limit_policy_env: "MANDOFORGE_TAOBAO_TOP_RATE_LIMIT_POLICY",
+            reconciliation_controller_env: "MANDOFORGE_TAOBAO_TOP_RECONCILIATION_CONTROLLER_URL",
+            webhook_ingestion_env: "MANDOFORGE_TAOBAO_TOP_WEBHOOK_INGESTION_URL",
+            compensation_policy_env: "MANDOFORGE_TAOBAO_TOP_COMPENSATION_POLICY",
+        },
+        NativeConnectorProductionSpec {
+            connector_id: "xiaohongshu-shop",
+            provider: "xiaohongshu-open-platform",
+            manifest_path: "packs/ecommerce-xiaohongshu/connectors/xiaohongshu-shop.yaml",
+            required_secret_refs: vec!["XHS_APP_ID", "XHS_APP_SECRET", "XHS_ACCESS_TOKEN"],
+            sandbox_base_url_env: "MANDOFORGE_XHS_SANDBOX_BASE_URL",
+            live_base_url_env: "MANDOFORGE_XHS_LIVE_BASE_URL",
+            token_refresh_controller_env: "MANDOFORGE_XHS_TOKEN_REFRESH_CONTROLLER_URL",
+            rate_limit_policy_env: "MANDOFORGE_XHS_RATE_LIMIT_POLICY",
+            reconciliation_controller_env: "MANDOFORGE_XHS_RECONCILIATION_CONTROLLER_URL",
+            webhook_ingestion_env: "MANDOFORGE_XHS_WEBHOOK_INGESTION_URL",
+            compensation_policy_env: "MANDOFORGE_XHS_COMPENSATION_POLICY",
+        },
+        NativeConnectorProductionSpec {
+            connector_id: "tiktok-shop-open-api",
+            provider: "tiktok-shop-open-api",
+            manifest_path: "packs/ecommerce-tiktok-shop/connectors/tiktok-shop-open-api.yaml",
+            required_secret_refs: vec![
+                "TIKTOK_SHOP_APP_KEY",
+                "TIKTOK_SHOP_APP_SECRET",
+                "TIKTOK_SHOP_ACCESS_TOKEN",
+            ],
+            sandbox_base_url_env: "MANDOFORGE_TIKTOK_SHOP_SANDBOX_BASE_URL",
+            live_base_url_env: "MANDOFORGE_TIKTOK_SHOP_LIVE_BASE_URL",
+            token_refresh_controller_env: "MANDOFORGE_TIKTOK_SHOP_TOKEN_REFRESH_CONTROLLER_URL",
+            rate_limit_policy_env: "MANDOFORGE_TIKTOK_SHOP_RATE_LIMIT_POLICY",
+            reconciliation_controller_env: "MANDOFORGE_TIKTOK_SHOP_RECONCILIATION_CONTROLLER_URL",
+            webhook_ingestion_env: "MANDOFORGE_TIKTOK_SHOP_WEBHOOK_INGESTION_URL",
+            compensation_policy_env: "MANDOFORGE_TIKTOK_SHOP_COMPENSATION_POLICY",
+        },
+        NativeConnectorProductionSpec {
+            connector_id: "amazon-selling-partner-api",
+            provider: "amazon-sp-api",
+            manifest_path: "packs/ecommerce-amazon/connectors/amazon-selling-partner-api.yaml",
+            required_secret_refs: vec![
+                "AMAZON_SPAPI_ACCESS_TOKEN",
+                "AWS_ACCESS_KEY_ID",
+                "AWS_SECRET_ACCESS_KEY",
+            ],
+            sandbox_base_url_env: "MANDOFORGE_AMAZON_SPAPI_SANDBOX_BASE_URL",
+            live_base_url_env: "MANDOFORGE_AMAZON_SPAPI_LIVE_BASE_URL",
+            token_refresh_controller_env: "MANDOFORGE_AMAZON_SPAPI_TOKEN_REFRESH_CONTROLLER_URL",
+            rate_limit_policy_env: "MANDOFORGE_AMAZON_SPAPI_RATE_LIMIT_POLICY",
+            reconciliation_controller_env: "MANDOFORGE_AMAZON_SPAPI_RECONCILIATION_CONTROLLER_URL",
+            webhook_ingestion_env: "MANDOFORGE_AMAZON_SPAPI_WEBHOOK_INGESTION_URL",
+            compensation_policy_env: "MANDOFORGE_AMAZON_SPAPI_COMPENSATION_POLICY",
+        },
+    ]
+}
+
+fn build_native_connector_readiness_item(
+    spec: &NativeConnectorProductionSpec,
+    live_enabled: bool,
+) -> NativeConnectorProductionReadinessItem {
+    let required_secret_refs = spec
+        .required_secret_refs
+        .iter()
+        .map(|secret| (*secret).to_string())
+        .collect::<Vec<_>>();
+    let configured_secret_refs = spec
+        .required_secret_refs
+        .iter()
+        .filter(|secret| env_nonempty(secret))
+        .map(|secret| (*secret).to_string())
+        .collect::<Vec<_>>();
+    let missing_secret_refs = spec
+        .required_secret_refs
+        .iter()
+        .filter(|secret| !env_nonempty(secret))
+        .map(|secret| (*secret).to_string())
+        .collect::<Vec<_>>();
+    let checks = vec![
+        readiness_check(
+            "live-runtime-gate",
+            "Live runtime gate",
+            live_enabled,
+            vec![format!(
+                "{LIVE_ENABLED_ENV} or {ECOMMERCE_LIVE_ENABLED_ENV} enables live HTTP execution"
+            )],
+            vec![format!(
+                "set {LIVE_ENABLED_ENV}=true only after connector-specific readiness passes"
+            )],
+        ),
+        readiness_check(
+            "credential-binding",
+            "Credential binding",
+            missing_secret_refs.is_empty(),
+            configured_secret_refs
+                .iter()
+                .map(|secret| format!("{secret} configured"))
+                .collect(),
+            missing_secret_refs
+                .iter()
+                .map(|secret| format!("{secret} missing"))
+                .collect(),
+        ),
+        readiness_check(
+            "sandbox-live-separation",
+            "Sandbox and live separation",
+            env_nonempty(spec.sandbox_base_url_env) && env_nonempty(spec.live_base_url_env),
+            configured_env_evidence(&[spec.sandbox_base_url_env, spec.live_base_url_env]),
+            vec![format!(
+                "{} and {} must both be configured",
+                spec.sandbox_base_url_env, spec.live_base_url_env
+            )],
+        ),
+        readiness_check(
+            "token-lifecycle",
+            "Token refresh and expiry handling",
+            env_nonempty(spec.token_refresh_controller_env),
+            configured_env_evidence(&[spec.token_refresh_controller_env]),
+            vec![format!(
+                "{} must point to a controller that proves refresh, expiry, and rotation behavior",
+                spec.token_refresh_controller_env
+            )],
+        ),
+        readiness_check(
+            "rate-limit-retry",
+            "Rate limits, retry, and timeout taxonomy",
+            env_nonempty(spec.rate_limit_policy_env),
+            configured_env_evidence(&[spec.rate_limit_policy_env]),
+            vec![format!(
+                "{} must declare the platform-specific rate-limit and retry policy",
+                spec.rate_limit_policy_env
+            )],
+        ),
+        readiness_check(
+            "idempotency-reconciliation",
+            "Idempotency and external reconciliation",
+            env_nonempty(spec.reconciliation_controller_env),
+            configured_env_evidence(&[spec.reconciliation_controller_env]),
+            vec![format!(
+                "{} must validate idempotent writes against external platform state",
+                spec.reconciliation_controller_env
+            )],
+        ),
+        readiness_check(
+            "webhook-ingestion",
+            "Webhook or polling ingestion",
+            env_nonempty(spec.webhook_ingestion_env),
+            configured_env_evidence(&[spec.webhook_ingestion_env]),
+            vec![format!(
+                "{} must capture external state changes with provenance",
+                spec.webhook_ingestion_env
+            )],
+        ),
+        readiness_check(
+            "compensation-policy",
+            "Compensation or non-compensable policy",
+            env_nonempty(spec.compensation_policy_env),
+            configured_env_evidence(&[spec.compensation_policy_env]),
+            vec![format!(
+                "{} must define compensation behavior or explicit non-compensable operations",
+                spec.compensation_policy_env
+            )],
+        ),
+        NativeConnectorProductionReadinessCheck {
+            id: "approval-commit-boundary".to_string(),
+            title: "Approval commit boundary".to_string(),
+            status: "ready".to_string(),
+            evidence: vec![
+                "native.connector.call executes writes only through approval commit flow"
+                    .to_string(),
+                "adapter returns redacted request plans for dry-run and disabled-live paths"
+                    .to_string(),
+            ],
+            blockers: Vec::new(),
+            next_actions: Vec::new(),
+        },
+        NativeConnectorProductionReadinessCheck {
+            id: "secret-redaction".to_string(),
+            title: "Secret redaction".to_string(),
+            status: "ready".to_string(),
+            evidence: vec![
+                "LiveHttpRequest::redacted exposes header/query/body keys and secret refs only"
+                    .to_string(),
+            ],
+            blockers: Vec::new(),
+            next_actions: Vec::new(),
+        },
+    ];
+    let blockers = checks
+        .iter()
+        .flat_map(|check| check.blockers.clone())
+        .collect::<Vec<_>>();
+    let status = if blockers.is_empty() {
+        "ready"
+    } else {
+        "blocked"
+    }
+    .to_string();
+    let next_actions = checks
+        .iter()
+        .flat_map(|check| check.next_actions.clone())
+        .collect::<Vec<_>>();
+
+    NativeConnectorProductionReadinessItem {
+        connector_id: spec.connector_id.to_string(),
+        provider: spec.provider.to_string(),
+        manifest_path: spec.manifest_path.to_string(),
+        status,
+        current_evidence_class: "repo_controlled".to_string(),
+        required_evidence_class: "customer_grade".to_string(),
+        required_secret_refs,
+        configured_secret_refs,
+        missing_secret_refs,
+        checks,
+        blockers,
+        next_actions,
+    }
+}
+
+fn readiness_check(
+    id: &str,
+    title: &str,
+    ready: bool,
+    evidence: Vec<String>,
+    blocked_next_actions: Vec<String>,
+) -> NativeConnectorProductionReadinessCheck {
+    let blockers = if ready {
+        Vec::new()
+    } else {
+        blocked_next_actions.clone()
+    };
+    NativeConnectorProductionReadinessCheck {
+        id: id.to_string(),
+        title: title.to_string(),
+        status: if ready { "ready" } else { "blocked" }.to_string(),
+        evidence,
+        blockers,
+        next_actions: if ready {
+            Vec::new()
+        } else {
+            blocked_next_actions
+        },
+    }
+}
+
+fn configured_env_evidence(keys: &[&str]) -> Vec<String> {
+    keys.iter()
+        .filter(|key| env_nonempty(key))
+        .map(|key| format!("{key} configured"))
+        .collect()
+}
+
+fn env_nonempty(key: &str) -> bool {
+    std::env::var(key)
+        .ok()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
 }
 
 impl NativeConnectorCall {
@@ -672,6 +1069,7 @@ fn env_bool(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use std::sync::{Mutex, OnceLock};
 
     fn env_lock() -> &'static Mutex<()> {
@@ -749,5 +1147,58 @@ mod tests {
         assert_eq!(result["status"], json!("live_disabled"));
         assert_eq!(result["request"]["adapter"], json!("alibaba_top"));
         assert!(!result.to_string().contains("session-token"));
+    }
+
+    #[test]
+    fn native_connector_production_readiness_fails_closed_without_customer_evidence() {
+        let _lock = env_lock().lock().expect("env lock");
+        let mut env_keys = BTreeSet::from([LIVE_ENABLED_ENV, ECOMMERCE_LIVE_ENABLED_ENV]);
+        for spec in native_connector_production_specs() {
+            for key in spec.required_secret_refs {
+                env_keys.insert(key);
+            }
+            env_keys.insert(spec.sandbox_base_url_env);
+            env_keys.insert(spec.live_base_url_env);
+            env_keys.insert(spec.token_refresh_controller_env);
+            env_keys.insert(spec.rate_limit_policy_env);
+            env_keys.insert(spec.reconciliation_controller_env);
+            env_keys.insert(spec.webhook_ingestion_env);
+            env_keys.insert(spec.compensation_policy_env);
+        }
+        let _guards = env_keys
+            .into_iter()
+            .map(|key| EnvGuard::set(key, ""))
+            .collect::<Vec<_>>();
+
+        let readiness = build_native_connector_production_readiness();
+
+        assert_eq!(readiness.status, "blocked");
+        assert!(!readiness.live_enabled);
+        assert_eq!(readiness.connector_count, 5);
+        assert_eq!(readiness.ready_connector_count, 0);
+        assert_eq!(readiness.blocked_connector_count, 5);
+        assert!(
+            readiness
+                .connectors
+                .iter()
+                .any(|connector| connector.connector_id == "tmall-top")
+        );
+        for connector in &readiness.connectors {
+            assert_eq!(connector.status, "blocked");
+            assert_eq!(connector.required_evidence_class, "customer_grade");
+            assert!(
+                connector
+                    .checks
+                    .iter()
+                    .any(|check| check.id == "secret-redaction" && check.status == "ready")
+            );
+            assert!(
+                connector
+                    .checks
+                    .iter()
+                    .any(|check| check.id == "idempotency-reconciliation"
+                        && check.status == "blocked")
+            );
+        }
     }
 }

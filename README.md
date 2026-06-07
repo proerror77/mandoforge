@@ -416,6 +416,7 @@ These manifests are a self-hosted pilot starting point, not a production hardeni
 - [Stage 1 Plan](docs/stage1-plan.md)
 - [Stage 1 Completion Audit](docs/stage1-completion-audit.md)
 - [Stage 2 Completion Audit](docs/stage2-completion-audit.md)
+- [Enterprise Product Completion Contract](docs/enterprise-product-completion-contract.md)
 - [Claude Managed Agents Alignment](docs/claude-managed-agents-alignment.md) - runtime-layer reference only
 - [MandoForge Roadmap v2](docs/mandoforge-roadmap-v2.md)
 - [Agent OS Product Roadmap](docs/stage2-stage3-roadmap.md)
@@ -454,11 +455,16 @@ Governance and operations:
 
 - `GET /api/policy`
 - `POST /api/policy/simulate`
+- `GET /api/stage2/readiness`
+- `GET /api/enterprise-product/readiness`
+- `GET /api/native-connectors/production-readiness`
+- `GET /api/ontology/engine-readiness`
 - `GET /api/providers/policy-gate`
 - `GET /api/vault/readiness`
 - `GET /api/execution-jobs/worker-readiness`
 - `GET /api/remote-computers/readiness`
 - `GET /api/remote-computers/runner/readiness`
+- `GET /api/remote-computers/production-path`
 - `POST /api/scheduler/run-due`
 - `GET /api/usage`
 - `GET /api/observability/collector-readiness`

@@ -106,6 +106,7 @@ fetch_json() {
 write_summary() {
   local readiness_file="$EVIDENCE_DIR/api-remote-computers-readiness.json"
   local runner_file="$EVIDENCE_DIR/api-remote-computers-runner-readiness.json"
+  local production_path_file="$EVIDENCE_DIR/api-remote-computers-production-path.json"
   local state_sync_evidence_file="$EVIDENCE_DIR/remote-computer-state-sync-evidence.json"
   local sidecar_recovery_evidence_file="$EVIDENCE_DIR/remote-computer-sidecar-recovery-evidence.json"
   local summary_file="$EVIDENCE_DIR/summary.txt"
@@ -118,6 +119,9 @@ write_summary() {
   local runner_configured
   local runner_ready
   local runner_message
+  local production_path_status
+  local production_path_blocked
+  local production_path_blocked_check_count
   local state_sync_evidence_status
   local state_sync_validation_status
   local state_sync_controller_status
@@ -153,6 +157,14 @@ write_summary() {
   runner_configured="$(jq -r '.configured // false' "$runner_file")"
   runner_ready="$(jq -r '(.configured == true) and (((.status // "") == "ready") or ((.status // "") == "dry_run_ready") or ((.status // "") == "live_ready"))' "$runner_file")"
   runner_message="$(jq -r '.message // ""' "$runner_file")"
+  production_path_status="missing"
+  production_path_blocked="true"
+  production_path_blocked_check_count="0"
+  if [[ -s "$production_path_file" ]]; then
+    production_path_status="$(jq -r '.status // "unknown"' "$production_path_file")"
+    production_path_blocked="$(jq -r 'if has("completion_blocked") then .completion_blocked else true end' "$production_path_file")"
+    production_path_blocked_check_count="$(jq -r '.blocked_check_count // 0' "$production_path_file")"
+  fi
   state_sync_evidence_status="missing"
   state_sync_validation_status="unknown"
   if [[ -s "$state_sync_evidence_file" ]]; then
@@ -244,6 +256,9 @@ write_summary() {
   if [[ "$state_sync_validation_status" != "validated" ]]; then
     blocked_count="$((blocked_count + 1))"
   fi
+  if [[ "$production_path_blocked" == "true" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
   if ! is_real_cluster_kind "$state_sync_target_kind"; then
     blocked_count="$((blocked_count + 1))"
   fi
@@ -312,6 +327,9 @@ write_summary() {
     echo "runner_status=$runner_status"
     echo "runner_configured=$runner_configured"
     echo "runner_ready=$runner_ready"
+    echo "production_path_status=$production_path_status"
+    echo "production_path_blocked=$production_path_blocked"
+    echo "production_path_blocked_check_count=$production_path_blocked_check_count"
     echo "state_sync_evidence_status=$state_sync_evidence_status"
     echo "state_sync_validation_status=$state_sync_validation_status"
     echo "state_sync_controller_status=$state_sync_controller_status"
@@ -352,6 +370,9 @@ write_summary() {
     fi
     if [[ "$state_sync_validation_status" != "validated" ]]; then
       echo "- state-sync validation response is not validated: $state_sync_validation_status"
+    fi
+    if [[ "$production_path_blocked" == "true" ]]; then
+      echo "- Remote Computer production path API remains blocked: status=$production_path_status blocked_check_count=$production_path_blocked_check_count"
     fi
     if ! is_real_cluster_kind "$state_sync_target_kind"; then
       echo "- state-sync target is not a real cluster kind: $state_sync_target_kind"
@@ -470,6 +491,7 @@ mkdir -p "$EVIDENCE_DIR"
 curl -fsS "$BASE_URL/healthz" >/dev/null
 fetch_json GET /api/remote-computers/readiness >/dev/null
 fetch_json GET /api/remote-computers/runner/readiness >/dev/null
+fetch_json GET /api/remote-computers/production-path >/dev/null
 capture_state_sync_evidence
 
 if [[ "$RUN_SIDECAR_RECOVERY" == "1" ]]; then
@@ -480,4 +502,5 @@ fi
 
 fetch_json GET /api/remote-computers/readiness >/dev/null
 fetch_json GET /api/remote-computers/runner/readiness >/dev/null
+fetch_json GET /api/remote-computers/production-path >/dev/null
 write_summary

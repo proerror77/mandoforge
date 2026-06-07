@@ -190,6 +190,50 @@ pub struct Stage2Readiness {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct EnterpriseProductReadiness {
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub required_evidence_class: String,
+    #[serde(default)]
+    pub lane_count: usize,
+    #[serde(default)]
+    pub ready_lane_count: usize,
+    #[serde(default)]
+    pub pilot_ready_lane_count: usize,
+    #[serde(default)]
+    pub blocked_lane_count: usize,
+    #[serde(default)]
+    pub completion_blocked: bool,
+    #[serde(default)]
+    pub lanes: Vec<EnterpriseProductLane>,
+    #[serde(default)]
+    pub next_actions: Vec<String>,
+    #[serde(default)]
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct EnterpriseProductLane {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub current_evidence_class: String,
+    #[serde(default)]
+    pub required_evidence_class: String,
+    #[serde(default)]
+    pub production_target: String,
+    #[serde(default)]
+    pub blockers: Vec<String>,
+    #[serde(default)]
+    pub next_actions: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 pub struct ObservabilitySummary {
     #[serde(default)]
     pub status: String,

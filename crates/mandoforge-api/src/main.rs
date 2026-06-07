@@ -4298,6 +4298,70 @@ struct Stage2EvidenceRequirement {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct EnterpriseProductCompletionReadiness {
+    generated_at: DateTime<Utc>,
+    status: String,
+    objective: String,
+    contract_path: String,
+    contract_present: bool,
+    required_evidence_class: String,
+    lane_count: usize,
+    ready_lane_count: usize,
+    pilot_ready_lane_count: usize,
+    blocked_lane_count: usize,
+    completion_blocked: bool,
+    lanes: Vec<EnterpriseProductCompletionLane>,
+    next_actions: Vec<String>,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EnterpriseProductCompletionLane {
+    id: String,
+    title: String,
+    status: String,
+    current_evidence_class: String,
+    required_evidence_class: String,
+    current_boundary: String,
+    production_target: String,
+    readiness_endpoints: Vec<String>,
+    evidence_scripts: Vec<String>,
+    required_evidence: Vec<String>,
+    blockers: Vec<String>,
+    next_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologyEngineReadiness {
+    generated_at: DateTime<Utc>,
+    status: String,
+    registry_version: String,
+    required_evidence_class: String,
+    object_type_count: usize,
+    relation_type_count: usize,
+    check_count: usize,
+    ready_check_count: usize,
+    pilot_ready_check_count: usize,
+    blocked_check_count: usize,
+    completion_blocked: bool,
+    checks: Vec<OntologyEngineReadinessCheck>,
+    next_actions: Vec<String>,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologyEngineReadinessCheck {
+    id: String,
+    title: String,
+    status: String,
+    current_evidence_class: String,
+    required_evidence_class: String,
+    evidence: Vec<String>,
+    blockers: Vec<String>,
+    next_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct RemoteComputerReadinessReport {
     generated_at: DateTime<Utc>,
     status: String,
@@ -6491,6 +6555,14 @@ fn build_router(state: AppState) -> Router {
         )
         .route("/api/deployment/auto-deploy", post(plan_auto_deploy))
         .route("/api/stage2/readiness", get(get_stage2_readiness))
+        .route(
+            "/api/enterprise-product/readiness",
+            get(get_enterprise_product_readiness),
+        )
+        .route(
+            "/api/native-connectors/production-readiness",
+            get(get_native_connector_production_readiness),
+        )
         .route("/api/agents", get(list_agents).post(create_agent))
         .route(
             "/api/agent-runtime-profiles",
@@ -6598,6 +6670,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/memory-governance/summary",
             get(get_memory_governance_summary),
+        )
+        .route(
+            "/api/ontology/engine-readiness",
+            get(get_ontology_engine_readiness),
         )
         .route(
             "/api/memory-governance/partitions",
@@ -7854,6 +7930,38 @@ async fn get_stage2_readiness(
     Ok(Json(build_stage2_completion_readiness()))
 }
 
+async fn get_enterprise_product_readiness(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<EnterpriseProductCompletionReadiness>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "enterprise_product_readiness",
+        None,
+    )
+    .await?;
+    Ok(Json(build_enterprise_product_completion_readiness()))
+}
+
+async fn get_native_connector_production_readiness(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<native_connectors::NativeConnectorProductionReadiness>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "native_connector_production_readiness",
+        None,
+    )
+    .await?;
+    Ok(Json(
+        native_connectors::build_native_connector_production_readiness(),
+    ))
+}
+
 fn build_stage2_completion_readiness() -> Stage2CompletionReadiness {
     let audit_path = "docs/stage2-completion-audit.md";
     let audit_content =
@@ -7892,6 +8000,382 @@ fn build_stage2_completion_readiness() -> Stage2CompletionReadiness {
         completion_blocked,
         message,
     }
+}
+
+fn build_enterprise_product_completion_readiness() -> EnterpriseProductCompletionReadiness {
+    let contract_path = "docs/enterprise-product-completion-contract.md";
+    let contract_present = project_file_path(contract_path)
+        .map(|path| path.is_file())
+        .unwrap_or(false);
+    let lanes = build_enterprise_product_completion_lanes(contract_present);
+    let lane_count = lanes.len();
+    let ready_lane_count = lanes.iter().filter(|lane| lane.status == "ready").count();
+    let pilot_ready_lane_count = lanes
+        .iter()
+        .filter(|lane| lane.status == "pilot_ready")
+        .count();
+    let blocked_lane_count = lanes.iter().filter(|lane| lane.status == "blocked").count();
+    let completion_blocked = !contract_present || ready_lane_count != lane_count;
+    let status = if completion_blocked {
+        "blocked"
+    } else {
+        "enterprise_product_complete"
+    }
+    .to_string();
+    let mut next_actions = vec![
+        "close Remote Computer multi-node distributed state evidence".to_string(),
+        "promote live connectors from generic approval-gated calls to platform-specific production semantics".to_string(),
+        "promote Context OS primitives into a versioned Ontology Engine release workflow".to_string(),
+        "add enterprise identity, audit export, data-retention, and operations evidence".to_string(),
+    ];
+    if !contract_present {
+        next_actions.insert(
+            0,
+            "restore docs/enterprise-product-completion-contract.md".to_string(),
+        );
+    }
+    let message = if completion_blocked {
+        format!(
+            "Enterprise product completion is blocked: {ready_lane_count}/{lane_count} lanes are customer-grade ready, {pilot_ready_lane_count} are pilot-ready, and {blocked_lane_count} remain blocked"
+        )
+    } else {
+        "Enterprise product completion has customer-grade evidence for every required lane"
+            .to_string()
+    };
+
+    EnterpriseProductCompletionReadiness {
+        generated_at: Utc::now(),
+        status,
+        objective: "Full Enterprise Product Completion".to_string(),
+        contract_path: contract_path.to_string(),
+        contract_present,
+        required_evidence_class: "customer_grade".to_string(),
+        lane_count,
+        ready_lane_count,
+        pilot_ready_lane_count,
+        blocked_lane_count,
+        completion_blocked,
+        lanes,
+        next_actions,
+        message,
+    }
+}
+
+fn build_enterprise_product_completion_lanes(
+    contract_present: bool,
+) -> Vec<EnterpriseProductCompletionLane> {
+    struct EnterpriseLaneSpec<'a> {
+        id: &'a str,
+        title: &'a str,
+        status: &'a str,
+        current_evidence_class: &'a str,
+        current_boundary: &'a str,
+        production_target: &'a str,
+        readiness_endpoints: Vec<&'a str>,
+        evidence_scripts: Vec<&'a str>,
+        required_evidence: Vec<&'a str>,
+        blockers: Vec<&'a str>,
+        next_actions: Vec<&'a str>,
+    }
+
+    let mut specs = vec![
+        EnterpriseLaneSpec {
+            id: "runtime-production",
+            title: "Runtime production hardening",
+            status: "pilot_ready",
+            current_evidence_class: "production_like_pilot",
+            current_boundary: "Agent OS core and Stage 2 runtime evidence are strong, but customer-grade restart, backup, restore, idempotency, and dead-letter drills are still required",
+            production_target: "Customer-grade managed runtime with durable store, queue, replay, backup/restore, restart/resume, and support ownership",
+            readiness_endpoints: vec![
+                "/api/stage2/readiness",
+                "/api/execution-jobs/worker-readiness",
+                "/api/session-loop-jobs",
+            ],
+            evidence_scripts: vec![
+                "./scripts/agent-os-core-evidence-gate.sh",
+                "./scripts/managed-session-runtime-evidence-gate.sh",
+                "./scripts/worker-evidence-gate.sh",
+            ],
+            required_evidence: vec![
+                "backup and restore preserve runtime action records",
+                "session-loop and execution jobs recover after API, worker, and queue restart",
+                "external side effects have idempotency, dead-letter, and manual replay evidence",
+            ],
+            blockers: vec![
+                "customer-grade backup/restore and dead-letter drills are not yet the enterprise completion gate",
+            ],
+            next_actions: vec![
+                "add a customer-grade runtime recovery evidence lane",
+                "archive restart/resume, backup/restore, and dead-letter repair evidence",
+            ],
+        },
+        EnterpriseLaneSpec {
+            id: "remote-computer-multinode",
+            title: "Remote Computer multi-node production state",
+            status: "blocked",
+            current_evidence_class: "production_like_pilot",
+            current_boundary: "Whiskey single-node k3s validates the pilot path but not multi-node distributed state",
+            production_target: "At least two schedulable nodes with distributed RWX state, lock-aware sync, sidecar recovery, NetworkPolicy, and tenant isolation",
+            readiness_endpoints: vec![
+                "/api/remote-computers/readiness",
+                "/api/remote-computers/runner/readiness",
+                "/api/remote-computers/production-path",
+            ],
+            evidence_scripts: vec![
+                "./scripts/remote-computer-evidence-gate.sh",
+                "./scripts/worker-remote-computer-evidence-gate.sh",
+                "./scripts/whiskey-remote-computer-k3s-verify.sh",
+            ],
+            required_evidence: vec![
+                "distributed RWX storage such as JuiceFS, CephFS, Longhorn RWX, or equivalent",
+                "workspace, notes, memory, skills, and artifacts use lock-aware sync",
+                "sidecar heartbeat and replacement recovery work across nodes",
+            ],
+            blockers: vec![
+                "single-node local-hostpath is not multi-node production state",
+                "live runner hardening and distributed lock-aware sync are not complete",
+            ],
+            next_actions: vec![
+                "choose and configure the production RWX storage class",
+                "run multi-node Remote Computer state sync and sidecar recovery evidence",
+            ],
+        },
+        EnterpriseLaneSpec {
+            id: "live-connector-production",
+            title: "Live connector production semantics",
+            status: "blocked",
+            current_evidence_class: "repo_controlled",
+            current_boundary: "Ecommerce live adapter and approval commit path exist, but platform-specific production semantics remain per-connector work",
+            production_target: "Platform-specific live connectors with OAuth/token lifecycle, rate limits, idempotency, reconciliation, webhook ingestion, and compensation policy",
+            readiness_endpoints: vec![
+                "/api/native-connectors/production-readiness",
+                "/api/workflow-packs/installations",
+                "/api/stage2/readiness",
+            ],
+            evidence_scripts: vec![
+                "./scripts/native-connector-production-readiness-gate.sh",
+                "./scripts/verify-ecommerce-tmall-context-os.sh",
+                "./scripts/workflow-pack-evidence-gate.sh",
+            ],
+            required_evidence: vec![
+                "sandbox/live separation and token lifecycle for each connector",
+                "idempotent external writes plus reconciliation against external platform state",
+                "platform-specific error taxonomy, rate-limit handling, and compensation policy",
+            ],
+            blockers: vec![
+                "generic native connector governance is not enough for every production platform",
+                "Tmall/Taobao, Xiaohongshu, TikTok Shop, Amazon SP-API, and Lark/Feishu each need promoted production contracts",
+            ],
+            next_actions: vec![
+                "start with Tmall/Taobao production semantics",
+                "add reconciliation and idempotency evidence before broadening to other ecommerce platforms",
+            ],
+        },
+        EnterpriseLaneSpec {
+            id: "ontology-engine",
+            title: "Versioned Ontology Engine",
+            status: "blocked",
+            current_evidence_class: "repo_controlled",
+            current_boundary: "Context OS primitives and Ontology Builder proposal flow exist; ontology-ready is not a full ontology engine",
+            production_target: "Versioned core and domain ontology registry with migrations, relation constraints, conflict handling, approvals, and runtime enforcement",
+            readiness_endpoints: vec![
+                "/api/ontology/engine-readiness",
+                "/api/ontology/registry",
+                "/api/semantic-graph",
+                "/api/semantic-workbench",
+            ],
+            evidence_scripts: vec![
+                "./scripts/ontology-engine-readiness-gate.sh",
+                "./scripts/verify-ecommerce-tmall-context-os.sh",
+            ],
+            required_evidence: vec![
+                "core and domain ontology versions can be promoted, rolled back, and migrated",
+                "relation constraints are enforced before policy decisions rely on semantic links",
+                "approved ontology changes create durable audit and context-packet evidence",
+            ],
+            blockers: vec![
+                "ontology proposals do not yet become a governed registry release workflow",
+                "domain ontology migration and conflict-resolution policy are not customer-grade",
+            ],
+            next_actions: vec![
+                "promote ontology proposals into reviewed registry versions",
+                "add domain ontology migration and relation-constraint gates",
+            ],
+        },
+        EnterpriseLaneSpec {
+            id: "workflowpack-enterprise-lifecycle",
+            title: "WorkflowPack enterprise lifecycle",
+            status: "pilot_ready",
+            current_evidence_class: "production_like_pilot",
+            current_boundary: "Install, stage, release, rollback, archive, onboarding, and connector quality are implemented, but customer-grade pack operations need canary, compatibility, and tenant-specific promotion evidence",
+            production_target: "Operational pack lifecycle with tenant onboarding, real connector quality, eval regression, canary, rollback, version compatibility, and customer overrides",
+            readiness_endpoints: vec![
+                "/api/workflow-packs/installations",
+                "/api/workflow-runs",
+                "/api/memory-governance/summary",
+            ],
+            evidence_scripts: vec![
+                "./scripts/verify-workflow-pack-manifest.sh",
+                "./scripts/workflow-pack-evidence-gate.sh",
+                "./scripts/managed-workflow-runtime-evidence-gate.sh",
+            ],
+            required_evidence: vec![
+                "tenant onboarding profiles are versioned and completeness-gated",
+                "real connector account quality checks gate pack release",
+                "pack updates preserve compatibility and rollback evidence",
+            ],
+            blockers: vec![
+                "customer-grade canary, compatibility matrix, and tenant override policy are not yet promoted to the enterprise completion gate",
+            ],
+            next_actions: vec![
+                "add pack version compatibility and canary evidence",
+                "gate customer-specific overrides without weakening manifest contract",
+            ],
+        },
+        EnterpriseLaneSpec {
+            id: "enterprise-security-admin",
+            title: "Enterprise security and administration",
+            status: "blocked",
+            current_evidence_class: "production_like_pilot",
+            current_boundary: "RBAC, tenant routing/RLS evidence, approval notifications, and Vault/KMS pilot surfaces exist; SSO/SCIM/SIEM/data-governance completion is not done",
+            production_target: "SSO/OIDC/SAML, SCIM, RBAC/ABAC, tenant RLS, production KMS, SIEM export, retention, legal hold, deletion/export, DLP, and break-glass audit",
+            readiness_endpoints: vec![
+                "/api/tenant-isolation/readiness",
+                "/api/vault/readiness",
+                "/api/approvals/notification-routing/summary",
+            ],
+            evidence_scripts: vec![
+                "./scripts/tenant-isolation-evidence-gate.sh",
+                "./scripts/vault-evidence-gate.sh",
+                "./scripts/approval-notification-evidence-gate.sh",
+            ],
+            required_evidence: vec![
+                "SSO and directory provisioning are production configured",
+                "audit export supports SIEM ingestion",
+                "data retention, legal hold, deletion/export, PII redaction, and DLP policies are tested",
+            ],
+            blockers: vec![
+                "SSO/SCIM/SIEM/data-governance lanes are not complete",
+                "production KMS/HSM and tenant isolation need customer-grade evidence",
+            ],
+            next_actions: vec![
+                "add identity provisioning and audit export lanes",
+                "promote data-retention and DLP policy gates",
+            ],
+        },
+        EnterpriseLaneSpec {
+            id: "observability-ops",
+            title: "Observability and operations",
+            status: "blocked",
+            current_evidence_class: "production_like_pilot",
+            current_boundary: "OTel, usage, cost, finance, and controller evidence exist for pilot targets; enterprise support SLOs and repair runbooks are not complete",
+            production_target: "Customer operations surface with metrics, traces, logs, audit correlation, alerts, SLOs, incident timeline, and manual repair workflows",
+            readiness_endpoints: vec![
+                "/api/observability",
+                "/api/observability/collector-readiness",
+                "/api/usage/finance-operations/summary",
+            ],
+            evidence_scripts: vec![
+                "./scripts/observability-collector-evidence-gate.sh",
+                "./scripts/finance-evidence-gate.sh",
+            ],
+            required_evidence: vec![
+                "alerts exist for failed jobs, stale leases, delivery failures, connector degradation, provider degradation, budget breach, and queue backlog",
+                "deployment, migration, pack, ontology, and connector versions are visible",
+                "incident timeline and manual repair actions are audited",
+            ],
+            blockers: vec![
+                "enterprise SLOs, alerts, incident timeline, and repair runbooks are not complete",
+            ],
+            next_actions: vec![
+                "define production SLOs per runtime lane",
+                "add alert and manual repair evidence gates",
+            ],
+        },
+        EnterpriseLaneSpec {
+            id: "product-surfaces",
+            title: "Enterprise product surfaces",
+            status: "blocked",
+            current_evidence_class: "repo_controlled",
+            current_boundary: "The UI reads many live APIs, but full Admin, Operator, Builder, and Ops consoles are not enterprise-complete",
+            production_target: "Live API-backed Admin, Operator, Builder, and Ops consoles with no fake completion state",
+            readiness_endpoints: vec![
+                "/api/enterprise-product/readiness",
+                "/api/stage2/readiness",
+                "/api/semantic-workbench",
+            ],
+            evidence_scripts: vec![
+                "./scripts/verify-static-ui-assets.sh",
+                "./scripts/verify-ui-api-truth-gate.mjs",
+                "./scripts/verify-static-ui-actionbook.sh",
+            ],
+            required_evidence: vec![
+                "Admin Console covers tenants, teams, agents, runtime profiles, providers, policies, approvals, connectors, budgets, and release state",
+                "Operator Console covers blocked work, approvals, replay, artifacts, jobs, and manual repair",
+                "Builder Console covers Workflow Packs, Ontology Builder, connector mapping, eval gates, and release gates",
+                "Ops Console covers health, workers, queues, costs, alerts, deployments, and incident evidence",
+            ],
+            blockers: vec![
+                "enterprise completion status is now API-visible, but full console coverage is not complete",
+            ],
+            next_actions: vec![
+                "surface enterprise readiness lanes in the console",
+                "extend UI truth gates to prove no fake enterprise completion state",
+            ],
+        },
+    ];
+
+    if !contract_present {
+        specs.insert(
+            0,
+            EnterpriseLaneSpec {
+                id: "enterprise-contract",
+                title: "Enterprise completion contract",
+                status: "blocked",
+                current_evidence_class: "none",
+                current_boundary: "The enterprise product completion contract document is missing",
+                production_target: "Versioned enterprise completion contract in repo documentation",
+                readiness_endpoints: vec!["/api/enterprise-product/readiness"],
+                evidence_scripts: vec!["./scripts/enterprise-product-completion-contract-gate.sh"],
+                required_evidence: vec![
+                    "docs/enterprise-product-completion-contract.md exists",
+                    "all required enterprise lanes are defined",
+                ],
+                blockers: vec!["enterprise product completion contract is missing"],
+                next_actions: vec!["restore docs/enterprise-product-completion-contract.md"],
+            },
+        );
+    }
+
+    specs
+        .into_iter()
+        .map(|spec| EnterpriseProductCompletionLane {
+            id: spec.id.to_string(),
+            title: spec.title.to_string(),
+            status: spec.status.to_string(),
+            current_evidence_class: spec.current_evidence_class.to_string(),
+            required_evidence_class: "customer_grade".to_string(),
+            current_boundary: spec.current_boundary.to_string(),
+            production_target: spec.production_target.to_string(),
+            readiness_endpoints: spec
+                .readiness_endpoints
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            evidence_scripts: spec
+                .evidence_scripts
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            required_evidence: spec
+                .required_evidence
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            blockers: spec.blockers.into_iter().map(str::to_string).collect(),
+            next_actions: spec.next_actions.into_iter().map(str::to_string).collect(),
+        })
+        .collect()
 }
 
 fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2EvidenceRequirement> {
@@ -11310,6 +11794,213 @@ async fn get_ontology_registry(
     )
     .await?;
     Ok(Json(ontology_registry()))
+}
+
+async fn get_ontology_engine_readiness(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<OntologyEngineReadiness>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "ontology_engine_readiness",
+        None,
+    )
+    .await?;
+    Ok(Json(build_ontology_engine_readiness()))
+}
+
+fn build_ontology_engine_readiness() -> OntologyEngineReadiness {
+    let registry = ontology_registry();
+    let checks = vec![
+        ontology_engine_check(
+            "core-registry",
+            "Core ontology registry",
+            "ready",
+            "repo_controlled",
+            vec![
+                format!("registry_version={}", registry.version),
+                format!("object_type_count={}", registry.object_types.len()),
+                format!("relation_type_count={}", registry.relation_types.len()),
+                "GET /api/ontology/registry".to_string(),
+            ],
+            Vec::new(),
+            Vec::new(),
+        ),
+        ontology_engine_check(
+            "relation-constraints",
+            "Relation constraint enforcement",
+            "ready",
+            "repo_controlled",
+            vec![
+                "semantic link writes call validate_semantic_link_against_ontology".to_string(),
+                "semantic ingestion batches reject disallowed relations before writing".to_string(),
+                "semantic_links_reject_relations_not_declared_in_ontology test coverage".to_string(),
+            ],
+            Vec::new(),
+            Vec::new(),
+        ),
+        ontology_engine_check(
+            "builder-review-proposals",
+            "Ontology Builder proposal review",
+            "ready",
+            "repo_controlled",
+            vec![
+                "POST /api/semantic-ontology/builder creates proposal_only first drafts".to_string(),
+                "POST /api/semantic-ontology/proposals/{id}/review records review decisions and audit logs".to_string(),
+                "builder preview mode does not mutate durable registry state".to_string(),
+            ],
+            Vec::new(),
+            Vec::new(),
+        ),
+        ontology_engine_check(
+            "context-packet-rendering",
+            "Context packet ontology rendering",
+            "ready",
+            "repo_controlled",
+            vec![
+                "POST /api/context-packets/{id}/render includes ontology_scope".to_string(),
+                "POST /api/semantic-objects/{id}/fetch is constrained to packet retrieved_objects".to_string(),
+                "POST /api/semantic-links/expand expands relation context from packet-visible objects".to_string(),
+            ],
+            Vec::new(),
+            Vec::new(),
+        ),
+        ontology_engine_check(
+            "conflict-trust-runtime-gates",
+            "Conflict, trust, and freshness runtime gates",
+            "pilot_ready",
+            "production_like_pilot",
+            vec![
+                "semantic workbench exposes conflicts and reflection queue".to_string(),
+                "high-risk tools fail closed on stale or untrusted semantic context".to_string(),
+            ],
+            vec![
+                "customer-grade policy must bind conflict/trust downgrade states to every high-risk workflow lane".to_string(),
+            ],
+            vec![
+                "archive conflict resolution, trust downgrade, and high-risk block evidence per customer domain".to_string(),
+            ],
+        ),
+        ontology_engine_check(
+            "domain-ontology-lifecycle",
+            "Domain ontology lifecycle",
+            "blocked",
+            "repo_controlled",
+            vec![
+                "workflow packs can declare ontology seeds and ontology action types".to_string(),
+                "ontology_expansion proposals are persisted as semantic objects".to_string(),
+            ],
+            vec![
+                "domain ontology versions cannot yet be promoted, rolled back, or migrated as first-class registry releases".to_string(),
+            ],
+            vec![
+                "add domain ontology release records with promote, rollback, archive, and migration evidence".to_string(),
+            ],
+        ),
+        ontology_engine_check(
+            "approved-release-materialization",
+            "Approved ontology release materialization",
+            "blocked",
+            "repo_controlled",
+            vec![
+                "proposal review records durable audit evidence".to_string(),
+            ],
+            vec![
+                "approved ontology proposals do not yet materialize into versioned registry releases".to_string(),
+            ],
+            vec![
+                "add a release workflow that turns approved proposals into immutable ontology versions".to_string(),
+            ],
+        ),
+        ontology_engine_check(
+            "migration-policy",
+            "Ontology migration policy",
+            "blocked",
+            "repo_controlled",
+            vec![
+                "core semantic storage migrations exist for sources, objects, links, context packets, and writeback candidates".to_string(),
+            ],
+            vec![
+                "domain ontology schema migration compatibility and rollback policy are not represented as customer-grade evidence".to_string(),
+            ],
+            vec![
+                "add compatibility checks for ontology version migrations across WorkflowPack releases".to_string(),
+            ],
+        ),
+    ];
+    let check_count = checks.len();
+    let ready_check_count = checks
+        .iter()
+        .filter(|check| check.status == "ready")
+        .count();
+    let pilot_ready_check_count = checks
+        .iter()
+        .filter(|check| check.status == "pilot_ready")
+        .count();
+    let blocked_check_count = checks
+        .iter()
+        .filter(|check| check.status == "blocked")
+        .count();
+    let completion_blocked = ready_check_count != check_count;
+    let status = if completion_blocked {
+        "blocked"
+    } else {
+        "ready"
+    }
+    .to_string();
+    let next_actions = vec![
+        "promote ontology proposals into immutable registry versions".to_string(),
+        "add domain ontology migration and rollback evidence".to_string(),
+        "bind conflict, trust, and freshness gates to customer-grade high-risk workflow policy"
+            .to_string(),
+    ];
+    let message = if completion_blocked {
+        format!(
+            "Ontology Engine completion is blocked: {ready_check_count}/{check_count} checks are customer-grade ready, {pilot_ready_check_count} are pilot-ready, and {blocked_check_count} remain blocked"
+        )
+    } else {
+        "Ontology Engine has customer-grade evidence for every required check".to_string()
+    };
+
+    OntologyEngineReadiness {
+        generated_at: Utc::now(),
+        status,
+        registry_version: registry.version,
+        required_evidence_class: "customer_grade".to_string(),
+        object_type_count: registry.object_types.len(),
+        relation_type_count: registry.relation_types.len(),
+        check_count,
+        ready_check_count,
+        pilot_ready_check_count,
+        blocked_check_count,
+        completion_blocked,
+        checks,
+        next_actions,
+        message,
+    }
+}
+
+fn ontology_engine_check(
+    id: &str,
+    title: &str,
+    status: &str,
+    current_evidence_class: &str,
+    evidence: Vec<String>,
+    blockers: Vec<String>,
+    next_actions: Vec<String>,
+) -> OntologyEngineReadinessCheck {
+    OntologyEngineReadinessCheck {
+        id: id.to_string(),
+        title: title.to_string(),
+        status: status.to_string(),
+        current_evidence_class: current_evidence_class.to_string(),
+        required_evidence_class: "customer_grade".to_string(),
+        evidence,
+        blockers,
+        next_actions,
+    }
 }
 
 fn ontology_registry() -> OntologyRegistry {
@@ -52500,35 +53191,513 @@ async fn get_remote_computer_production_path(
         None,
     )
     .await?;
+    let generated_at = Utc::now();
     let readiness = build_remote_computer_readiness(&state).await?;
     let execution_transport = build_remote_computer_execution_transport_readiness(&state).await?;
     let worker_readiness = build_worker_readiness(&state).await?;
-    let status = if readiness.status == "ready" && execution_transport.execution_enabled {
-        "ready"
+    let audit_logs = state.list_audit_logs(None).await?;
+    Ok(Json(build_remote_computer_production_path_payload(
+        generated_at,
+        readiness,
+        execution_transport,
+        worker_readiness,
+        &audit_logs,
+    )))
+}
+
+fn build_remote_computer_production_path_payload(
+    generated_at: DateTime<Utc>,
+    readiness: RemoteComputerReadinessReport,
+    execution_transport: RemoteComputerExecutionTransportReadiness,
+    worker_readiness: WorkerReadinessReport,
+    audit_logs: &[AuditLog],
+) -> Value {
+    let state_sync_evidence = remote_computer_latest_audit_details(
+        audit_logs,
+        "remote_computer.production_state_sync_validation",
+    );
+    let sidecar_recovery_evidence =
+        remote_computer_latest_audit_details(audit_logs, "remote_computer.sidecar_recovery_run");
+    let state_sync_controller = state_sync_evidence
+        .and_then(|details| details.get("controller_execution"))
+        .unwrap_or(&Value::Null);
+    let sidecar_validation = sidecar_recovery_evidence
+        .and_then(|details| details.get("validation_result"))
+        .unwrap_or(&Value::Null);
+
+    let state_sync_target_kind = state_sync_controller
+        .get("target_kind")
+        .and_then(Value::as_str);
+    let state_sync_node_count = state_sync_controller
+        .get("node_count")
+        .and_then(Value::as_u64);
+    let state_sync_cluster_id = state_sync_controller
+        .get("cluster_id")
+        .and_then(Value::as_str);
+    let state_sync_backend = state_sync_controller
+        .get("distributed_state_backend")
+        .or_else(|| state_sync_controller.get("storage_backend"))
+        .or_else(|| state_sync_controller.get("state_backend"))
+        .and_then(Value::as_str);
+    let state_sync_claim = state_sync_controller
+        .get("state_claim")
+        .and_then(Value::as_str);
+    let state_sync_checked_path_count = state_sync_controller
+        .get("checked_path_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let state_sync_checked_path_detail_count =
+        remote_computer_checked_state_path_detail_count(state_sync_controller);
+
+    let sidecar_target_kind = sidecar_validation
+        .get("target_kind")
+        .and_then(Value::as_str);
+    let sidecar_node_count = sidecar_validation.get("node_count").and_then(Value::as_u64);
+    let sidecar_cluster_id = sidecar_validation.get("cluster_id").and_then(Value::as_str);
+    let sidecar_checked_pod_count = sidecar_validation
+        .get("checked_pod_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let sidecar_checked_pod_detail_count =
+        remote_computer_checked_sidecar_pod_detail_count(sidecar_validation);
+
+    let production_cluster_id = std::env::var("MANDOFORGE_STAGE2_PRODUCTION_CLUSTER_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let state_sync_cluster_matches_expected = production_cluster_id
+        .as_deref()
+        .is_none_or(|expected| state_sync_cluster_id == Some(expected));
+    let sidecar_cluster_matches_expected = production_cluster_id
+        .as_deref()
+        .is_none_or(|expected| sidecar_cluster_id == Some(expected));
+
+    let mut checks = Vec::new();
+    checks.push(remote_computer_production_check(
+        "remote_computer_readiness",
+        "Remote Computer base readiness is clean",
+        readiness.status == "ready",
+        json!({
+            "status": readiness.status,
+            "readiness_score": readiness.readiness_score,
+            "critical_attention_items": readiness.attention_items.iter().filter(|item| item.severity == "critical").count(),
+            "warning_attention_items": readiness.attention_items.iter().filter(|item| item.severity == "warning").count(),
+        }),
+        vec!["base Remote Computer readiness is not ready"],
+        vec!["clear critical and warning items from /api/remote-computers/readiness"],
+    ));
+    checks.push(remote_computer_production_check(
+        "distributed_state_contract",
+        "Distributed state provider, profile, contract, and lock manager are configured",
+        readiness.state_filesystem.distributed_filesystem_configured
+            && readiness.state_filesystem.production_profile_present
+            && readiness.state_filesystem.state_contract_present
+            && readiness.state_filesystem.lock_manager_configured
+            && !readiness.production_state_sync.production_blocked,
+        json!({
+            "provider": readiness.state_filesystem.provider,
+            "distributed_filesystem_configured": readiness.state_filesystem.distributed_filesystem_configured,
+            "production_profile_present": readiness.state_filesystem.production_profile_present,
+            "state_contract_present": readiness.state_filesystem.state_contract_present,
+            "lock_manager_configured": readiness.state_filesystem.lock_manager_configured,
+            "conflict_policy": readiness.state_filesystem.conflict_policy,
+            "production_state_sync_status": readiness.production_state_sync.status,
+            "production_state_sync_blocking_reasons": readiness.production_state_sync.blocking_reasons,
+        }),
+        vec![
+            "distributed RWX state, production profile, state contract, lock manager, or state-sync readiness is missing",
+        ],
+        vec![
+            "configure JuiceFS/CephFS/Longhorn RWX state, enable the lock manager, then rerun state sync validation",
+        ],
+    ));
+    checks.push(remote_computer_production_check(
+        "multi_node_state_sync_evidence",
+        "Fresh state-sync evidence proves a production multi-node cluster",
+        state_sync_controller.get("status").and_then(Value::as_str) == Some("validated")
+            && readiness.production_state_sync.controller_evidence_fresh
+            && remote_computer_real_cluster_kind(state_sync_target_kind)
+            && state_sync_node_count.is_some_and(|count| count >= 2)
+            && remote_computer_production_identity(state_sync_cluster_id)
+            && state_sync_cluster_matches_expected
+            && remote_computer_distributed_state_backend(state_sync_backend)
+            && state_sync_claim.is_some_and(|claim| !claim.trim().is_empty())
+            && state_sync_checked_path_count > 0
+            && state_sync_checked_path_detail_count >= state_sync_checked_path_count,
+        json!({
+            "controller_status": state_sync_controller.get("status").and_then(Value::as_str),
+            "controller_evidence_fresh": readiness.production_state_sync.controller_evidence_fresh,
+            "target_kind": state_sync_target_kind,
+            "node_count": state_sync_node_count,
+            "cluster_id": state_sync_cluster_id,
+            "expected_production_cluster_id": production_cluster_id,
+            "cluster_matches_expected": state_sync_cluster_matches_expected,
+            "distributed_state_backend": state_sync_backend,
+            "state_claim": state_sync_claim,
+            "checked_path_count": state_sync_checked_path_count,
+            "checked_path_detail_count": state_sync_checked_path_detail_count,
+        }),
+        vec![
+            "state-sync controller evidence is missing, stale, single-node, non-production, or not bound to checked state paths",
+        ],
+        vec![
+            "run /api/remote-computers/state-sync/validate against a two-node production cluster and return checked path details for every state layout path",
+        ],
+    ));
+    checks.push(remote_computer_production_check(
+        "worker_pool_production_ops",
+        "Worker queue and isolated pool are production-ready",
+        worker_readiness.production_ops.status == "ready"
+            && !worker_readiness.production_ops.production_blocked
+            && worker_readiness.load_validation.latest_controller_validated
+            && worker_readiness.load_validation.controller_evidence_fresh,
+        json!({
+            "worker_status": worker_readiness.status,
+            "production_ops_status": worker_readiness.production_ops.status,
+            "production_blocked": worker_readiness.production_ops.production_blocked,
+            "queue_backend": worker_readiness.queue_backend.kind,
+            "load_validated": worker_readiness.load_validation.load_validated,
+            "latest_controller_validated": worker_readiness.load_validation.latest_controller_validated,
+            "controller_evidence_fresh": worker_readiness.load_validation.controller_evidence_fresh,
+            "blocking_reasons": worker_readiness.production_ops.blocking_reasons,
+        }),
+        vec!["worker production ops or isolated load validation evidence is not ready"],
+        vec!["run worker load validation with a durable queue and isolated worker pool before scaling Remote Computer execution"],
+    ));
+    checks.push(remote_computer_production_check(
+        "execution_transport_and_runner",
+        "Kubernetes execution transport and live runner mutation are enabled behind policy",
+        execution_transport.execution_enabled
+            && execution_transport.status == "enabled"
+            && readiness.runner.configured
+            && readiness.runner.live_mutation_enabled
+            && !readiness.runner.dry_run_only,
+        json!({
+            "execution_transport_status": execution_transport.status,
+            "execution_enabled": execution_transport.execution_enabled,
+            "runner_status": readiness.runner.status,
+            "runner_configured": readiness.runner.configured,
+            "runner_live_mutation_enabled": readiness.runner.live_mutation_enabled,
+            "runner_dry_run_only": readiness.runner.dry_run_only,
+            "supported_operations": execution_transport.supported_operations,
+        }),
+        vec!["Remote Computer execution transport or Kubernetes runner live mutation remains fail-closed"],
+        vec!["enable Kubernetes execution transport only after state sync, worker, and sidecar evidence are ready"],
+    ));
+    checks.push(remote_computer_production_check(
+        "sidecar_recovery_evidence",
+        "Sidecar recovery evidence is validated across the production cluster",
+        sidecar_validation.get("status").and_then(Value::as_str) == Some("validated")
+            && remote_computer_real_cluster_kind(sidecar_target_kind)
+            && sidecar_node_count.is_some_and(|count| count >= 2)
+            && remote_computer_production_identity(sidecar_cluster_id)
+            && sidecar_cluster_matches_expected
+            && sidecar_validation.get("replacement_scope").and_then(Value::as_str)
+                == Some("cluster")
+            && sidecar_validation
+                .get("replacement_pods_healthy")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            && sidecar_checked_pod_count > 0
+            && sidecar_checked_pod_detail_count >= sidecar_checked_pod_count,
+        json!({
+            "validation_status": sidecar_validation.get("status").and_then(Value::as_str),
+            "target_kind": sidecar_target_kind,
+            "node_count": sidecar_node_count,
+            "cluster_id": sidecar_cluster_id,
+            "expected_production_cluster_id": production_cluster_id,
+            "cluster_matches_expected": sidecar_cluster_matches_expected,
+            "replacement_scope": sidecar_validation.get("replacement_scope").and_then(Value::as_str),
+            "replacement_pods_healthy": sidecar_validation.get("replacement_pods_healthy").and_then(Value::as_bool),
+            "checked_pod_count": sidecar_checked_pod_count,
+            "checked_pod_detail_count": sidecar_checked_pod_detail_count,
+        }),
+        vec![
+            "sidecar recovery validation is missing, single-node, non-production, or not cluster-wide",
+        ],
+        vec![
+            "run /api/remote-computers/sidecars/recovery/run with a validation controller that proves cluster-wide replacement health",
+        ],
+    ));
+    checks.push(remote_computer_production_check(
+        "pod_security_and_artifact_sync",
+        "Network policy, autoscaling, and artifact sidecar wiring are production-ready",
+        readiness.network_policy.present
+            && readiness.autoscaling.queue_depth_scaling_present
+            && readiness.warm_pool.manifest_present
+            && readiness.artifact_discovery_sidecar.present
+            && readiness.artifact_discovery_sidecar_config.status == "configured",
+        json!({
+            "network_policy_present": readiness.network_policy.present,
+            "queue_depth_scaling_present": readiness.autoscaling.queue_depth_scaling_present,
+            "warm_pool_manifest_present": readiness.warm_pool.manifest_present,
+            "artifact_sidecar_present": readiness.artifact_discovery_sidecar.present,
+            "artifact_sidecar_config_status": readiness.artifact_discovery_sidecar_config.status,
+        }),
+        vec!["pod network policy, queue-depth scaling, warm pool, or artifact sidecar wiring is incomplete"],
+        vec!["keep Remote Computer execution behind the existing worker path until pod security and artifact sync are fully wired"],
+    ));
+
+    let blocked_check_count = checks
+        .iter()
+        .filter(|check| check.get("status").and_then(Value::as_str) != Some("ready"))
+        .count();
+    let ready_check_count = checks.len() - blocked_check_count;
+    let check_count = checks.len();
+    let completion_blocked = blocked_check_count > 0;
+    let status = if completion_blocked {
+        "blocked"
     } else {
-        "ready_for_pilot"
+        "ready"
     };
-    Ok(Json(json!({
+    let blockers: Vec<String> = checks
+        .iter()
+        .filter(|check| check.get("status").and_then(Value::as_str) != Some("ready"))
+        .filter_map(|check| {
+            let id = check.get("id").and_then(Value::as_str)?;
+            let blockers = check.get("blockers").and_then(Value::as_array)?;
+            Some(format!(
+                "{id}: {}",
+                blockers
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ))
+        })
+        .collect();
+
+    json!({
         "status": status,
-        "generated_at": Utc::now(),
-        "checks": {
-            "readiness": readiness,
+        "completion_blocked": completion_blocked,
+        "generated_at": generated_at,
+        "required_evidence_class": "customer_grade",
+        "objective": "Remote Computer multi-node production state",
+        "ready_check_count": ready_check_count,
+        "blocked_check_count": blocked_check_count,
+        "check_count": check_count,
+        "production_cluster_id": production_cluster_id,
+        "checks": checks,
+        "blockers": blockers,
+        "raw_readiness": {
+            "remote_computer": readiness,
             "execution_transport": execution_transport,
             "worker": worker_readiness,
         },
         "production_path": [
             {"key": "lease_remote_computer", "status": "available"},
             {"key": "assign_execution_job", "status": "available"},
-            {"key": "worker_executes_assigned_job", "status": if execution_transport.execution_enabled { "enabled" } else { "fail_closed" }},
-            {"key": "sync_artifacts", "status": "available"},
+            {"key": "worker_executes_assigned_job", "status": if completion_blocked { "fail_closed" } else { "enabled" }},
+            {"key": "sync_artifacts", "status": if completion_blocked { "blocked" } else { "available" }},
             {"key": "audit_and_reclaim", "status": "available"}
         ],
-        "runbook_actions": [
-            "confirm readiness and state-sync blockers before enabling Kubernetes execution transport",
-            "run worker load validation before scaling remote computer workers",
-            "keep direct tool execution behind execution-job approvals and worker handoff"
+        "next_actions": [
+            "configure a real distributed RWX state provider and lock-aware state sync manager",
+            "run state-sync validation against a non-pilot two-node production cluster",
+            "run sidecar recovery validation against the same production cluster",
+            "enable Kubernetes execution transport only after worker, state, and sidecar evidence are fresh"
         ],
-    })))
+        "message": if completion_blocked {
+            format!("Remote Computer customer-grade multi-node production path is blocked: {ready_check_count}/{check_count} checks are ready")
+        } else {
+            "Remote Computer customer-grade multi-node production path is ready".to_string()
+        }
+    })
+}
+
+fn remote_computer_production_check(
+    id: &str,
+    title: &str,
+    ready: bool,
+    evidence: Value,
+    blockers: Vec<&str>,
+    next_actions: Vec<&str>,
+) -> Value {
+    json!({
+        "id": id,
+        "title": title,
+        "status": if ready { "ready" } else { "blocked" },
+        "evidence": evidence,
+        "blockers": if ready { Vec::<String>::new() } else { blockers.into_iter().map(str::to_string).collect::<Vec<_>>() },
+        "next_actions": if ready { Vec::<String>::new() } else { next_actions.into_iter().map(str::to_string).collect::<Vec<_>>() },
+    })
+}
+
+fn remote_computer_latest_audit_details<'a>(
+    audit_logs: &'a [AuditLog],
+    action: &str,
+) -> Option<&'a Value> {
+    audit_logs
+        .iter()
+        .filter(|log| log.action == action)
+        .max_by_key(|log| log.created_at)
+        .map(|log| &log.details)
+}
+
+fn remote_computer_real_cluster_kind(value: Option<&str>) -> bool {
+    matches!(
+        value,
+        Some("k8s_cluster" | "kubernetes_cluster" | "production_cluster" | "real_cluster")
+    )
+}
+
+fn remote_computer_distributed_state_backend(value: Option<&str>) -> bool {
+    matches!(value, Some("juicefs" | "cephfs" | "longhorn-rwx"))
+}
+
+fn remote_computer_production_identity(value: Option<&str>) -> bool {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    let normalized = value.to_ascii_lowercase();
+    ![
+        "whiskey",
+        "pilot",
+        "mock",
+        "example",
+        "sample",
+        "demo",
+        "local",
+        "localhost",
+        "127.0.0.1",
+        "[::1]",
+    ]
+    .iter()
+    .any(|token| normalized.contains(token))
+}
+
+fn remote_computer_checked_state_path_detail_count(controller_execution: &Value) -> u64 {
+    let state_claim = controller_execution
+        .get("state_claim")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let cluster_id = controller_execution
+        .get("cluster_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if state_claim.is_empty() || cluster_id.is_empty() {
+        return 0;
+    }
+    let mut checked_paths = BTreeSet::new();
+    for key in ["checked_paths", "checked_state_paths", "path_checks"] {
+        if let Some(items) = controller_execution.get(key).and_then(Value::as_array) {
+            for item in items {
+                let item_cluster = item
+                    .get("cluster_id")
+                    .or_else(|| item.get("state_sync_cluster_id"))
+                    .or_else(|| item.get("target_cluster_id"))
+                    .and_then(Value::as_str);
+                let item_claim = item
+                    .get("state_claim")
+                    .or_else(|| item.get("claim"))
+                    .or_else(|| item.get("pvc"))
+                    .or_else(|| item.get("persistent_volume_claim"))
+                    .and_then(Value::as_str);
+                let item_path = item
+                    .get("path")
+                    .or_else(|| item.get("state_path"))
+                    .or_else(|| item.get("name"))
+                    .and_then(Value::as_str);
+                let status = item
+                    .get("status")
+                    .or_else(|| item.get("result"))
+                    .or_else(|| item.get("health"))
+                    .and_then(Value::as_str)
+                    .map(|value| value.to_ascii_lowercase());
+                let has_audit_ref = item
+                    .get("audit_id")
+                    .or_else(|| item.get("audit_log_id"))
+                    .or_else(|| item.get("trace_id"))
+                    .or_else(|| item.get("run_id"))
+                    .or_else(|| item.get("checked_at"))
+                    .or_else(|| item.get("validated_at"))
+                    .or_else(|| item.get("timestamp"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty());
+                if item_cluster == Some(cluster_id)
+                    && item_claim == Some(state_claim)
+                    && item_path.is_some_and(|path| !path.trim().is_empty())
+                    && status.as_deref().is_some_and(|status| {
+                        matches!(
+                            status,
+                            "passed"
+                                | "validated"
+                                | "completed"
+                                | "ready"
+                                | "exists"
+                                | "mounted"
+                                | "available"
+                                | "ok"
+                                | "healthy"
+                                | "accessible"
+                                | "readable"
+                                | "writable"
+                        )
+                    })
+                    && has_audit_ref
+                {
+                    checked_paths.insert(item_path.unwrap().to_string());
+                }
+            }
+        }
+    }
+    checked_paths.len() as u64
+}
+
+fn remote_computer_checked_sidecar_pod_detail_count(validation_result: &Value) -> u64 {
+    let cluster_id = validation_result
+        .get("cluster_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if cluster_id.is_empty() {
+        return 0;
+    }
+    let mut checked_pods = BTreeSet::new();
+    for key in ["checked_pods", "replacement_pods", "pod_checks"] {
+        if let Some(items) = validation_result.get(key).and_then(Value::as_array) {
+            for item in items {
+                let item_cluster = item
+                    .get("cluster_id")
+                    .or_else(|| item.get("sidecar_cluster_id"))
+                    .or_else(|| item.get("target_cluster_id"))
+                    .and_then(Value::as_str);
+                let pod = item
+                    .get("pod")
+                    .or_else(|| item.get("pod_name"))
+                    .or_else(|| item.get("name"))
+                    .and_then(Value::as_str);
+                let status = item
+                    .get("status")
+                    .or_else(|| item.get("phase"))
+                    .or_else(|| item.get("health"))
+                    .and_then(Value::as_str)
+                    .map(|value| value.to_ascii_lowercase());
+                let has_audit_ref = item
+                    .get("audit_id")
+                    .or_else(|| item.get("audit_log_id"))
+                    .or_else(|| item.get("trace_id"))
+                    .or_else(|| item.get("run_id"))
+                    .or_else(|| item.get("checked_at"))
+                    .or_else(|| item.get("validated_at"))
+                    .or_else(|| item.get("timestamp"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty());
+                if item_cluster == Some(cluster_id)
+                    && pod.is_some_and(|pod| !pod.trim().is_empty())
+                    && status.as_deref().is_some_and(|status| {
+                        matches!(
+                            status,
+                            "running" | "ready" | "healthy" | "succeeded" | "validated"
+                        )
+                    })
+                    && has_audit_ref
+                {
+                    checked_pods.insert(pod.unwrap().to_string());
+                }
+            }
+        }
+    }
+    checked_pods.len() as u64
 }
 
 async fn validate_remote_computer_state_sync(
@@ -54310,6 +55479,12 @@ where
             .and_then(Value::as_str),
         "state_claim": body.get("state_claim").and_then(Value::as_str),
         "checked_path_count": body.get("checked_path_count").and_then(Value::as_u64),
+        "checked_paths": body
+            .get("checked_paths")
+            .or_else(|| body.get("checked_state_paths"))
+            .or_else(|| body.get("path_checks"))
+            .cloned()
+            .unwrap_or_else(|| json!([])),
     }))
 }
 
@@ -57386,6 +58561,88 @@ Stage 2 is not complete.
         assert!(managed_session.required_for_core);
         assert!(managed_session.required_for_stage2_production);
         assert!(!managed_session.enterprise_optional);
+    }
+
+    #[test]
+    fn enterprise_product_readiness_reports_customer_grade_blockers() {
+        let readiness = build_enterprise_product_completion_readiness();
+
+        assert_eq!(readiness.status, "blocked");
+        assert!(readiness.contract_present);
+        assert!(readiness.completion_blocked);
+        assert_eq!(readiness.required_evidence_class, "customer_grade");
+        assert_eq!(readiness.lane_count, 8);
+        assert_eq!(readiness.ready_lane_count, 0);
+        assert_eq!(readiness.pilot_ready_lane_count, 2);
+        assert_eq!(readiness.blocked_lane_count, 6);
+        assert!(
+            readiness
+                .next_actions
+                .iter()
+                .any(|action| action.contains("Remote Computer multi-node"))
+        );
+
+        let runtime = readiness
+            .lanes
+            .iter()
+            .find(|lane| lane.id == "runtime-production")
+            .expect("runtime lane");
+        assert_eq!(runtime.status, "pilot_ready");
+        assert_eq!(runtime.current_evidence_class, "production_like_pilot");
+        assert!(
+            runtime
+                .readiness_endpoints
+                .contains(&"/api/stage2/readiness".to_string())
+        );
+
+        let remote_computer = readiness
+            .lanes
+            .iter()
+            .find(|lane| lane.id == "remote-computer-multinode")
+            .expect("remote computer lane");
+        assert_eq!(remote_computer.status, "blocked");
+        assert!(
+            remote_computer
+                .blockers
+                .iter()
+                .any(|blocker| blocker.contains("single-node local-hostpath"))
+        );
+
+        let live_connectors = readiness
+            .lanes
+            .iter()
+            .find(|lane| lane.id == "live-connector-production")
+            .expect("live connector lane");
+        assert_eq!(live_connectors.status, "blocked");
+        assert!(
+            live_connectors
+                .evidence_scripts
+                .contains(&"./scripts/verify-ecommerce-tmall-context-os.sh".to_string())
+        );
+
+        let ontology = readiness
+            .lanes
+            .iter()
+            .find(|lane| lane.id == "ontology-engine")
+            .expect("ontology lane");
+        assert_eq!(ontology.status, "blocked");
+        assert!(
+            ontology
+                .current_boundary
+                .contains("ontology-ready is not a full ontology engine")
+        );
+
+        let product_surfaces = readiness
+            .lanes
+            .iter()
+            .find(|lane| lane.id == "product-surfaces")
+            .expect("product surfaces lane");
+        assert_eq!(product_surfaces.status, "blocked");
+        assert!(
+            product_surfaces
+                .readiness_endpoints
+                .contains(&"/api/enterprise-product/readiness".to_string())
+        );
     }
 
     #[test]
@@ -62901,6 +64158,63 @@ not json
         );
     }
 
+    #[test]
+    fn ontology_engine_readiness_reports_release_lifecycle_blockers() {
+        let readiness = build_ontology_engine_readiness();
+
+        assert_eq!(readiness.status, "blocked");
+        assert!(readiness.completion_blocked);
+        assert_eq!(readiness.required_evidence_class, "customer_grade");
+        assert_eq!(readiness.registry_version, "core-v0.1");
+        assert!(readiness.object_type_count >= 20);
+        assert!(readiness.relation_type_count >= 10);
+        assert_eq!(readiness.check_count, 8);
+        assert_eq!(readiness.ready_check_count, 4);
+        assert_eq!(readiness.pilot_ready_check_count, 1);
+        assert_eq!(readiness.blocked_check_count, 3);
+
+        for ready_check in [
+            "core-registry",
+            "relation-constraints",
+            "builder-review-proposals",
+            "context-packet-rendering",
+        ] {
+            let check = readiness
+                .checks
+                .iter()
+                .find(|check| check.id == ready_check)
+                .unwrap_or_else(|| panic!("missing {ready_check} ontology readiness check"));
+            assert_eq!(check.status, "ready");
+            assert_eq!(check.required_evidence_class, "customer_grade");
+        }
+
+        let lifecycle = readiness
+            .checks
+            .iter()
+            .find(|check| check.id == "domain-ontology-lifecycle")
+            .expect("domain lifecycle check");
+        assert_eq!(lifecycle.status, "blocked");
+        assert!(
+            lifecycle
+                .blockers
+                .iter()
+                .any(|blocker| { blocker.contains("promoted, rolled back, or migrated") })
+        );
+
+        let release = readiness
+            .checks
+            .iter()
+            .find(|check| check.id == "approved-release-materialization")
+            .expect("release materialization check");
+        assert_eq!(release.status, "blocked");
+        assert!(
+            release
+                .next_actions
+                .iter()
+                .any(|action| action.contains("immutable ontology versions"))
+        );
+    }
+
     #[tokio::test]
     async fn semantic_links_reject_relations_not_declared_in_ontology() {
         let app = test_app().await;
@@ -63849,9 +65163,18 @@ not json
                 .expect("valid request"),
         )
         .await;
-        assert_eq!(remote_path["status"], "ready_for_pilot");
-        assert!(remote_path["checks"]["readiness"].is_object());
-        assert!(remote_path["checks"]["execution_transport"].is_object());
+        assert_eq!(remote_path["status"], "blocked");
+        assert_eq!(remote_path["completion_blocked"], true);
+        assert_eq!(remote_path["required_evidence_class"], "customer_grade");
+        assert!(remote_path["raw_readiness"]["remote_computer"].is_object());
+        assert!(remote_path["raw_readiness"]["execution_transport"].is_object());
+        assert!(
+            remote_path["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|check| check["id"] == "multi_node_state_sync_evidence")
+        );
 
         let worker_validation: Value = request_json(
             app,
@@ -86636,6 +87959,267 @@ not json
                 .unwrap_or_default()
                 .contains("approval commit token digest does not match")
         );
+    }
+
+    #[tokio::test]
+    async fn ecommerce_native_connector_live_adapter_executes_after_approval_commit() {
+        let _lock = env_lock().lock().expect("env lock");
+        let _live_enabled = EnvVarGuard::set("MANDOFORGE_NATIVE_CONNECTOR_LIVE_ENABLED", "1");
+        let _ecommerce_live_alias =
+            EnvVarGuard::remove("MANDOFORGE_ECOMMERCE_LIVE_ADAPTERS_ENABLED");
+        let _app_key = EnvVarGuard::set("TMALL_TOP_APP_KEY", "tmall-app-key");
+        let _app_secret = EnvVarGuard::set("TMALL_TOP_APP_SECRET", "tmall-app-secret");
+        let _session = EnvVarGuard::set("TMALL_TOP_SESSION", "tmall-session-token");
+
+        let call_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock tmall listener");
+        let addr = listener.local_addr().expect("mock tmall addr");
+        let mock_top = Router::new()
+            .route("/router/rest", post(mock_tmall_top_adapter))
+            .with_state(call_count.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, mock_top)
+                .await
+                .expect("mock tmall top adapter");
+        });
+
+        let state = test_state_with_worker(Arc::new(QueueBackedExecutionWorker));
+        let organization = state
+            .create_organization(
+                CreateOrganization {
+                    name: "Ecommerce Live Adapter Org".to_string(),
+                    slug: "ecommerce-live-adapter-org".to_string(),
+                },
+                Some("admin-1".to_string()),
+            )
+            .await
+            .expect("create org");
+        let team = state
+            .create_team(
+                organization.id,
+                CreateTeam {
+                    name: "Ecommerce Live Adapter Team".to_string(),
+                    slug: "ecommerce-live-adapter-team".to_string(),
+                },
+            )
+            .await
+            .expect("create team");
+        state
+            .create_provider_access(
+                team.id,
+                CreateProviderAccess {
+                    provider_name: "openai-compatible".to_string(),
+                    model_allowlist: vec!["gpt-5.4-mini".to_string()],
+                },
+            )
+            .await
+            .expect("create provider access");
+        let agent = state
+            .create_agent(CreateAgent {
+                name: "Ecommerce Live Adapter Agent".to_string(),
+                kind: "orchestrator".to_string(),
+                provider: "openai-compatible".to_string(),
+                model: "gpt-5.4-mini".to_string(),
+                team_id: Some(team.id),
+                project_id: None,
+                runtime_profile_id: None,
+                agent_role: "manager".to_string(),
+                system_prompt: "Use ecommerce native connectors only through approval commits."
+                    .to_string(),
+                runtime_config: json!({}),
+                tools: vec!["native.connector.call".to_string()],
+                tool_policy: json!({
+                    "approval_required": [
+                        {"tool": "native.connector.call", "risk": "critical"}
+                    ]
+                }),
+                mcp_server_ids: vec![],
+                skill_ids: vec![],
+                workflow_pack_ids: vec!["ecommerce-tmall".to_string()],
+                remote_computer_profile: json!({}),
+                semantic_scopes: json!({"domain_scope": "ecommerce", "workflow_scope": "tmall"}),
+                release_state: "draft".to_string(),
+            })
+            .await
+            .expect("create agent");
+        let definition = state
+            .create_workflow_definition(WorkflowDefinition {
+                id: Uuid::new_v4(),
+                pack_installation_id: None,
+                pack_id: Some("ecommerce-tmall".to_string()),
+                pack_version: Some("0.1.0".to_string()),
+                name: "Tmall approved refund workflow".to_string(),
+                entrypoint: "tmall-refund-agree".to_string(),
+                trigger_type: "manual".to_string(),
+                default_agent_id: agent.id,
+                default_environment_id: None,
+                input_schema_ref: None,
+                output_schema_ref: None,
+                step_graph: empty_json_object(),
+                handoff_rules: json!({
+                    "root_task_grant": {
+                        "tool_scope": {
+                            "read": [],
+                            "write": [],
+                            "external_write": ["native.connector.call"]
+                        },
+                        "connector_scope": {
+                            "mode": "commit_write",
+                            "allowed_connector_ids": ["tmall-top"],
+                            "allowed_tool_names": ["refund-agree"],
+                            "tenant_scope": {"workspace_id": "tmall-prod"},
+                            "side_effect_classes": ["marketplace_refund_write"]
+                        },
+                        "external_effects": {
+                            "publish": false,
+                            "payment": false,
+                            "external_message": false,
+                            "account_mutation": false,
+                            "marketplace_refund_write": true
+                        }
+                    }
+                }),
+                execution_strategy: default_workflow_execution_strategy(),
+                runtime_adapter: None,
+                runtime_mode: None,
+                runtime_capability_contract: empty_json_object(),
+                event_ingestion_policy: default_event_ingestion_policy(),
+                approval_policy_ref: None,
+                eval_gate_refs: Vec::new(),
+                release_state: "released".to_string(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                archived_at: None,
+            })
+            .await
+            .expect("workflow definition");
+        let app = build_router(state.clone());
+        let run: WorkflowRun = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-runs",
+                json!({"workflow_definition_id": definition.id}),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        let root_task_grant_id = run.root_task_grant_id.expect("root grant");
+
+        let approval_required: Value = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/tools/native.connector.call/execute")
+                .header("content-type", "application/json")
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::from(
+                    json!({
+                        "session_id": run.primary_session_id,
+                        "task_grant_id": root_task_grant_id,
+                        "args": {
+                            "connector_id": "tmall-top",
+                            "operation": "refund-agree",
+                            "side_effect_class": "marketplace_refund_write",
+                            "payload": {
+                                "__adapter_base_url": format!("http://{addr}/router/rest"),
+                                "refund_id": "R-live-1",
+                                "tid": "T-live-1",
+                                "oid": "O-live-1"
+                            }
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(approval_required["status"], json!("approval_required"));
+        let approval_id = Uuid::parse_str(
+            approval_required["approval_id"]
+                .as_str()
+                .expect("approval id"),
+        )
+        .expect("valid approval id");
+
+        let approved: Approval = request_json(
+            app,
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/approvals/{approval_id}/approve"))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let job = state
+            .execution_queue
+            .list()
+            .await
+            .expect("execution jobs")
+            .into_iter()
+            .find(|job| job.approval_id == approval_id)
+            .expect("queued ecommerce connector commit");
+        let completed = run_execution_job(&state, job.id, "ecommerce-live-adapter-worker")
+            .await
+            .expect("ecommerce connector live adapter executes");
+        assert_eq!(completed.status, ExecutionJobStatus::Completed);
+        assert_eq!(
+            call_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "mock Tmall endpoint should receive exactly one live call"
+        );
+
+        let tool_call = state
+            .get_tool_call(approved.tool_call_id.expect("tool call id"))
+            .await
+            .expect("tool call");
+        assert_eq!(tool_call.status, "completed");
+        let result = tool_call.result.expect("tool result");
+        assert_eq!(result["adapter_result"]["status"], json!("live_called"));
+        assert_eq!(
+            result["adapter_result"]["response"]["http_status"],
+            json!(200)
+        );
+        let body_preview: Value = serde_json::from_str(
+            result["adapter_result"]["response"]["body_preview"]
+                .as_str()
+                .expect("body preview"),
+        )
+        .expect("json body preview");
+        assert_eq!(body_preview["ok"], json!(true));
+        assert_eq!(body_preview["method"], json!("taobao.rp.refunds.agree"));
+        assert!(!result.to_string().contains("tmall-session-token"));
+        assert!(!result.to_string().contains("tmall-app-secret"));
+
+        let consumed_token = state
+            .approval_commit_token_for_approval(approval_id)
+            .await
+            .expect("commit token")
+            .expect("ecommerce approval should keep token record");
+        assert_eq!(consumed_token.status, "consumed");
+        server.abort();
+    }
+
+    async fn mock_tmall_top_adapter(
+        State(call_count): State<Arc<std::sync::atomic::AtomicUsize>>,
+        Query(params): Query<BTreeMap<String, String>>,
+    ) -> Json<Value> {
+        call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            params.get("method").map(String::as_str),
+            Some("taobao.rp.refunds.agree")
+        );
+        assert!(params.contains_key("sign"));
+        assert_eq!(
+            params.get("refund_id").map(String::as_str),
+            Some("R-live-1")
+        );
+        Json(json!({"ok": true, "method": params.get("method").cloned().unwrap_or_default()}))
     }
 
     fn test_workspace_root() -> PathBuf {

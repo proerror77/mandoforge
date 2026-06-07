@@ -41,6 +41,8 @@ const LIVE_CHECKS = [
   ["GET", "/api/agent-handoff-assignments"],
   ["GET", "/api/workflow-packs/installations"],
   ["GET", "/api/stage2/readiness"],
+  ["GET", "/api/enterprise-product/readiness"],
+  ["GET", "/api/native-connectors/production-readiness"],
   ["GET", "/api/observability"],
   ["GET", "/api/capability-discovery"],
   ["GET", "/api/usage"],
@@ -58,6 +60,7 @@ const LIVE_CHECKS = [
   ["GET", "/api/semantic-workbench?domain_scope=legal"],
   ["GET", "/api/semantic-reflection/queue"],
   ["GET", "/api/ontology/registry"],
+  ["GET", "/api/ontology/engine-readiness"],
   ["GET", "/api/semantic-retrieval/backends"],
   [
     "POST",
