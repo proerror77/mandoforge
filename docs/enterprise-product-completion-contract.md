@@ -212,6 +212,8 @@ Required evidence:
 
 Primary repo surfaces:
 
+- `GET /api/enterprise-security/admin-readiness`
+- `scripts/enterprise-security-admin-readiness-gate.sh`
 - `scripts/tenant-isolation-evidence-gate.sh`
 - `scripts/vault-evidence-gate.sh`
 - `scripts/approval-notification-evidence-gate.sh`

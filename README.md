@@ -457,6 +457,7 @@ Governance and operations:
 - `POST /api/policy/simulate`
 - `GET /api/stage2/readiness`
 - `GET /api/enterprise-product/readiness`
+- `GET /api/enterprise-security/admin-readiness`
 - `GET /api/native-connectors/production-readiness`
 - `GET /api/ontology/engine-readiness`
 - `GET /api/providers/policy-gate`

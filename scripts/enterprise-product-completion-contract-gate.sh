@@ -26,6 +26,7 @@ required_files=(
   scripts/agent-os-core-evidence-gate.sh
   scripts/managed-session-runtime-evidence-gate.sh
   scripts/worker-remote-computer-evidence-gate.sh
+  scripts/enterprise-security-admin-readiness-gate.sh
   scripts/native-connector-production-readiness-gate.sh
   scripts/ontology-engine-readiness-gate.sh
   scripts/verify-ecommerce-tmall-context-os.sh

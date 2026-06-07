@@ -42,6 +42,7 @@ const LIVE_CHECKS = [
   ["GET", "/api/workflow-packs/installations"],
   ["GET", "/api/stage2/readiness"],
   ["GET", "/api/enterprise-product/readiness"],
+  ["GET", "/api/enterprise-security/admin-readiness"],
   ["GET", "/api/native-connectors/production-readiness"],
   ["GET", "/api/observability"],
   ["GET", "/api/capability-discovery"],
