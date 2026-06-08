@@ -119,10 +119,12 @@ Required evidence:
 Primary repo surfaces:
 
 - `docs/workflow-pack-manifest-contract.md`
+- `docs/ecommerce-platform-closed-loop.md`
 - `crates/mandoforge-api/src/native_connectors.rs`
 - `crates/mandoforge-api/src/execution.rs`
 - `GET /api/native-connectors/production-readiness`
 - `scripts/native-connector-production-readiness-gate.sh`
+- `scripts/verify-ecommerce-platform-closed-loop.sh`
 - `scripts/verify-ecommerce-tmall-context-os.sh`
 - `scripts/workflow-pack-evidence-gate.sh`
 

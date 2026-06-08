@@ -19,6 +19,7 @@ required_lanes=(
 required_files=(
   docs/architecture.md
   docs/runtime-truth-audit.md
+  docs/ecommerce-platform-closed-loop.md
   docs/workflow-pack-manifest-contract.md
   docs/drafts/context-os-memory-architecture.md
   docs/agent-remote-computer-plan.md
@@ -28,6 +29,7 @@ required_files=(
   scripts/worker-remote-computer-evidence-gate.sh
   scripts/enterprise-security-admin-readiness-gate.sh
   scripts/native-connector-production-readiness-gate.sh
+  scripts/verify-ecommerce-platform-closed-loop.sh
   scripts/ontology-engine-readiness-gate.sh
   scripts/verify-ecommerce-tmall-context-os.sh
   scripts/verify-workflow-pack-manifest.sh
