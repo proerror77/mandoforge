@@ -1,0 +1,141 @@
+connectors:
+  - id: xianyu-goofish
+    type: native
+    provider: goofish-browser-session
+    adapter_contract:
+      adapter_id: xianyu-goofish-adapter
+      runtime: native.connector.call
+      implementation: mandoforge.native_connectors.xianyu_goofish
+      live_execution: approval_commit_only
+      dry_run_supported: true
+      live_runtime:
+        enable_env: MANDOFORGE_NATIVE_CONNECTOR_LIVE_ENABLED
+        base_url_env: MANDOFORGE_XIANYU_BASE_URL
+        base_url_default: https://h5api.m.goofish.com
+        endpoint_path_arg: payload.__adapter_endpoint_path
+        secret_source: environment_or_vault_ref
+        required_env:
+          - XIANYU_SESSION_COOKIE
+          - XIANYU_DEVICE_ID
+    auth:
+      type: browser-session-cookie
+      required_secrets: [XIANYU_SESSION_COOKIE, XIANYU_DEVICE_ID]
+    read_operations:
+      - id: conversation-list-read
+        api_name: xianyu.im.conversation.list
+        permission: xianyu.conversation.read
+        object_types: [xianyu_conversation]
+        request_contract:
+          required_fields: [account_id, page_token]
+          optional_fields: [updated_after, page_size]
+        response_contract:
+          required_fields: [conversation_id, buyer_id, item_id, updated_at]
+          evidence_id_field: conversation_id
+      - id: message-thread-read
+        api_name: xianyu.im.message.thread
+        permission: xianyu.message.read
+        object_types: [xianyu_message]
+        request_contract:
+          required_fields: [account_id, conversation_id]
+          optional_fields: [before_message_id, page_size]
+        response_contract:
+          required_fields: [message_id, conversation_id, sender_id, content, created_at]
+          evidence_id_field: message_id
+      - id: item-list-read
+        api_name: xianyu.item.list
+        permission: xianyu.item.read
+        object_types: [xianyu_item]
+        request_contract:
+          required_fields: [account_id, page_token]
+          optional_fields: [status, page_size]
+        response_contract:
+          required_fields: [item_id, title, price, status, updated_at]
+          evidence_id_field: item_id
+      - id: order-detail-read
+        api_name: xianyu.order.detail
+        permission: xianyu.order.read
+        object_types: [xianyu_order]
+        request_contract:
+          required_fields: [account_id, order_id]
+          optional_fields: [item_id, buyer_id]
+        response_contract:
+          required_fields: [order_id, item_id, buyer_id, status, updated_at]
+          evidence_id_field: order_id
+      - id: risk-status-read
+        api_name: xianyu.account.risk.status
+        permission: xianyu.risk.read
+        object_types: [xianyu_risk_verification]
+        request_contract:
+          required_fields: [account_id]
+          optional_fields: [session_id, verification_type]
+        response_contract:
+          required_fields: [account_id, status, verification_required, updated_at]
+          evidence_id_field: account_id
+    write_operations:
+      - id: chat-message-send
+        api_name: xianyu.im.message.send
+        permission: xianyu.chat.message.write
+        approval_required: true
+        request_contract:
+          required_fields: [conversation_id, buyer_id, message_text]
+          forbidden_fields: [buyer_phone, buyer_address, raw_private_message, session_cookie]
+        response_contract:
+          required_fields: [success, request_id]
+      - id: delivery-steps-send
+        api_name: xianyu.delivery.steps.send
+        permission: xianyu.delivery.message.write
+        approval_required: true
+        request_contract:
+          required_fields: [order_id, conversation_id, buyer_id, delivery_steps]
+          forbidden_fields: [buyer_phone, buyer_address, raw_private_message, session_cookie, unapproved_card_secret]
+        response_contract:
+          required_fields: [success, request_id]
+      - id: item-polish-submit
+        api_name: xianyu.item.polish
+        permission: xianyu.item.polish.write
+        approval_required: true
+        request_contract:
+          required_fields: [item_id]
+          forbidden_fields: [session_cookie, unsupported_policy_exception]
+        response_contract:
+          required_fields: [success, request_id]
+    readiness_probes:
+      credential_probe:
+        required_secrets: [XIANYU_SESSION_COOKIE, XIANYU_DEVICE_ID]
+      tenant_scope_probe:
+        required_fields: [tenant_id, workspace_id, account_id, seller_id]
+      permission_probe:
+        sample_read_operations: [conversation-list-read, message-thread-read, item-list-read, order-detail-read]
+    approval_commit_binding:
+      required_for_write_operations: true
+      bind_fields: [tenant_id, workspace_id, connector_id, api_name, operation_id, object_id, payload_digest, approval_commit_token]
+    production_readiness:
+      required_evidence_class: customer_grade
+      fail_closed_without_evidence: true
+      environment_separation:
+        sandbox_base_url_env: MANDOFORGE_XIANYU_REPLAY_BASE_URL
+        live_base_url_env: MANDOFORGE_XIANYU_LIVE_BASE_URL
+      token_lifecycle:
+        required: true
+        controller_env: MANDOFORGE_XIANYU_SESSION_REFRESH_CONTROLLER_URL
+      rate_limit_retry:
+        required: true
+        policy_env: MANDOFORGE_XIANYU_RATE_LIMIT_POLICY
+        error_taxonomy: [network_timeout, page_structure_changed, risk_verification_required, rate_limited]
+      idempotency_reconciliation:
+        required: true
+        controller_env: MANDOFORGE_XIANYU_RECONCILIATION_CONTROLLER_URL
+        idempotency_fields: [tenant_id, connector_id, operation_id, object_id, payload_digest]
+      webhook_ingestion:
+        required: true
+        endpoint_env: MANDOFORGE_XIANYU_EVENT_INGESTION_URL
+      compensation:
+        required: true
+        policy_env: MANDOFORGE_XIANYU_COMPENSATION_POLICY
+        mode: compensation_or_explicit_non_compensable
+      approval_commit_boundary:
+        required: true
+      secret_redaction:
+        required: true
+    prompt_injection_boundary:
+      treat_results_as_data: true

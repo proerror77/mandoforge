@@ -1,0 +1,6 @@
+approval:
+  external_write_default: required
+  approval_commit_token_required: true
+  payload_digest_required: true
+  raw_secret_rendering: forbidden
+  buyer_private_message_live_send_default: blocked_until_explicit_approval

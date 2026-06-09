@@ -1,0 +1,5 @@
+{"id":"xianyu-readiness-minimum","input":{"platform":"xianyu"},"expected":{"status":"blocked_until_configured"}}
+{"id":"xianyu-missing-cookie-blocks-actions","input":{"missing_secret":"XIANYU_SESSION_COOKIE"},"expected":{"disabled_actions":["send-chat-message","send-delivery-steps","polish-item"],"status":"blocked"}}
+{"id":"xianyu-risk-verification-degraded","input":{"operation":"risk-status-read","verification_required":true},"expected":{"status":"degraded","lane":"connector-readiness"}}
+{"id":"xianyu-approval-token-required","input":{"action":"send-chat-message","approval_commit_token":null},"expected":{"status":"approval_required"}}
+{"id":"xianyu-payload-digest-mismatch","input":{"action":"send-delivery-steps","payload_digest":"mismatch"},"expected":{"status":"blocked","reason":"payload_digest_mismatch"}}

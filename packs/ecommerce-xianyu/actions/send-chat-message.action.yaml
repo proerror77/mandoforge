@@ -1,0 +1,28 @@
+id: send-chat-message
+object_type: xianyu_message
+connector_id: xianyu-goofish
+operation_id: chat-message-send
+side_effect_class: marketplace_private_message_write
+parameters:
+  - name: conversation_id
+    type: ObjectReference<xianyu_conversation>
+    required: true
+  - name: buyer_id
+    type: String
+    required: true
+  - name: message_text
+    type: String
+    required: true
+validations:
+  rules:
+    - conversation belongs to tenant-bound account_id
+    - message_text passes store reply and risk policy
+    - approval payload digest matches conversation_id, operation_id, and message_text
+effects:
+  native_connector_call: native.connector.call
+  audit_event: xianyu.action.send_chat_message
+approval:
+  approval_required: true
+  approver_role: admin
+  approval_commit_token_required: true
+  payload_digest_required: true

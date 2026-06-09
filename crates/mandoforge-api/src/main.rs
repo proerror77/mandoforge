@@ -19260,6 +19260,7 @@ fn workflow_pack_marketplace_manifest_paths() -> Vec<String> {
         "packs/ecommerce-taobao/package.yaml".to_string(),
         "packs/ecommerce-tiktok-shop/package.yaml".to_string(),
         "packs/ecommerce-tmall/package.yaml".to_string(),
+        "packs/ecommerce-xianyu/package.yaml".to_string(),
         "packs/ecommerce-xiaohongshu/package.yaml".to_string(),
         "packs/legal/package.yaml".to_string(),
     ]
@@ -67357,6 +67358,13 @@ not json
                 "xiaohongshu_comment",
                 "comment-on-note",
                 Some("reply-shop-comment"),
+            ),
+            (
+                "ecommerce-xianyu",
+                "xianyu",
+                "xianyu_conversation",
+                "message-in-conversation",
+                Some("send-chat-message"),
             ),
             (
                 "ecommerce-tiktok-shop",

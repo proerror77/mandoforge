@@ -1,0 +1,14 @@
+connector_map:
+  connector_id: xianyu-goofish
+  lanes:
+    connector-readiness:
+      required_operations: [conversation-list-read, message-thread-read, item-list-read, order-detail-read, risk-status-read]
+      blocked_behavior: disable_platform_actions
+    customer-service-conversation:
+      required_operations: [conversation-list-read, message-thread-read, item-list-read]
+      write_operations: [chat-message-send]
+      blocked_behavior: draft_only
+    delivery-triage:
+      required_operations: [order-detail-read, item-list-read, message-thread-read]
+      write_operations: [delivery-steps-send]
+      blocked_behavior: approval_required

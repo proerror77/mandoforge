@@ -1,0 +1,3 @@
+id: response-writer
+role: writer
+instructions: Produce draft-only customer replies, delivery plans, readiness reports, and approval-binding summaries with source evidence references.

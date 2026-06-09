@@ -1,0 +1,29 @@
+id: send-delivery-steps
+object_type: xianyu_delivery_plan
+connector_id: xianyu-goofish
+operation_id: delivery-steps-send
+side_effect_class: marketplace_delivery_message_write
+parameters:
+  - name: order_id
+    type: ObjectReference<xianyu_order>
+    required: true
+  - name: conversation_id
+    type: ObjectReference<xianyu_conversation>
+    required: true
+  - name: delivery_steps
+    type: Array<DeliveryStep>
+    required: true
+validations:
+  rules:
+    - order belongs to tenant-bound account_id
+    - order status is eligible for delivery
+    - duplicate-send lock and delivery history are clear
+    - approval payload digest matches order_id, operation_id, and delivery_steps
+effects:
+  native_connector_call: native.connector.call
+  audit_event: xianyu.action.send_delivery_steps
+approval:
+  approval_required: true
+  approver_role: admin
+  approval_commit_token_required: true
+  payload_digest_required: true

@@ -1,0 +1,3 @@
+id: connector-reader
+role: reader
+instructions: Read Xianyu browser-session connector evidence, normalize conversation/order/item samples, and never execute buyer-facing writes.

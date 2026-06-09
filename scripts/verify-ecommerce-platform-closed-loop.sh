@@ -53,6 +53,18 @@ SPECS = [
     compensation_env: "MANDOFORGE_XHS_COMPENSATION_POLICY"
   },
   {
+    pack: "ecommerce-xianyu",
+    connector_id: "xianyu-goofish",
+    connector_path: "packs/ecommerce-xianyu/connectors/xianyu-goofish.yaml",
+    sandbox_env: "MANDOFORGE_XIANYU_REPLAY_BASE_URL",
+    live_env: "MANDOFORGE_XIANYU_LIVE_BASE_URL",
+    token_env: "MANDOFORGE_XIANYU_SESSION_REFRESH_CONTROLLER_URL",
+    rate_env: "MANDOFORGE_XIANYU_RATE_LIMIT_POLICY",
+    reconciliation_env: "MANDOFORGE_XIANYU_RECONCILIATION_CONTROLLER_URL",
+    webhook_env: "MANDOFORGE_XIANYU_EVENT_INGESTION_URL",
+    compensation_env: "MANDOFORGE_XIANYU_COMPENSATION_POLICY"
+  },
+  {
     pack: "ecommerce-tiktok-shop",
     connector_id: "tiktok-shop-open-api",
     connector_path: "packs/ecommerce-tiktok-shop/connectors/tiktok-shop-open-api.yaml",

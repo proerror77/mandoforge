@@ -12,6 +12,7 @@ test -f packs/ecommerce-core/package.yaml
 test -f packs/ecommerce-taobao/package.yaml
 test -f packs/ecommerce-tiktok-shop/package.yaml
 test -f packs/ecommerce-tmall/package.yaml
+test -f packs/ecommerce-xianyu/package.yaml
 test -f packs/ecommerce-xiaohongshu/package.yaml
 test -f packs/legal/package.yaml
 test -f scripts/verify-ecommerce-platform-closed-loop.sh

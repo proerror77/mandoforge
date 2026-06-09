@@ -1,0 +1,1 @@
+{"type":"object","required":["conversation_id","buyer_intent","reply_text","approval_required"],"properties":{"conversation_id":{"type":"string"},"buyer_intent":{"type":"string"},"reply_text":{"type":"string"},"approval_required":{"type":"boolean"},"evidence_refs":{"type":"array","items":{"type":"string"}},"manual_handoff_reason":{"type":"string"}}}
