@@ -1,9 +1,9 @@
 use crate::api::{Agent, Session};
-use crate::components::{KeyMetrics, Panel, Rows, VersionBlock};
+use crate::components::{FlowMeter, KeyMetrics, Panel, Rows, RuntimePipeline, VersionBlock};
 use crate::state::ConsoleData;
 use crate::{
-    FlowMeter, RuntimePipeline, effective_selected, is_active_status, label_or, orbit_point,
-    position_style, session_title, short_id, status_tone,
+    effective_selected, is_active_status, label_or, orbit_point, position_style, session_title,
+    short_id, status_tone,
 };
 use yew::prelude::*;
 

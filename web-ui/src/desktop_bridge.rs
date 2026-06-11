@@ -123,19 +123,16 @@ where
 
 fn desktop_invoke_function() -> Option<(JsValue, Function)> {
     let window = web_sys::window()?;
-    let tauri = Reflect::get(window.as_ref(), &JsValue::from_str("__TAURI__")).ok()?;
-    if tauri.is_undefined() || tauri.is_null() {
+    let internals =
+        Reflect::get(window.as_ref(), &JsValue::from_str("__TAURI_INTERNALS__")).ok()?;
+    if internals.is_undefined() || internals.is_null() {
         return None;
     }
-    let core = Reflect::get(&tauri, &JsValue::from_str("core"))
-        .ok()
-        .filter(|value| !value.is_undefined() && !value.is_null())
-        .unwrap_or(tauri);
-    let invoke = Reflect::get(&core, &JsValue::from_str("invoke"))
+    let invoke = Reflect::get(&internals, &JsValue::from_str("invoke"))
         .ok()?
         .dyn_into::<Function>()
         .ok()?;
-    Some((core, invoke))
+    Some((internals, invoke))
 }
 
 fn js_error_text(value: JsValue) -> String {

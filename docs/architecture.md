@@ -9,6 +9,10 @@ agent app, and it is not an enterprise production-evidence checklist.
 Existing Work Surfaces
   Slack / Feishu / GitHub / Jira / Linear / Email
         |
+Desktop Shell / Product Console
+  Tauri tray / WebView / OS notifications
+  Embedded or external loopback API mode
+        |
 Collaboration Layer
   WorkItem / Project / Assignment / Review
   Agent Teammate / Squad / Activity Feed
@@ -30,9 +34,13 @@ Enterprise Data Foundation
   Graph / Docs / APIs / Event Streams
 ```
 
-The current repository is strongest in the Managed Runtime Layer. Claude Managed
-Agents is a useful reference for that layer only: Agent, Environment, Session,
-Events, and Threads. It does not define the whole Agent OS.
+The optional desktop shell is a local product surface for operators. It owns
+tray integration, native notification forwarding, autostart controls, and
+loopback WebView startup, but it does not own the Agent OS runtime or policy
+boundary. The current repository is strongest in the Managed Runtime Layer.
+Claude Managed Agents is a useful reference for that layer only: Agent,
+Environment, Session, Events, and Threads. It does not define the whole Agent
+OS.
 
 The workflow-level target architecture is defined in
 [Managed Agent Workflow Architecture](managed-agent-workflow-architecture.md).

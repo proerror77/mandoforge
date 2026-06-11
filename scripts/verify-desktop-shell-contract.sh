@@ -53,6 +53,12 @@ require_text "$DESKTOP_ROOT/Cargo.toml" "tauri-plugin-single-instance"
 require_text "$DESKTOP_ROOT/tauri.conf.json" "com.mandonothing.mandoforge"
 require_text "$DESKTOP_ROOT/tauri.conf.json" "http://127.0.0.1:8787"
 require_text "$DESKTOP_ROOT/tauri.conf.json" "frontendDist"
+require_text "$DESKTOP_ROOT/tauri.conf.json" "\"withGlobalTauri\": false"
+require_text "$DESKTOP_ROOT/tauri.conf.json" "\"csp\":"
+require_text "$DESKTOP_ROOT/tauri.conf.json" "default-src 'self'"
+require_text "$DESKTOP_ROOT/tauri.conf.json" "script-src 'self' 'wasm-unsafe-eval'"
+require_text "$DESKTOP_ROOT/tauri.conf.json" "connect-src http://127.0.0.1"
+require_text "$DESKTOP_ROOT/tauri.conf.json" "http://localhost"
 require_text "$DESKTOP_ROOT/capabilities/default.json" "\"windows\": \\[\"main\"\\]"
 require_text "$DESKTOP_ROOT/capabilities/default.json" "core:webview:allow-create-webview-window"
 
@@ -84,6 +90,7 @@ done
 require_text "$DESKTOP_ROOT/src/lib.rs" "MANDOFORGE_API_BASE_URL"
 require_text "$DESKTOP_ROOT/src/lib.rs" "MANDOFORGE_DESKTOP_EMBEDDED_API"
 require_text "$DESKTOP_ROOT/src/lib.rs" "MANDOFORGE_DESKTOP_API_COMMAND"
+require_text "$DESKTOP_ROOT/src/lib.rs" "MANDOFORGE_DESKTOP_HEALTH_NONCE"
 require_text "$DESKTOP_ROOT/src/lib.rs" "MANDOFORGE_DESKTOP_SMOKE_EXIT_AFTER_MS"
 require_text "$DESKTOP_ROOT/src/lib.rs" "DesktopMode::ExistingApi"
 require_text "$DESKTOP_ROOT/src/lib.rs" "DesktopMode::EmbeddedLocalApi"
@@ -95,12 +102,22 @@ require_text "$DESKTOP_ROOT/src/lib.rs" "tauri_plugin_autostart::init"
 require_text "$DESKTOP_ROOT/src/lib.rs" "--from-autostart"
 require_text "$DESKTOP_ROOT/src/lib.rs" "tauri_plugin_notification::init"
 require_text "$DESKTOP_ROOT/src/lib.rs" "record_forwarded_notification_key"
+require_text "$DESKTOP_ROOT/src/lib.rs" "forget_forwarded_notification_key"
 require_text "$DESKTOP_ROOT/src/lib.rs" "127.0.0.1:0"
+require_text "$DESKTOP_ROOT/src/lib.rs" "validate_loopback_http_api_url"
+require_text "$DESKTOP_ROOT/src/lib.rs" "wait_for_api_reachable(&api_base_url, Some(&health_nonce)"
+require_text "$DESKTOP_ROOT/src/lib.rs" "api_healthz_ready"
+require_text "$DESKTOP_ROOT/src/lib.rs" "GET /healthz HTTP/1.1"
+require_text "$DESKTOP_ROOT/src/lib.rs" "response.contains(nonce)"
 require_text "$DESKTOP_ROOT/src/lib.rs" "api_reachable"
 require_text "$DESKTOP_ROOT/src/lib.rs" "api_unreachable"
 require_text "$DESKTOP_ROOT/src/commands.rs" "native_forwarding_enabled: true"
+require_text "$DESKTOP_ROOT/src/commands.rs" "validate_http_api_url"
 require_text "$DESKTOP_ROOT/src/commands.rs" "payload.severity != \"critical\""
 require_text "$DESKTOP_ROOT/src/commands.rs" "duplicate_ignored"
+require_text "$DESKTOP_ROOT/src/commands.rs" "notification_text"
+require_text "$DESKTOP_ROOT/src/commands.rs" "character.is_control()"
+require_text "$DESKTOP_ROOT/src/commands.rs" "state.forget_forwarded_notification_key(&key)"
 require_text "$DESKTOP_ROOT/src/commands.rs" "get_autostart_status"
 require_text "$DESKTOP_ROOT/src/commands.rs" "set_autostart_enabled"
 require_text "$DESKTOP_ROOT/src/commands.rs" "explicit_operator_opt_in_only"
@@ -116,9 +133,15 @@ require_text "$DESKTOP_ROOT/src/commands.rs" "autostart_enabled(&app)"
 require_text "$DESKTOP_ROOT/src/commands.rs" "native_notifications_enabled: true"
 require_text "$DESKTOP_ROOT/src/commands.rs" "enterprise_completion_claimed: false"
 require_text "$DESKTOP_ROOT/src/commands.rs" "mandoforge.criticalNotificationsMuted"
+require_text "web-ui/src/desktop_bridge.rs" "__TAURI_INTERNALS__"
+require_text "web-ui/src/desktop_bridge.rs" "JsFuture::from(promise).await"
 require_text "web-ui/src/notifications.rs" "forward_critical_notifications_to_desktop"
 require_text "web-ui/src/notifications.rs" "forward_console_notification"
+require_text "web-ui/src/notifications.rs" "JsFuture::from(promise).await.is_ok()"
+require_text "web-ui/src/notifications.rs" "mark_desktop_notification_forwarded(&key)"
+require_text "web-ui/src/notifications.rs" "local_storage"
 require_text "web-ui/src/notifications.rs" "session_storage"
+require_text "web-ui/src/notifications.rs" "visited >= 500"
 require_text "scripts/verify-desktop-runtime-smoke.sh" "START_API"
 require_text "scripts/verify-desktop-runtime-smoke.sh" "EMBEDDED_API"
 require_text "scripts/verify-desktop-runtime-smoke.sh" "cargo run -p mandoforge-desktop"
@@ -126,6 +149,16 @@ require_text "scripts/verify-desktop-runtime-smoke.sh" "MANDOFORGE_DESKTOP_EMBED
 
 if grep -R -q "cargo run -p mandoforge-api" "$DESKTOP_ROOT/src"; then
   echo "desktop shell contract failed: desktop MVP must not hard-code cargo-run API startup" >&2
+  exit 1
+fi
+
+if grep -R -q "MANDOFORGE_DESKTOP_API_ARGS" "$DESKTOP_ROOT/src"; then
+  echo "desktop shell contract failed: embedded API args must not be injected through whitespace-split env" >&2
+  exit 1
+fi
+
+if grep -R -q "\"__TAURI__\"" web-ui/src; then
+  echo "desktop shell contract failed: web UI must not depend on the global Tauri API bundle" >&2
   exit 1
 fi
 

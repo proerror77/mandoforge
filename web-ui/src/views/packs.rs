@@ -1,10 +1,11 @@
-use crate::PackCardModel;
-use crate::components::{JsonPreview, KeyMetrics, Panel, Rows, StatusLogo};
+use crate::components::{
+    JsonPreview, KeyMetrics, PackCardModel, PackMosaic, Panel, Rows, StatusLogo,
+};
 use crate::state::ConsoleData;
 use crate::{
-    PackMosaic, json_array_len, label_or, pack_blocker_summary, pack_card_models,
-    pack_connector_rows, pack_has_external_writes, pack_lifecycle_steps, pack_metric_count,
-    pack_requires_approval, pack_string_list, semantic_scope_summary, status_tone,
+    json_array_len, label_or, pack_blocker_summary, pack_card_models, pack_connector_rows,
+    pack_has_external_writes, pack_lifecycle_steps, pack_metric_count, pack_requires_approval,
+    pack_string_list, semantic_scope_summary, status_tone,
 };
 use serde_json::Value;
 use yew::prelude::*;

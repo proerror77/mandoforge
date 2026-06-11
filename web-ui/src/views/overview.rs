@@ -1,10 +1,12 @@
-use crate::components::{KeyMetrics, OverviewButton, OverviewSignal, Panel, Rows};
+use crate::components::{
+    EnterpriseReadinessPanel, KeyMetrics, OverviewButton, OverviewSignal, PackMosaic, Panel, Rows,
+    RuntimePipeline,
+};
 use crate::state::{ConsoleData, View};
 use crate::{
-    EnterpriseReadinessPanel, PackMosaic, RuntimePipeline, active_job_count, blocked_pack_count,
-    failed_job_count, first_lane_blocker, is_active_status, json_status, label_or,
-    operator_queue_rows, pack_overview_rows, pending_approval_count, ready_pack_count,
-    status_tone, worker_issue_rows,
+    active_job_count, blocked_pack_count, failed_job_count, first_lane_blocker, is_active_status,
+    json_status, label_or, operator_queue_rows, pack_overview_rows, pending_approval_count,
+    ready_pack_count, status_tone, worker_issue_rows,
 };
 use yew::prelude::*;
 
@@ -24,10 +26,10 @@ pub(crate) fn OverviewView(props: &OverviewProps) -> Html {
         .filter(|session| is_active_status(&session.status))
         .count();
     let pending_approvals = pending_approval_count(&data.approvals.data);
-    let active_workers =
-        active_job_count(&data.execution_jobs.data) + active_job_count(&data.session_loop_jobs.data);
-    let failed_jobs =
-        failed_job_count(&data.execution_jobs.data) + failed_job_count(&data.session_loop_jobs.data);
+    let active_workers = active_job_count(&data.execution_jobs.data)
+        + active_job_count(&data.session_loop_jobs.data);
+    let failed_jobs = failed_job_count(&data.execution_jobs.data)
+        + failed_job_count(&data.session_loop_jobs.data);
     let active_runs = data
         .workflow_runs
         .data

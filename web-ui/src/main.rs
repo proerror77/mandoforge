@@ -116,10 +116,7 @@ fn App() -> Html {
             5_000,
         ),
         ontology_registry: use_polling::<OntologyRegistry>("/api/ontology/registry", 6_000),
-        ontology_engine_readiness: use_polling::<Value>(
-            "/api/ontology/engine-readiness",
-            6_000,
-        ),
+        ontology_engine_readiness: use_polling::<Value>("/api/ontology/engine-readiness", 6_000),
         semantic_retrieval_backends: use_polling::<Value>(
             "/api/semantic-retrieval/backends",
             6_000,
@@ -224,8 +221,7 @@ fn App() -> Html {
                             packet.id
                         }
                         Err(error) => {
-                            mutation_status
-                                .set(format!("Context packet creation failed: {error}"));
+                            mutation_status.set(format!("Context packet creation failed: {error}"));
                             return;
                         }
                     }
@@ -330,22 +326,26 @@ fn App() -> Html {
         })
     };
 
-    let notifications = console_notifications(&data);
+    let notifications = use_memo(data.clone(), |data| console_notifications(data));
     let notification_count = notifications.len();
     let critical_notification_count = notifications
         .iter()
         .filter(|notification| notification.severity == "critical")
         .count();
     {
-        let notifications = notifications.clone();
+        let notifications = (*notifications).clone();
         let critical_notifications_muted = *critical_notifications_muted;
-        use_effect_with((notifications, critical_notifications_muted), |(notifications, muted)| {
-            if !*muted {
-                forward_critical_notifications_to_desktop(notifications);
-            }
-            || ()
-        });
+        use_effect_with(
+            (notifications, critical_notifications_muted),
+            |(notifications, muted)| {
+                if !*muted {
+                    forward_critical_notifications_to_desktop(notifications);
+                }
+                || ()
+            },
+        );
     }
+    let notifications = (*notifications).clone();
 
     html! {
         <main class="console-shell">
@@ -539,8 +539,7 @@ fn VisualCommandDeck(props: &VisualCommandDeckProps) -> Html {
         .readiness_score
         .unwrap_or_else(|| readiness_from_status(&data.stage2_readiness.data.status));
     let workflow_activity = data.workflow_runs.data.len() + data.dynamic_workflow_plans.data.len();
-    let semantic_mass =
-        data.semantic_graph.data.node_count + data.semantic_graph.data.edge_count;
+    let semantic_mass = data.semantic_graph.data.node_count + data.semantic_graph.data.edge_count;
     let enterprise_blocked = data.enterprise_product_readiness.data.blocked_lane_count;
 
     html! {
@@ -605,7 +604,12 @@ fn DynamicWorkflowCanvas(props: &DynamicWorkflowCanvasProps) -> Html {
     let ready_plans = props
         .plans
         .iter()
-        .filter(|plan| matches!(plan.status.as_str(), "approved" | "materialized" | "reviewed"))
+        .filter(|plan| {
+            matches!(
+                plan.status.as_str(),
+                "approved" | "materialized" | "reviewed"
+            )
+        })
         .count();
     let latest_plan = props.plans.first();
     let latest_objective = latest_plan
@@ -621,11 +625,31 @@ fn DynamicWorkflowCanvas(props: &DynamicWorkflowCanvasProps) -> Html {
     let latest_agent_count = latest_plan.map(dynamic_plan_total_agents).unwrap_or(0);
     let stages = vec![
         ("Plan", props.plans.len(), status_tone(&latest_status)),
-        ("Native", native_plans, if native_plans > 0 { "good" } else { "neutral" }),
-        ("Work", active_work, if active_work > 0 { "info" } else { "neutral" }),
-        ("Runs", active_runs, if active_runs > 0 { "info" } else { "neutral" }),
-        ("Gate", ready_plans, if ready_plans > 0 { "good" } else { "neutral" }),
-        ("Errors", failed_jobs, if failed_jobs > 0 { "bad" } else { "good" }),
+        (
+            "Native",
+            native_plans,
+            if native_plans > 0 { "good" } else { "neutral" },
+        ),
+        (
+            "Work",
+            active_work,
+            if active_work > 0 { "info" } else { "neutral" },
+        ),
+        (
+            "Runs",
+            active_runs,
+            if active_runs > 0 { "info" } else { "neutral" },
+        ),
+        (
+            "Gate",
+            ready_plans,
+            if ready_plans > 0 { "good" } else { "neutral" },
+        ),
+        (
+            "Errors",
+            failed_jobs,
+            if failed_jobs > 0 { "bad" } else { "good" },
+        ),
     ];
 
     html! {
@@ -652,7 +676,11 @@ fn dynamic_plan_strategy(plan: &DynamicWorkflowPlan) -> String {
     plan.materialization
         .get("execution_strategy")
         .and_then(Value::as_str)
-        .or_else(|| plan.analysis.get("execution_strategy").and_then(Value::as_str))
+        .or_else(|| {
+            plan.analysis
+                .get("execution_strategy")
+                .and_then(Value::as_str)
+        })
         .or_else(|| {
             if plan.runtime_adapter.is_empty() {
                 None
@@ -683,173 +711,6 @@ fn dynamic_plan_total_agents(plan: &DynamicWorkflowPlan) -> usize {
 
 fn label_or_strategy(value: &str) -> String {
     label_or(value, "unknown").replace('_', " ")
-}
-
-#[derive(Properties, Clone, PartialEq)]
-pub(crate) struct FlowMeterProps {
-    pub(crate) label: &'static str,
-    pub(crate) value: usize,
-    pub(crate) max: usize,
-    #[prop_or("neutral")]
-    pub(crate) tone: &'static str,
-}
-
-#[component]
-pub(crate) fn FlowMeter(props: &FlowMeterProps) -> Html {
-    html! {
-        <div class={classes!("flow-meter", props.tone)}>
-            <span>{ props.label }</span>
-            <strong>{ props.value }</strong>
-            <i><b style={width_style(props.value, props.max)}></b></i>
-        </div>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-pub(crate) struct RuntimePipelineProps {
-    pub(crate) sessions: Vec<Session>,
-    pub(crate) execution_jobs: Vec<WorkerJob>,
-    pub(crate) session_loop_jobs: Vec<WorkerJob>,
-    pub(crate) approvals: Vec<Approval>,
-    pub(crate) tool_calls: Vec<ToolCall>,
-}
-
-#[component]
-pub(crate) fn RuntimePipeline(props: &RuntimePipelineProps) -> Html {
-    let stages = vec![
-        ("Sessions", props.sessions.len(), "neutral"),
-        (
-            "Session loop",
-            active_job_count(&props.session_loop_jobs),
-            "info",
-        ),
-        ("Workers", active_job_count(&props.execution_jobs), "info"),
-        ("Tools", props.tool_calls.len(), "good"),
-        (
-            "Approvals",
-            props
-                .approvals
-                .iter()
-                .filter(|approval| approval.status == "pending" || approval.status == "requires_action")
-                .count(),
-            "warn",
-        ),
-    ];
-    let max = stages.iter().map(|(_, value, _)| *value).max().unwrap_or(1).max(1);
-    html! {
-        <div class="runtime-pipeline">
-            { for stages.iter().enumerate().map(|(index, (label, value, tone))| html! {
-                <div class={classes!("pipeline-stage", *tone)} key={(*label).to_string()}>
-                    <span>{ index + 1 }</span>
-                    <strong>{ label }</strong>
-                    <i style={height_style(*value, max)}></i>
-                    <small>{ value }</small>
-                </div>
-            }) }
-        </div>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-pub(crate) struct PackMosaicProps {
-    pub(crate) installations: Vec<WorkflowPackInstallation>,
-    pub(crate) marketplace: WorkflowPackMarketplace,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct PackCardModel {
-    pub(crate) id: String,
-    pub(crate) name: String,
-    pub(crate) kind: String,
-    pub(crate) version: String,
-    pub(crate) description: String,
-    pub(crate) status: String,
-    pub(crate) source: String,
-    pub(crate) manifest: Value,
-}
-
-#[component]
-pub(crate) fn PackMosaic(props: &PackMosaicProps) -> Html {
-    let marketplace_count = props.marketplace.packs.len();
-    let total = props.installations.len().max(marketplace_count).max(1);
-    html! {
-        <div class="pack-mosaic">
-            <div class="mosaic-grid">
-                { for props.installations.iter().take(12).enumerate().map(|(index, pack)| html! {
-                    <article class={classes!("mosaic-tile", status_tone(&pack.status))} key={pack.id.clone()}>
-                        <span>{ index + 1 }</span>
-                        <strong>{ label_or(&pack.pack_id, "pack") }</strong>
-                        <small>{ semantic_scope_summary(&pack.manifest["semantic_scopes"]) }</small>
-                    </article>
-                }) }
-                { if props.installations.is_empty() {
-                    html! {
-                        { for props.marketplace.packs.iter().take(8).enumerate().map(|(index, pack)| html! {
-                            <article class={classes!("mosaic-tile", status_tone(&pack.status))} key={pack.id.clone()}>
-                                <span>{ index + 1 }</span>
-                                <strong>{ label_or(&pack.name, &pack.id) }</strong>
-                                <small>{ format!("{} / {}", label_or(&pack.kind, "kind"), label_or(&pack.version, "version")) }</small>
-                            </article>
-                        }) }
-                    }
-                } else {
-                    html! {}
-                }}
-            </div>
-            <div class="mosaic-side">
-                <FlowMeter label="Marketplace" value={marketplace_count} max={total} tone="neutral" />
-                <FlowMeter label="Installed" value={props.installations.len()} max={total} tone="good" />
-            </div>
-        </div>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-pub(crate) struct EnterpriseReadinessPanelProps {
-    pub(crate) readiness: EnterpriseProductReadiness,
-}
-
-#[component]
-pub(crate) fn EnterpriseReadinessPanel(props: &EnterpriseReadinessPanelProps) -> Html {
-    let readiness = &props.readiness;
-    let total = readiness.lane_count.max(readiness.lanes.len()).max(1);
-    let next_action = readiness
-        .next_actions
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "No next action reported.".to_string());
-    html! {
-        <div class="enterprise-readiness">
-            <div class="enterprise-summary">
-                <div>
-                    <span>{ label_or(&readiness.required_evidence_class, "customer_grade") }</span>
-                    <strong>{ label_or(&readiness.status, "blocked") }</strong>
-                    <small>{ label_or(&readiness.message, &next_action) }</small>
-                </div>
-                <div class="enterprise-meters">
-                    <FlowMeter label="Ready" value={readiness.ready_lane_count} max={total} tone="good" />
-                    <FlowMeter label="Pilot" value={readiness.pilot_ready_lane_count} max={total} tone="warn" />
-                    <FlowMeter label="Blocked" value={readiness.blocked_lane_count} max={total} tone={if readiness.blocked_lane_count > 0 { "bad" } else { "good" }} />
-                </div>
-            </div>
-            <div class="enterprise-lanes">
-                { for readiness.lanes.iter().map(|lane| {
-                    let blocker = lane.blockers.first().or_else(|| lane.next_actions.first());
-                    html! {
-                        <article class={classes!("enterprise-lane", status_tone(&lane.status))} key={lane.id.clone()}>
-                            <StatusLogo status={lane.status.clone()} />
-                            <div>
-                                <strong>{ label_or(&lane.title, &lane.id) }</strong>
-                                <span>{ format!("{} -> {}", label_or(&lane.current_evidence_class, "evidence"), label_or(&lane.required_evidence_class, "customer_grade")) }</span>
-                                <small>{ blocker.cloned().unwrap_or_else(|| label_or(&lane.production_target, "target").to_string()) }</small>
-                            </div>
-                            <em>{ label_or(&lane.status, "status") }</em>
-                        </article>
-                    }
-                }) }
-            </div>
-        </div>
-    }
 }
 
 #[hook]
@@ -996,10 +857,12 @@ pub(crate) fn json_gate_tone(value: &Value) -> &'static str {
 }
 
 pub(crate) fn first_lane_blocker(readiness: &EnterpriseProductReadiness) -> Option<String> {
-    readiness
-        .lanes
-        .iter()
-        .find_map(|lane| lane.blockers.first().or_else(|| lane.next_actions.first()).cloned())
+    readiness.lanes.iter().find_map(|lane| {
+        lane.blockers
+            .first()
+            .or_else(|| lane.next_actions.first())
+            .cloned()
+    })
 }
 
 pub(crate) fn worker_issue_rows(
@@ -1139,12 +1002,13 @@ pub(crate) fn pack_metric_count(
     array_key: &str,
     fallback_count_key: &str,
 ) -> usize {
-    json_array_len(&manifest[array_key])
-        .max(manifest
+    json_array_len(&manifest[array_key]).max(
+        manifest
             .get(fallback_count_key)
             .and_then(Value::as_u64)
             .map(|count| count as usize)
-            .unwrap_or(0))
+            .unwrap_or(0),
+    )
 }
 
 pub(crate) fn pack_string_list(manifest: &Value, key: &str, limit: usize) -> Vec<String> {
@@ -1187,7 +1051,10 @@ pub(crate) fn pack_connector_rows(manifest: &Value) -> Vec<(String, String)> {
                         .and_then(Value::as_u64)
                         .map(|count| format!("{count} samples"))
                         .unwrap_or_else(|| "sample gate not declared".to_string());
-                    Some((id.to_string(), format!("{kind} / {write_label} / {quality}")))
+                    Some((
+                        id.to_string(),
+                        format!("{kind} / {write_label} / {quality}"),
+                    ))
                 })
                 .collect::<Vec<_>>()
         })
@@ -1292,7 +1159,16 @@ pub(crate) fn pack_lifecycle_steps(
     if source == "marketplace" {
         return order
             .into_iter()
-            .map(|(label, _)| (label, if label == "Install" { "warn" } else { "neutral" }))
+            .map(|(label, _)| {
+                (
+                    label,
+                    if label == "Install" {
+                        "warn"
+                    } else {
+                        "neutral"
+                    },
+                )
+            })
             .collect();
     }
     order
@@ -1341,8 +1217,12 @@ pub(crate) fn pack_blocker_summary(
                 .to_string()
         }
         "released" => "Released pack with read/draft governed runtime surfaces.".to_string(),
-        "rolled_back" => "Rolled back; historical release evidence remains audit-visible.".to_string(),
-        "archived" => "Archived; hidden from active tenant behavior without deleting evidence.".to_string(),
+        "rolled_back" => {
+            "Rolled back; historical release evidence remains audit-visible.".to_string()
+        }
+        "archived" => {
+            "Archived; hidden from active tenant behavior without deleting evidence.".to_string()
+        }
         status if status_tone(status) == "bad" => {
             "Blocked pack. Inspect lifecycle gate evidence before demo or release.".to_string()
         }
@@ -1384,15 +1264,20 @@ pub(crate) fn operator_queue_rows(data: &ConsoleData) -> Vec<(String, String, St
                 None
             }
         });
-    let lane_rows = data.enterprise_product_readiness.data.lanes.iter().filter_map(|lane| {
-        lane.blockers.first().map(|blocker| {
-            (
-                lane.status.clone(),
-                label_or(&lane.title, &lane.id).to_string(),
-                blocker.clone(),
-            )
-        })
-    });
+    let lane_rows = data
+        .enterprise_product_readiness
+        .data
+        .lanes
+        .iter()
+        .filter_map(|lane| {
+            lane.blockers.first().map(|blocker| {
+                (
+                    lane.status.clone(),
+                    label_or(&lane.title, &lane.id).to_string(),
+                    blocker.clone(),
+                )
+            })
+        });
     approval_rows
         .chain(job_rows)
         .chain(lane_rows)
@@ -1420,7 +1305,12 @@ pub(crate) fn board_column(status: &str) -> &'static str {
 
 pub(crate) fn status_tone(status: &str) -> &'static str {
     match status {
-        "ready" | "completed" | "succeeded" | "active" | "promoted" | "released"
+        "ready"
+        | "completed"
+        | "succeeded"
+        | "active"
+        | "promoted"
+        | "released"
         | "enterprise_product_complete" => "good",
         "running" | "queued" | "claimed" | "in_progress" | "installed" | "staged" => "info",
         "pending" | "requires_action" | "review" | "warning" | "attention" | "pilot_ready" => {
@@ -1517,14 +1407,6 @@ pub(crate) fn session_title(session: &Session) -> String {
     }
 }
 
-fn width_style(value: usize, max: usize) -> String {
-    format!("width: {:.1}%;", percent(value, max))
-}
-
-fn height_style(value: usize, max: usize) -> String {
-    format!("height: {:.1}%;", percent(value, max).max(8.0))
-}
-
 pub(crate) fn gauge_style(score: f64) -> String {
     let pct = score.clamp(0.0, 1.0) * 100.0;
     format!("--gauge: {:.1}%;", pct)
@@ -1532,14 +1414,6 @@ pub(crate) fn gauge_style(score: f64) -> String {
 
 pub(crate) fn position_style(x: f64, y: f64) -> String {
     format!("left: {:.2}%; top: {:.2}%;", x, y)
-}
-
-fn percent(value: usize, max: usize) -> f64 {
-    if max == 0 {
-        0.0
-    } else {
-        (value as f64 / max as f64 * 100.0).clamp(0.0, 100.0)
-    }
 }
 
 pub(crate) fn orbit_point(index: usize, total: usize, cx: f64, cy: f64, radius: f64) -> (f64, f64) {

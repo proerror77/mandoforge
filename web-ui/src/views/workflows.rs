@@ -1,7 +1,7 @@
 use crate::api::{WorkflowDefinition, WorkflowRun};
-use crate::components::{JsonPreview, KeyMetrics, Panel, Rows};
+use crate::components::{FlowMeter, JsonPreview, KeyMetrics, Panel, Rows};
 use crate::state::ConsoleData;
-use crate::{FlowMeter, is_active_status, label_or, short_id, status_tone};
+use crate::{is_active_status, label_or, short_id, status_tone};
 use yew::prelude::*;
 
 #[derive(Properties, Clone, PartialEq)]

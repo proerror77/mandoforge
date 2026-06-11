@@ -19,6 +19,7 @@ tauri-plugin-autostart = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-single-instance = "2"
 time = { version = "0.3", features = ["formatting"] }
+uuid = { version = "1", features = ["v4"] }
 
 [build-dependencies]
 tauri-build = "2"

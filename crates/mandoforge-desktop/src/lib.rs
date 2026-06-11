@@ -4,13 +4,16 @@ mod tray;
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use std::{
+    collections::{HashSet, VecDeque},
     fs::OpenOptions,
-    net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
+    io::{Read, Write},
+    net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
     process::{Child, Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::Mutex,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use uuid::Uuid;
 
 const DEFAULT_API_BASE_URL: &str = "http://127.0.0.1:8787";
 const DEFAULT_EMBEDDED_API_COMMAND: &str = "mandoforge-api";
@@ -25,7 +28,8 @@ pub struct DesktopState {
 
 #[derive(Default)]
 struct NotificationBridgeState {
-    forwarded_keys: Vec<String>,
+    forwarded_keys: VecDeque<String>,
+    forwarded_key_set: HashSet<String>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -91,15 +95,15 @@ impl DesktopState {
                 notification_bridge: Mutex::new(NotificationBridgeState::default()),
             });
         }
-        Ok(Self::new(
-            std::env::var("MANDOFORGE_API_BASE_URL")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| DEFAULT_API_BASE_URL.to_string()),
-        ))
+        let api_base_url = std::env::var("MANDOFORGE_API_BASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_API_BASE_URL.to_string());
+        validate_loopback_http_api_url(&api_base_url)?;
+        Ok(Self::new(api_base_url))
     }
 
-    fn new(api_base_url: String) -> Self {
+    pub(crate) fn new(api_base_url: String) -> Self {
         Self {
             api_base_url,
             mode: DesktopMode::ExistingApi,
@@ -128,15 +132,27 @@ impl DesktopState {
         let Ok(mut bridge) = self.notification_bridge.lock() else {
             return false;
         };
-        if bridge.forwarded_keys.iter().any(|existing| existing == key) {
+        if bridge.forwarded_key_set.contains(key) {
             return false;
         }
-        bridge.forwarded_keys.push(key.to_string());
+        bridge.forwarded_keys.push_back(key.to_string());
+        bridge.forwarded_key_set.insert(key.to_string());
         if bridge.forwarded_keys.len() > 256 {
             let overflow = bridge.forwarded_keys.len() - 256;
-            bridge.forwarded_keys.drain(0..overflow);
+            let evicted_keys = bridge.forwarded_keys.drain(0..overflow).collect::<Vec<_>>();
+            for evicted in evicted_keys {
+                bridge.forwarded_key_set.remove(&evicted);
+            }
         }
         true
+    }
+
+    pub fn forget_forwarded_notification_key(&self, key: &str) {
+        let Ok(mut bridge) = self.notification_bridge.lock() else {
+            return;
+        };
+        bridge.forwarded_key_set.remove(key);
+        bridge.forwarded_keys.retain(|existing| existing != key);
     }
 
     pub fn forwarded_notification_count(&self) -> usize {
@@ -149,7 +165,7 @@ impl DesktopState {
 
 struct EmbeddedApiProcess {
     api_base_url: String,
-    child: Arc<Mutex<Child>>,
+    child: Child,
 }
 
 impl EmbeddedApiProcess {
@@ -158,18 +174,9 @@ impl EmbeddedApiProcess {
             .ok()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_EMBEDDED_API_COMMAND.to_string());
-        let args = std::env::var("MANDOFORGE_DESKTOP_API_ARGS")
-            .ok()
-            .map(|value| {
-                value
-                    .split_whitespace()
-                    .filter(|part| !part.trim().is_empty())
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
         let addr = reserve_loopback_addr()?;
         let api_base_url = format!("http://{addr}");
+        let health_nonce = Uuid::new_v4().to_string();
         let log_path = logs_dir()?.join("embedded-api.log");
         let stdout = OpenOptions::new()
             .create(true)
@@ -178,14 +185,14 @@ impl EmbeddedApiProcess {
             .with_context(|| format!("could not open embedded API log {}", log_path.display()))?;
         let stderr = stdout.try_clone()?;
         let mut child = Command::new(&command)
-            .args(args)
             .env("MANDOFORGE_ADDR", addr.to_string())
+            .env("MANDOFORGE_DESKTOP_HEALTH_NONCE", &health_nonce)
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr))
             .spawn()
             .with_context(|| format!("failed to spawn embedded API command: {command}"))?;
 
-        if !wait_for_api_reachable(&api_base_url, Duration::from_secs(20)) {
+        if !wait_for_api_reachable(&api_base_url, Some(&health_nonce), Duration::from_secs(20)) {
             let _ = child.kill();
             let _ = child.wait();
             bail!(
@@ -196,17 +203,15 @@ impl EmbeddedApiProcess {
 
         Ok(Self {
             api_base_url,
-            child: Arc::new(Mutex::new(child)),
+            child,
         })
     }
 }
 
 impl Drop for EmbeddedApiProcess {
     fn drop(&mut self) {
-        if let Ok(mut child) = self.child.lock() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -260,8 +265,7 @@ fn focus_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
 }
 
 fn open_console_window(app: &tauri::App, api_base_url: &str) -> Result<()> {
-    let url = tauri::Url::parse(api_base_url)
-        .with_context(|| format!("invalid MANDOFORGE_API_BASE_URL: {api_base_url}"))?;
+    let url = validate_loopback_http_api_url(api_base_url)?;
     WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
         .title("MandoForge Control Plane")
         .inner_size(1280.0, 860.0)
@@ -287,7 +291,7 @@ fn install_smoke_auto_exit(app: &tauri::AppHandle) {
 }
 
 fn api_connectivity_state(api_base_url: &str) -> &'static str {
-    let Ok(url) = tauri::Url::parse(api_base_url) else {
+    let Ok(url) = validate_http_api_url(api_base_url) else {
         return "api_url_invalid";
     };
     let Some(host) = url.host_str() else {
@@ -308,10 +312,14 @@ fn api_connectivity_state(api_base_url: &str) -> &'static str {
     }
 }
 
-fn wait_for_api_reachable(api_base_url: &str, timeout: Duration) -> bool {
+fn wait_for_api_reachable(
+    api_base_url: &str,
+    expected_nonce: Option<&str>,
+    timeout: Duration,
+) -> bool {
     let started_at = SystemTime::now();
     loop {
-        if api_connectivity_state(api_base_url) == "api_reachable" {
+        if api_healthz_ready(api_base_url, expected_nonce) {
             return true;
         }
         if started_at
@@ -330,6 +338,73 @@ fn reserve_loopback_addr() -> Result<SocketAddr> {
     let addr = listener.local_addr()?;
     drop(listener);
     Ok(addr)
+}
+
+pub(crate) fn validate_http_api_url(api_base_url: &str) -> Result<tauri::Url> {
+    let url = tauri::Url::parse(api_base_url)
+        .with_context(|| format!("invalid MANDOFORGE_API_BASE_URL: {api_base_url}"))?;
+    match url.scheme() {
+        "http" | "https" => Ok(url),
+        scheme => bail!("MANDOFORGE_API_BASE_URL must use http or https, got {scheme}"),
+    }
+}
+
+pub(crate) fn validate_loopback_http_api_url(api_base_url: &str) -> Result<tauri::Url> {
+    let url = validate_http_api_url(api_base_url)?;
+    let Some(host) = url.host_str() else {
+        bail!("MANDOFORGE_API_BASE_URL must include a host");
+    };
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .map(|address| address.is_loopback())
+            .unwrap_or(false);
+    if !loopback {
+        bail!("MandoForge desktop WebView only allows loopback API URLs");
+    }
+    Ok(url)
+}
+
+fn api_healthz_ready(api_base_url: &str, expected_nonce: Option<&str>) -> bool {
+    let Ok(url) = validate_http_api_url(api_base_url) else {
+        return false;
+    };
+    if url.scheme() != "http" {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let Some(port) = url.port_or_known_default() else {
+        return false;
+    };
+    let Ok(mut addresses) = (host, port).to_socket_addrs() else {
+        return false;
+    };
+    let Some(address) = addresses.next() else {
+        return false;
+    };
+    let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(500)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+    let request =
+        format!("GET /healthz HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n");
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let mut response = String::new();
+    if stream.read_to_string(&mut response).is_err() {
+        return false;
+    }
+    if !response.starts_with("HTTP/1.1 200") && !response.starts_with("HTTP/1.0 200") {
+        return false;
+    }
+    match expected_nonce {
+        Some(nonce) => response.contains(nonce),
+        None => response.contains(r#""status":"ok""#) || response.contains(r#""status": "ok""#),
+    }
 }
 
 fn env_bool(key: &str) -> bool {
@@ -386,6 +461,20 @@ mod tests {
     }
 
     #[test]
+    fn desktop_api_url_rejects_non_http_schemes() {
+        assert!(validate_http_api_url("file:///etc/passwd").is_err());
+        assert!(validate_http_api_url("mandoforge://api").is_err());
+        assert!(validate_http_api_url("http://127.0.0.1:8787").is_ok());
+    }
+
+    #[test]
+    fn desktop_webview_url_requires_loopback_host() {
+        assert!(validate_loopback_http_api_url("http://127.0.0.1:8787").is_ok());
+        assert!(validate_loopback_http_api_url("http://localhost:8787").is_ok());
+        assert!(validate_loopback_http_api_url("https://example.com").is_err());
+    }
+
+    #[test]
     fn env_bool_accepts_explicit_truthy_values() {
         unsafe {
             std::env::set_var("MANDOFORGE_DESKTOP_TEST_BOOL", "true");
@@ -402,5 +491,24 @@ mod tests {
         assert!(state.record_forwarded_notification_key("execution-job:1"));
         assert!(!state.record_forwarded_notification_key("execution-job:1"));
         assert_eq!(state.forwarded_notification_count(), 1);
+    }
+
+    #[test]
+    fn notification_bridge_evicts_oldest_keys_at_cap() {
+        let state = DesktopState::new("http://127.0.0.1:9".to_string());
+        for index in 0..257 {
+            assert!(state.record_forwarded_notification_key(&format!("execution-job:{index}")));
+        }
+        assert_eq!(state.forwarded_notification_count(), 256);
+        assert!(state.record_forwarded_notification_key("execution-job:0"));
+        assert_eq!(state.forwarded_notification_count(), 256);
+    }
+
+    #[test]
+    fn notification_bridge_can_forget_failed_forwarding_key() {
+        let state = DesktopState::new("http://127.0.0.1:9".to_string());
+        assert!(state.record_forwarded_notification_key("execution-job:1"));
+        state.forget_forwarded_notification_key("execution-job:1");
+        assert!(state.record_forwarded_notification_key("execution-job:1"));
     }
 }

@@ -1,8 +1,9 @@
 use crate::state::{ConsoleData, View};
 use crate::{json_status, label_or, short_id, status_tone};
-use js_sys::{Function, Object, Reflect};
+use js_sys::{Function, Object, Promise, Reflect};
 use serde_json::Value;
 use wasm_bindgen::{JsCast, JsValue};
+use wasm_bindgen_futures::{JsFuture, spawn_local};
 use yew::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -110,7 +111,10 @@ pub(crate) fn console_notifications(data: &ConsoleData) -> Vec<ConsoleNotificati
             Some(ConsoleNotification {
                 key: format!("approval:{}", approval.id),
                 severity: "warning",
-                title: format!("Approval required: {}", label_or(&approval.kind, "runtime action")),
+                title: format!(
+                    "Approval required: {}",
+                    label_or(&approval.kind, "runtime action")
+                ),
                 detail: label_or(&approval.reason, &approval.id).to_string(),
                 target: View::Agents,
                 target_label: "Open approvals",
@@ -251,9 +255,12 @@ pub(crate) fn forward_critical_notifications_to_desktop(notifications: &[Console
         .iter()
         .filter(|notification| notification.severity == "critical")
     {
-        if desktop_notification_forwarded(&notification.key) {
+        if desktop_notification_forwarded(&notification.key)
+            || desktop_notification_forward_pending(&notification.key)
+        {
             continue;
         }
+        mark_desktop_notification_forward_pending(&notification.key);
         let payload = Object::new();
         set_js_string(&payload, "key", &notification.key);
         set_js_string(&payload, "severity", notification.severity);
@@ -263,16 +270,26 @@ pub(crate) fn forward_critical_notifications_to_desktop(notifications: &[Console
 
         let args = Object::new();
         let _ = Reflect::set(&args, &JsValue::from_str("payload"), &payload);
-        if invoke
-            .call2(
-                &this_arg,
-                &JsValue::from_str("forward_console_notification"),
-                &args,
-            )
-            .is_ok()
-        {
-            mark_desktop_notification_forwarded(&notification.key);
-        }
+        let key = notification.key.clone();
+        let raw = invoke.call2(
+            &this_arg,
+            &JsValue::from_str("forward_console_notification"),
+            &args,
+        );
+        let Ok(raw) = raw else {
+            clear_desktop_notification_forward_pending(&key);
+            continue;
+        };
+        let Ok(promise) = raw.dyn_into::<Promise>() else {
+            clear_desktop_notification_forward_pending(&key);
+            continue;
+        };
+        spawn_local(async move {
+            if JsFuture::from(promise).await.is_ok() {
+                mark_desktop_notification_forwarded(&key);
+            }
+            clear_desktop_notification_forward_pending(&key);
+        });
     }
 }
 
@@ -311,20 +328,30 @@ fn json_gate_notification(
 
 fn json_blockers(value: &Value) -> Vec<String> {
     let mut blockers = Vec::new();
-    collect_json_blockers(value, 0, &mut blockers);
+    let mut visited = 0usize;
+    collect_json_blockers(value, 0, &mut blockers, &mut visited);
     blockers.sort();
     blockers.dedup();
     blockers.truncate(5);
     blockers
 }
 
-fn collect_json_blockers(value: &Value, depth: usize, blockers: &mut Vec<String>) {
-    if depth > 3 || blockers.len() >= 12 {
+fn collect_json_blockers(
+    value: &Value,
+    depth: usize,
+    blockers: &mut Vec<String>,
+    visited: &mut usize,
+) {
+    if depth > 3 || blockers.len() >= 12 || *visited >= 500 {
         return;
     }
+    *visited += 1;
     match value {
         Value::Object(map) => {
             for (key, child) in map {
+                if *visited >= 500 {
+                    break;
+                }
                 let key_lower = key.to_ascii_lowercase();
                 let relevant = key_lower.contains("blocker")
                     || key_lower.contains("blocked")
@@ -344,21 +371,26 @@ fn collect_json_blockers(value: &Value, depth: usize, blockers: &mut Vec<String>
                                 {
                                     blockers.push(text.to_string());
                                 } else {
-                                    collect_json_blockers(item, depth + 1, blockers);
+                                    collect_json_blockers(item, depth + 1, blockers, visited);
                                 }
                             }
                         }
-                        Value::Object(_) => collect_json_blockers(child, depth + 1, blockers),
+                        Value::Object(_) => {
+                            collect_json_blockers(child, depth + 1, blockers, visited)
+                        }
                         _ => {}
                     }
                 } else if depth < 2 {
-                    collect_json_blockers(child, depth + 1, blockers);
+                    collect_json_blockers(child, depth + 1, blockers, visited);
                 }
             }
         }
         Value::Array(items) => {
             for item in items {
-                collect_json_blockers(item, depth + 1, blockers);
+                if *visited >= 500 {
+                    break;
+                }
+                collect_json_blockers(item, depth + 1, blockers, visited);
             }
         }
         _ => {}
@@ -376,19 +408,16 @@ fn notification_rank(severity: &str) -> usize {
 
 fn desktop_invoke_function() -> Option<(JsValue, Function)> {
     let window = web_sys::window()?;
-    let tauri = Reflect::get(window.as_ref(), &JsValue::from_str("__TAURI__")).ok()?;
-    if tauri.is_undefined() || tauri.is_null() {
+    let internals =
+        Reflect::get(window.as_ref(), &JsValue::from_str("__TAURI_INTERNALS__")).ok()?;
+    if internals.is_undefined() || internals.is_null() {
         return None;
     }
-    let core = Reflect::get(&tauri, &JsValue::from_str("core"))
-        .ok()
-        .filter(|value| !value.is_undefined() && !value.is_null())
-        .unwrap_or(tauri);
-    let invoke = Reflect::get(&core, &JsValue::from_str("invoke"))
+    let invoke = Reflect::get(&internals, &JsValue::from_str("invoke"))
         .ok()?
         .dyn_into::<Function>()
         .ok()?;
-    Some((core, invoke))
+    Some((internals, invoke))
 }
 
 fn set_js_string(target: &Object, key: &str, value: &str) {
@@ -397,17 +426,56 @@ fn set_js_string(target: &Object, key: &str, value: &str) {
 
 fn desktop_notification_forwarded(key: &str) -> bool {
     web_sys::window()
-        .and_then(|window| window.session_storage().ok().flatten())
-        .and_then(|storage| storage.get_item(&desktop_notification_storage_key(key)).ok().flatten())
+        .and_then(|window| window.local_storage().ok().flatten())
+        .and_then(|storage| {
+            storage
+                .get_item(&desktop_notification_storage_key(key))
+                .ok()
+                .flatten()
+        })
         .is_some()
 }
 
 fn mark_desktop_notification_forwarded(key: &str) {
-    if let Some(storage) = web_sys::window().and_then(|window| window.session_storage().ok().flatten()) {
+    if let Some(storage) =
+        web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+    {
         let _ = storage.set_item(&desktop_notification_storage_key(key), "1");
     }
 }
 
 fn desktop_notification_storage_key(key: &str) -> String {
     format!("mandoforge.nativeNotificationForwarded.{key}")
+}
+
+fn desktop_notification_forward_pending(key: &str) -> bool {
+    web_sys::window()
+        .and_then(|window| window.session_storage().ok().flatten())
+        .and_then(|storage| {
+            storage
+                .get_item(&desktop_notification_pending_storage_key(key))
+                .ok()
+                .flatten()
+        })
+        .is_some()
+}
+
+fn mark_desktop_notification_forward_pending(key: &str) {
+    if let Some(storage) =
+        web_sys::window().and_then(|window| window.session_storage().ok().flatten())
+    {
+        let _ = storage.set_item(&desktop_notification_pending_storage_key(key), "1");
+    }
+}
+
+fn clear_desktop_notification_forward_pending(key: &str) {
+    if let Some(storage) =
+        web_sys::window().and_then(|window| window.session_storage().ok().flatten())
+    {
+        let _ = storage.remove_item(&desktop_notification_pending_storage_key(key));
+    }
+}
+
+fn desktop_notification_pending_storage_key(key: &str) -> String {
+    format!("mandoforge.nativeNotificationPending.{key}")
 }

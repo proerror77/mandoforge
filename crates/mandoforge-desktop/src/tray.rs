@@ -39,7 +39,9 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
             }
             "open_browser" => {
                 let state = app.state::<DesktopState>();
-                let _ = opener::open(state.api_base_url());
+                if crate::validate_http_api_url(state.api_base_url()).is_ok() {
+                    let _ = opener::open(state.api_base_url());
+                }
             }
             "copy_api_url" => {
                 let state = app.state::<DesktopState>();

@@ -1,7 +1,7 @@
 use crate::api::DynamicWorkflowPlan;
-use crate::components::{KeyMetrics, Panel, Rows};
+use crate::components::{FlowMeter, KeyMetrics, Panel, Rows};
 use crate::state::ConsoleData;
-use crate::{FlowMeter, label_or, status_tone};
+use crate::{label_or, status_tone};
 use yew::prelude::*;
 
 #[derive(Properties, Clone, PartialEq)]

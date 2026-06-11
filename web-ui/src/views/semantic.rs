@@ -1,9 +1,9 @@
 use crate::api::{RenderedExecutionContext, SemanticGraphSnapshot, SemanticObject};
-use crate::components::{JsonPreview, KeyMetrics, Panel, Rows};
+use crate::components::{FlowMeter, JsonPreview, KeyMetrics, Panel, Rows};
 use crate::state::ConsoleData;
 use crate::{
-    FlowMeter, compact_json, label_or, orbit_point, position_style, semantic_scope_summary,
-    short_id, status_tone,
+    compact_json, label_or, orbit_point, position_style, semantic_scope_summary, short_id,
+    status_tone,
 };
 use yew::prelude::*;
 

@@ -1,9 +1,10 @@
 use crate::api::{EnterpriseProductReadiness, ObservabilitySummary, Stage2Readiness};
-use crate::components::{JsonPreview, KeyMetrics, Panel, Rows, VersionBlock};
+use crate::components::{
+    EnterpriseReadinessPanel, FlowMeter, JsonPreview, KeyMetrics, Panel, Rows, VersionBlock,
+};
 use crate::state::ConsoleData;
 use crate::{
-    EnterpriseReadinessPanel, FlowMeter, compact_json, gauge_style, json_object_count, label_or,
-    readiness_from_status, status_tone,
+    compact_json, gauge_style, json_object_count, label_or, readiness_from_status, status_tone,
 };
 use serde_json::Value;
 use yew::prelude::*;
@@ -152,7 +153,9 @@ impl EvidenceRequirement {
             Some(keyword) => (
                 "pilot_ready".to_string(),
                 self.title.to_string(),
-                format!("Mentioned in current evidence (`{keyword}`), but not proven customer-grade ready."),
+                format!(
+                    "Mentioned in current evidence (`{keyword}`), but not proven customer-grade ready."
+                ),
             ),
             None => (
                 "blocked".to_string(),
