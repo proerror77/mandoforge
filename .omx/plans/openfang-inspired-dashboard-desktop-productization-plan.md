@@ -533,6 +533,7 @@ Mitigation: Desktop MVP explicitly excludes signed updater and enterprise comple
 - Phase 1 Settings view extraction implemented: the operator settings surface now lives under `web-ui/src/views/settings.rs`, with `web-ui/src/main.rs` retaining only route wiring for Settings.
 - Phase 1 Deploy view extraction implemented: the deployment/readiness surface now lives under `web-ui/src/views/deploy.rs`, with `web-ui/src/main.rs` retaining only route wiring for Deploy.
 - Phase 1 Agents view extraction implemented: the managed agent observability surface now lives under `web-ui/src/views/agents.rs`; `browser-harness` validated the Agents route at desktop and 390px mobile widths with 10 panels and no horizontal overflow.
+- Phase 1 Dynamic view extraction implemented: the dynamic workflow fleet surface now lives under `web-ui/src/views/dynamic.rs`, with shared command-deck visual components still centralized until the remaining business views are extracted.
 - Phase 1 boundary: business views still live in `web-ui/src/main.rs`; further extraction should move view-specific code into `web-ui/src/views/*` in small behavior-preserving commits.
 - Phase 2 implemented: Overview is the product home, backed by live console APIs, and avoids the visual command deck pushing first-screen operator signals down.
 - Phase 4 implemented: pack marketplace cards now expose lifecycle, workflows, agents, connectors, actions, release gates, files, connector gate copy, approval posture, and semantic scope from API-backed manifest summaries.
