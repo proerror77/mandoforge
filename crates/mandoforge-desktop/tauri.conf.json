@@ -1,0 +1,26 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "MandoForge",
+  "version": "0.1.0",
+  "identifier": "com.mandonothing.mandoforge",
+  "build": {
+    "beforeDevCommand": "",
+    "beforeBuildCommand": "",
+    "frontendDist": "../../web",
+    "devUrl": "http://127.0.0.1:8787"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": false,
+    "targets": "all",
+    "category": "DeveloperTool",
+    "shortDescription": "MandoForge Enterprise Agent OS Control Plane",
+    "longDescription": "Desktop shell for opening an existing MandoForge API-backed control plane. Governance remains owned by the API."
+  }
+}

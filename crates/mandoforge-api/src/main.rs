@@ -19128,6 +19128,7 @@ async fn get_workflow_pack_marketplace(
                     "resolved_manifest_path": resolved_path,
                     "status": "ready",
                     "validation": report,
+                    "manifest_summary": workflow_pack_manifest_summary(&manifest, &report),
                     "actions": ["install", "configure", "stage", "release"],
                 }));
             }
@@ -29045,6 +29046,83 @@ fn workflow_pack_kind_label(kind: &workflow_pack::PackKind) -> &'static str {
         workflow_pack::PackKind::WorkflowPack => "WorkflowPack",
         workflow_pack::PackKind::DomainPack => "DomainPack",
     }
+}
+
+fn workflow_pack_connector_kind_label(kind: &workflow_pack::ConnectorKind) -> &'static str {
+    match kind {
+        workflow_pack::ConnectorKind::Mcp => "mcp",
+        workflow_pack::ConnectorKind::Native => "native",
+    }
+}
+
+fn workflow_pack_manifest_summary(
+    manifest: &workflow_pack::WorkflowPackManifest,
+    report: &workflow_pack::WorkflowPackValidationReport,
+) -> Value {
+    json!({
+        "validated_file_count": report.validated_file_count,
+        "agent_count": report.agent_count,
+        "connector_count": report.connector_count,
+        "required_eval_gate_count": report.required_eval_gate_count,
+        "semantic_scopes": manifest.semantic_scopes,
+        "capabilities": manifest.capabilities,
+        "profiles": manifest.profiles.iter().map(|profile| json!({
+            "id": profile.id,
+            "required": profile.required,
+        })).collect::<Vec<_>>(),
+        "workflows": manifest.workflows.iter().map(|workflow| json!({
+            "id": workflow.id,
+            "entry_agent": workflow.entry_agent,
+        })).collect::<Vec<_>>(),
+        "agents": manifest.agents.iter().map(|agent| json!({
+            "id": agent.id,
+            "role": agent.role,
+            "external_write_count": agent.tool_scope.external_write.len(),
+            "handoff_count": agent.handoffs.len(),
+            "approval_handoff_count": agent.handoffs.iter().filter(|handoff| handoff.approval_required).count(),
+        })).collect::<Vec<_>>(),
+        "connectors": manifest.connectors.iter().map(|connector| json!({
+            "id": connector.id,
+            "kind": workflow_pack_connector_kind_label(&connector.kind),
+            "required_permission_count": connector.required_permissions.len(),
+            "writes": {
+                "enabled": connector.writes.enabled,
+                "approval_required": connector.writes.approval_required,
+            },
+            "provenance_required": connector.provenance.required,
+            "data_quality": connector.data_quality.as_ref().map(|quality| json!({
+                "min_sample_count": quality.min_sample_count,
+                "max_age_hours": quality.max_age_hours,
+                "citation_required": quality.citation_required,
+                "required_metadata_field_count": quality.required_metadata_fields.len(),
+                "required_content_field_count": quality.required_content_fields.len(),
+            })),
+        })).collect::<Vec<_>>(),
+        "actions": manifest.actions.iter().map(|action| json!({
+            "id": action.id,
+            "required": action.required,
+        })).collect::<Vec<_>>(),
+        "policies": manifest.policies.iter().map(|policy| json!({
+            "id": policy.id,
+            "required": policy.required,
+        })).collect::<Vec<_>>(),
+        "evals": manifest.evals.iter().map(|eval| json!({
+            "id": eval.id,
+            "required": eval.gate.required,
+            "min_score": eval.gate.min_score,
+        })).collect::<Vec<_>>(),
+        "release_gates": manifest.release_gates.iter().map(|gate| json!({
+            "id": gate.id,
+            "gate_type": gate.gate_type,
+            "required": gate.required,
+        })).collect::<Vec<_>>(),
+        "onboarding": manifest.onboarding.as_ref().map(|onboarding| json!({
+            "workflow": onboarding.workflow,
+            "required_profile_count": onboarding.required_profiles.len(),
+            "profile_schema_count": onboarding.profile_schemas.len(),
+            "eval": onboarding.eval,
+        })),
+    })
 }
 
 async fn record_workflow_pack_installation_audit(

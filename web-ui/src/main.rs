@@ -9,6 +9,7 @@ use yew::prelude::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum View {
+    Overview,
     Agents,
     Board,
     Workflows,
@@ -16,10 +17,12 @@ enum View {
     Semantic,
     Packs,
     Deploy,
+    Settings,
 }
 
 impl View {
-    const ALL: [View; 7] = [
+    const ALL: [View; 9] = [
+        View::Overview,
         View::Agents,
         View::Board,
         View::Workflows,
@@ -27,10 +30,12 @@ impl View {
         View::Semantic,
         View::Packs,
         View::Deploy,
+        View::Settings,
     ];
 
     fn id(self) -> &'static str {
         match self {
+            View::Overview => "overview",
             View::Agents => "agents",
             View::Board => "board",
             View::Workflows => "workflows",
@@ -38,11 +43,13 @@ impl View {
             View::Semantic => "semantic",
             View::Packs => "packs",
             View::Deploy => "deploy",
+            View::Settings => "settings",
         }
     }
 
     fn label(self) -> &'static str {
         match self {
+            View::Overview => "Overview",
             View::Agents => "Agents",
             View::Board => "Board",
             View::Workflows => "Workflows",
@@ -50,11 +57,13 @@ impl View {
             View::Semantic => "Semantic",
             View::Packs => "Packs",
             View::Deploy => "Deploy",
+            View::Settings => "Settings",
         }
     }
 
     fn title(self) -> &'static str {
         match self {
+            View::Overview => "Enterprise control overview",
             View::Agents => "Managed agent observability",
             View::Board => "Task board",
             View::Workflows => "Workflow graph console",
@@ -62,6 +71,7 @@ impl View {
             View::Semantic => "Semantic memory layer",
             View::Packs => "Workflow pack operations",
             View::Deploy => "Deployment truth surface",
+            View::Settings => "Operator settings",
         }
     }
 
@@ -69,7 +79,7 @@ impl View {
         Self::ALL
             .into_iter()
             .find(|view| view.id() == value)
-            .unwrap_or(View::Agents)
+            .unwrap_or(View::Overview)
     }
 }
 
@@ -117,11 +127,7 @@ struct ConsoleData {
 
 #[component]
 fn App() -> Html {
-    let active_view = use_state(|| {
-        storage_get("mandoforge.activeView")
-            .map(|value| View::from_id(&value))
-            .unwrap_or(View::Agents)
-    });
+    let active_view = use_state(initial_active_view);
     let token_input = use_state(get_admin_token);
     let mutation_status = use_state(String::new);
     let task_title = use_state(|| "Smoke run: fetch a public webpage title".to_string());
@@ -138,6 +144,7 @@ fn App() -> Html {
     });
     let context_packet_id = use_state(String::new);
     let rendered_context = use_state(|| None::<RenderedExecutionContext>);
+    let critical_notifications_muted = use_state(initial_critical_notifications_muted);
 
     let data = ConsoleData {
         agents: use_polling::<Vec<Agent>>("/api/agents", 5_000),
@@ -371,6 +378,18 @@ fn App() -> Html {
         })
     };
 
+    let toggle_critical_notifications = {
+        let critical_notifications_muted = critical_notifications_muted.clone();
+        Callback::from(move |_| {
+            let next_value = !*critical_notifications_muted;
+            storage_set(
+                "mandoforge.criticalNotificationsMuted",
+                if next_value { "1" } else { "0" },
+            );
+            critical_notifications_muted.set(next_value);
+        })
+    };
+
     let start_task = {
         let agents = data.agents.data.clone();
         let task_title = task_title.clone();
@@ -416,6 +435,13 @@ fn App() -> Html {
             });
         })
     };
+
+    let notifications = console_notifications(&data);
+    let notification_count = notifications.len();
+    let critical_notification_count = notifications
+        .iter()
+        .filter(|notification| notification.severity == "critical")
+        .count();
 
     html! {
         <main class="console-shell">
@@ -472,11 +498,42 @@ fn App() -> Html {
                 })}
             </nav>
 
-            <VisualCommandDeck data={data.clone()} view={*active_view} />
+            <NotificationCenter
+                notifications={notifications}
+                critical_muted={*critical_notifications_muted}
+                on_toggle_critical={toggle_critical_notifications.clone()}
+                on_view={{
+                    let active_view = active_view.clone();
+                    Callback::from(move |view: View| {
+                        storage_set("mandoforge.activeView", view.id());
+                        active_view.set(view);
+                    })
+                }}
+            />
+
+            {
+                if matches!(*active_view, View::Overview | View::Packs | View::Settings) {
+                    html! {}
+                } else {
+                    html! { <VisualCommandDeck data={data.clone()} view={*active_view} /> }
+                }
+            }
 
             <section class="workspace">
                 {
                     match *active_view {
+                        View::Overview => html! {
+                            <OverviewView
+                                data={data.clone()}
+                                on_view={{
+                                    let active_view = active_view.clone();
+                                    Callback::from(move |view: View| {
+                                        storage_set("mandoforge.activeView", view.id());
+                                        active_view.set(view);
+                                    })
+                                }}
+                            />
+                        },
                         View::Agents => html! {
                             <AgentsView
                                 data={data.clone()}
@@ -515,6 +572,15 @@ fn App() -> Html {
                         },
                         View::Packs => html! { <PacksView data={data.clone()} /> },
                         View::Deploy => html! { <DeployView data={data.clone()} on_verify={verify_deploy.clone()} /> },
+                        View::Settings => html! {
+                            <SettingsView
+                                data={data.clone()}
+                                critical_muted={*critical_notifications_muted}
+                                notification_count={notification_count}
+                                critical_notification_count={critical_notification_count}
+                                on_toggle_critical={toggle_critical_notifications.clone()}
+                            />
+                        },
                     }
                 }
             </section>
@@ -532,6 +598,16 @@ struct DataProps {
     data: ConsoleData,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ConsoleNotification {
+    key: String,
+    severity: &'static str,
+    title: String,
+    detail: String,
+    target: View,
+    target_label: &'static str,
+}
+
 #[derive(Properties, Clone, PartialEq)]
 struct AgentsProps {
     data: ConsoleData,
@@ -544,6 +620,252 @@ struct AgentsProps {
     on_agent: Callback<Event>,
     on_environment: Callback<Event>,
     on_start_task: Callback<MouseEvent>,
+}
+
+#[derive(Properties, Clone, PartialEq)]
+struct OverviewProps {
+    data: ConsoleData,
+    on_view: Callback<View>,
+}
+
+#[derive(Properties, Clone, PartialEq)]
+struct NotificationCenterProps {
+    notifications: Vec<ConsoleNotification>,
+    critical_muted: bool,
+    on_toggle_critical: Callback<MouseEvent>,
+    on_view: Callback<View>,
+}
+
+#[component]
+fn NotificationCenter(props: &NotificationCenterProps) -> Html {
+    let critical_count = props
+        .notifications
+        .iter()
+        .filter(|notification| notification.severity == "critical")
+        .count();
+    let visible_notifications = props
+        .notifications
+        .iter()
+        .filter(|notification| !(props.critical_muted && notification.severity == "critical"))
+        .take(5)
+        .cloned()
+        .collect::<Vec<_>>();
+    let has_notifications = !props.notifications.is_empty();
+
+    html! {
+        <section class={classes!("notification-center", (!has_notifications).then_some("quiet"))} aria-label="Operator notification center">
+            <div class="notification-summary">
+                <div>
+                    <span>{ "Operator notifications" }</span>
+                    <strong>{ if has_notifications {
+                        format!("{} actionable / {} critical", props.notifications.len(), critical_count)
+                    } else {
+                        "No actionable notifications".to_string()
+                    } }</strong>
+                </div>
+                <button class="secondary" onclick={props.on_toggle_critical.clone()}>
+                    { if props.critical_muted { "Enable critical" } else { "Mute critical" } }
+                </button>
+            </div>
+            <div class="notification-list">
+                {
+                    if props.critical_muted && critical_count > 0 {
+                        html! {
+                            <article class="notification-item muted">
+                                <div>
+                                    <span>{ "muted" }</span>
+                                    <strong>{ format!("{critical_count} critical notifications hidden") }</strong>
+                                    <p>{ "Critical browser and desktop forwarding stays disabled until re-enabled in Settings." }</p>
+                                </div>
+                            </article>
+                        }
+                    } else if visible_notifications.is_empty() {
+                        html! {
+                            <article class="notification-item neutral">
+                                <div>
+                                    <span>{ "clear" }</span>
+                                    <strong>{ "Queue is clear" }</strong>
+                                    <p>{ "Approvals, failed jobs, connector gates, ontology gates, and enterprise lanes report no current actionable notification." }</p>
+                                </div>
+                            </article>
+                        }
+                    } else {
+                        html! {
+                            { for visible_notifications.into_iter().map(|notification| {
+                                let on_view = props.on_view.clone();
+                                let target = notification.target;
+                                html! {
+                                    <article class={classes!("notification-item", notification.severity)} key={notification.key.clone()}>
+                                        <div>
+                                            <span>{ notification.severity }</span>
+                                            <strong>{ notification.title }</strong>
+                                            <p>{ notification.detail }</p>
+                                        </div>
+                                        <button class="secondary" onclick={Callback::from(move |_| on_view.emit(target))}>
+                                            { notification.target_label }
+                                        </button>
+                                    </article>
+                                }
+                            }) }
+                        }
+                    }
+                }
+            </div>
+        </section>
+    }
+}
+
+#[component]
+fn OverviewView(props: &OverviewProps) -> Html {
+    let data = &props.data;
+    let active_sessions = data
+        .sessions
+        .data
+        .iter()
+        .filter(|session| is_active_status(&session.status))
+        .count();
+    let pending_approvals = pending_approval_count(&data.approvals.data);
+    let active_workers =
+        active_job_count(&data.execution_jobs.data) + active_job_count(&data.session_loop_jobs.data);
+    let failed_jobs =
+        failed_job_count(&data.execution_jobs.data) + failed_job_count(&data.session_loop_jobs.data);
+    let active_runs = data
+        .workflow_runs
+        .data
+        .iter()
+        .filter(|run| is_active_status(&run.status))
+        .count();
+    let ready_packs = ready_pack_count(&data.workflow_pack_installations.data);
+    let blocked_packs = blocked_pack_count(&data.workflow_pack_installations.data);
+    let connector_status = json_status(&data.native_connector_production_readiness.data);
+    let ontology_status = json_status(&data.ontology_engine_readiness.data);
+    let enterprise = &data.enterprise_product_readiness.data;
+    let primary_next_action = enterprise
+        .next_actions
+        .first()
+        .cloned()
+        .or_else(|| first_lane_blocker(enterprise))
+        .unwrap_or_else(|| "No enterprise readiness next action reported.".to_string());
+    let readiness_tone = if enterprise.completion_blocked || enterprise.blocked_lane_count > 0 {
+        "bad"
+    } else {
+        status_tone(&enterprise.status)
+    };
+
+    html! {
+        <div class="overview-layout">
+            <section class="overview-hero">
+                <div class="overview-hero-copy">
+                    <p class="eyebrow">{ "Enterprise Agent OS Control Plane" }</p>
+                    <h2>{ "Runtime, packs, connectors, ontology, and evidence on one operator surface." }</h2>
+                    <p>{ primary_next_action }</p>
+                </div>
+                <div class="overview-hero-actions">
+                    <OverviewButton label="Review blockers" target={View::Deploy} on_view={props.on_view.clone()} />
+                    <OverviewButton label="Open packs" target={View::Packs} on_view={props.on_view.clone()} />
+                    <OverviewButton label="Check ontology" target={View::Semantic} on_view={props.on_view.clone()} />
+                </div>
+            </section>
+
+            <section class="overview-signals">
+                <OverviewSignal
+                    label="Active sessions"
+                    value={active_sessions.to_string()}
+                    detail={format!("{} total managed sessions", data.sessions.data.len())}
+                    tone={if active_sessions > 0 { "info" } else { "neutral" }}
+                    target={View::Agents}
+                    on_view={props.on_view.clone()}
+                />
+                <OverviewSignal
+                    label="Pending approvals"
+                    value={pending_approvals.to_string()}
+                    detail={"Draft and high-risk actions stay approval-gated.".to_string()}
+                    tone={if pending_approvals > 0 { "warn" } else { "good" }}
+                    target={View::Agents}
+                    on_view={props.on_view.clone()}
+                />
+                <OverviewSignal
+                    label="Worker pressure"
+                    value={active_workers.to_string()}
+                    detail={format!("{failed_jobs} failed or errored jobs")}
+                    tone={if failed_jobs > 0 { "bad" } else if active_workers > 0 { "info" } else { "good" }}
+                    target={View::Agents}
+                    on_view={props.on_view.clone()}
+                />
+                <OverviewSignal
+                    label="Workflow runs"
+                    value={active_runs.to_string()}
+                    detail={format!("{} total workflow runs", data.workflow_runs.data.len())}
+                    tone={if active_runs > 0 { "info" } else { "neutral" }}
+                    target={View::Workflows}
+                    on_view={props.on_view.clone()}
+                />
+                <OverviewSignal
+                    label="Released packs"
+                    value={ready_packs.to_string()}
+                    detail={format!("{blocked_packs} blocked pack installations")}
+                    tone={if blocked_packs > 0 { "warn" } else if ready_packs > 0 { "good" } else { "neutral" }}
+                    target={View::Packs}
+                    on_view={props.on_view.clone()}
+                />
+                <OverviewSignal
+                    label="Enterprise lanes"
+                    value={format!("{}/{}", enterprise.ready_lane_count, enterprise.lane_count.max(enterprise.lanes.len()))}
+                    detail={format!("{} blocked / evidence class {}", enterprise.blocked_lane_count, label_or(&enterprise.required_evidence_class, "customer_grade"))}
+                    tone={readiness_tone}
+                    target={View::Deploy}
+                    on_view={props.on_view.clone()}
+                />
+            </section>
+
+            <div class="overview-grid">
+                <Panel title="Runtime pressure">
+                    <RuntimePipeline
+                        sessions={data.sessions.data.clone()}
+                        execution_jobs={data.execution_jobs.data.clone()}
+                        session_loop_jobs={data.session_loop_jobs.data.clone()}
+                        approvals={data.approvals.data.clone()}
+                        tool_calls={data.tool_calls.data.clone()}
+                    />
+                    <Rows empty="No failed worker jobs." rows={worker_issue_rows(&data.execution_jobs.data, &data.session_loop_jobs.data)} />
+                </Panel>
+                <Panel title="Enterprise readiness">
+                    <EnterpriseReadinessPanel readiness={enterprise.clone()} />
+                </Panel>
+                <Panel title="Pack capability state">
+                    <PackMosaic
+                        installations={data.workflow_pack_installations.data.clone()}
+                        marketplace={data.workflow_pack_marketplace.data.clone()}
+                    />
+                    <Rows empty="No installed packs." rows={pack_overview_rows(&data.workflow_pack_installations.data, &data.workflow_pack_marketplace.data)} />
+                </Panel>
+                <Panel title="Connector and ontology gates">
+                    <KeyMetrics values={vec![
+                        ("Native connectors".to_string(), connector_status.clone()),
+                        ("Ontology engine".to_string(), ontology_status.clone()),
+                        ("Semantic objects".to_string(), data.semantic_objects.data.len().to_string()),
+                        ("Graph edges".to_string(), data.semantic_graph.data.edge_count.to_string()),
+                        ("Reflection queue".to_string(), data.semantic_reflection_queue.data.queue.len().to_string()),
+                    ]} />
+                    <div class="overview-gate-actions">
+                        <OverviewButton label="Connector details" target={View::Deploy} on_view={props.on_view.clone()} />
+                        <OverviewButton label="Ontology details" target={View::Semantic} on_view={props.on_view.clone()} />
+                    </div>
+                </Panel>
+                <Panel title="Immediate operator queue">
+                    <Rows empty="No immediate blockers reported." rows={operator_queue_rows(data)} />
+                </Panel>
+                <Panel title="Evidence surfaces">
+                    <KeyMetrics values={vec![
+                        ("Enterprise contract".to_string(), "/api/enterprise-product/readiness".to_string()),
+                        ("Connector production".to_string(), "/api/native-connectors/production-readiness".to_string()),
+                        ("Ontology readiness".to_string(), "/api/ontology/engine-readiness".to_string()),
+                        ("Pack lifecycle".to_string(), "/api/workflow-packs/installations".to_string()),
+                    ]} />
+                </Panel>
+            </div>
+        </div>
+    }
 }
 
 #[component]
@@ -810,14 +1132,22 @@ fn SemanticView(props: &SemanticProps) -> Html {
 
 #[component]
 fn PacksView(props: &DataProps) -> Html {
+    let cards = pack_card_models(
+        &props.data.workflow_pack_installations.data,
+        &props.data.workflow_pack_marketplace.data,
+    );
     html! {
-        <div class="page-grid">
-            <Panel title="Marketplace map">
-                <PackMosaic
-                    installations={props.data.workflow_pack_installations.data.clone()}
-                    marketplace={props.data.workflow_pack_marketplace.data.clone()}
-                />
-            </Panel>
+        <div class="page-stack">
+            <section class="pack-product-grid">
+                { for cards.into_iter().map(|card| html! { <PackProductCard card={card} /> }) }
+            </section>
+            <div class="page-grid">
+                <Panel title="Marketplace map">
+                    <PackMosaic
+                        installations={props.data.workflow_pack_installations.data.clone()}
+                        marketplace={props.data.workflow_pack_marketplace.data.clone()}
+                    />
+                </Panel>
             <Panel title="Installations">
                 <Rows empty="No pack installations." rows={props.data.workflow_pack_installations.data.iter().take(12).map(|pack| {
                     (
@@ -845,6 +1175,7 @@ fn PacksView(props: &DataProps) -> Html {
             <Panel title="Onboarding">
                 <JsonPreview value={Value::Array(props.data.capability_discovery.data.capabilities.clone())} />
             </Panel>
+            </div>
         </div>
     }
 }
@@ -877,6 +1208,62 @@ fn DeployView(props: &DeployProps) -> Html {
             </Panel>
             <Panel title="Usage and finance">
                 <JsonPreview value={props.data.usage.data.clone()} />
+            </Panel>
+        </div>
+    }
+}
+
+#[derive(Properties, Clone, PartialEq)]
+struct SettingsProps {
+    data: ConsoleData,
+    critical_muted: bool,
+    notification_count: usize,
+    critical_notification_count: usize,
+    on_toggle_critical: Callback<MouseEvent>,
+}
+
+#[component]
+fn SettingsView(props: &SettingsProps) -> Html {
+    let token_saved = storage_get("mandoforge.adminToken")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    html! {
+        <div class="page-grid">
+            <Panel title="Notification policy">
+                <div class="settings-stack">
+                    <div class="settings-row">
+                        <div>
+                            <span>{ "Critical operator notifications" }</span>
+                            <strong>{ if props.critical_muted { "Muted in this browser" } else { "Enabled in this browser" } }</strong>
+                            <p>{ "Applies to failed execution jobs, stalled session-loop jobs, connector blockers, ontology blockers, and enterprise readiness regressions. Native OS notifications are not enabled yet." }</p>
+                        </div>
+                        <button onclick={props.on_toggle_critical.clone()}>
+                            { if props.critical_muted { "Enable critical notifications" } else { "Mute critical notifications" } }
+                        </button>
+                    </div>
+                    <KeyMetrics values={vec![
+                        ("Actionable notifications".to_string(), props.notification_count.to_string()),
+                        ("Critical notifications".to_string(), props.critical_notification_count.to_string()),
+                        ("Deduplication".to_string(), "stable event key".to_string()),
+                        ("Native forwarding".to_string(), "desktop phase only".to_string()),
+                    ]} />
+                </div>
+            </Panel>
+            <Panel title="Console identity">
+                <KeyMetrics values={vec![
+                    ("Admin token".to_string(), if token_saved { "saved locally".to_string() } else { "not saved".to_string() }),
+                    ("API auth".to_string(), "Bearer + x-mandoforge identity headers".to_string()),
+                    ("API errors".to_string(), count_errors(&props.data).to_string()),
+                    ("Refreshing endpoints".to_string(), count_loading(&props.data).to_string()),
+                ]} />
+            </Panel>
+            <Panel title="Desktop boundary">
+                <KeyMetrics values={vec![
+                    ("Desktop status".to_string(), "not packaged in web phase".to_string()),
+                    ("Governance".to_string(), "API owns policy, approval, audit, readiness".to_string()),
+                    ("Notification source".to_string(), "web bridge classification".to_string()),
+                    ("OS permission prompt".to_string(), "not requested".to_string()),
+                ]} />
             </Panel>
         </div>
     }
@@ -1342,6 +1729,112 @@ struct PackMosaicProps {
     marketplace: WorkflowPackMarketplace,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct PackCardModel {
+    id: String,
+    name: String,
+    kind: String,
+    version: String,
+    description: String,
+    status: String,
+    source: String,
+    manifest: Value,
+}
+
+#[derive(Properties, Clone, PartialEq)]
+struct PackProductCardProps {
+    card: PackCardModel,
+}
+
+#[component]
+fn PackProductCard(props: &PackProductCardProps) -> Html {
+    let card = &props.card;
+    let workflow_count = pack_metric_count(&card.manifest, "workflows", "workflow_count");
+    let agent_count = pack_metric_count(&card.manifest, "agents", "agent_count");
+    let connector_count = pack_metric_count(&card.manifest, "connectors", "connector_count");
+    let action_count = pack_metric_count(&card.manifest, "actions", "action_count");
+    let release_gate_count =
+        pack_metric_count(&card.manifest, "release_gates", "required_eval_gate_count");
+    let validated_file_count =
+        pack_metric_count(&card.manifest, "validated_files", "validated_file_count");
+    let external_writes = pack_has_external_writes(&card.manifest);
+    let approval_required = pack_requires_approval(&card.manifest);
+    let safe_action = if external_writes {
+        "Draft + approval before external write"
+    } else {
+        "Read and draft surfaces only"
+    };
+    html! {
+        <article class={classes!("pack-product-card", status_tone(&card.status))} key={card.id.clone()}>
+            <header class="pack-product-header">
+                <StatusLogo status={card.status.clone()} />
+                <div>
+                    <span>{ format!("{} / {}", label_or(&card.kind, "WorkflowPack"), label_or(&card.version, "version")) }</span>
+                    <strong>{ label_or(&card.name, &card.id) }</strong>
+                </div>
+                <em>{ label_or(&card.status, &card.source) }</em>
+            </header>
+            <p>{ label_or(&card.description, "No pack description reported.") }</p>
+            <div class="pack-lifecycle" aria-label="WorkflowPack lifecycle">
+                { for pack_lifecycle_steps(&card.status, &card.source).into_iter().map(|(label, tone)| html! {
+                    <span class={classes!("pack-lifecycle-step", tone)}>{ label }</span>
+                }) }
+            </div>
+            <div class="pack-card-metrics">
+                <PackMetric label="Workflows" value={workflow_count} />
+                <PackMetric label="Agents" value={agent_count} />
+                <PackMetric label="Connectors" value={connector_count} />
+                <PackMetric label="Actions" value={action_count} />
+                <PackMetric label="Gates" value={release_gate_count} />
+                <PackMetric label="Files" value={validated_file_count} />
+            </div>
+            <div class="pack-capabilities">
+                { for pack_string_list(&card.manifest, "capabilities", 6).into_iter().map(|capability| html! {
+                    <span>{ capability }</span>
+                }) }
+                { if json_array_len(&card.manifest["capabilities"]) == 0 {
+                    html! { <span>{ "No capabilities declared" }</span> }
+                } else {
+                    html! {}
+                }}
+            </div>
+            <div class="pack-connector-list">
+                { for pack_connector_rows(&card.manifest).into_iter().map(|row| html! {
+                    <div class="pack-connector-row" key={row.0.clone()}>
+                        <strong>{ row.0 }</strong>
+                        <span>{ row.1 }</span>
+                    </div>
+                }) }
+            </div>
+            <div class="pack-gate-strip">
+                <span>{ format!("{release_gate_count} release gates") }</span>
+                <span>{ if approval_required { "approval required" } else { "approval not declared" } }</span>
+                <span>{ safe_action }</span>
+            </div>
+            <div class="pack-card-footer">
+                <small>{ pack_blocker_summary(card, external_writes, release_gate_count) }</small>
+                <b>{ semantic_scope_summary(&card.manifest["semantic_scopes"]) }</b>
+            </div>
+        </article>
+    }
+}
+
+#[derive(Properties, Clone, PartialEq)]
+struct PackMetricProps {
+    label: &'static str,
+    value: usize,
+}
+
+#[component]
+fn PackMetric(props: &PackMetricProps) -> Html {
+    html! {
+        <div class="pack-metric">
+            <span>{ props.label }</span>
+            <strong>{ props.value }</strong>
+        </div>
+    }
+}
+
 #[component]
 fn PackMosaic(props: &PackMosaicProps) -> Html {
     let marketplace_count = props.marketplace.packs.len();
@@ -1452,6 +1945,54 @@ fn EnterpriseReadinessPanel(props: &EnterpriseReadinessPanelProps) -> Html {
                 }) }
             </div>
         </div>
+    }
+}
+
+#[derive(Properties, Clone, PartialEq)]
+struct OverviewButtonProps {
+    label: &'static str,
+    target: View,
+    on_view: Callback<View>,
+}
+
+#[component]
+fn OverviewButton(props: &OverviewButtonProps) -> Html {
+    let target = props.target;
+    let on_view = props.on_view.clone();
+    html! {
+        <button
+            class="overview-action"
+            onclick={Callback::from(move |_| on_view.emit(target))}
+        >
+            { props.label }
+        </button>
+    }
+}
+
+#[derive(Properties, Clone, PartialEq)]
+struct OverviewSignalProps {
+    label: &'static str,
+    value: String,
+    detail: String,
+    #[prop_or("neutral")]
+    tone: &'static str,
+    target: View,
+    on_view: Callback<View>,
+}
+
+#[component]
+fn OverviewSignal(props: &OverviewSignalProps) -> Html {
+    let target = props.target;
+    let on_view = props.on_view.clone();
+    html! {
+        <button
+            class={classes!("overview-signal", props.tone)}
+            onclick={Callback::from(move |_| on_view.emit(target))}
+        >
+            <span>{ props.label }</span>
+            <strong>{ &props.value }</strong>
+            <small>{ &props.detail }</small>
+        </button>
     }
 }
 
@@ -1668,6 +2209,684 @@ fn active_job_count(jobs: &[WorkerJob]) -> usize {
         .count()
 }
 
+fn pending_approval_count(approvals: &[Approval]) -> usize {
+    approvals
+        .iter()
+        .filter(|approval| approval.status == "pending" || approval.status == "requires_action")
+        .count()
+}
+
+fn failed_job_count(jobs: &[WorkerJob]) -> usize {
+    jobs.iter()
+        .filter(|job| status_tone(&job.status) == "bad" || job.last_error.is_some())
+        .count()
+}
+
+fn ready_pack_count(packs: &[WorkflowPackInstallation]) -> usize {
+    packs
+        .iter()
+        .filter(|pack| matches!(pack.status.as_str(), "released" | "ready" | "active"))
+        .count()
+}
+
+fn blocked_pack_count(packs: &[WorkflowPackInstallation]) -> usize {
+    packs
+        .iter()
+        .filter(|pack| status_tone(&pack.status) == "bad" || pack.status == "blocked")
+        .count()
+}
+
+fn json_status(value: &Value) -> String {
+    value
+        .get("status")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("readiness").and_then(Value::as_str))
+        .map(|status| label_or(status, "not reported").to_string())
+        .unwrap_or_else(|| {
+            if value.is_null() {
+                "not reported".to_string()
+            } else {
+                "reported".to_string()
+            }
+        })
+}
+
+fn first_lane_blocker(readiness: &EnterpriseProductReadiness) -> Option<String> {
+    readiness
+        .lanes
+        .iter()
+        .find_map(|lane| lane.blockers.first().or_else(|| lane.next_actions.first()).cloned())
+}
+
+fn worker_issue_rows(
+    execution_jobs: &[WorkerJob],
+    session_loop_jobs: &[WorkerJob],
+) -> Vec<(String, String, String)> {
+    execution_jobs
+        .iter()
+        .chain(session_loop_jobs.iter())
+        .filter(|job| status_tone(&job.status) == "bad" || job.last_error.is_some())
+        .take(6)
+        .map(|job| {
+            (
+                job.status.clone(),
+                short_id(&job.id),
+                job.last_error
+                    .clone()
+                    .unwrap_or_else(|| label_or(&job.updated_at, "worker issue").to_string()),
+            )
+        })
+        .collect()
+}
+
+fn pack_overview_rows(
+    installations: &[WorkflowPackInstallation],
+    marketplace: &WorkflowPackMarketplace,
+) -> Vec<(String, String, String)> {
+    let installation_rows = installations.iter().take(6).map(|pack| {
+        (
+            pack.status.clone(),
+            label_or(&pack.pack_id, "pack").to_string(),
+            format!(
+                "{} / {} / {}",
+                label_or(&pack.kind, "kind"),
+                label_or(&pack.version, "version"),
+                semantic_scope_summary(&pack.manifest["semantic_scopes"])
+            ),
+        )
+    });
+    let marketplace_rows = marketplace.packs.iter().take(6).map(|pack| {
+        (
+            pack.status.clone(),
+            label_or(&pack.name, &pack.id).to_string(),
+            format!(
+                "{} / {} / {}",
+                label_or(&pack.kind, "kind"),
+                label_or(&pack.version, "version"),
+                label_or(&pack.description, "marketplace pack")
+            ),
+        )
+    });
+    installation_rows.chain(marketplace_rows).take(8).collect()
+}
+
+fn pack_card_models(
+    installations: &[WorkflowPackInstallation],
+    marketplace: &WorkflowPackMarketplace,
+) -> Vec<PackCardModel> {
+    let mut cards = installations
+        .iter()
+        .map(|pack| {
+            let manifest = pack.manifest.clone();
+            PackCardModel {
+                id: pack.pack_id.clone(),
+                name: json_string(&manifest, "name")
+                    .unwrap_or_else(|| label_or(&pack.pack_id, "pack").to_string()),
+                kind: label_or(&pack.kind, "WorkflowPack").to_string(),
+                version: label_or(&pack.version, "version").to_string(),
+                description: json_string(&manifest, "description").unwrap_or_default(),
+                status: label_or(&pack.status, "installed").to_string(),
+                source: "installed".to_string(),
+                manifest,
+            }
+        })
+        .collect::<Vec<_>>();
+    for pack in &marketplace.packs {
+        if cards.iter().any(|card| card.id == pack.id) {
+            continue;
+        }
+        let manifest = if pack.manifest_summary.is_null()
+            || pack
+                .manifest_summary
+                .as_object()
+                .is_some_and(|object| object.is_empty())
+        {
+            pack.validation.clone()
+        } else {
+            pack.manifest_summary.clone()
+        };
+        cards.push(PackCardModel {
+            id: pack.id.clone(),
+            name: label_or(&pack.name, &pack.id).to_string(),
+            kind: label_or(&pack.kind, "WorkflowPack").to_string(),
+            version: label_or(&pack.version, "version").to_string(),
+            description: pack.description.clone(),
+            status: label_or(&pack.status, "available").to_string(),
+            source: "marketplace".to_string(),
+            manifest,
+        });
+    }
+    cards.sort_by(|a, b| {
+        pack_sort_weight(&a.id)
+            .cmp(&pack_sort_weight(&b.id))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    cards
+}
+
+fn pack_sort_weight(id: &str) -> usize {
+    match id {
+        "ecommerce-tmall" => 0,
+        "ecommerce-xiaohongshu" => 1,
+        "ecommerce-taobao" => 2,
+        "ecommerce-tiktok-shop" => 3,
+        "ecommerce-amazon" => 4,
+        "ecommerce-core" => 5,
+        "legal" => 6,
+        "ai-governance" => 7,
+        _ => 20,
+    }
+}
+
+fn json_string(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(ToString::to_string)
+}
+
+fn json_array_len(value: &Value) -> usize {
+    value.as_array().map(Vec::len).unwrap_or(0)
+}
+
+fn pack_metric_count(manifest: &Value, array_key: &str, fallback_count_key: &str) -> usize {
+    json_array_len(&manifest[array_key])
+        .max(manifest
+            .get(fallback_count_key)
+            .and_then(Value::as_u64)
+            .map(|count| count as usize)
+            .unwrap_or(0))
+}
+
+fn pack_string_list(manifest: &Value, key: &str, limit: usize) -> Vec<String> {
+    manifest
+        .get(key)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(ToString::to_string))
+                .take(limit)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn pack_connector_rows(manifest: &Value) -> Vec<(String, String)> {
+    let rows = manifest
+        .get("connectors")
+        .and_then(Value::as_array)
+        .map(|connectors| {
+            connectors
+                .iter()
+                .take(3)
+                .filter_map(|connector| {
+                    let id = connector.get("id").and_then(Value::as_str)?;
+                    let kind = connector
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .unwrap_or("connector");
+                    let write_label = connector
+                        .get("writes")
+                        .and_then(|writes| writes.get("enabled"))
+                        .and_then(Value::as_bool)
+                        .map(|enabled| if enabled { "writes gated" } else { "read only" })
+                        .unwrap_or("readiness gated");
+                    let quality = connector
+                        .get("data_quality")
+                        .and_then(|quality| quality.get("min_sample_count"))
+                        .and_then(Value::as_u64)
+                        .map(|count| format!("{count} samples"))
+                        .unwrap_or_else(|| "sample gate not declared".to_string());
+                    Some((id.to_string(), format!("{kind} / {write_label} / {quality}")))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if rows.is_empty() {
+        vec![(
+            "connector contract".to_string(),
+            "No connector declared in this card payload.".to_string(),
+        )]
+    } else {
+        rows
+    }
+}
+
+fn pack_has_external_writes(manifest: &Value) -> bool {
+    let connector_write = manifest
+        .get("connectors")
+        .and_then(Value::as_array)
+        .map(|connectors| {
+            connectors.iter().any(|connector| {
+                connector
+                    .get("writes")
+                    .and_then(|writes| writes.get("enabled"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+    let agent_external_write = manifest
+        .get("agents")
+        .and_then(Value::as_array)
+        .map(|agents| {
+            agents.iter().any(|agent| {
+                agent
+                    .get("tool_scope")
+                    .and_then(|scope| scope.get("external_write"))
+                    .and_then(Value::as_array)
+                    .is_some_and(|writes| !writes.is_empty())
+                    || agent
+                        .get("external_write_count")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|count| count > 0)
+            })
+        })
+        .unwrap_or(false);
+    connector_write || agent_external_write
+}
+
+fn pack_requires_approval(manifest: &Value) -> bool {
+    let connector_approval = manifest
+        .get("connectors")
+        .and_then(Value::as_array)
+        .map(|connectors| {
+            connectors.iter().any(|connector| {
+                connector
+                    .get("writes")
+                    .and_then(|writes| writes.get("approval_required"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+    let handoff_approval = manifest
+        .get("agents")
+        .and_then(Value::as_array)
+        .map(|agents| {
+            agents.iter().any(|agent| {
+                agent
+                    .get("handoffs")
+                    .and_then(Value::as_array)
+                    .map(|handoffs| {
+                        handoffs.iter().any(|handoff| {
+                            handoff
+                                .get("approval_required")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false)
+                    || agent
+                        .get("approval_handoff_count")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|count| count > 0)
+            })
+        })
+        .unwrap_or(false);
+    connector_approval || handoff_approval
+}
+
+fn pack_lifecycle_steps(status: &str, source: &str) -> Vec<(&'static str, &'static str)> {
+    let order = [
+        ("Install", "installed"),
+        ("Stage", "staged"),
+        ("Onboard", "onboarding"),
+        ("Quality", "quality"),
+        ("Release", "released"),
+        ("Rollback", "rolled_back"),
+    ];
+    if source == "marketplace" {
+        return order
+            .into_iter()
+            .map(|(label, _)| (label, if label == "Install" { "warn" } else { "neutral" }))
+            .collect();
+    }
+    order
+        .into_iter()
+        .map(|(label, step_status)| {
+            let tone = if status == step_status {
+                "info"
+            } else if lifecycle_step_passed(status, step_status) {
+                "good"
+            } else if status_tone(status) == "bad" {
+                "bad"
+            } else {
+                "neutral"
+            };
+            (label, tone)
+        })
+        .collect()
+}
+
+fn lifecycle_step_passed(status: &str, step: &str) -> bool {
+    let rank = |value: &str| match value {
+        "installed" => 1,
+        "staged" => 2,
+        "onboarding" => 3,
+        "quality" => 4,
+        "released" => 5,
+        "rolled_back" => 6,
+        "archived" => 7,
+        _ => 0,
+    };
+    rank(status) > rank(step)
+}
+
+fn pack_blocker_summary(
+    card: &PackCardModel,
+    external_writes: bool,
+    release_gate_count: usize,
+) -> String {
+    if card.source == "marketplace" {
+        return "Available pack. Install creates a draft version before staging or release."
+            .to_string();
+    }
+    match card.status.as_str() {
+        "released" if external_writes => {
+            "Released, but buyer-facing writes remain approval-gated and connector-quality-bound."
+                .to_string()
+        }
+        "released" => "Released pack with read/draft governed runtime surfaces.".to_string(),
+        "rolled_back" => "Rolled back; historical release evidence remains audit-visible.".to_string(),
+        "archived" => "Archived; hidden from active tenant behavior without deleting evidence.".to_string(),
+        status if status_tone(status) == "bad" => {
+            "Blocked pack. Inspect lifecycle gate evidence before demo or release.".to_string()
+        }
+        _ if release_gate_count > 0 => {
+            "Not released yet. Eval, policy, connector, and approval gates must pass first."
+                .to_string()
+        }
+        _ => "Draft package shape is visible; lifecycle gates are not complete yet.".to_string(),
+    }
+}
+
+fn console_notifications(data: &ConsoleData) -> Vec<ConsoleNotification> {
+    let mut notifications = Vec::new();
+
+    notifications.extend(data.approvals.data.iter().filter_map(|approval| {
+        if approval.status == "pending" || approval.status == "requires_action" {
+            Some(ConsoleNotification {
+                key: format!("approval:{}", approval.id),
+                severity: "warning",
+                title: format!("Approval required: {}", label_or(&approval.kind, "runtime action")),
+                detail: label_or(&approval.reason, &approval.id).to_string(),
+                target: View::Agents,
+                target_label: "Open approvals",
+            })
+        } else {
+            None
+        }
+    }));
+
+    notifications.extend(data.execution_jobs.data.iter().filter_map(|job| {
+        if status_tone(&job.status) == "bad" || job.last_error.is_some() {
+            Some(ConsoleNotification {
+                key: format!("execution-job:{}", job.id),
+                severity: "critical",
+                title: format!("Execution job failed: {}", short_id(&job.id)),
+                detail: job
+                    .last_error
+                    .clone()
+                    .unwrap_or_else(|| format!("status {}", label_or(&job.status, "failed"))),
+                target: View::Workflows,
+                target_label: "Open runs",
+            })
+        } else {
+            None
+        }
+    }));
+
+    notifications.extend(data.session_loop_jobs.data.iter().filter_map(|job| {
+        let stuck = matches!(job.status.as_str(), "stuck" | "timed_out" | "timeout");
+        if stuck || status_tone(&job.status) == "bad" || job.last_error.is_some() {
+            Some(ConsoleNotification {
+                key: format!("session-loop-job:{}", job.id),
+                severity: "critical",
+                title: format!("Session loop attention: {}", short_id(&job.id)),
+                detail: job
+                    .last_error
+                    .clone()
+                    .unwrap_or_else(|| format!("status {}", label_or(&job.status, "stuck"))),
+                target: View::Workflows,
+                target_label: "Open runs",
+            })
+        } else {
+            None
+        }
+    }));
+
+    if let Some(notification) = json_gate_notification(
+        "connector:production-readiness",
+        "Connector production readiness blocked",
+        &data.native_connector_production_readiness.data,
+        View::Deploy,
+        "Open deploy",
+    ) {
+        notifications.push(notification);
+    }
+
+    if let Some(notification) = json_gate_notification(
+        "ontology:engine-readiness",
+        "Ontology engine readiness blocked",
+        &data.ontology_engine_readiness.data,
+        View::Semantic,
+        "Open ontology",
+    ) {
+        notifications.push(notification);
+    }
+
+    notifications.extend(
+        data.enterprise_product_readiness
+            .data
+            .lanes
+            .iter()
+            .filter_map(|lane| {
+                let blocker = lane.blockers.first().or_else(|| lane.next_actions.first());
+                let tone = status_tone(&lane.status);
+                if tone == "bad" || (tone == "warn" && blocker.is_some()) {
+                    Some(ConsoleNotification {
+                        key: format!("enterprise:{}", label_or(&lane.id, &lane.title)),
+                        severity: if tone == "bad" { "critical" } else { "warning" },
+                        title: format!(
+                            "Enterprise lane regression: {}",
+                            label_or(&lane.title, &lane.id)
+                        ),
+                        detail: blocker.cloned().unwrap_or_else(|| {
+                            format!(
+                                "{} -> {}",
+                                label_or(&lane.current_evidence_class, "current evidence"),
+                                label_or(&lane.required_evidence_class, "required evidence")
+                            )
+                        }),
+                        target: View::Deploy,
+                        target_label: "Open readiness",
+                    })
+                } else {
+                    None
+                }
+            }),
+    );
+
+    if data.enterprise_product_readiness.data.completion_blocked
+        && data.enterprise_product_readiness.data.lanes.is_empty()
+    {
+        notifications.push(ConsoleNotification {
+            key: "enterprise:completion-blocked".to_string(),
+            severity: "critical",
+            title: "Enterprise completion blocked".to_string(),
+            detail: data
+                .enterprise_product_readiness
+                .data
+                .next_actions
+                .first()
+                .cloned()
+                .unwrap_or_else(|| {
+                    label_or(
+                        &data.enterprise_product_readiness.data.message,
+                        "Enterprise readiness endpoint reports completion blocked.",
+                    )
+                    .to_string()
+                }),
+            target: View::Deploy,
+            target_label: "Open readiness",
+        });
+    }
+
+    notifications.sort_by(|left, right| {
+        notification_rank(left.severity)
+            .cmp(&notification_rank(right.severity))
+            .then_with(|| left.key.cmp(&right.key))
+    });
+    notifications.dedup_by(|left, right| left.key == right.key);
+    notifications
+}
+
+fn json_gate_notification(
+    key: &str,
+    title: &str,
+    value: &Value,
+    target: View,
+    target_label: &'static str,
+) -> Option<ConsoleNotification> {
+    if value.is_null() {
+        return None;
+    }
+    let status = json_status(value);
+    let tone = status_tone(&status);
+    let blockers = json_blockers(value);
+    if tone != "bad" && tone != "warn" && blockers.is_empty() {
+        return None;
+    }
+    Some(ConsoleNotification {
+        key: key.to_string(),
+        severity: if tone == "bad" || !blockers.is_empty() {
+            "critical"
+        } else {
+            "warning"
+        },
+        title: title.to_string(),
+        detail: blockers
+            .first()
+            .cloned()
+            .unwrap_or_else(|| format!("status {status}")),
+        target,
+        target_label,
+    })
+}
+
+fn json_blockers(value: &Value) -> Vec<String> {
+    let mut blockers = Vec::new();
+    collect_json_blockers(value, 0, &mut blockers);
+    blockers.sort();
+    blockers.dedup();
+    blockers.truncate(5);
+    blockers
+}
+
+fn collect_json_blockers(value: &Value, depth: usize, blockers: &mut Vec<String>) {
+    if depth > 3 || blockers.len() >= 12 {
+        return;
+    }
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                let key_lower = key.to_ascii_lowercase();
+                let relevant = key_lower.contains("blocker")
+                    || key_lower.contains("blocked")
+                    || key_lower.contains("failure")
+                    || key_lower.contains("error")
+                    || key_lower.contains("next_action")
+                    || key_lower.contains("reason");
+                if relevant {
+                    match child {
+                        Value::String(text) if !text.trim().is_empty() => {
+                            blockers.push(text.to_string())
+                        }
+                        Value::Array(items) => {
+                            for item in items {
+                                if let Some(text) = item.as_str().filter(|text| !text.trim().is_empty())
+                                {
+                                    blockers.push(text.to_string());
+                                } else {
+                                    collect_json_blockers(item, depth + 1, blockers);
+                                }
+                            }
+                        }
+                        Value::Object(_) => collect_json_blockers(child, depth + 1, blockers),
+                        _ => {}
+                    }
+                } else if depth < 2 {
+                    collect_json_blockers(child, depth + 1, blockers);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_json_blockers(item, depth + 1, blockers);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn notification_rank(severity: &str) -> usize {
+    match severity {
+        "critical" => 0,
+        "warning" => 1,
+        "info" => 2,
+        _ => 3,
+    }
+}
+
+fn operator_queue_rows(data: &ConsoleData) -> Vec<(String, String, String)> {
+    let approval_rows = data.approvals.data.iter().filter_map(|approval| {
+        if approval.status == "pending" || approval.status == "requires_action" {
+            Some((
+                approval.status.clone(),
+                label_or(&approval.kind, "approval").to_string(),
+                label_or(&approval.reason, &approval.id).to_string(),
+            ))
+        } else {
+            None
+        }
+    });
+    let job_rows = data
+        .execution_jobs
+        .data
+        .iter()
+        .chain(data.session_loop_jobs.data.iter())
+        .filter_map(|job| {
+            if status_tone(&job.status) == "bad" || job.last_error.is_some() {
+                Some((
+                    job.status.clone(),
+                    short_id(&job.id),
+                    job.last_error
+                        .clone()
+                        .unwrap_or_else(|| label_or(&job.updated_at, "worker issue").to_string()),
+                ))
+            } else {
+                None
+            }
+        });
+    let lane_rows = data.enterprise_product_readiness.data.lanes.iter().filter_map(|lane| {
+        lane.blockers.first().map(|blocker| {
+            (
+                lane.status.clone(),
+                label_or(&lane.title, &lane.id).to_string(),
+                blocker.clone(),
+            )
+        })
+    });
+    approval_rows
+        .chain(job_rows)
+        .chain(lane_rows)
+        .take(10)
+        .collect()
+}
+
 fn is_active_status(status: &str) -> bool {
     matches!(
         status,
@@ -1690,11 +2909,11 @@ fn status_tone(status: &str) -> &'static str {
     match status {
         "ready" | "completed" | "succeeded" | "active" | "promoted" | "released"
         | "enterprise_product_complete" => "good",
-        "running" | "queued" | "claimed" | "in_progress" => "info",
+        "running" | "queued" | "claimed" | "in_progress" | "installed" | "staged" => "info",
         "pending" | "requires_action" | "review" | "warning" | "attention" | "pilot_ready" => {
             "warn"
         }
-        "failed" | "blocked" | "critical" | "cancelled" => "bad",
+        "failed" | "blocked" | "critical" | "cancelled" | "rolled_back" => "bad",
         _ => "neutral",
     }
 }
@@ -1839,6 +3058,27 @@ fn storage_get(key: &str) -> Option<String> {
     web_sys::window()
         .and_then(|window| window.local_storage().ok().flatten())
         .and_then(|storage| storage.get_item(key).ok().flatten())
+}
+
+fn initial_active_view() -> View {
+    let stored = storage_get("mandoforge.activeView");
+    let migrated = storage_get("mandoforge.overviewDefaultMigrated").is_some();
+    if stored.as_deref() == Some("agents") && !migrated {
+        storage_set("mandoforge.activeView", View::Overview.id());
+        storage_set("mandoforge.overviewDefaultMigrated", "1");
+        return View::Overview;
+    }
+    stored
+        .as_deref()
+        .map(View::from_id)
+        .unwrap_or(View::Overview)
+}
+
+fn initial_critical_notifications_muted() -> bool {
+    matches!(
+        storage_get("mandoforge.criticalNotificationsMuted").as_deref(),
+        Some("1" | "true" | "muted")
+    )
 }
 
 fn storage_set(key: &str, value: &str) {

@@ -436,6 +436,8 @@ pub struct WorkflowPackMarketplacePack {
     pub status: String,
     #[serde(default)]
     pub validation: Value,
+    #[serde(default)]
+    pub manifest_summary: Value,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
