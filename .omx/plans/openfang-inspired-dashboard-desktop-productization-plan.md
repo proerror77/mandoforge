@@ -551,6 +551,7 @@ Mitigation: Desktop MVP explicitly excludes signed updater and enterprise comple
 - Phase 3 initial wizard slice implemented: `Wizard` is now a first-run console route with local/repo-pilot/customer-grade access modes, local progress storage, pack selection, identity/runtime/connector/ontology/evidence checks, and a governed pilot session launcher through the existing `/api/sessions` policy boundary.
 - Phase 3 boundary: the wizard does not configure real external connector credentials, does not perform live writes, and does not mark customer-grade completion. It surfaces the current blockers from readiness APIs and links operators back to Packs, Deploy, Semantic, and Agents.
 - Customer-grade evidence closure slice implemented in Deploy: the page now exposes a conservative checklist for real platform credentials, token refresh, reconciliation/idempotency, webhook/polling delivery, compensation policy, and archived deployment evidence, sourced from current readiness/connector/deployment JSON and marked blocked unless evidence is present.
+- Live connector evidence gate tightened: `/api/native-connectors/production-readiness` now treats archived deployment evidence as a first-class customer-grade requirement per ecommerce connector and only reports `current_evidence_class=customer_grade` when every production-readiness check is present.
 
 ## Definition Of Done
 

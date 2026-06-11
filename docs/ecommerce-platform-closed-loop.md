@@ -33,7 +33,7 @@ Each platform connector must declare:
 - Production-readiness evidence requirements for sandbox/live separation, token
   lifecycle, rate-limit/retry policy, idempotency and reconciliation, webhook or
   polling ingestion, compensation or explicit non-compensable policy, approval
-  boundary, and secret redaction.
+  boundary, secret redaction, and archived deployment evidence.
 
 The verification entrypoint is:
 

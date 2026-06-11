@@ -113,6 +113,8 @@ Required evidence:
 - Compensation or rollback adapters are defined where the platform supports
   them, and explicit non-compensable operations are marked.
 - Webhook or polling ingestion records external state changes with provenance.
+- Each promoted live connector has an immutable deployment evidence archive with
+  deployment target, connector version, logs, and support owner.
 - Connector results never leak raw secrets into tool results, artifacts, events,
   logs, or audit rows.
 

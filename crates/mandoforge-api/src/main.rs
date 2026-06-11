@@ -8488,14 +8488,17 @@ fn build_enterprise_product_completion_lanes(
                 "sandbox/live separation and token lifecycle for each connector",
                 "idempotent external writes plus reconciliation against external platform state",
                 "platform-specific error taxonomy, rate-limit handling, and compensation policy",
+                "immutable deployment evidence archive for every promoted live connector",
             ],
             blockers: vec![
                 "generic native connector governance is not enough for every production platform",
+                "deployment evidence archive is not present for every promoted live connector",
                 "Tmall/Taobao, Xiaohongshu, TikTok Shop, Amazon SP-API, and Lark/Feishu each need promoted production contracts",
             ],
             next_actions: vec![
                 "start with Tmall/Taobao production semantics",
                 "add reconciliation and idempotency evidence before broadening to other ecommerce platforms",
+                "archive connector deployment evidence with target, version, logs, and owner",
             ],
         },
         EnterpriseLaneSpec {
