@@ -10,7 +10,7 @@ use gloo_timers::callback::Interval;
 use notifications::*;
 use serde_json::{Value, json};
 use state::*;
-use views::WizardView;
+use views::{OverviewView, WizardView};
 use wasm_bindgen_futures::spawn_local;
 use web_sys::{HtmlInputElement, HtmlSelectElement, HtmlTextAreaElement};
 use yew::prelude::*;
@@ -519,166 +519,6 @@ struct AgentsProps {
     on_agent: Callback<Event>,
     on_environment: Callback<Event>,
     on_start_task: Callback<MouseEvent>,
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct OverviewProps {
-    data: ConsoleData,
-    on_view: Callback<View>,
-}
-
-#[component]
-fn OverviewView(props: &OverviewProps) -> Html {
-    let data = &props.data;
-    let active_sessions = data
-        .sessions
-        .data
-        .iter()
-        .filter(|session| is_active_status(&session.status))
-        .count();
-    let pending_approvals = pending_approval_count(&data.approvals.data);
-    let active_workers =
-        active_job_count(&data.execution_jobs.data) + active_job_count(&data.session_loop_jobs.data);
-    let failed_jobs =
-        failed_job_count(&data.execution_jobs.data) + failed_job_count(&data.session_loop_jobs.data);
-    let active_runs = data
-        .workflow_runs
-        .data
-        .iter()
-        .filter(|run| is_active_status(&run.status))
-        .count();
-    let ready_packs = ready_pack_count(&data.workflow_pack_installations.data);
-    let blocked_packs = blocked_pack_count(&data.workflow_pack_installations.data);
-    let connector_status = json_status(&data.native_connector_production_readiness.data);
-    let ontology_status = json_status(&data.ontology_engine_readiness.data);
-    let enterprise = &data.enterprise_product_readiness.data;
-    let primary_next_action = enterprise
-        .next_actions
-        .first()
-        .cloned()
-        .or_else(|| first_lane_blocker(enterprise))
-        .unwrap_or_else(|| "No enterprise readiness next action reported.".to_string());
-    let readiness_tone = if enterprise.completion_blocked || enterprise.blocked_lane_count > 0 {
-        "bad"
-    } else {
-        status_tone(&enterprise.status)
-    };
-
-    html! {
-        <div class="overview-layout">
-            <section class="overview-hero">
-                <div class="overview-hero-copy">
-                    <p class="eyebrow">{ "Enterprise Agent OS Control Plane" }</p>
-                    <h2>{ "Runtime, packs, connectors, ontology, and evidence on one operator surface." }</h2>
-                    <p>{ primary_next_action }</p>
-                </div>
-                <div class="overview-hero-actions">
-                    <OverviewButton label="Start wizard" target={View::Wizard} on_view={props.on_view.clone()} />
-                    <OverviewButton label="Review blockers" target={View::Deploy} on_view={props.on_view.clone()} />
-                    <OverviewButton label="Open packs" target={View::Packs} on_view={props.on_view.clone()} />
-                    <OverviewButton label="Check ontology" target={View::Semantic} on_view={props.on_view.clone()} />
-                </div>
-            </section>
-
-            <section class="overview-signals">
-                <OverviewSignal
-                    label="Active sessions"
-                    value={active_sessions.to_string()}
-                    detail={format!("{} total managed sessions", data.sessions.data.len())}
-                    tone={if active_sessions > 0 { "info" } else { "neutral" }}
-                    target={View::Agents}
-                    on_view={props.on_view.clone()}
-                />
-                <OverviewSignal
-                    label="Pending approvals"
-                    value={pending_approvals.to_string()}
-                    detail={"Draft and high-risk actions stay approval-gated.".to_string()}
-                    tone={if pending_approvals > 0 { "warn" } else { "good" }}
-                    target={View::Agents}
-                    on_view={props.on_view.clone()}
-                />
-                <OverviewSignal
-                    label="Worker pressure"
-                    value={active_workers.to_string()}
-                    detail={format!("{failed_jobs} failed or errored jobs")}
-                    tone={if failed_jobs > 0 { "bad" } else if active_workers > 0 { "info" } else { "good" }}
-                    target={View::Agents}
-                    on_view={props.on_view.clone()}
-                />
-                <OverviewSignal
-                    label="Workflow runs"
-                    value={active_runs.to_string()}
-                    detail={format!("{} total workflow runs", data.workflow_runs.data.len())}
-                    tone={if active_runs > 0 { "info" } else { "neutral" }}
-                    target={View::Workflows}
-                    on_view={props.on_view.clone()}
-                />
-                <OverviewSignal
-                    label="Released packs"
-                    value={ready_packs.to_string()}
-                    detail={format!("{blocked_packs} blocked pack installations")}
-                    tone={if blocked_packs > 0 { "warn" } else if ready_packs > 0 { "good" } else { "neutral" }}
-                    target={View::Packs}
-                    on_view={props.on_view.clone()}
-                />
-                <OverviewSignal
-                    label="Enterprise lanes"
-                    value={format!("{}/{}", enterprise.ready_lane_count, enterprise.lane_count.max(enterprise.lanes.len()))}
-                    detail={format!("{} blocked / evidence class {}", enterprise.blocked_lane_count, label_or(&enterprise.required_evidence_class, "customer_grade"))}
-                    tone={readiness_tone}
-                    target={View::Deploy}
-                    on_view={props.on_view.clone()}
-                />
-            </section>
-
-            <div class="overview-grid">
-                <Panel title="Runtime pressure">
-                    <RuntimePipeline
-                        sessions={data.sessions.data.clone()}
-                        execution_jobs={data.execution_jobs.data.clone()}
-                        session_loop_jobs={data.session_loop_jobs.data.clone()}
-                        approvals={data.approvals.data.clone()}
-                        tool_calls={data.tool_calls.data.clone()}
-                    />
-                    <Rows empty="No failed worker jobs." rows={worker_issue_rows(&data.execution_jobs.data, &data.session_loop_jobs.data)} />
-                </Panel>
-                <Panel title="Enterprise readiness">
-                    <EnterpriseReadinessPanel readiness={enterprise.clone()} />
-                </Panel>
-                <Panel title="Pack capability state">
-                    <PackMosaic
-                        installations={data.workflow_pack_installations.data.clone()}
-                        marketplace={data.workflow_pack_marketplace.data.clone()}
-                    />
-                    <Rows empty="No installed packs." rows={pack_overview_rows(&data.workflow_pack_installations.data, &data.workflow_pack_marketplace.data)} />
-                </Panel>
-                <Panel title="Connector and ontology gates">
-                    <KeyMetrics values={vec![
-                        ("Native connectors".to_string(), connector_status.clone()),
-                        ("Ontology engine".to_string(), ontology_status.clone()),
-                        ("Semantic objects".to_string(), data.semantic_objects.data.len().to_string()),
-                        ("Graph edges".to_string(), data.semantic_graph.data.edge_count.to_string()),
-                        ("Reflection queue".to_string(), data.semantic_reflection_queue.data.queue.len().to_string()),
-                    ]} />
-                    <div class="overview-gate-actions">
-                        <OverviewButton label="Connector details" target={View::Deploy} on_view={props.on_view.clone()} />
-                        <OverviewButton label="Ontology details" target={View::Semantic} on_view={props.on_view.clone()} />
-                    </div>
-                </Panel>
-                <Panel title="Immediate operator queue">
-                    <Rows empty="No immediate blockers reported." rows={operator_queue_rows(data)} />
-                </Panel>
-                <Panel title="Evidence surfaces">
-                    <KeyMetrics values={vec![
-                        ("Enterprise contract".to_string(), "/api/enterprise-product/readiness".to_string()),
-                        ("Connector production".to_string(), "/api/native-connectors/production-readiness".to_string()),
-                        ("Ontology readiness".to_string(), "/api/ontology/engine-readiness".to_string()),
-                        ("Pack lifecycle".to_string(), "/api/workflow-packs/installations".to_string()),
-                    ]} />
-                </Panel>
-            </div>
-        </div>
-    }
 }
 
 #[component]
@@ -1309,16 +1149,16 @@ fn AgentTopology(props: &AgentTopologyProps) -> Html {
 }
 
 #[derive(Properties, Clone, PartialEq)]
-struct RuntimePipelineProps {
-    sessions: Vec<Session>,
-    execution_jobs: Vec<WorkerJob>,
-    session_loop_jobs: Vec<WorkerJob>,
-    approvals: Vec<Approval>,
-    tool_calls: Vec<ToolCall>,
+pub(crate) struct RuntimePipelineProps {
+    pub(crate) sessions: Vec<Session>,
+    pub(crate) execution_jobs: Vec<WorkerJob>,
+    pub(crate) session_loop_jobs: Vec<WorkerJob>,
+    pub(crate) approvals: Vec<Approval>,
+    pub(crate) tool_calls: Vec<ToolCall>,
 }
 
 #[component]
-fn RuntimePipeline(props: &RuntimePipelineProps) -> Html {
+pub(crate) fn RuntimePipeline(props: &RuntimePipelineProps) -> Html {
     let stages = vec![
         ("Sessions", props.sessions.len(), "neutral"),
         (
@@ -1537,9 +1377,9 @@ fn RenderedContextPreview(props: &RenderedContextPreviewProps) -> Html {
 }
 
 #[derive(Properties, Clone, PartialEq)]
-struct PackMosaicProps {
-    installations: Vec<WorkflowPackInstallation>,
-    marketplace: WorkflowPackMarketplace,
+pub(crate) struct PackMosaicProps {
+    pub(crate) installations: Vec<WorkflowPackInstallation>,
+    pub(crate) marketplace: WorkflowPackMarketplace,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1649,7 +1489,7 @@ fn PackMetric(props: &PackMetricProps) -> Html {
 }
 
 #[component]
-fn PackMosaic(props: &PackMosaicProps) -> Html {
+pub(crate) fn PackMosaic(props: &PackMosaicProps) -> Html {
     let marketplace_count = props.marketplace.packs.len();
     let total = props.installations.len().max(marketplace_count).max(1);
     html! {
@@ -1714,12 +1554,12 @@ fn ReadinessRadar(props: &ReadinessRadarProps) -> Html {
 }
 
 #[derive(Properties, Clone, PartialEq)]
-struct EnterpriseReadinessPanelProps {
-    readiness: EnterpriseProductReadiness,
+pub(crate) struct EnterpriseReadinessPanelProps {
+    pub(crate) readiness: EnterpriseProductReadiness,
 }
 
 #[component]
-fn EnterpriseReadinessPanel(props: &EnterpriseReadinessPanelProps) -> Html {
+pub(crate) fn EnterpriseReadinessPanel(props: &EnterpriseReadinessPanelProps) -> Html {
     let readiness = &props.readiness;
     let total = readiness.lane_count.max(readiness.lanes.len()).max(1);
     let next_action = readiness
@@ -1843,33 +1683,33 @@ fn count_errors(data: &ConsoleData) -> usize {
     .count()
 }
 
-fn active_job_count(jobs: &[WorkerJob]) -> usize {
+pub(crate) fn active_job_count(jobs: &[WorkerJob]) -> usize {
     jobs.iter()
         .filter(|job| is_active_status(&job.status))
         .count()
 }
 
-fn pending_approval_count(approvals: &[Approval]) -> usize {
+pub(crate) fn pending_approval_count(approvals: &[Approval]) -> usize {
     approvals
         .iter()
         .filter(|approval| approval.status == "pending" || approval.status == "requires_action")
         .count()
 }
 
-fn failed_job_count(jobs: &[WorkerJob]) -> usize {
+pub(crate) fn failed_job_count(jobs: &[WorkerJob]) -> usize {
     jobs.iter()
         .filter(|job| status_tone(&job.status) == "bad" || job.last_error.is_some())
         .count()
 }
 
-fn ready_pack_count(packs: &[WorkflowPackInstallation]) -> usize {
+pub(crate) fn ready_pack_count(packs: &[WorkflowPackInstallation]) -> usize {
     packs
         .iter()
         .filter(|pack| matches!(pack.status.as_str(), "released" | "ready" | "active"))
         .count()
 }
 
-fn blocked_pack_count(packs: &[WorkflowPackInstallation]) -> usize {
+pub(crate) fn blocked_pack_count(packs: &[WorkflowPackInstallation]) -> usize {
     packs
         .iter()
         .filter(|pack| status_tone(&pack.status) == "bad" || pack.status == "blocked")
@@ -1911,7 +1751,7 @@ pub(crate) fn first_lane_blocker(readiness: &EnterpriseProductReadiness) -> Opti
         .find_map(|lane| lane.blockers.first().or_else(|| lane.next_actions.first()).cloned())
 }
 
-fn worker_issue_rows(
+pub(crate) fn worker_issue_rows(
     execution_jobs: &[WorkerJob],
     session_loop_jobs: &[WorkerJob],
 ) -> Vec<(String, String, String)> {
@@ -1932,7 +1772,7 @@ fn worker_issue_rows(
         .collect()
 }
 
-fn pack_overview_rows(
+pub(crate) fn pack_overview_rows(
     installations: &[WorkflowPackInstallation],
     marketplace: &WorkflowPackMarketplace,
 ) -> Vec<(String, String, String)> {
@@ -2260,7 +2100,7 @@ fn pack_blocker_summary(
     }
 }
 
-fn operator_queue_rows(data: &ConsoleData) -> Vec<(String, String, String)> {
+pub(crate) fn operator_queue_rows(data: &ConsoleData) -> Vec<(String, String, String)> {
     let approval_rows = data.approvals.data.iter().filter_map(|approval| {
         if approval.status == "pending" || approval.status == "requires_action" {
             Some((
@@ -2306,7 +2146,7 @@ fn operator_queue_rows(data: &ConsoleData) -> Vec<(String, String, String)> {
         .collect()
 }
 
-fn is_active_status(status: &str) -> bool {
+pub(crate) fn is_active_status(status: &str) -> bool {
     matches!(
         status,
         "running" | "queued" | "claimed" | "in_progress" | "requires_action"
