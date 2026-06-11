@@ -1,5 +1,6 @@
 mod api;
 mod components;
+mod desktop_bridge;
 mod notifications;
 mod state;
 mod views;
@@ -10,7 +11,7 @@ use gloo_timers::callback::Interval;
 use notifications::*;
 use serde_json::{Value, json};
 use state::*;
-use views::{BoardView, OverviewView, WizardView, WorkflowsView};
+use views::{BoardView, OverviewView, SettingsView, WizardView, WorkflowsView};
 use wasm_bindgen_futures::spawn_local;
 use web_sys::{HtmlInputElement, HtmlSelectElement, HtmlTextAreaElement};
 use yew::prelude::*;
@@ -796,62 +797,6 @@ fn DeployView(props: &DeployProps) -> Html {
             </Panel>
             <Panel title="Usage and finance">
                 <JsonPreview value={props.data.usage.data.clone()} />
-            </Panel>
-        </div>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct SettingsProps {
-    data: ConsoleData,
-    critical_muted: bool,
-    notification_count: usize,
-    critical_notification_count: usize,
-    on_toggle_critical: Callback<MouseEvent>,
-}
-
-#[component]
-fn SettingsView(props: &SettingsProps) -> Html {
-    let token_saved = storage_get("mandoforge.adminToken")
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false);
-    html! {
-        <div class="page-grid">
-            <Panel title="Notification policy">
-                <div class="settings-stack">
-                    <div class="settings-row">
-                        <div>
-                            <span>{ "Critical operator notifications" }</span>
-                            <strong>{ if props.critical_muted { "Muted in this browser" } else { "Enabled in this browser" } }</strong>
-                            <p>{ "Applies to failed execution jobs, stalled session-loop jobs, connector blockers, ontology blockers, and enterprise readiness regressions. Native OS notifications are not enabled yet." }</p>
-                        </div>
-                        <button onclick={props.on_toggle_critical.clone()}>
-                            { if props.critical_muted { "Enable critical notifications" } else { "Mute critical notifications" } }
-                        </button>
-                    </div>
-                    <KeyMetrics values={vec![
-                        ("Actionable notifications".to_string(), props.notification_count.to_string()),
-                        ("Critical notifications".to_string(), props.critical_notification_count.to_string()),
-                        ("Deduplication".to_string(), "stable event key".to_string()),
-                        ("Native forwarding".to_string(), "desktop phase only".to_string()),
-                    ]} />
-                </div>
-            </Panel>
-            <Panel title="Console identity">
-                <KeyMetrics values={vec![
-                    ("Admin token".to_string(), if token_saved { "saved locally".to_string() } else { "not saved".to_string() }),
-                    ("API auth".to_string(), "Bearer + x-mandoforge identity headers".to_string()),
-                    ("API errors".to_string(), count_errors(&props.data).to_string()),
-                    ("Refreshing endpoints".to_string(), count_loading(&props.data).to_string()),
-                ]} />
-            </Panel>
-            <Panel title="Desktop boundary">
-                <KeyMetrics values={vec![
-                    ("Desktop status".to_string(), "not packaged in web phase".to_string()),
-                    ("Governance".to_string(), "API owns policy, approval, audit, readiness".to_string()),
-                    ("Notification source".to_string(), "web bridge classification".to_string()),
-                    ("OS permission prompt".to_string(), "not requested".to_string()),
-                ]} />
             </Panel>
         </div>
     }
