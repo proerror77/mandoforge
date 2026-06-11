@@ -12,8 +12,8 @@ use notifications::*;
 use serde_json::{Value, json};
 use state::*;
 use views::{
-    AgentsView, BoardView, DeployView, DynamicView, OverviewView, SemanticView, SettingsView,
-    WizardView, WorkflowsView,
+    AgentsView, BoardView, DeployView, DynamicView, OverviewView, PacksView, SemanticView,
+    SettingsView, WizardView, WorkflowsView,
 };
 use wasm_bindgen_futures::spawn_local;
 use web_sys::{HtmlInputElement, HtmlSelectElement, HtmlTextAreaElement};
@@ -517,61 +517,6 @@ fn App() -> Html {
 }
 
 #[derive(Properties, Clone, PartialEq)]
-struct DataProps {
-    data: ConsoleData,
-}
-
-#[component]
-fn PacksView(props: &DataProps) -> Html {
-    let cards = pack_card_models(
-        &props.data.workflow_pack_installations.data,
-        &props.data.workflow_pack_marketplace.data,
-    );
-    html! {
-        <div class="page-stack">
-            <section class="pack-product-grid">
-                { for cards.into_iter().map(|card| html! { <PackProductCard card={card} /> }) }
-            </section>
-            <div class="page-grid">
-                <Panel title="Marketplace map">
-                    <PackMosaic
-                        installations={props.data.workflow_pack_installations.data.clone()}
-                        marketplace={props.data.workflow_pack_marketplace.data.clone()}
-                    />
-                </Panel>
-            <Panel title="Installations">
-                <Rows empty="No pack installations." rows={props.data.workflow_pack_installations.data.iter().take(12).map(|pack| {
-                    (
-                        pack.status.clone(),
-                        label_or(&pack.pack_id, "pack").to_string(),
-                        format!("{} / {} / {}", label_or(&pack.kind, "kind"), label_or(&pack.version, "version"), semantic_scope_summary(&pack.manifest["semantic_scopes"]))
-                    )
-                }).collect::<Vec<_>>()} />
-            </Panel>
-            <Panel title="Marketplace">
-                <KeyMetrics values={vec![
-                    ("Status".to_string(), props.data.workflow_pack_marketplace.data.status.clone()),
-                    ("Packs".to_string(), props.data.workflow_pack_marketplace.data.packs.len().to_string()),
-                    ("Bindings".to_string(), "via /api/workflow-packs/installations/{id}/bindings".to_string()),
-                    ("Runtime objects".to_string(), "via /api/workflow-packs/installations/{id}/runtime-objects".to_string()),
-                ]} />
-                <Rows empty="No marketplace packs." rows={props.data.workflow_pack_marketplace.data.packs.iter().map(|pack| {
-                    (
-                        pack.status.clone(),
-                        label_or(&pack.name, &pack.id).to_string(),
-                        format!("{} / {} / {}", label_or(&pack.kind, "kind"), label_or(&pack.version, "version"), pack.description.clone())
-                    )
-                }).collect::<Vec<_>>()} />
-            </Panel>
-            <Panel title="Onboarding">
-                <JsonPreview value={Value::Array(props.data.capability_discovery.data.capabilities.clone())} />
-            </Panel>
-            </div>
-        </div>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
 struct VisualCommandDeckProps {
     data: ConsoleData,
     view: View,
@@ -821,100 +766,6 @@ pub(crate) struct PackCardModel {
     pub(crate) status: String,
     pub(crate) source: String,
     pub(crate) manifest: Value,
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct PackProductCardProps {
-    card: PackCardModel,
-}
-
-#[component]
-fn PackProductCard(props: &PackProductCardProps) -> Html {
-    let card = &props.card;
-    let workflow_count = pack_metric_count(&card.manifest, "workflows", "workflow_count");
-    let agent_count = pack_metric_count(&card.manifest, "agents", "agent_count");
-    let connector_count = pack_metric_count(&card.manifest, "connectors", "connector_count");
-    let action_count = pack_metric_count(&card.manifest, "actions", "action_count");
-    let release_gate_count =
-        pack_metric_count(&card.manifest, "release_gates", "required_eval_gate_count");
-    let validated_file_count =
-        pack_metric_count(&card.manifest, "validated_files", "validated_file_count");
-    let external_writes = pack_has_external_writes(&card.manifest);
-    let approval_required = pack_requires_approval(&card.manifest);
-    let safe_action = if external_writes {
-        "Draft + approval before external write"
-    } else {
-        "Read and draft surfaces only"
-    };
-    html! {
-        <article class={classes!("pack-product-card", status_tone(&card.status))} key={card.id.clone()}>
-            <header class="pack-product-header">
-                <StatusLogo status={card.status.clone()} />
-                <div>
-                    <span>{ format!("{} / {}", label_or(&card.kind, "WorkflowPack"), label_or(&card.version, "version")) }</span>
-                    <strong>{ label_or(&card.name, &card.id) }</strong>
-                </div>
-                <em>{ label_or(&card.status, &card.source) }</em>
-            </header>
-            <p>{ label_or(&card.description, "No pack description reported.") }</p>
-            <div class="pack-lifecycle" aria-label="WorkflowPack lifecycle">
-                { for pack_lifecycle_steps(&card.status, &card.source).into_iter().map(|(label, tone)| html! {
-                    <span class={classes!("pack-lifecycle-step", tone)}>{ label }</span>
-                }) }
-            </div>
-            <div class="pack-card-metrics">
-                <PackMetric label="Workflows" value={workflow_count} />
-                <PackMetric label="Agents" value={agent_count} />
-                <PackMetric label="Connectors" value={connector_count} />
-                <PackMetric label="Actions" value={action_count} />
-                <PackMetric label="Gates" value={release_gate_count} />
-                <PackMetric label="Files" value={validated_file_count} />
-            </div>
-            <div class="pack-capabilities">
-                { for pack_string_list(&card.manifest, "capabilities", 6).into_iter().map(|capability| html! {
-                    <span>{ capability }</span>
-                }) }
-                { if json_array_len(&card.manifest["capabilities"]) == 0 {
-                    html! { <span>{ "No capabilities declared" }</span> }
-                } else {
-                    html! {}
-                }}
-            </div>
-            <div class="pack-connector-list">
-                { for pack_connector_rows(&card.manifest).into_iter().map(|row| html! {
-                    <div class="pack-connector-row" key={row.0.clone()}>
-                        <strong>{ row.0 }</strong>
-                        <span>{ row.1 }</span>
-                    </div>
-                }) }
-            </div>
-            <div class="pack-gate-strip">
-                <span>{ format!("{release_gate_count} release gates") }</span>
-                <span>{ if approval_required { "approval required" } else { "approval not declared" } }</span>
-                <span>{ safe_action }</span>
-            </div>
-            <div class="pack-card-footer">
-                <small>{ pack_blocker_summary(card, external_writes, release_gate_count) }</small>
-                <b>{ semantic_scope_summary(&card.manifest["semantic_scopes"]) }</b>
-            </div>
-        </article>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct PackMetricProps {
-    label: &'static str,
-    value: usize,
-}
-
-#[component]
-fn PackMetric(props: &PackMetricProps) -> Html {
-    html! {
-        <div class="pack-metric">
-            <span>{ props.label }</span>
-            <strong>{ props.value }</strong>
-        </div>
-    }
 }
 
 #[component]
@@ -1279,7 +1130,7 @@ fn json_string(value: &Value, key: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
-fn json_array_len(value: &Value) -> usize {
+pub(crate) fn json_array_len(value: &Value) -> usize {
     value.as_array().map(Vec::len).unwrap_or(0)
 }
 
@@ -1296,7 +1147,7 @@ pub(crate) fn pack_metric_count(
             .unwrap_or(0))
 }
 
-fn pack_string_list(manifest: &Value, key: &str, limit: usize) -> Vec<String> {
+pub(crate) fn pack_string_list(manifest: &Value, key: &str, limit: usize) -> Vec<String> {
     manifest
         .get(key)
         .and_then(Value::as_array)
@@ -1310,7 +1161,7 @@ fn pack_string_list(manifest: &Value, key: &str, limit: usize) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn pack_connector_rows(manifest: &Value) -> Vec<(String, String)> {
+pub(crate) fn pack_connector_rows(manifest: &Value) -> Vec<(String, String)> {
     let rows = manifest
         .get("connectors")
         .and_then(Value::as_array)
@@ -1426,7 +1277,10 @@ pub(crate) fn pack_requires_approval(manifest: &Value) -> bool {
     connector_approval || handoff_approval
 }
 
-fn pack_lifecycle_steps(status: &str, source: &str) -> Vec<(&'static str, &'static str)> {
+pub(crate) fn pack_lifecycle_steps(
+    status: &str,
+    source: &str,
+) -> Vec<(&'static str, &'static str)> {
     let order = [
         ("Install", "installed"),
         ("Stage", "staged"),
@@ -1472,7 +1326,7 @@ fn lifecycle_step_passed(status: &str, step: &str) -> bool {
     rank(status) > rank(step)
 }
 
-fn pack_blocker_summary(
+pub(crate) fn pack_blocker_summary(
     card: &PackCardModel,
     external_writes: bool,
     release_gate_count: usize,
