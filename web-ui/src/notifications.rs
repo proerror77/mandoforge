@@ -1,6 +1,8 @@
 use crate::state::{ConsoleData, View};
 use crate::{json_status, label_or, short_id, status_tone};
+use js_sys::{Function, Object, Reflect};
 use serde_json::Value;
+use wasm_bindgen::{JsCast, JsValue};
 use yew::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -241,6 +243,39 @@ pub(crate) fn console_notifications(data: &ConsoleData) -> Vec<ConsoleNotificati
     notifications
 }
 
+pub(crate) fn forward_critical_notifications_to_desktop(notifications: &[ConsoleNotification]) {
+    let Some((this_arg, invoke)) = desktop_invoke_function() else {
+        return;
+    };
+    for notification in notifications
+        .iter()
+        .filter(|notification| notification.severity == "critical")
+    {
+        if desktop_notification_forwarded(&notification.key) {
+            continue;
+        }
+        let payload = Object::new();
+        set_js_string(&payload, "key", &notification.key);
+        set_js_string(&payload, "severity", notification.severity);
+        set_js_string(&payload, "title", &notification.title);
+        set_js_string(&payload, "detail", &notification.detail);
+        set_js_string(&payload, "target_label", notification.target_label);
+
+        let args = Object::new();
+        let _ = Reflect::set(&args, &JsValue::from_str("payload"), &payload);
+        if invoke
+            .call2(
+                &this_arg,
+                &JsValue::from_str("forward_console_notification"),
+                &args,
+            )
+            .is_ok()
+        {
+            mark_desktop_notification_forwarded(&notification.key);
+        }
+    }
+}
+
 fn json_gate_notification(
     key: &str,
     title: &str,
@@ -337,4 +372,42 @@ fn notification_rank(severity: &str) -> usize {
         "info" => 2,
         _ => 3,
     }
+}
+
+fn desktop_invoke_function() -> Option<(JsValue, Function)> {
+    let window = web_sys::window()?;
+    let tauri = Reflect::get(window.as_ref(), &JsValue::from_str("__TAURI__")).ok()?;
+    if tauri.is_undefined() || tauri.is_null() {
+        return None;
+    }
+    let core = Reflect::get(&tauri, &JsValue::from_str("core"))
+        .ok()
+        .filter(|value| !value.is_undefined() && !value.is_null())
+        .unwrap_or(tauri);
+    let invoke = Reflect::get(&core, &JsValue::from_str("invoke"))
+        .ok()?
+        .dyn_into::<Function>()
+        .ok()?;
+    Some((core, invoke))
+}
+
+fn set_js_string(target: &Object, key: &str, value: &str) {
+    let _ = Reflect::set(target, &JsValue::from_str(key), &JsValue::from_str(value));
+}
+
+fn desktop_notification_forwarded(key: &str) -> bool {
+    web_sys::window()
+        .and_then(|window| window.session_storage().ok().flatten())
+        .and_then(|storage| storage.get_item(&desktop_notification_storage_key(key)).ok().flatten())
+        .is_some()
+}
+
+fn mark_desktop_notification_forwarded(key: &str) {
+    if let Some(storage) = web_sys::window().and_then(|window| window.session_storage().ok().flatten()) {
+        let _ = storage.set_item(&desktop_notification_storage_key(key), "1");
+    }
+}
+
+fn desktop_notification_storage_key(key: &str) -> String {
+    format!("mandoforge.nativeNotificationForwarded.{key}")
 }

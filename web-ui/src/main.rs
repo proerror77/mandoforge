@@ -332,6 +332,16 @@ fn App() -> Html {
         .iter()
         .filter(|notification| notification.severity == "critical")
         .count();
+    {
+        let notifications = notifications.clone();
+        let critical_notifications_muted = *critical_notifications_muted;
+        use_effect_with((notifications, critical_notifications_muted), |(notifications, muted)| {
+            if !*muted {
+                forward_critical_notifications_to_desktop(notifications);
+            }
+            || ()
+        });
+    }
 
     html! {
         <main class="console-shell">

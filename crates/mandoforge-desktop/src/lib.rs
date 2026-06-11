@@ -20,6 +20,12 @@ pub struct DesktopState {
     mode: DesktopMode,
     started_at_ms: u128,
     embedded_api: Option<EmbeddedApiProcess>,
+    notification_bridge: Mutex<NotificationBridgeState>,
+}
+
+#[derive(Default)]
+struct NotificationBridgeState {
+    forwarded_keys: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -45,6 +51,8 @@ pub struct NotificationStatus {
     pub native_forwarding_enabled: bool,
     pub browser_permission_prompted: bool,
     pub muted_storage_key: &'static str,
+    pub allowed_severity: &'static str,
+    pub forwarded_count: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -70,6 +78,7 @@ impl DesktopState {
                 mode: DesktopMode::EmbeddedLocalApi,
                 started_at_ms: now_ms(),
                 embedded_api: Some(embedded),
+                notification_bridge: Mutex::new(NotificationBridgeState::default()),
             });
         }
         Ok(Self::new(
@@ -86,6 +95,7 @@ impl DesktopState {
             mode: DesktopMode::ExistingApi,
             started_at_ms: now_ms(),
             embedded_api: None,
+            notification_bridge: Mutex::new(NotificationBridgeState::default()),
         }
     }
 
@@ -102,6 +112,28 @@ impl DesktopState {
             embedded_api_enabled: matches!(self.mode, DesktopMode::EmbeddedLocalApi),
             embedded_api_owned: self.embedded_api.is_some(),
         }
+    }
+
+    pub fn record_forwarded_notification_key(&self, key: &str) -> bool {
+        let Ok(mut bridge) = self.notification_bridge.lock() else {
+            return false;
+        };
+        if bridge.forwarded_keys.iter().any(|existing| existing == key) {
+            return false;
+        }
+        bridge.forwarded_keys.push(key.to_string());
+        if bridge.forwarded_keys.len() > 256 {
+            let overflow = bridge.forwarded_keys.len() - 256;
+            bridge.forwarded_keys.drain(0..overflow);
+        }
+        true
+    }
+
+    pub fn forwarded_notification_count(&self) -> usize {
+        self.notification_bridge
+            .lock()
+            .map(|bridge| bridge.forwarded_keys.len())
+            .unwrap_or_default()
     }
 }
 
@@ -172,6 +204,7 @@ impl Drop for EmbeddedApiProcess {
 pub fn run() {
     let state = DesktopState::from_env().expect("failed to initialize MandoForge desktop state");
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
@@ -180,6 +213,7 @@ pub fn run() {
             commands::open_config_dir,
             commands::open_logs_dir,
             commands::get_notification_status,
+            commands::forward_console_notification,
             commands::get_desktop_hardening_status,
         ])
         .setup(|app| {
@@ -333,5 +367,13 @@ mod tests {
         unsafe {
             std::env::remove_var("MANDOFORGE_DESKTOP_TEST_BOOL");
         }
+    }
+
+    #[test]
+    fn notification_bridge_deduplicates_forwarded_keys() {
+        let state = DesktopState::new("http://127.0.0.1:9".to_string());
+        assert!(state.record_forwarded_notification_key("execution-job:1"));
+        assert!(!state.record_forwarded_notification_key("execution-job:1"));
+        assert_eq!(state.forwarded_notification_count(), 1);
     }
 }
