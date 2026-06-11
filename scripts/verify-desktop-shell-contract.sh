@@ -13,7 +13,7 @@ require_file() {
 require_text() {
   local file="$1"
   local pattern="$2"
-  if ! grep -q "$pattern" "$file"; then
+  if ! grep -q -- "$pattern" "$file"; then
     echo "desktop shell contract failed: $file missing pattern: $pattern" >&2
     exit 1
   fi
@@ -47,7 +47,9 @@ done
 require_text "Cargo.toml" "crates/mandoforge-desktop"
 require_text "$DESKTOP_ROOT/Cargo.toml" "tauri"
 require_text "$DESKTOP_ROOT/Cargo.toml" "tray-icon"
+require_text "$DESKTOP_ROOT/Cargo.toml" "tauri-plugin-autostart"
 require_text "$DESKTOP_ROOT/Cargo.toml" "tauri-plugin-notification"
+require_text "$DESKTOP_ROOT/Cargo.toml" "tauri-plugin-single-instance"
 require_text "$DESKTOP_ROOT/tauri.conf.json" "com.mandonothing.mandoforge"
 require_text "$DESKTOP_ROOT/tauri.conf.json" "http://127.0.0.1:8787"
 require_text "$DESKTOP_ROOT/tauri.conf.json" "frontendDist"
@@ -62,6 +64,8 @@ for command in \
   open_logs_dir \
   get_notification_status \
   forward_console_notification \
+  get_autostart_status \
+  set_autostart_enabled \
   get_desktop_hardening_status; do
   require_text "$DESKTOP_ROOT/src/commands.rs" "fn $command"
   require_text "$DESKTOP_ROOT/src/lib.rs" "commands::$command"
@@ -85,6 +89,10 @@ require_text "$DESKTOP_ROOT/src/lib.rs" "DesktopMode::ExistingApi"
 require_text "$DESKTOP_ROOT/src/lib.rs" "DesktopMode::EmbeddedLocalApi"
 require_text "$DESKTOP_ROOT/src/lib.rs" "embedded_api_enabled: matches!"
 require_text "$DESKTOP_ROOT/src/lib.rs" "embedded_api_owned"
+require_text "$DESKTOP_ROOT/src/lib.rs" "tauri_plugin_single_instance::init"
+require_text "$DESKTOP_ROOT/src/lib.rs" "focus_main_window"
+require_text "$DESKTOP_ROOT/src/lib.rs" "tauri_plugin_autostart::init"
+require_text "$DESKTOP_ROOT/src/lib.rs" "--from-autostart"
 require_text "$DESKTOP_ROOT/src/lib.rs" "tauri_plugin_notification::init"
 require_text "$DESKTOP_ROOT/src/lib.rs" "record_forwarded_notification_key"
 require_text "$DESKTOP_ROOT/src/lib.rs" "127.0.0.1:0"
@@ -93,11 +101,18 @@ require_text "$DESKTOP_ROOT/src/lib.rs" "api_unreachable"
 require_text "$DESKTOP_ROOT/src/commands.rs" "native_forwarding_enabled: true"
 require_text "$DESKTOP_ROOT/src/commands.rs" "payload.severity != \"critical\""
 require_text "$DESKTOP_ROOT/src/commands.rs" "duplicate_ignored"
+require_text "$DESKTOP_ROOT/src/commands.rs" "get_autostart_status"
+require_text "$DESKTOP_ROOT/src/commands.rs" "set_autostart_enabled"
+require_text "$DESKTOP_ROOT/src/commands.rs" "explicit_operator_opt_in_only"
+require_text "$DESKTOP_ROOT/src/commands.rs" ".enable()"
+require_text "$DESKTOP_ROOT/src/commands.rs" ".disable()"
 require_text "$DESKTOP_ROOT/src/commands.rs" "evidence_class: \"mvp_local_shell\""
 require_text "$DESKTOP_ROOT/src/commands.rs" "signed_distribution_ready: false"
 require_text "$DESKTOP_ROOT/src/commands.rs" "updater_enabled: false"
-require_text "$DESKTOP_ROOT/src/commands.rs" "single_instance_enabled: false"
-require_text "$DESKTOP_ROOT/src/commands.rs" "autostart_enabled: false"
+require_text "$DESKTOP_ROOT/src/commands.rs" "single_instance_control_available: true"
+require_text "$DESKTOP_ROOT/src/commands.rs" "single_instance_enabled: true"
+require_text "$DESKTOP_ROOT/src/commands.rs" "autostart_control_available: true"
+require_text "$DESKTOP_ROOT/src/commands.rs" "autostart_enabled(&app)"
 require_text "$DESKTOP_ROOT/src/commands.rs" "native_notifications_enabled: true"
 require_text "$DESKTOP_ROOT/src/commands.rs" "enterprise_completion_claimed: false"
 require_text "$DESKTOP_ROOT/src/commands.rs" "mandoforge.criticalNotificationsMuted"
@@ -111,6 +126,11 @@ require_text "scripts/verify-desktop-runtime-smoke.sh" "MANDOFORGE_DESKTOP_EMBED
 
 if grep -R -q "cargo run -p mandoforge-api" "$DESKTOP_ROOT/src"; then
   echo "desktop shell contract failed: desktop MVP must not hard-code cargo-run API startup" >&2
+  exit 1
+fi
+
+if grep -q "autostart:default" "$DESKTOP_ROOT/capabilities/default.json"; then
+  echo "desktop shell contract failed: autostart plugin commands must not be directly exposed to the web console" >&2
   exit 1
 fi
 

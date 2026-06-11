@@ -1,8 +1,10 @@
 use crate::{
-    DesktopHardeningStatus, DesktopState, DesktopStatus, NotificationStatus, config_dir, logs_dir,
+    AutostartStatus, DesktopHardeningStatus, DesktopState, DesktopStatus, NotificationStatus,
+    config_dir, logs_dir,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
+use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_notification::NotificationExt;
 
 #[tauri::command]
@@ -122,26 +124,56 @@ pub fn forward_console_notification(
 }
 
 #[tauri::command]
-pub fn get_desktop_hardening_status() -> DesktopHardeningStatus {
+pub fn get_autostart_status(app: AppHandle) -> AutostartStatus {
+    AutostartStatus {
+        control_available: true,
+        enabled: autostart_enabled(&app),
+        policy: "explicit_operator_opt_in_only",
+        platform_registration: "tauri_plugin_autostart",
+    }
+}
+
+#[tauri::command]
+pub fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<AutostartStatus, String> {
+    let manager = app.autolaunch();
+    if enabled {
+        manager
+            .enable()
+            .map_err(|error| format!("autostart enable failed: {error}"))?;
+    } else {
+        manager
+            .disable()
+            .map_err(|error| format!("autostart disable failed: {error}"))?;
+    }
+    Ok(get_autostart_status(app))
+}
+
+#[tauri::command]
+pub fn get_desktop_hardening_status(app: AppHandle) -> DesktopHardeningStatus {
     DesktopHardeningStatus {
         evidence_class: "mvp_local_shell",
         bundle_active: false,
         signed_distribution_ready: false,
         updater_enabled: false,
-        single_instance_enabled: false,
-        autostart_enabled: false,
+        single_instance_control_available: true,
+        single_instance_enabled: true,
+        autostart_control_available: true,
+        autostart_enabled: autostart_enabled(&app),
         csp_configured: false,
         native_notifications_enabled: true,
         enterprise_completion_claimed: false,
         next_actions: vec![
             "enable signed bundle metadata before distribution",
             "add updater only with signed feed evidence",
-            "add single-instance behavior before default desktop launch",
-            "add explicit autostart opt-in before enabling background startup",
+            "keep autostart disabled by default and require explicit operator opt-in",
             "configure CSP before packaged WebView distribution",
             "capture packaged OS notification permission evidence before distribution",
         ],
     }
+}
+
+fn autostart_enabled(app: &AppHandle) -> bool {
+    app.autolaunch().is_enabled().unwrap_or(false)
 }
 
 fn bounded_text(value: &str, max_chars: usize) -> String {

@@ -61,12 +61,22 @@ pub struct DesktopHardeningStatus {
     pub bundle_active: bool,
     pub signed_distribution_ready: bool,
     pub updater_enabled: bool,
+    pub single_instance_control_available: bool,
     pub single_instance_enabled: bool,
+    pub autostart_control_available: bool,
     pub autostart_enabled: bool,
     pub csp_configured: bool,
     pub native_notifications_enabled: bool,
     pub enterprise_completion_claimed: bool,
     pub next_actions: Vec<&'static str>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AutostartStatus {
+    pub control_available: bool,
+    pub enabled: bool,
+    pub policy: &'static str,
+    pub platform_registration: &'static str,
 }
 
 impl DesktopState {
@@ -204,6 +214,13 @@ impl Drop for EmbeddedApiProcess {
 pub fn run() {
     let state = DesktopState::from_env().expect("failed to initialize MandoForge desktop state");
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            focus_main_window(app);
+        }))
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--from-autostart"]),
+        ))
         .plugin(tauri_plugin_notification::init())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
@@ -214,6 +231,8 @@ pub fn run() {
             commands::open_logs_dir,
             commands::get_notification_status,
             commands::forward_console_notification,
+            commands::get_autostart_status,
+            commands::set_autostart_enabled,
             commands::get_desktop_hardening_status,
         ])
         .setup(|app| {
@@ -230,6 +249,14 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running MandoForge desktop");
+}
+
+fn focus_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
 }
 
 fn open_console_window(app: &tauri::App, api_base_url: &str) -> Result<()> {

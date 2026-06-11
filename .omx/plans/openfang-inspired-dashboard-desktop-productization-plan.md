@@ -345,6 +345,10 @@ Desktop behavior:
   - `open_config_dir`
   - `open_logs_dir`
   - `get_notification_status`
+  - `forward_console_notification`
+  - `get_desktop_hardening_status`
+  - `get_autostart_status`
+  - `set_autostart_enabled`
 - Provide tray:
   - Show Console
   - Open Browser
@@ -395,6 +399,8 @@ Acceptance criteria:
 - `scripts/verify-desktop-shell-contract.sh` exists and validates desktop config, expected IPC commands, bundle metadata, and critical files.
 - Packaging instructions are documented.
 - Update path is either implemented with signing or explicitly marked unavailable.
+- Single-instance behavior focuses the existing console instead of launching duplicate shells.
+- Autostart remains disabled by default and can only be changed through an explicit operator command.
 - Desktop still uses API-backed readiness and does not introduce local-only truth.
 
 ### Phase 8: Enterprise Product Completion Tie-In
@@ -531,13 +537,14 @@ Mitigation: Desktop MVP explicitly excludes signed updater and enterprise comple
 - Phase 5 boundary: browser-native permission prompting remains unimplemented; desktop OS notification forwarding is now mapped through the same critical notification bridge into Tauri with key-based de-duplication.
 - Settings slice implemented: critical notification visibility can be muted per browser through `mandoforge.criticalNotificationsMuted`.
 - Phase 6 initial MVP implemented: `crates/mandoforge-desktop` is a Tauri 2 shell that opens an existing API-backed console from `MANDOFORGE_API_BASE_URL` or `http://127.0.0.1:8787`, exposes status/base-url/logs/config/browser/notification IPC commands, and installs a macOS-capable tray menu.
-- Phase 6 boundary: embedded API startup, signed distribution, updater, and native OS notification forwarding are not implemented yet; `scripts/verify-desktop-shell-contract.sh` keeps those claims explicit.
+- Phase 6 boundary: signed distribution and updater are not implemented yet; embedded API startup and native OS notification forwarding are implemented as bounded local-shell contracts, and `scripts/verify-desktop-shell-contract.sh` keeps those claims explicit.
 - Phase 6 runtime smoke implemented: desktop status now reports API reachability (`api_reachable`, `api_unreachable`, or `api_url_invalid`), `MANDOFORGE_DESKTOP_SMOKE_EXIT_AFTER_MS` lets the Tauri event loop auto-exit for verification, and `scripts/verify-desktop-runtime-smoke.sh` can launch against an existing API or start a memory-mode API with `START_API=1`.
 - Phase 6 runtime smoke passed after replacing the invalid placeholder icon with a Tauri-decodable PNG and adding `core:webview:allow-create-webview-window` to the desktop capability file.
 - Phase 6 embedded local API implemented as an explicit opt-in process-owner contract: `MANDOFORGE_DESKTOP_EMBEDDED_API=1` starts an API command from `MANDOFORGE_DESKTOP_API_COMMAND` on a reserved localhost port, waits for API reachability before opening the WebView, and kills the owned child process on desktop exit.
 - Phase 6 embedded boundary: this is not yet a Tauri packaged sidecar or signed distribution artifact; it is a verified local startup contract. `EMBEDDED_API=1 ./scripts/verify-desktop-runtime-smoke.sh` covers the opt-in path.
-- Phase 7 hardening truth surface implemented: desktop IPC now exposes `get_desktop_hardening_status` with explicit false values for signed distribution, updater, single-instance, autostart, CSP, and enterprise completion claims, while native notifications are reported as enabled only for critical events forwarded from the web notification bridge.
-- Phase 7 boundary: the hardening surface is a truthful contract and verification hook, not implementation of signed packaging, updater, autostart, CSP, or packaged notification permission evidence.
+- Phase 7 hardening truth surface implemented: desktop IPC now exposes `get_desktop_hardening_status` with explicit false values for signed distribution, updater, CSP, and enterprise completion claims, while native notifications are reported as enabled only for critical events forwarded from the web notification bridge.
+- Phase 7 single-instance and autostart slice implemented: the desktop shell registers Tauri single-instance behavior that refocuses the existing console, plus explicit opt-in `get_autostart_status` / `set_autostart_enabled` IPC backed by the OS autostart plugin; autostart remains disabled unless an operator enables it.
+- Phase 7 boundary: the hardening surface is a truthful contract and verification hook, not implementation of signed packaging, updater, CSP, or packaged notification permission evidence.
 - Phase 3 initial wizard slice implemented: `Wizard` is now a first-run console route with local/repo-pilot/customer-grade access modes, local progress storage, pack selection, identity/runtime/connector/ontology/evidence checks, and a governed pilot session launcher through the existing `/api/sessions` policy boundary.
 - Phase 3 boundary: the wizard does not configure real external connector credentials, does not perform live writes, and does not mark customer-grade completion. It surfaces the current blockers from readiness APIs and links operators back to Packs, Deploy, Semantic, and Agents.
 
