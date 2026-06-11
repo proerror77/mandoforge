@@ -531,6 +531,7 @@ Mitigation: Desktop MVP explicitly excludes signed updater and enterprise comple
 - Phase 1 Board view extraction implemented: the task board now lives under `web-ui/src/views/board.rs`; `browser-harness` validated the Board route at desktop and 390px mobile widths with 6 kanban columns, 2 panels, and no horizontal overflow.
 - Phase 1 Workflows view extraction implemented: the workflow graph console now lives under `web-ui/src/views/workflows.rs`; `browser-harness` validated the Workflows route at desktop and 390px mobile widths with 5 panels, 3 workflow flow meters, and no horizontal overflow.
 - Phase 1 Settings view extraction implemented: the operator settings surface now lives under `web-ui/src/views/settings.rs`, with `web-ui/src/main.rs` retaining only route wiring for Settings.
+- Phase 1 Deploy view extraction implemented: the deployment/readiness surface now lives under `web-ui/src/views/deploy.rs`, with `web-ui/src/main.rs` retaining only route wiring for Deploy.
 - Phase 1 boundary: business views still live in `web-ui/src/main.rs`; further extraction should move view-specific code into `web-ui/src/views/*` in small behavior-preserving commits.
 - Phase 2 implemented: Overview is the product home, backed by live console APIs, and avoids the visual command deck pushing first-screen operator signals down.
 - Phase 4 implemented: pack marketplace cards now expose lifecycle, workflows, agents, connectors, actions, release gates, files, connector gate copy, approval posture, and semantic scope from API-backed manifest summaries.
@@ -549,6 +550,7 @@ Mitigation: Desktop MVP explicitly excludes signed updater and enterprise comple
 - Phase 7 boundary: the hardening surface is a truthful contract and verification hook, not implementation of signed packaging, updater, CSP, or packaged notification permission evidence.
 - Phase 3 initial wizard slice implemented: `Wizard` is now a first-run console route with local/repo-pilot/customer-grade access modes, local progress storage, pack selection, identity/runtime/connector/ontology/evidence checks, and a governed pilot session launcher through the existing `/api/sessions` policy boundary.
 - Phase 3 boundary: the wizard does not configure real external connector credentials, does not perform live writes, and does not mark customer-grade completion. It surfaces the current blockers from readiness APIs and links operators back to Packs, Deploy, Semantic, and Agents.
+- Customer-grade evidence closure slice implemented in Deploy: the page now exposes a conservative checklist for real platform credentials, token refresh, reconciliation/idempotency, webhook/polling delivery, compensation policy, and archived deployment evidence, sourced from current readiness/connector/deployment JSON and marked blocked unless evidence is present.
 
 ## Definition Of Done
 

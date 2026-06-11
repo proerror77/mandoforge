@@ -11,7 +11,7 @@ use gloo_timers::callback::Interval;
 use notifications::*;
 use serde_json::{Value, json};
 use state::*;
-use views::{BoardView, OverviewView, SettingsView, WizardView, WorkflowsView};
+use views::{BoardView, DeployView, OverviewView, SettingsView, WizardView, WorkflowsView};
 use wasm_bindgen_futures::spawn_local;
 use web_sys::{HtmlInputElement, HtmlSelectElement, HtmlTextAreaElement};
 use yew::prelude::*;
@@ -770,39 +770,6 @@ fn PacksView(props: &DataProps) -> Html {
 }
 
 #[derive(Properties, Clone, PartialEq)]
-struct DeployProps {
-    data: ConsoleData,
-    on_verify: Callback<MouseEvent>,
-}
-
-#[component]
-fn DeployView(props: &DeployProps) -> Html {
-    html! {
-        <div class="page-grid">
-            <Panel title="Latest deployment">
-                <VersionBlock version={props.data.deployment_version.data.clone()} />
-                <button onclick={props.on_verify.clone()}>{ "Verify deployed version" }</button>
-            </Panel>
-            <Panel title="Stage 2 readiness">
-                <ReadinessRadar readiness={props.data.stage2_readiness.data.clone()} observability={props.data.observability.data.clone()} />
-            </Panel>
-            <Panel title="Enterprise product readiness">
-                <EnterpriseReadinessPanel readiness={props.data.enterprise_product_readiness.data.clone()} />
-            </Panel>
-            <Panel title="Live connector production">
-                <JsonPreview value={props.data.native_connector_production_readiness.data.clone()} />
-            </Panel>
-            <Panel title="Remote computer path">
-                <JsonPreview value={props.data.remote_computer_production_path.data.clone()} />
-            </Panel>
-            <Panel title="Usage and finance">
-                <JsonPreview value={props.data.usage.data.clone()} />
-            </Panel>
-        </div>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
 struct VisualCommandDeckProps {
     data: ConsoleData,
     view: View,
@@ -1357,35 +1324,6 @@ pub(crate) fn PackMosaic(props: &PackMosaicProps) -> Html {
             <div class="mosaic-side">
                 <FlowMeter label="Marketplace" value={marketplace_count} max={total} tone="neutral" />
                 <FlowMeter label="Installed" value={props.installations.len()} max={total} tone="good" />
-            </div>
-        </div>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct ReadinessRadarProps {
-    readiness: Stage2Readiness,
-    observability: ObservabilitySummary,
-}
-
-#[component]
-fn ReadinessRadar(props: &ReadinessRadarProps) -> Html {
-    let score = props
-        .readiness
-        .readiness_score
-        .unwrap_or_else(|| readiness_from_status(&props.readiness.status));
-    let category_count = json_object_count(&props.readiness.categories);
-    let signal_count = json_object_count(&props.observability.signals);
-    html! {
-        <div class="readiness-radar">
-            <div class="radar-dial" style={gauge_style(score)}>
-                <span>{ format!("{:.0}", score * 100.0) }</span>
-                <small>{ "score" }</small>
-            </div>
-            <div class="radar-bars">
-                <FlowMeter label="Categories" value={category_count} max={category_count.max(1)} tone="info" />
-                <FlowMeter label="Signals" value={signal_count} max={signal_count.max(1)} tone="good" />
-                <FlowMeter label="Observability" value={usize::from(status_tone(&props.observability.status) == "good")} max={1} tone={status_tone(&props.observability.status)} />
             </div>
         </div>
     }
@@ -2109,7 +2047,7 @@ fn height_style(value: usize, max: usize) -> String {
     format!("height: {:.1}%;", percent(value, max).max(8.0))
 }
 
-fn gauge_style(score: f64) -> String {
+pub(crate) fn gauge_style(score: f64) -> String {
     let pct = score.clamp(0.0, 1.0) * 100.0;
     format!("--gauge: {:.1}%;", pct)
 }
@@ -2132,7 +2070,7 @@ fn orbit_point(index: usize, total: usize, cx: f64, cy: f64, radius: f64) -> (f6
     (cx + radius * angle.cos(), cy + radius * angle.sin())
 }
 
-fn readiness_from_status(status: &str) -> f64 {
+pub(crate) fn readiness_from_status(status: &str) -> f64 {
     match status_tone(status) {
         "good" => 0.92,
         "info" => 0.72,
@@ -2142,7 +2080,7 @@ fn readiness_from_status(status: &str) -> f64 {
     }
 }
 
-fn json_object_count(value: &Value) -> usize {
+pub(crate) fn json_object_count(value: &Value) -> usize {
     match value {
         Value::Array(items) => items.len(),
         Value::Object(map) => map.len(),
