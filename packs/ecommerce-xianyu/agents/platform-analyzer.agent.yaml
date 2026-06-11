@@ -1,0 +1,54 @@
+id: platform-analyzer
+role: analyzer
+instructions: Classify Xianyu connector readiness, conversation intent, delivery risk, risk-verification state, and approval gaps before any external write.
+ontology:
+  domain_scope: ecommerce
+  workflow_scope: xianyu
+  share_policy: isolated
+  object_types:
+    - id: xianyu_store
+      source: store-profile
+      summary: Xianyu seller account identity, operating policy, tenant scope, and risk posture
+    - id: xianyu_connector_account
+      source: connector-account
+      summary: browser session cookie binding, device identity, permission scope, and readiness status
+    - id: xianyu_conversation
+      source: conversation-list-read
+      summary: buyer conversation, item reference, latest message state, and routing status
+    - id: xianyu_message
+      source: message-thread-read
+      summary: buyer or seller message content, media references, sender, and timestamp
+    - id: xianyu_item
+      source: item-list-read
+      summary: listed item, title, price, inventory state, delivery policy, and listing facts
+    - id: xianyu_order
+      source: order-detail-read
+      summary: order, buyer-facing context, payment, delivery state, refund status, and evidence
+    - id: xianyu_delivery_plan
+      source: delivery-triage
+      summary: draft-only delivery steps, card or content references, approval requirements, and send sequence
+    - id: xianyu_risk_verification
+      source: risk-status-read
+      summary: captcha, slider, QR, face-verification, or login-risk handoff state
+    - id: xianyu_approval_commit
+      source: approval-policy
+      summary: approval token, payload digest, operation id, object id, and executor binding
+  relation_types:
+    - id: belongs-to-store
+      from: [xianyu_conversation, xianyu_item, xianyu_order, xianyu_risk_verification]
+      to: [xianyu_store]
+    - id: message-in-conversation
+      from: [xianyu_message]
+      to: [xianyu_conversation]
+    - id: references-item
+      from: [xianyu_conversation, xianyu_order, xianyu_delivery_plan]
+      to: [xianyu_item]
+    - id: references-order
+      from: [xianyu_delivery_plan]
+      to: [xianyu_order]
+    - id: uses-connector-account
+      from: [xianyu_store]
+      to: [xianyu_connector_account]
+    - id: requires-approval-commit
+      from: [xianyu_message, xianyu_delivery_plan, xianyu_item]
+      to: [xianyu_approval_commit]

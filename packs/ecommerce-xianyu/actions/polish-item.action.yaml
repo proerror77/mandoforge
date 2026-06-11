@@ -1,0 +1,22 @@
+id: polish-item
+object_type: xianyu_item
+connector_id: xianyu-goofish
+operation_id: item-polish-submit
+side_effect_class: marketplace_item_visibility_write
+parameters:
+  - name: item_id
+    type: ObjectReference<xianyu_item>
+    required: true
+validations:
+  rules:
+    - item belongs to tenant-bound account_id
+    - item is active and eligible for polish
+    - approval payload digest matches item_id and operation_id
+effects:
+  native_connector_call: native.connector.call
+  audit_event: xianyu.action.polish_item
+approval:
+  approval_required: true
+  approver_role: admin
+  approval_commit_token_required: true
+  payload_digest_required: true

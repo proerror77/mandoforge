@@ -1,0 +1,12 @@
+connector_account:
+  platform: xianyu
+  connector_id: xianyu-goofish
+  tenant_id: required
+  workspace_id: required
+  account_id: required
+  seller_id: required
+  auth_mode: browser-session-cookie
+  credential_secret_refs: [XIANYU_SESSION_COOKIE, XIANYU_DEVICE_ID]
+  permission_scopes: [xianyu.conversation.read, xianyu.message.read, xianyu.item.read, xianyu.order.read, xianyu.risk.read, xianyu.chat.message.write, xianyu.delivery.message.write, xianyu.item.polish.write]
+  environment: replay
+  readiness_status: blocked_until_configured

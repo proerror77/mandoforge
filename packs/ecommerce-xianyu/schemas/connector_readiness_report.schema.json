@@ -1,0 +1,1 @@
+{"type":"object","required":["connector_id","status","evidence_gaps","disabled_actions"],"properties":{"connector_id":{"type":"string"},"status":{"type":"string"},"evidence_gaps":{"type":"array","items":{"type":"string"}},"disabled_actions":{"type":"array","items":{"type":"string"}},"sample_reads":{"type":"array","items":{"type":"string"}}}}

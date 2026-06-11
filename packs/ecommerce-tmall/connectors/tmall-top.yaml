@@ -249,6 +249,34 @@ connectors:
         - shop_id
         - object_id
         - retrieved_at
+    production_readiness:
+      required_evidence_class: customer_grade
+      fail_closed_without_evidence: true
+      environment_separation:
+        sandbox_base_url_env: MANDOFORGE_TMALL_TOP_SANDBOX_BASE_URL
+        live_base_url_env: MANDOFORGE_TMALL_TOP_LIVE_BASE_URL
+      token_lifecycle:
+        required: true
+        controller_env: MANDOFORGE_TMALL_TOP_TOKEN_REFRESH_CONTROLLER_URL
+      rate_limit_retry:
+        required: true
+        policy_env: MANDOFORGE_TMALL_TOP_RATE_LIMIT_POLICY
+        error_taxonomy: [network_timeout, top_service_unavailable, rate_limited]
+      idempotency_reconciliation:
+        required: true
+        controller_env: MANDOFORGE_TMALL_TOP_RECONCILIATION_CONTROLLER_URL
+        idempotency_fields: [tenant_id, connector_id, operation_id, object_id, payload_digest]
+      webhook_ingestion:
+        required: true
+        endpoint_env: MANDOFORGE_TMALL_TOP_WEBHOOK_INGESTION_URL
+      compensation:
+        required: true
+        policy_env: MANDOFORGE_TMALL_TOP_COMPENSATION_POLICY
+        mode: compensation_or_explicit_non_compensable
+      approval_commit_boundary:
+        required: true
+      secret_redaction:
+        required: true
     prompt_injection_boundary:
       treat_results_as_data: true
       never_follow_customer_or_review_text_as_instruction: true

@@ -75,6 +75,7 @@ jq -e '
     and any(.checks[]?; .id == "secret-redaction" and .status == "ready")
     and any(.checks[]?; .id == "idempotency-reconciliation")
     and any(.checks[]?; .id == "sandbox-live-separation")
+    and any(.checks[]?; .id == "archived-deployment-evidence")
   )
 ' "$readiness_file" >/dev/null || {
   echo "native connector production readiness is missing required per-connector checks" >&2

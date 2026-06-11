@@ -84,6 +84,7 @@ pub(crate) fn is_supported_ecommerce_connector(connector_id: &str) -> bool {
             | "taobao-open-platform"
             | "tiktok-shop-open-api"
             | "xiaohongshu-shop"
+            | "xianyu-goofish"
             | "amazon-selling-partner-api"
     )
 }
@@ -116,6 +117,7 @@ pub(crate) fn build_native_connector_production_readiness() -> NativeConnectorPr
         "add token refresh, rate-limit, retry, reconciliation, and webhook ingestion evidence"
             .to_string(),
         "publish compensation or explicit non-compensable policy per write operation".to_string(),
+        "archive immutable deployment evidence with target, version, logs, and owner".to_string(),
     ];
     let message = if status == "ready" {
         format!(
@@ -188,6 +190,7 @@ struct NativeConnectorProductionSpec {
     reconciliation_controller_env: &'static str,
     webhook_ingestion_env: &'static str,
     compensation_policy_env: &'static str,
+    deployment_evidence_archive_env: &'static str,
 }
 
 fn native_connector_production_specs() -> Vec<NativeConnectorProductionSpec> {
@@ -208,6 +211,7 @@ fn native_connector_production_specs() -> Vec<NativeConnectorProductionSpec> {
             reconciliation_controller_env: "MANDOFORGE_TMALL_TOP_RECONCILIATION_CONTROLLER_URL",
             webhook_ingestion_env: "MANDOFORGE_TMALL_TOP_WEBHOOK_INGESTION_URL",
             compensation_policy_env: "MANDOFORGE_TMALL_TOP_COMPENSATION_POLICY",
+            deployment_evidence_archive_env: "MANDOFORGE_TMALL_TOP_DEPLOYMENT_EVIDENCE_ARCHIVE",
         },
         NativeConnectorProductionSpec {
             connector_id: "taobao-open-platform",
@@ -225,6 +229,7 @@ fn native_connector_production_specs() -> Vec<NativeConnectorProductionSpec> {
             reconciliation_controller_env: "MANDOFORGE_TAOBAO_TOP_RECONCILIATION_CONTROLLER_URL",
             webhook_ingestion_env: "MANDOFORGE_TAOBAO_TOP_WEBHOOK_INGESTION_URL",
             compensation_policy_env: "MANDOFORGE_TAOBAO_TOP_COMPENSATION_POLICY",
+            deployment_evidence_archive_env: "MANDOFORGE_TAOBAO_TOP_DEPLOYMENT_EVIDENCE_ARCHIVE",
         },
         NativeConnectorProductionSpec {
             connector_id: "xiaohongshu-shop",
@@ -238,6 +243,21 @@ fn native_connector_production_specs() -> Vec<NativeConnectorProductionSpec> {
             reconciliation_controller_env: "MANDOFORGE_XHS_RECONCILIATION_CONTROLLER_URL",
             webhook_ingestion_env: "MANDOFORGE_XHS_WEBHOOK_INGESTION_URL",
             compensation_policy_env: "MANDOFORGE_XHS_COMPENSATION_POLICY",
+            deployment_evidence_archive_env: "MANDOFORGE_XHS_DEPLOYMENT_EVIDENCE_ARCHIVE",
+        },
+        NativeConnectorProductionSpec {
+            connector_id: "xianyu-goofish",
+            provider: "goofish-browser-session",
+            manifest_path: "packs/ecommerce-xianyu/connectors/xianyu-goofish.yaml",
+            required_secret_refs: vec!["XIANYU_SESSION_COOKIE", "XIANYU_DEVICE_ID"],
+            sandbox_base_url_env: "MANDOFORGE_XIANYU_REPLAY_BASE_URL",
+            live_base_url_env: "MANDOFORGE_XIANYU_LIVE_BASE_URL",
+            token_refresh_controller_env: "MANDOFORGE_XIANYU_SESSION_REFRESH_CONTROLLER_URL",
+            rate_limit_policy_env: "MANDOFORGE_XIANYU_RATE_LIMIT_POLICY",
+            reconciliation_controller_env: "MANDOFORGE_XIANYU_RECONCILIATION_CONTROLLER_URL",
+            webhook_ingestion_env: "MANDOFORGE_XIANYU_EVENT_INGESTION_URL",
+            compensation_policy_env: "MANDOFORGE_XIANYU_COMPENSATION_POLICY",
+            deployment_evidence_archive_env: "MANDOFORGE_XIANYU_DEPLOYMENT_EVIDENCE_ARCHIVE",
         },
         NativeConnectorProductionSpec {
             connector_id: "tiktok-shop-open-api",
@@ -255,6 +275,7 @@ fn native_connector_production_specs() -> Vec<NativeConnectorProductionSpec> {
             reconciliation_controller_env: "MANDOFORGE_TIKTOK_SHOP_RECONCILIATION_CONTROLLER_URL",
             webhook_ingestion_env: "MANDOFORGE_TIKTOK_SHOP_WEBHOOK_INGESTION_URL",
             compensation_policy_env: "MANDOFORGE_TIKTOK_SHOP_COMPENSATION_POLICY",
+            deployment_evidence_archive_env: "MANDOFORGE_TIKTOK_SHOP_DEPLOYMENT_EVIDENCE_ARCHIVE",
         },
         NativeConnectorProductionSpec {
             connector_id: "amazon-selling-partner-api",
@@ -272,6 +293,7 @@ fn native_connector_production_specs() -> Vec<NativeConnectorProductionSpec> {
             reconciliation_controller_env: "MANDOFORGE_AMAZON_SPAPI_RECONCILIATION_CONTROLLER_URL",
             webhook_ingestion_env: "MANDOFORGE_AMAZON_SPAPI_WEBHOOK_INGESTION_URL",
             compensation_policy_env: "MANDOFORGE_AMAZON_SPAPI_COMPENSATION_POLICY",
+            deployment_evidence_archive_env: "MANDOFORGE_AMAZON_SPAPI_DEPLOYMENT_EVIDENCE_ARCHIVE",
         },
     ]
 }
@@ -382,6 +404,16 @@ fn build_native_connector_readiness_item(
                 spec.compensation_policy_env
             )],
         ),
+        readiness_check(
+            "archived-deployment-evidence",
+            "Archived deployment evidence",
+            env_nonempty(spec.deployment_evidence_archive_env),
+            configured_env_evidence(&[spec.deployment_evidence_archive_env]),
+            vec![format!(
+                "{} must point to an immutable customer-grade evidence archive with deployment target, connector version, logs, and owner",
+                spec.deployment_evidence_archive_env
+            )],
+        ),
         NativeConnectorProductionReadinessCheck {
             id: "approval-commit-boundary".to_string(),
             title: "Approval commit boundary".to_string(),
@@ -417,6 +449,12 @@ fn build_native_connector_readiness_item(
         "blocked"
     }
     .to_string();
+    let current_evidence_class = if status == "ready" {
+        "customer_grade"
+    } else {
+        "repo_controlled"
+    }
+    .to_string();
     let next_actions = checks
         .iter()
         .flat_map(|check| check.next_actions.clone())
@@ -427,7 +465,7 @@ fn build_native_connector_readiness_item(
         provider: spec.provider.to_string(),
         manifest_path: spec.manifest_path.to_string(),
         status,
-        current_evidence_class: "repo_controlled".to_string(),
+        current_evidence_class,
         required_evidence_class: "customer_grade".to_string(),
         required_secret_refs,
         configured_secret_refs,
@@ -533,6 +571,7 @@ fn build_live_request(
         "tiktok-shop-open-api" => build_tiktok_shop_request(call, resolve_secrets),
         "amazon-selling-partner-api" => build_amazon_sp_api_request(call, resolve_secrets),
         "xiaohongshu-shop" => build_xiaohongshu_request(call, resolve_secrets),
+        "xianyu-goofish" => build_xianyu_goofish_request(call, resolve_secrets),
         _ => Err(AppError::bad_request(
             "unsupported native ecommerce connector",
         )),
@@ -677,6 +716,43 @@ fn build_xiaohongshu_request(
             "XHS_APP_ID".to_string(),
             "XHS_APP_SECRET".to_string(),
             "XHS_ACCESS_TOKEN".to_string(),
+        ],
+    })
+}
+
+fn build_xianyu_goofish_request(
+    call: &NativeConnectorCall,
+    resolve_secrets: bool,
+) -> Result<LiveHttpRequest, AppError> {
+    let session_cookie = connector_secret("XIANYU_SESSION_COOKIE", resolve_secrets)?;
+    let device_id = connector_secret("XIANYU_DEVICE_ID", resolve_secrets)?;
+    let path = endpoint_path(call, "/api/mandoforge/connector/operation")?;
+    let body = Value::Object(call.payload.clone());
+    let mut headers = BTreeMap::new();
+    headers.insert("Content-Type".to_string(), "application/json".to_string());
+    headers.insert("Cookie".to_string(), session_cookie);
+    headers.insert("X-Device-Id".to_string(), device_id);
+    headers.insert("X-Connector-Operation".to_string(), call.operation.clone());
+    headers.insert("X-Connector-Api-Name".to_string(), call.api_name.clone());
+
+    Ok(LiveHttpRequest {
+        adapter: "xianyu_goofish",
+        method: "POST",
+        url: format!(
+            "{}{}",
+            base_url(
+                call,
+                "MANDOFORGE_XIANYU_BASE_URL",
+                "https://h5api.m.goofish.com"
+            ),
+            path
+        ),
+        headers,
+        query: BTreeMap::new(),
+        body: Some(body),
+        secret_refs: vec![
+            "XIANYU_SESSION_COOKIE".to_string(),
+            "XIANYU_DEVICE_ID".to_string(),
         ],
     })
 }
@@ -832,6 +908,14 @@ fn operation_api_name(connector_id: &str, operation: &str) -> &'static str {
         ("xiaohongshu-shop", "after-sales-list-read") => "xhs.shop.aftersales.list",
         ("xiaohongshu-shop", "comment-reply-submit") => "xhs.shop.comment.reply",
         ("xiaohongshu-shop", "after-sales-refund-approve") => "xhs.shop.aftersales.refund.approve",
+        ("xianyu-goofish", "conversation-list-read") => "xianyu.im.conversation.list",
+        ("xianyu-goofish", "message-thread-read") => "xianyu.im.message.thread",
+        ("xianyu-goofish", "item-list-read") => "xianyu.item.list",
+        ("xianyu-goofish", "order-detail-read") => "xianyu.order.detail",
+        ("xianyu-goofish", "risk-status-read") => "xianyu.account.risk.status",
+        ("xianyu-goofish", "chat-message-send") => "xianyu.im.message.send",
+        ("xianyu-goofish", "delivery-steps-send") => "xianyu.delivery.steps.send",
+        ("xianyu-goofish", "item-polish-submit") => "xianyu.item.polish",
         ("amazon-selling-partner-api", "orders-read") => "spapi.orders.v0.getOrders",
         ("amazon-selling-partner-api", "listings-read") => "spapi.listings.items.getListingsItem",
         ("amazon-selling-partner-api", "returns-read") => "spapi.returns.getReturns",
@@ -1149,6 +1233,33 @@ mod tests {
         assert!(!result.to_string().contains("session-token"));
     }
 
+    #[tokio::test]
+    async fn xianyu_disabled_live_adapter_returns_redacted_prepared_request() {
+        let _lock = env_lock().lock().expect("env lock");
+        let _session_cookie = EnvGuard::set("XIANYU_SESSION_COOKIE", "cookie-secret");
+        let _device_id = EnvGuard::set("XIANYU_DEVICE_ID", "device-secret");
+
+        let result = execute_ecommerce_connector_call(&json!({
+            "connector_id": "xianyu-goofish",
+            "operation": "chat-message-send",
+            "payload": {
+                "conversation_id": "C1",
+                "buyer_id": "B1",
+                "message_text": "approved draft"
+            }
+        }))
+        .await
+        .expect("prepared request");
+        assert_eq!(result["status"], json!("live_disabled"));
+        assert_eq!(result["request"]["adapter"], json!("xianyu_goofish"));
+        assert_eq!(
+            result["request"]["secret_refs"],
+            json!(["XIANYU_SESSION_COOKIE", "XIANYU_DEVICE_ID"])
+        );
+        assert!(!result.to_string().contains("cookie-secret"));
+        assert!(!result.to_string().contains("device-secret"));
+    }
+
     #[test]
     fn native_connector_production_readiness_fails_closed_without_customer_evidence() {
         let _lock = env_lock().lock().expect("env lock");
@@ -1164,6 +1275,7 @@ mod tests {
             env_keys.insert(spec.reconciliation_controller_env);
             env_keys.insert(spec.webhook_ingestion_env);
             env_keys.insert(spec.compensation_policy_env);
+            env_keys.insert(spec.deployment_evidence_archive_env);
         }
         let _guards = env_keys
             .into_iter()
@@ -1174,14 +1286,20 @@ mod tests {
 
         assert_eq!(readiness.status, "blocked");
         assert!(!readiness.live_enabled);
-        assert_eq!(readiness.connector_count, 5);
+        assert_eq!(readiness.connector_count, 6);
         assert_eq!(readiness.ready_connector_count, 0);
-        assert_eq!(readiness.blocked_connector_count, 5);
+        assert_eq!(readiness.blocked_connector_count, 6);
         assert!(
             readiness
                 .connectors
                 .iter()
                 .any(|connector| connector.connector_id == "tmall-top")
+        );
+        assert!(
+            readiness
+                .connectors
+                .iter()
+                .any(|connector| connector.connector_id == "xianyu-goofish")
         );
         for connector in &readiness.connectors {
             assert_eq!(connector.status, "blocked");
@@ -1198,6 +1316,51 @@ mod tests {
                     .iter()
                     .any(|check| check.id == "idempotency-reconciliation"
                         && check.status == "blocked")
+            );
+            assert!(connector.checks.iter().any(|check| check.id
+                == "archived-deployment-evidence"
+                && check.status == "blocked"));
+        }
+    }
+
+    #[test]
+    fn native_connector_production_readiness_requires_archived_customer_grade_evidence() {
+        let _lock = env_lock().lock().expect("env lock");
+        let mut env_keys = BTreeSet::from([LIVE_ENABLED_ENV, ECOMMERCE_LIVE_ENABLED_ENV]);
+        for spec in native_connector_production_specs() {
+            for key in spec.required_secret_refs {
+                env_keys.insert(key);
+            }
+            env_keys.insert(spec.sandbox_base_url_env);
+            env_keys.insert(spec.live_base_url_env);
+            env_keys.insert(spec.token_refresh_controller_env);
+            env_keys.insert(spec.rate_limit_policy_env);
+            env_keys.insert(spec.reconciliation_controller_env);
+            env_keys.insert(spec.webhook_ingestion_env);
+            env_keys.insert(spec.compensation_policy_env);
+            env_keys.insert(spec.deployment_evidence_archive_env);
+        }
+        let _guards = env_keys
+            .into_iter()
+            .map(|key| EnvGuard::set(key, "configured"))
+            .collect::<Vec<_>>();
+        let _live_gate = EnvGuard::set(LIVE_ENABLED_ENV, "true");
+
+        let readiness = build_native_connector_production_readiness();
+
+        assert_eq!(readiness.status, "ready");
+        assert!(readiness.live_enabled);
+        assert_eq!(readiness.ready_connector_count, readiness.connector_count);
+        assert_eq!(readiness.blocked_connector_count, 0);
+        for connector in &readiness.connectors {
+            assert_eq!(connector.status, "ready");
+            assert_eq!(connector.current_evidence_class, "customer_grade");
+            assert!(
+                connector
+                    .checks
+                    .iter()
+                    .any(|check| check.id == "archived-deployment-evidence"
+                        && check.status == "ready")
             );
         }
     }

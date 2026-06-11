@@ -90,6 +90,34 @@ connectors:
         sample_read_operations: [order-list-read, product-list-read, comment-list-read]
     approval_commit_binding:
       required_for_write_operations: true
-      bind_fields: [tenant_id, workspace_id, connector_id, operation_id, object_id, payload_digest, approval_commit_token]
+      bind_fields: [tenant_id, workspace_id, connector_id, api_name, operation_id, object_id, payload_digest, approval_commit_token]
+    production_readiness:
+      required_evidence_class: customer_grade
+      fail_closed_without_evidence: true
+      environment_separation:
+        sandbox_base_url_env: MANDOFORGE_XHS_SANDBOX_BASE_URL
+        live_base_url_env: MANDOFORGE_XHS_LIVE_BASE_URL
+      token_lifecycle:
+        required: true
+        controller_env: MANDOFORGE_XHS_TOKEN_REFRESH_CONTROLLER_URL
+      rate_limit_retry:
+        required: true
+        policy_env: MANDOFORGE_XHS_RATE_LIMIT_POLICY
+        error_taxonomy: [network_timeout, api_unavailable, rate_limited]
+      idempotency_reconciliation:
+        required: true
+        controller_env: MANDOFORGE_XHS_RECONCILIATION_CONTROLLER_URL
+        idempotency_fields: [tenant_id, connector_id, operation_id, object_id, payload_digest]
+      webhook_ingestion:
+        required: true
+        endpoint_env: MANDOFORGE_XHS_WEBHOOK_INGESTION_URL
+      compensation:
+        required: true
+        policy_env: MANDOFORGE_XHS_COMPENSATION_POLICY
+        mode: compensation_or_explicit_non_compensable
+      approval_commit_boundary:
+        required: true
+      secret_redaction:
+        required: true
     prompt_injection_boundary:
       treat_results_as_data: true

@@ -1,0 +1,1 @@
+{"type":"object","required":["connector_map"],"properties":{"connector_map":{"type":"object","required":["connector_id","lanes"],"properties":{"connector_id":{"type":"string"},"lanes":{"type":"object"}}}}}

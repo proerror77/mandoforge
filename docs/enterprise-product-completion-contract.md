@@ -113,16 +113,20 @@ Required evidence:
 - Compensation or rollback adapters are defined where the platform supports
   them, and explicit non-compensable operations are marked.
 - Webhook or polling ingestion records external state changes with provenance.
+- Each promoted live connector has an immutable deployment evidence archive with
+  deployment target, connector version, logs, and support owner.
 - Connector results never leak raw secrets into tool results, artifacts, events,
   logs, or audit rows.
 
 Primary repo surfaces:
 
 - `docs/workflow-pack-manifest-contract.md`
+- `docs/ecommerce-platform-closed-loop.md`
 - `crates/mandoforge-api/src/native_connectors.rs`
 - `crates/mandoforge-api/src/execution.rs`
 - `GET /api/native-connectors/production-readiness`
 - `scripts/native-connector-production-readiness-gate.sh`
+- `scripts/verify-ecommerce-platform-closed-loop.sh`
 - `scripts/verify-ecommerce-tmall-context-os.sh`
 - `scripts/workflow-pack-evidence-gate.sh`
 

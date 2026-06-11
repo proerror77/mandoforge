@@ -1795,6 +1795,7 @@ mod tests {
             "ecommerce-core",
             "ecommerce-taobao",
             "ecommerce-xiaohongshu",
+            "ecommerce-xianyu",
             "ecommerce-tiktok-shop",
             "ecommerce-amazon",
         ] {

@@ -12,7 +12,7 @@ use axum::{
     Json, Router,
     extract::Request,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response, Sse, sse::Event, sse::KeepAlive},
     routing::{delete, get, patch, post},
@@ -33,6 +33,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 const DEFAULT_TENANT_ID: &str = "00000000-0000-4000-8000-000000000001";
+const CONSOLE_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' http://127.0.0.1:* http://localhost:*; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
 
 mod authorization;
 mod codex_app_server;
@@ -7568,8 +7569,18 @@ fn build_router(state: AppState) -> Router {
             tenant_context_middleware,
         ))
         .layer(api_cors_layer())
+        .layer(middleware::from_fn(security_headers_middleware))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+async fn security_headers_middleware(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static(CONSOLE_CONTENT_SECURITY_POLICY),
+    );
+    response
 }
 
 fn api_cors_layer() -> CorsLayer {
@@ -7723,7 +7734,15 @@ fn approval_email_relay_url_from_env() -> Option<String> {
 }
 
 async fn healthz() -> Json<Value> {
-    Json(json!({"status": "ok"}))
+    let mut payload = json!({"status": "ok"});
+    if let Some(nonce) = std::env::var("MANDOFORGE_DESKTOP_HEALTH_NONCE")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        payload["desktop_health_nonce"] = json!(nonce);
+    }
+    Json(payload)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -8488,14 +8507,17 @@ fn build_enterprise_product_completion_lanes(
                 "sandbox/live separation and token lifecycle for each connector",
                 "idempotent external writes plus reconciliation against external platform state",
                 "platform-specific error taxonomy, rate-limit handling, and compensation policy",
+                "immutable deployment evidence archive for every promoted live connector",
             ],
             blockers: vec![
                 "generic native connector governance is not enough for every production platform",
+                "deployment evidence archive is not present for every promoted live connector",
                 "Tmall/Taobao, Xiaohongshu, TikTok Shop, Amazon SP-API, and Lark/Feishu each need promoted production contracts",
             ],
             next_actions: vec![
                 "start with Tmall/Taobao production semantics",
                 "add reconciliation and idempotency evidence before broadening to other ecommerce platforms",
+                "archive connector deployment evidence with target, version, logs, and owner",
             ],
         },
         EnterpriseLaneSpec {
@@ -19128,6 +19150,7 @@ async fn get_workflow_pack_marketplace(
                     "resolved_manifest_path": resolved_path,
                     "status": "ready",
                     "validation": report,
+                    "manifest_summary": workflow_pack_manifest_summary(&manifest, &report),
                     "actions": ["install", "configure", "stage", "release"],
                 }));
             }
@@ -19260,6 +19283,7 @@ fn workflow_pack_marketplace_manifest_paths() -> Vec<String> {
         "packs/ecommerce-taobao/package.yaml".to_string(),
         "packs/ecommerce-tiktok-shop/package.yaml".to_string(),
         "packs/ecommerce-tmall/package.yaml".to_string(),
+        "packs/ecommerce-xianyu/package.yaml".to_string(),
         "packs/ecommerce-xiaohongshu/package.yaml".to_string(),
         "packs/legal/package.yaml".to_string(),
     ]
@@ -29044,6 +29068,83 @@ fn workflow_pack_kind_label(kind: &workflow_pack::PackKind) -> &'static str {
         workflow_pack::PackKind::WorkflowPack => "WorkflowPack",
         workflow_pack::PackKind::DomainPack => "DomainPack",
     }
+}
+
+fn workflow_pack_connector_kind_label(kind: &workflow_pack::ConnectorKind) -> &'static str {
+    match kind {
+        workflow_pack::ConnectorKind::Mcp => "mcp",
+        workflow_pack::ConnectorKind::Native => "native",
+    }
+}
+
+fn workflow_pack_manifest_summary(
+    manifest: &workflow_pack::WorkflowPackManifest,
+    report: &workflow_pack::WorkflowPackValidationReport,
+) -> Value {
+    json!({
+        "validated_file_count": report.validated_file_count,
+        "agent_count": report.agent_count,
+        "connector_count": report.connector_count,
+        "required_eval_gate_count": report.required_eval_gate_count,
+        "semantic_scopes": manifest.semantic_scopes,
+        "capabilities": manifest.capabilities,
+        "profiles": manifest.profiles.iter().map(|profile| json!({
+            "id": profile.id,
+            "required": profile.required,
+        })).collect::<Vec<_>>(),
+        "workflows": manifest.workflows.iter().map(|workflow| json!({
+            "id": workflow.id,
+            "entry_agent": workflow.entry_agent,
+        })).collect::<Vec<_>>(),
+        "agents": manifest.agents.iter().map(|agent| json!({
+            "id": agent.id,
+            "role": agent.role,
+            "external_write_count": agent.tool_scope.external_write.len(),
+            "handoff_count": agent.handoffs.len(),
+            "approval_handoff_count": agent.handoffs.iter().filter(|handoff| handoff.approval_required).count(),
+        })).collect::<Vec<_>>(),
+        "connectors": manifest.connectors.iter().map(|connector| json!({
+            "id": connector.id,
+            "kind": workflow_pack_connector_kind_label(&connector.kind),
+            "required_permission_count": connector.required_permissions.len(),
+            "writes": {
+                "enabled": connector.writes.enabled,
+                "approval_required": connector.writes.approval_required,
+            },
+            "provenance_required": connector.provenance.required,
+            "data_quality": connector.data_quality.as_ref().map(|quality| json!({
+                "min_sample_count": quality.min_sample_count,
+                "max_age_hours": quality.max_age_hours,
+                "citation_required": quality.citation_required,
+                "required_metadata_field_count": quality.required_metadata_fields.len(),
+                "required_content_field_count": quality.required_content_fields.len(),
+            })),
+        })).collect::<Vec<_>>(),
+        "actions": manifest.actions.iter().map(|action| json!({
+            "id": action.id,
+            "required": action.required,
+        })).collect::<Vec<_>>(),
+        "policies": manifest.policies.iter().map(|policy| json!({
+            "id": policy.id,
+            "required": policy.required,
+        })).collect::<Vec<_>>(),
+        "evals": manifest.evals.iter().map(|eval| json!({
+            "id": eval.id,
+            "required": eval.gate.required,
+            "min_score": eval.gate.min_score,
+        })).collect::<Vec<_>>(),
+        "release_gates": manifest.release_gates.iter().map(|gate| json!({
+            "id": gate.id,
+            "gate_type": gate.gate_type,
+            "required": gate.required,
+        })).collect::<Vec<_>>(),
+        "onboarding": manifest.onboarding.as_ref().map(|onboarding| json!({
+            "workflow": onboarding.workflow,
+            "required_profile_count": onboarding.required_profiles.len(),
+            "profile_schema_count": onboarding.profile_schemas.len(),
+            "eval": onboarding.eval,
+        })),
+    })
 }
 
 async fn record_workflow_pack_installation_audit(
@@ -58581,6 +58682,140 @@ mod tests {
     }
 
     #[test]
+    fn workflow_pack_manifest_summary_labels_connector_kinds() {
+        let manifest = workflow_pack::WorkflowPackManifest {
+            schema_version: "workflowpack.mandoforge.dev/v1".to_string(),
+            kind: workflow_pack::PackKind::DomainPack,
+            id: "summary-test".to_string(),
+            name: "Summary Test".to_string(),
+            version: "0.1.0".to_string(),
+            description: "summary test".to_string(),
+            capabilities: vec!["capability.one".to_string()],
+            semantic_scopes: BTreeMap::from([("domain".to_string(), "test".to_string())]),
+            extends: Vec::new(),
+            profiles: vec![workflow_pack::PackFileRef {
+                id: "default".to_string(),
+                path: "profiles/default.yaml".to_string(),
+                required: true,
+            }],
+            skills: Vec::new(),
+            workflows: vec![workflow_pack::WorkflowRef {
+                id: "workflow".to_string(),
+                path: "workflows/workflow.yaml".to_string(),
+                entry_agent: "agent".to_string(),
+            }],
+            agents: vec![workflow_pack::AgentRef {
+                id: "agent".to_string(),
+                path: "agents/agent.yaml".to_string(),
+                role: workflow_pack::AgentRole::Analyzer,
+                tool_scope: workflow_pack::ToolScope {
+                    read: vec!["profile.read".to_string()],
+                    write: Vec::new(),
+                    external_write: vec!["native.connector.call".to_string()],
+                },
+                handoffs: vec![workflow_pack::HandoffRule {
+                    target_agent: "agent".to_string(),
+                    intents: vec!["review".to_string()],
+                    risk_level: workflow_pack::RiskLevel::Medium,
+                    approval_required: true,
+                    schema: "schemas/handoff.json".to_string(),
+                }],
+            }],
+            connectors: vec![
+                workflow_pack::ConnectorRef {
+                    id: "native-connector".to_string(),
+                    kind: workflow_pack::ConnectorKind::Native,
+                    path: "connectors/native.yaml".to_string(),
+                    required_permissions: vec![
+                        "native.read".to_string(),
+                        "native.write".to_string(),
+                    ],
+                    writes: workflow_pack::ConnectorWrites {
+                        enabled: true,
+                        approval_required: true,
+                    },
+                    provenance: workflow_pack::ConnectorProvenance { required: true },
+                    tenant_scope: workflow_pack::TenantScope {
+                        tenant_id: "tenant".to_string(),
+                        workspace_id: "workspace".to_string(),
+                    },
+                    prompt_injection_boundary: workflow_pack::PromptInjectionBoundary {
+                        treat_results_as_data: true,
+                    },
+                    data_quality: Some(workflow_pack::ConnectorDataQualityContract {
+                        min_sample_count: 3,
+                        max_age_hours: 24,
+                        citation_required: true,
+                        required_metadata_fields: vec!["source".to_string()],
+                        required_content_fields: vec!["body".to_string()],
+                    }),
+                },
+                workflow_pack::ConnectorRef {
+                    id: "mcp-connector".to_string(),
+                    kind: workflow_pack::ConnectorKind::Mcp,
+                    path: "connectors/mcp.yaml".to_string(),
+                    required_permissions: Vec::new(),
+                    writes: workflow_pack::ConnectorWrites::default(),
+                    provenance: workflow_pack::ConnectorProvenance { required: false },
+                    tenant_scope: workflow_pack::TenantScope {
+                        tenant_id: "tenant".to_string(),
+                        workspace_id: "workspace".to_string(),
+                    },
+                    prompt_injection_boundary: workflow_pack::PromptInjectionBoundary {
+                        treat_results_as_data: true,
+                    },
+                    data_quality: None,
+                },
+            ],
+            actions: vec![workflow_pack::PackFileRef {
+                id: "action".to_string(),
+                path: "actions/action.yaml".to_string(),
+                required: true,
+            }],
+            schemas: Vec::new(),
+            policies: vec![workflow_pack::PackFileRef {
+                id: "policy".to_string(),
+                path: "policies/policy.yaml".to_string(),
+                required: true,
+            }],
+            evals: vec![workflow_pack::EvalRef {
+                id: "eval".to_string(),
+                path: "evals/eval.jsonl".to_string(),
+                gate: workflow_pack::EvalGate {
+                    required: true,
+                    min_score: 0.9,
+                },
+            }],
+            release_gates: Vec::new(),
+            onboarding: None,
+        };
+        let report = workflow_pack::WorkflowPackValidationReport {
+            pack_id: manifest.id.clone(),
+            schema_version: manifest.schema_version.clone(),
+            validated_file_count: 9,
+            agent_count: 1,
+            connector_count: 2,
+            required_eval_gate_count: 1,
+        };
+
+        let summary = workflow_pack_manifest_summary(&manifest, &report);
+
+        assert_eq!(summary["connector_count"], json!(2));
+        assert_eq!(summary["connectors"][0]["kind"], json!("native"));
+        assert_eq!(summary["connectors"][1]["kind"], json!("mcp"));
+        assert_eq!(
+            summary["connectors"][0]["writes"]["approval_required"],
+            json!(true)
+        );
+        assert_eq!(
+            summary["connectors"][0]["data_quality"]["required_metadata_field_count"],
+            json!(1)
+        );
+        assert_eq!(summary["agents"][0]["external_write_count"], json!(1));
+        assert_eq!(summary["agents"][0]["approval_handoff_count"], json!(1));
+    }
+
+    #[test]
     fn allows_read_only_sql() {
         assert!(
             ensure_read_only_sql("select * from generic_demo.platform_events limit 10").is_ok()
@@ -62223,6 +62458,29 @@ not json
                 && call.policy_decision["decision"] == "denied"
                 && call.policy_decision["agent_version_id"] == json!(version.id)
         }));
+    }
+
+    #[tokio::test]
+    async fn create_session_rejects_unknown_agent_id() {
+        let app = test_app().await;
+        let missing_agent_id = Uuid::new_v4();
+
+        let (status, error) = request_value(
+            app,
+            json_request_with_headers(
+                "POST",
+                "/api/sessions",
+                json!({"agent_id": missing_agent_id, "title": "stale agent"}),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(error["error"].as_str(), Some("agent not found"));
     }
 
     #[tokio::test]
@@ -67357,6 +67615,13 @@ not json
                 "xiaohongshu_comment",
                 "comment-on-note",
                 Some("reply-shop-comment"),
+            ),
+            (
+                "ecommerce-xianyu",
+                "xianyu",
+                "xianyu_conversation",
+                "message-in-conversation",
+                Some("send-chat-message"),
             ),
             (
                 "ecommerce-tiktok-shop",

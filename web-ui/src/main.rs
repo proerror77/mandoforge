@@ -1,127 +1,27 @@
 mod api;
+mod components;
+mod desktop_bridge;
+mod notifications;
+mod state;
+mod views;
 
 use api::*;
+use components::*;
 use gloo_timers::callback::Interval;
+use notifications::*;
 use serde_json::{Value, json};
+use state::*;
+use views::{
+    AgentsView, BoardView, DeployView, DynamicView, OverviewView, PacksView, SemanticView,
+    SettingsView, WizardView, WorkflowsView,
+};
 use wasm_bindgen_futures::spawn_local;
 use web_sys::{HtmlInputElement, HtmlSelectElement, HtmlTextAreaElement};
 use yew::prelude::*;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum View {
-    Agents,
-    Board,
-    Workflows,
-    Dynamic,
-    Semantic,
-    Packs,
-    Deploy,
-}
-
-impl View {
-    const ALL: [View; 7] = [
-        View::Agents,
-        View::Board,
-        View::Workflows,
-        View::Dynamic,
-        View::Semantic,
-        View::Packs,
-        View::Deploy,
-    ];
-
-    fn id(self) -> &'static str {
-        match self {
-            View::Agents => "agents",
-            View::Board => "board",
-            View::Workflows => "workflows",
-            View::Dynamic => "dynamic",
-            View::Semantic => "semantic",
-            View::Packs => "packs",
-            View::Deploy => "deploy",
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            View::Agents => "Agents",
-            View::Board => "Board",
-            View::Workflows => "Workflows",
-            View::Dynamic => "Dynamic",
-            View::Semantic => "Semantic",
-            View::Packs => "Packs",
-            View::Deploy => "Deploy",
-        }
-    }
-
-    fn title(self) -> &'static str {
-        match self {
-            View::Agents => "Managed agent observability",
-            View::Board => "Task board",
-            View::Workflows => "Workflow graph console",
-            View::Dynamic => "Dynamic workflow fleet",
-            View::Semantic => "Semantic memory layer",
-            View::Packs => "Workflow pack operations",
-            View::Deploy => "Deployment truth surface",
-        }
-    }
-
-    fn from_id(value: &str) -> View {
-        Self::ALL
-            .into_iter()
-            .find(|view| view.id() == value)
-            .unwrap_or(View::Agents)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct ConsoleData {
-    agents: ApiState<Vec<Agent>>,
-    environments: ApiState<Vec<Environment>>,
-    sessions: ApiState<Vec<Session>>,
-    approvals: ApiState<Vec<Approval>>,
-    execution_jobs: ApiState<Vec<WorkerJob>>,
-    session_loop_jobs: ApiState<Vec<WorkerJob>>,
-    tool_calls: ApiState<Vec<ToolCall>>,
-    workflow_runs: ApiState<Vec<WorkflowRun>>,
-    workflow_definitions: ApiState<Vec<WorkflowDefinition>>,
-    dynamic_workflow_plans: ApiState<Vec<DynamicWorkflowPlan>>,
-    task_board: ApiState<TaskBoardSnapshot>,
-    work_items: ApiState<Vec<WorkItem>>,
-    manager_plans: ApiState<Vec<Value>>,
-    agent_handoffs: ApiState<Vec<Value>>,
-    agent_handoff_assignments: ApiState<Vec<Value>>,
-    workflow_pack_installations: ApiState<Vec<WorkflowPackInstallation>>,
-    stage2_readiness: ApiState<Stage2Readiness>,
-    enterprise_product_readiness: ApiState<EnterpriseProductReadiness>,
-    native_connector_production_readiness: ApiState<Value>,
-    observability: ApiState<ObservabilitySummary>,
-    capability_discovery: ApiState<CapabilityDiscovery>,
-    usage: ApiState<Value>,
-    memory_governance: ApiState<Value>,
-    memory_writebacks: ApiState<Value>,
-    memory_writeback_candidates: ApiState<Value>,
-    scheduler_summary: ApiState<Value>,
-    deployment_version: ApiState<DeploymentVersion>,
-    remote_computer_production_path: ApiState<Value>,
-    workflow_pack_marketplace: ApiState<WorkflowPackMarketplace>,
-    semantic_objects: ApiState<Vec<SemanticObject>>,
-    semantic_links: ApiState<Vec<Value>>,
-    semantic_search: ApiState<Value>,
-    semantic_graph: ApiState<SemanticGraphSnapshot>,
-    semantic_workbench: ApiState<Value>,
-    semantic_reflection_queue: ApiState<SemanticReflectionQueue>,
-    ontology_registry: ApiState<OntologyRegistry>,
-    ontology_engine_readiness: ApiState<Value>,
-    semantic_retrieval_backends: ApiState<Value>,
-}
-
 #[component]
 fn App() -> Html {
-    let active_view = use_state(|| {
-        storage_get("mandoforge.activeView")
-            .map(|value| View::from_id(&value))
-            .unwrap_or(View::Agents)
-    });
+    let active_view = use_state(initial_active_view);
     let token_input = use_state(get_admin_token);
     let mutation_status = use_state(String::new);
     let task_title = use_state(|| "Smoke run: fetch a public webpage title".to_string());
@@ -138,6 +38,7 @@ fn App() -> Html {
     });
     let context_packet_id = use_state(String::new);
     let rendered_context = use_state(|| None::<RenderedExecutionContext>);
+    let critical_notifications_muted = use_state(initial_critical_notifications_muted);
 
     let data = ConsoleData {
         agents: use_polling::<Vec<Agent>>("/api/agents", 5_000),
@@ -215,10 +116,7 @@ fn App() -> Html {
             5_000,
         ),
         ontology_registry: use_polling::<OntologyRegistry>("/api/ontology/registry", 6_000),
-        ontology_engine_readiness: use_polling::<Value>(
-            "/api/ontology/engine-readiness",
-            6_000,
-        ),
+        ontology_engine_readiness: use_polling::<Value>("/api/ontology/engine-readiness", 6_000),
         semantic_retrieval_backends: use_polling::<Value>(
             "/api/semantic-retrieval/backends",
             6_000,
@@ -323,8 +221,7 @@ fn App() -> Html {
                             packet.id
                         }
                         Err(error) => {
-                            mutation_status
-                                .set(format!("Context packet creation failed: {error}"));
+                            mutation_status.set(format!("Context packet creation failed: {error}"));
                             return;
                         }
                     }
@@ -368,6 +265,18 @@ fn App() -> Html {
                     Err(error) => mutation_status.set(format!("Deployment verify failed: {error}")),
                 }
             });
+        })
+    };
+
+    let toggle_critical_notifications = {
+        let critical_notifications_muted = critical_notifications_muted.clone();
+        Callback::from(move |_| {
+            let next_value = !*critical_notifications_muted;
+            storage_set(
+                "mandoforge.criticalNotificationsMuted",
+                if next_value { "1" } else { "0" },
+            );
+            critical_notifications_muted.set(next_value);
         })
     };
 
@@ -416,6 +325,27 @@ fn App() -> Html {
             });
         })
     };
+
+    let notifications = use_memo(data.clone(), |data| console_notifications(data));
+    let notification_count = notifications.len();
+    let critical_notification_count = notifications
+        .iter()
+        .filter(|notification| notification.severity == "critical")
+        .count();
+    {
+        let notifications = (*notifications).clone();
+        let critical_notifications_muted = *critical_notifications_muted;
+        use_effect_with(
+            (notifications, critical_notifications_muted),
+            |(notifications, muted)| {
+                if !*muted {
+                    forward_critical_notifications_to_desktop(notifications);
+                }
+                || ()
+            },
+        );
+    }
+    let notifications = (*notifications).clone();
 
     html! {
         <main class="console-shell">
@@ -472,11 +402,61 @@ fn App() -> Html {
                 })}
             </nav>
 
-            <VisualCommandDeck data={data.clone()} view={*active_view} />
+            <NotificationCenter
+                notifications={notifications}
+                critical_muted={*critical_notifications_muted}
+                on_toggle_critical={toggle_critical_notifications.clone()}
+                on_view={{
+                    let active_view = active_view.clone();
+                    Callback::from(move |view: View| {
+                        storage_set("mandoforge.activeView", view.id());
+                        active_view.set(view);
+                    })
+                }}
+            />
+
+            {
+                if matches!(
+                    *active_view,
+                    View::Overview | View::Wizard | View::Packs | View::Settings
+                ) {
+                    html! {}
+                } else {
+                    html! { <VisualCommandDeck data={data.clone()} view={*active_view} /> }
+                }
+            }
 
             <section class="workspace">
                 {
                     match *active_view {
+                        View::Overview => html! {
+                            <OverviewView
+                                data={data.clone()}
+                                on_view={{
+                                    let active_view = active_view.clone();
+                                    Callback::from(move |view: View| {
+                                        storage_set("mandoforge.activeView", view.id());
+                                        active_view.set(view);
+                                    })
+                                }}
+                            />
+                        },
+                        View::Wizard => html! {
+                            <WizardView
+                                data={data.clone()}
+                                on_status={{
+                                    let mutation_status = mutation_status.clone();
+                                    Callback::from(move |message: String| mutation_status.set(message))
+                                }}
+                                on_view={{
+                                    let active_view = active_view.clone();
+                                    Callback::from(move |view: View| {
+                                        storage_set("mandoforge.activeView", view.id());
+                                        active_view.set(view);
+                                    })
+                                }}
+                            />
+                        },
                         View::Agents => html! {
                             <AgentsView
                                 data={data.clone()}
@@ -515,6 +495,15 @@ fn App() -> Html {
                         },
                         View::Packs => html! { <PacksView data={data.clone()} /> },
                         View::Deploy => html! { <DeployView data={data.clone()} on_verify={verify_deploy.clone()} /> },
+                        View::Settings => html! {
+                            <SettingsView
+                                data={data.clone()}
+                                critical_muted={*critical_notifications_muted}
+                                notification_count={notification_count}
+                                critical_notification_count={critical_notification_count}
+                                on_toggle_critical={toggle_critical_notifications.clone()}
+                            />
+                        },
                     }
                 }
             </section>
@@ -524,361 +513,6 @@ fn App() -> Html {
                 <span>{ if mutation_status.is_empty() { "No operator action in this browser turn." } else { mutation_status.as_str() } }</span>
             </footer>
         </main>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct DataProps {
-    data: ConsoleData,
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct AgentsProps {
-    data: ConsoleData,
-    task_title: String,
-    task_message: String,
-    selected_agent_id: String,
-    selected_environment_id: String,
-    on_task_title: Callback<InputEvent>,
-    on_task_message: Callback<InputEvent>,
-    on_agent: Callback<Event>,
-    on_environment: Callback<Event>,
-    on_start_task: Callback<MouseEvent>,
-}
-
-#[component]
-fn AgentsView(props: &AgentsProps) -> Html {
-    let data = &props.data;
-    html! {
-        <div class="page-grid agents-grid">
-            <Panel title="Task launcher">
-                <div class="taskbar">
-                    <label>
-                        <span>{ "Agent" }</span>
-                        <select value={effective_selected(&props.selected_agent_id, data.agents.data.first().map(|agent| agent.id.as_str()))} onchange={props.on_agent.clone()}>
-                            { for data.agents.data.iter().map(|agent| html! {
-                                <option value={agent.id.clone()}>{ format!("{} / {}", agent.name, label_or(&agent.agent_role, "agent")) }</option>
-                            }) }
-                        </select>
-                    </label>
-                    <label>
-                        <span>{ "Environment" }</span>
-                        <select value={props.selected_environment_id.clone()} onchange={props.on_environment.clone()}>
-                            <option value="">{ "Default environment" }</option>
-                            { for data.environments.data.iter().map(|environment| html! {
-                                <option value={environment.id.clone()}>{ format!("{} / {}", environment.name, label_or(&environment.status, "status")) }</option>
-                            }) }
-                        </select>
-                    </label>
-                    <input
-                        value={props.task_title.clone()}
-                        placeholder="Task title"
-                        oninput={props.on_task_title.clone()}
-                    />
-                    <textarea
-                        value={props.task_message.clone()}
-                        placeholder="Describe the task for the selected agent"
-                        oninput={props.on_task_message.clone()}
-                    />
-                    <button disabled={data.agents.data.is_empty()} onclick={props.on_start_task.clone()}>{ "Start task" }</button>
-                    <small>{ "Creates POST /api/sessions with an initial message; the runtime queues the session loop." }</small>
-                </div>
-            </Panel>
-            <Panel title="Runtime topology">
-                <AgentTopology agents={data.agents.data.clone()} sessions={data.sessions.data.clone()} />
-            </Panel>
-            <Panel title="Queue pressure">
-                <RuntimePipeline
-                    sessions={data.sessions.data.clone()}
-                    execution_jobs={data.execution_jobs.data.clone()}
-                    session_loop_jobs={data.session_loop_jobs.data.clone()}
-                    approvals={data.approvals.data.clone()}
-                    tool_calls={data.tool_calls.data.clone()}
-                />
-            </Panel>
-            <Panel title="Worker state">
-                <Rows empty="No worker jobs reported." rows={data.execution_jobs.data.iter().take(8).map(|job| {
-                    (job.status.clone(), job.worker_id.clone().unwrap_or_else(|| job.id.clone()), job.last_error.clone().unwrap_or_else(|| job.updated_at.clone()))
-                }).collect::<Vec<_>>()} />
-            </Panel>
-            <Panel title="Managed sessions">
-                <Rows empty="No sessions yet." rows={data.sessions.data.iter().take(10).map(|session| {
-                    (session.status.clone(), short_id(&session.id), session_title(session))
-                }).collect::<Vec<_>>()} />
-            </Panel>
-            <Panel title="Workflow runs">
-                <Rows empty="No workflow runs." rows={data.workflow_runs.data.iter().take(8).map(|run| {
-                    (run.status.clone(), label_or(&run.title, "workflow run").to_string(), short_id(&run.id))
-                }).collect::<Vec<_>>()} />
-            </Panel>
-            <Panel title="Approvals">
-                <Rows empty="No approvals." rows={data.approvals.data.iter().take(8).map(|approval| {
-                    (approval.status.clone(), label_or(&approval.kind, "approval").to_string(), label_or(&approval.reason, &approval.id).to_string())
-                }).collect::<Vec<_>>()} />
-            </Panel>
-            <Panel title="Tool calls">
-                <Rows empty="No tool calls." rows={data.tool_calls.data.iter().take(8).map(|call| {
-                    (call.status.clone(), label_or(&call.tool_name, "tool").to_string(), short_id(&call.id))
-                }).collect::<Vec<_>>()} />
-            </Panel>
-            <Panel title="Deployment version">
-                <VersionBlock version={data.deployment_version.data.clone()} />
-            </Panel>
-            <Panel title="Logs and artifacts">
-                <KeyMetrics values={vec![
-                    ("Events".to_string(), "via /api/sessions/{id}/events".to_string()),
-                    ("Stream".to_string(), "via /api/sessions/{id}/stream".to_string()),
-                    ("Artifacts".to_string(), "via /api/sessions/{id}/artifacts".to_string()),
-                    ("Audit logs".to_string(), "via /api/sessions/{id}/audit-logs".to_string()),
-                ]} />
-            </Panel>
-        </div>
-    }
-}
-
-#[component]
-fn BoardView(props: &DataProps) -> Html {
-    let items = &props.data.task_board.data.items;
-    html! {
-        <div class="page-stack">
-            <div class="kanban">
-                { for ["ready", "running", "review", "blocked", "backlog", "done"].iter().map(|column| {
-                    let filtered = items.iter().filter(|item| board_column(&item.status) == *column).collect::<Vec<_>>();
-                    html! {
-                        <section class="board-column">
-                            <header>
-                                <strong>{ column.to_ascii_uppercase() }</strong>
-                                <span>{ filtered.len() }</span>
-                            </header>
-                            { for filtered.into_iter().map(|item| html! {
-                                <article class="board-card" key={item.id.clone()}>
-                                    <strong>{ label_or(&item.title, item.work_item.as_ref().map(|w| w.title.as_str()).unwrap_or("Untitled work")) }</strong>
-                                    <span>{ format!("{} / {}", label_or(&item.priority, "normal"), short_id(&item.id)) }</span>
-                                </article>
-                            }) }
-                        </section>
-                    }
-                }) }
-            </div>
-            <div class="page-grid">
-                <Panel title="Work items">
-                    <Rows empty="No work items." rows={props.data.work_items.data.iter().take(8).map(|item| {
-                        (item.status.clone(), label_or(&item.title, "work item").to_string(), item.priority.clone())
-                    }).collect::<Vec<_>>()} />
-                </Panel>
-                <Panel title="Handoffs and reviews">
-                    <KeyMetrics values={vec![
-                        ("Manager plans".to_string(), props.data.manager_plans.data.len().to_string()),
-                        ("Handoffs".to_string(), props.data.agent_handoffs.data.len().to_string()),
-                        ("Assignments".to_string(), props.data.agent_handoff_assignments.data.len().to_string()),
-                    ]} />
-                </Panel>
-            </div>
-        </div>
-    }
-}
-
-#[component]
-fn WorkflowsView(props: &DataProps) -> Html {
-    html! {
-        <div class="page-grid">
-            <Panel title="Workflow graph">
-                <WorkflowGraph runs={props.data.workflow_runs.data.clone()} definitions={props.data.workflow_definitions.data.clone()} />
-            </Panel>
-            <Panel title="Workflow runs">
-                <Rows empty="No workflow runs." rows={props.data.workflow_runs.data.iter().take(12).map(|run| {
-                    (run.status.clone(), label_or(&run.title, "workflow run").to_string(), short_id(&run.id))
-                }).collect::<Vec<_>>()} />
-            </Panel>
-            <Panel title="Definitions">
-                <Rows empty="No workflow definitions." rows={props.data.workflow_definitions.data.iter().take(12).map(|definition| {
-                    (definition.status.clone(), label_or(&definition.name, "workflow").to_string(), label_or(&definition.version, "version").to_string())
-                }).collect::<Vec<_>>()} />
-            </Panel>
-            <Panel title="Scheduler">
-                <JsonPreview value={props.data.scheduler_summary.data.clone()} />
-            </Panel>
-            <Panel title="Evidence surfaces">
-                <KeyMetrics values={vec![
-                    ("Workflow".to_string(), props.data.workflow_runs.data.len().to_string()),
-                    ("Steps".to_string(), "via /api/workflow-runs/{id}/steps".to_string()),
-                    ("Transitions".to_string(), "via /api/workflow-runs/{id}/transitions".to_string()),
-                    ("Grants".to_string(), "via /api/workflow-runs/{id}/task-grants".to_string()),
-                    ("Graph".to_string(), "via /api/workflow-runs/{id}/graph".to_string()),
-                ]} />
-            </Panel>
-        </div>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct DynamicProps {
-    data: ConsoleData,
-    objective: String,
-    on_objective: Callback<InputEvent>,
-    on_compile: Callback<MouseEvent>,
-}
-
-#[component]
-fn DynamicView(props: &DynamicProps) -> Html {
-    html! {
-        <div class="page-grid">
-            <Panel title="Compiler">
-                <div class="form-stack">
-                    <textarea value={props.objective.clone()} oninput={props.on_objective.clone()} />
-                    <button onclick={props.on_compile.clone()}>{ "Compile dynamic workflow" }</button>
-                </div>
-            </Panel>
-            <Panel title="Fleet shape">
-                <FleetShape plans={props.data.dynamic_workflow_plans.data.clone()} />
-            </Panel>
-            <Panel title="Plans">
-                <Rows empty="No dynamic workflow plans." rows={props.data.dynamic_workflow_plans.data.iter().take(12).map(|plan| {
-                    (plan.status.clone(), label_or(&plan.objective, "dynamic workflow").to_string(), label_or(&plan.runtime_adapter, "runtime").to_string())
-                }).collect::<Vec<_>>()} />
-            </Panel>
-            <Panel title="Fleet policy">
-                <KeyMetrics values={vec![
-                    ("Max agents".to_string(), "1000 policy cap".to_string()),
-                    ("Max parallel".to_string(), "16 policy cap".to_string()),
-                    ("Cross-check".to_string(), "review and adjudication metadata".to_string()),
-                ]} />
-            </Panel>
-        </div>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct SemanticProps {
-    data: ConsoleData,
-    source_text: String,
-    context_packet_id: String,
-    rendered_context: Option<RenderedExecutionContext>,
-    on_source: Callback<InputEvent>,
-    on_build: Callback<MouseEvent>,
-    on_context_packet_id: Callback<InputEvent>,
-    on_render_context: Callback<MouseEvent>,
-}
-
-#[component]
-fn SemanticView(props: &SemanticProps) -> Html {
-    html! {
-        <div class="page-grid semantic-grid">
-            <Panel title="Ontology builder">
-                <div class="form-stack">
-                    <textarea value={props.source_text.clone()} oninput={props.on_source.clone()} />
-                    <button onclick={props.on_build.clone()}>{ "Preview ontology proposal" }</button>
-                </div>
-            </Panel>
-            <Panel title="Ontology engine readiness">
-                <JsonPreview value={props.data.ontology_engine_readiness.data.clone()} />
-            </Panel>
-            <Panel title="Context compiler">
-                <div class="form-stack">
-                    <input
-                        value={props.context_packet_id.clone()}
-                        placeholder="Context packet ID"
-                        oninput={props.on_context_packet_id.clone()}
-                    />
-                    <button onclick={props.on_render_context.clone()}>{ "Render execution context" }</button>
-                    <RenderedContextPreview rendered={props.rendered_context.clone()} />
-                </div>
-            </Panel>
-            <Panel title="Semantic graph">
-                <SemanticMap snapshot={props.data.semantic_graph.data.clone()} objects={props.data.semantic_objects.data.clone()} />
-            </Panel>
-            <Panel title="Objects">
-                <Rows empty="No semantic objects." rows={props.data.semantic_objects.data.iter().take(10).map(|object| {
-                    (
-                        object.status.clone(),
-                        label_or(&object.title, &object.object_key).to_string(),
-                        format!("{} / {} / {}", object.object_type, object.trust_level, semantic_scope_summary(&object.semantic_scopes))
-                    )
-                }).collect::<Vec<_>>()} />
-            </Panel>
-            <Panel title="Governance">
-                <KeyMetrics values={vec![
-                    ("Writebacks".to_string(), compact_json(&props.data.memory_writebacks.data)),
-                    ("Candidates".to_string(), compact_json(&props.data.memory_writeback_candidates.data)),
-                    ("Ontology".to_string(), props.data.ontology_registry.data.version.clone()),
-                    ("Reflection".to_string(), props.data.semantic_reflection_queue.data.status.clone()),
-                ]} />
-            </Panel>
-        </div>
-    }
-}
-
-#[component]
-fn PacksView(props: &DataProps) -> Html {
-    html! {
-        <div class="page-grid">
-            <Panel title="Marketplace map">
-                <PackMosaic
-                    installations={props.data.workflow_pack_installations.data.clone()}
-                    marketplace={props.data.workflow_pack_marketplace.data.clone()}
-                />
-            </Panel>
-            <Panel title="Installations">
-                <Rows empty="No pack installations." rows={props.data.workflow_pack_installations.data.iter().take(12).map(|pack| {
-                    (
-                        pack.status.clone(),
-                        label_or(&pack.pack_id, "pack").to_string(),
-                        format!("{} / {} / {}", label_or(&pack.kind, "kind"), label_or(&pack.version, "version"), semantic_scope_summary(&pack.manifest["semantic_scopes"]))
-                    )
-                }).collect::<Vec<_>>()} />
-            </Panel>
-            <Panel title="Marketplace">
-                <KeyMetrics values={vec![
-                    ("Status".to_string(), props.data.workflow_pack_marketplace.data.status.clone()),
-                    ("Packs".to_string(), props.data.workflow_pack_marketplace.data.packs.len().to_string()),
-                    ("Bindings".to_string(), "via /api/workflow-packs/installations/{id}/bindings".to_string()),
-                    ("Runtime objects".to_string(), "via /api/workflow-packs/installations/{id}/runtime-objects".to_string()),
-                ]} />
-                <Rows empty="No marketplace packs." rows={props.data.workflow_pack_marketplace.data.packs.iter().map(|pack| {
-                    (
-                        pack.status.clone(),
-                        label_or(&pack.name, &pack.id).to_string(),
-                        format!("{} / {} / {}", label_or(&pack.kind, "kind"), label_or(&pack.version, "version"), pack.description.clone())
-                    )
-                }).collect::<Vec<_>>()} />
-            </Panel>
-            <Panel title="Onboarding">
-                <JsonPreview value={Value::Array(props.data.capability_discovery.data.capabilities.clone())} />
-            </Panel>
-        </div>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct DeployProps {
-    data: ConsoleData,
-    on_verify: Callback<MouseEvent>,
-}
-
-#[component]
-fn DeployView(props: &DeployProps) -> Html {
-    html! {
-        <div class="page-grid">
-            <Panel title="Latest deployment">
-                <VersionBlock version={props.data.deployment_version.data.clone()} />
-                <button onclick={props.on_verify.clone()}>{ "Verify deployed version" }</button>
-            </Panel>
-            <Panel title="Stage 2 readiness">
-                <ReadinessRadar readiness={props.data.stage2_readiness.data.clone()} observability={props.data.observability.data.clone()} />
-            </Panel>
-            <Panel title="Enterprise product readiness">
-                <EnterpriseReadinessPanel readiness={props.data.enterprise_product_readiness.data.clone()} />
-            </Panel>
-            <Panel title="Live connector production">
-                <JsonPreview value={props.data.native_connector_production_readiness.data.clone()} />
-            </Panel>
-            <Panel title="Remote computer path">
-                <JsonPreview value={props.data.remote_computer_production_path.data.clone()} />
-            </Panel>
-            <Panel title="Usage and finance">
-                <JsonPreview value={props.data.usage.data.clone()} />
-            </Panel>
-        </div>
     }
 }
 
@@ -905,8 +539,7 @@ fn VisualCommandDeck(props: &VisualCommandDeckProps) -> Html {
         .readiness_score
         .unwrap_or_else(|| readiness_from_status(&data.stage2_readiness.data.status));
     let workflow_activity = data.workflow_runs.data.len() + data.dynamic_workflow_plans.data.len();
-    let semantic_mass =
-        data.semantic_graph.data.node_count + data.semantic_graph.data.edge_count;
+    let semantic_mass = data.semantic_graph.data.node_count + data.semantic_graph.data.edge_count;
     let enterprise_blocked = data.enterprise_product_readiness.data.blocked_lane_count;
 
     html! {
@@ -971,7 +604,12 @@ fn DynamicWorkflowCanvas(props: &DynamicWorkflowCanvasProps) -> Html {
     let ready_plans = props
         .plans
         .iter()
-        .filter(|plan| matches!(plan.status.as_str(), "approved" | "materialized" | "reviewed"))
+        .filter(|plan| {
+            matches!(
+                plan.status.as_str(),
+                "approved" | "materialized" | "reviewed"
+            )
+        })
         .count();
     let latest_plan = props.plans.first();
     let latest_objective = latest_plan
@@ -987,11 +625,31 @@ fn DynamicWorkflowCanvas(props: &DynamicWorkflowCanvasProps) -> Html {
     let latest_agent_count = latest_plan.map(dynamic_plan_total_agents).unwrap_or(0);
     let stages = vec![
         ("Plan", props.plans.len(), status_tone(&latest_status)),
-        ("Native", native_plans, if native_plans > 0 { "good" } else { "neutral" }),
-        ("Work", active_work, if active_work > 0 { "info" } else { "neutral" }),
-        ("Runs", active_runs, if active_runs > 0 { "info" } else { "neutral" }),
-        ("Gate", ready_plans, if ready_plans > 0 { "good" } else { "neutral" }),
-        ("Errors", failed_jobs, if failed_jobs > 0 { "bad" } else { "good" }),
+        (
+            "Native",
+            native_plans,
+            if native_plans > 0 { "good" } else { "neutral" },
+        ),
+        (
+            "Work",
+            active_work,
+            if active_work > 0 { "info" } else { "neutral" },
+        ),
+        (
+            "Runs",
+            active_runs,
+            if active_runs > 0 { "info" } else { "neutral" },
+        ),
+        (
+            "Gate",
+            ready_plans,
+            if ready_plans > 0 { "good" } else { "neutral" },
+        ),
+        (
+            "Errors",
+            failed_jobs,
+            if failed_jobs > 0 { "bad" } else { "good" },
+        ),
     ];
 
     html! {
@@ -1018,7 +676,11 @@ fn dynamic_plan_strategy(plan: &DynamicWorkflowPlan) -> String {
     plan.materialization
         .get("execution_strategy")
         .and_then(Value::as_str)
-        .or_else(|| plan.analysis.get("execution_strategy").and_then(Value::as_str))
+        .or_else(|| {
+            plan.analysis
+                .get("execution_strategy")
+                .and_then(Value::as_str)
+        })
         .or_else(|| {
             if plan.runtime_adapter.is_empty() {
                 None
@@ -1049,535 +711,6 @@ fn dynamic_plan_total_agents(plan: &DynamicWorkflowPlan) -> usize {
 
 fn label_or_strategy(value: &str) -> String {
     label_or(value, "unknown").replace('_', " ")
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct FlowMeterProps {
-    label: &'static str,
-    value: usize,
-    max: usize,
-    #[prop_or("neutral")]
-    tone: &'static str,
-}
-
-#[component]
-fn FlowMeter(props: &FlowMeterProps) -> Html {
-    html! {
-        <div class={classes!("flow-meter", props.tone)}>
-            <span>{ props.label }</span>
-            <strong>{ props.value }</strong>
-            <i><b style={width_style(props.value, props.max)}></b></i>
-        </div>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct AgentTopologyProps {
-    agents: Vec<Agent>,
-    sessions: Vec<Session>,
-}
-
-#[component]
-fn AgentTopology(props: &AgentTopologyProps) -> Html {
-    let total = props.agents.len().max(1);
-    html! {
-        <div class="agent-topology">
-            <div class="topology-canvas">
-                <span class="topology-hub">{ props.agents.len() }</span>
-                <i class="topology-axis horizontal"></i>
-                <i class="topology-axis vertical"></i>
-                { for props.agents.iter().take(14).enumerate().map(|(index, agent)| {
-                    let (x, y) = orbit_point(index, total, 50.0, 50.0, 41.0);
-                    html! {
-                        <article
-                            class={classes!("topology-agent", status_tone(&agent.release_state))}
-                            style={position_style(x, y)}
-                            title={format!("{} / {}", agent.name, label_or(&agent.agent_role, "agent"))}
-                        >
-                            <span>{ agent.name.chars().next().unwrap_or('A') }</span>
-                        </article>
-                    }
-                }) }
-            </div>
-            <div class="topology-side">
-                <FlowMeter label="Agents" value={props.agents.len()} max={props.agents.len().max(1)} tone="good" />
-                <FlowMeter label="Active sessions" value={props.sessions.iter().filter(|session| is_active_status(&session.status)).count()} max={props.sessions.len().max(1)} tone="info" />
-                <FlowMeter label="Released" value={props.agents.iter().filter(|agent| status_tone(&agent.release_state) == "good").count()} max={props.agents.len().max(1)} tone="good" />
-            </div>
-        </div>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct RuntimePipelineProps {
-    sessions: Vec<Session>,
-    execution_jobs: Vec<WorkerJob>,
-    session_loop_jobs: Vec<WorkerJob>,
-    approvals: Vec<Approval>,
-    tool_calls: Vec<ToolCall>,
-}
-
-#[component]
-fn RuntimePipeline(props: &RuntimePipelineProps) -> Html {
-    let stages = vec![
-        ("Sessions", props.sessions.len(), "neutral"),
-        (
-            "Session loop",
-            active_job_count(&props.session_loop_jobs),
-            "info",
-        ),
-        ("Workers", active_job_count(&props.execution_jobs), "info"),
-        ("Tools", props.tool_calls.len(), "good"),
-        (
-            "Approvals",
-            props
-                .approvals
-                .iter()
-                .filter(|approval| approval.status == "pending" || approval.status == "requires_action")
-                .count(),
-            "warn",
-        ),
-    ];
-    let max = stages.iter().map(|(_, value, _)| *value).max().unwrap_or(1).max(1);
-    html! {
-        <div class="runtime-pipeline">
-            { for stages.iter().enumerate().map(|(index, (label, value, tone))| html! {
-                <div class={classes!("pipeline-stage", *tone)} key={(*label).to_string()}>
-                    <span>{ index + 1 }</span>
-                    <strong>{ label }</strong>
-                    <i style={height_style(*value, max)}></i>
-                    <small>{ value }</small>
-                </div>
-            }) }
-        </div>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct WorkflowGraphProps {
-    runs: Vec<WorkflowRun>,
-    definitions: Vec<WorkflowDefinition>,
-}
-
-#[component]
-fn WorkflowGraph(props: &WorkflowGraphProps) -> Html {
-    let active_runs = props
-        .runs
-        .iter()
-        .filter(|run| is_active_status(&run.status))
-        .count();
-    let failed_runs = props
-        .runs
-        .iter()
-        .filter(|run| status_tone(&run.status) == "bad")
-        .count();
-    html! {
-        <div class="workflow-graph">
-            <div class="graph-lane">
-                { for props.definitions.iter().take(6).enumerate().map(|(index, definition)| html! {
-                    <div class={classes!("graph-node", status_tone(&definition.status))} key={definition.id.clone()}>
-                        <span>{ index + 1 }</span>
-                        <strong>{ label_or(&definition.name, "workflow") }</strong>
-                    </div>
-                }) }
-                { if props.definitions.is_empty() {
-                    html! { <p class="empty">{ "No workflow definitions." }</p> }
-                } else {
-                    html! {}
-                }}
-            </div>
-            <div class="graph-stats">
-                <FlowMeter label="Runs" value={props.runs.len()} max={props.runs.len().max(1)} tone="neutral" />
-                <FlowMeter label="Active" value={active_runs} max={props.runs.len().max(1)} tone="info" />
-                <FlowMeter label="Failed" value={failed_runs} max={props.runs.len().max(1)} tone={if failed_runs > 0 { "bad" } else { "good" }} />
-            </div>
-        </div>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct FleetShapeProps {
-    plans: Vec<DynamicWorkflowPlan>,
-}
-
-#[component]
-fn FleetShape(props: &FleetShapeProps) -> Html {
-    let total = props.plans.len().max(1);
-    html! {
-        <div class="fleet-shape">
-            { for props.plans.iter().take(18).enumerate().map(|(index, plan)| {
-                let size = 26 + ((index % 5) * 8);
-                html! {
-                    <article
-                        class={classes!("fleet-cell", status_tone(&plan.status))}
-                        key={plan.id.clone()}
-                        style={format!("--cell-size: {}px;", size)}
-                    >
-                        <strong>{ index + 1 }</strong>
-                        <span>{ label_or(&plan.runtime_adapter, "runtime") }</span>
-                    </article>
-                }
-            }) }
-            { if props.plans.is_empty() {
-                html! {
-                    <div class="fleet-empty">
-                        { for (0..9).map(|index| html! { <i style={format!("--delay: {}ms;", index * 80)}></i> }) }
-                    </div>
-                }
-            } else {
-                html! {}
-            }}
-            <div class="fleet-summary">
-                <FlowMeter label="Compiled plans" value={props.plans.len()} max={total} tone="info" />
-                <FlowMeter label="Ready plans" value={props.plans.iter().filter(|plan| status_tone(&plan.status) == "good").count()} max={total} tone="good" />
-            </div>
-        </div>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct SemanticMapProps {
-    snapshot: SemanticGraphSnapshot,
-    objects: Vec<SemanticObject>,
-}
-
-#[component]
-fn SemanticMap(props: &SemanticMapProps) -> Html {
-    let total = props.objects.len().max(1);
-    html! {
-        <div class="semantic-map">
-            <div class="semantic-canvas">
-                <span class="semantic-core">{ props.snapshot.node_count }</span>
-                { for props.objects.iter().take(16).enumerate().map(|(index, object)| {
-                    let (x, y) = orbit_point(index, total, 50.0, 50.0, 42.0);
-                    html! {
-                        <b
-                            class={classes!("semantic-node", status_tone(&object.status))}
-                            title={format!("{} / {}", label_or(&object.title, &object.object_key), object.object_type)}
-                            style={position_style(x, y)}
-                        />
-                    }
-                }) }
-            </div>
-            <div class="semantic-stats">
-                <FlowMeter label="Objects" value={props.snapshot.node_count} max={props.snapshot.node_count.max(1)} tone="info" />
-                <FlowMeter label="Links" value={props.snapshot.edge_count} max={props.snapshot.edge_count.max(props.snapshot.node_count).max(1)} tone="good" />
-                <FlowMeter label="Conflicts" value={props.snapshot.conflicts.len()} max={props.snapshot.conflicts.len().max(1)} tone={if props.snapshot.conflicts.is_empty() { "good" } else { "warn" }} />
-            </div>
-        </div>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct RenderedContextPreviewProps {
-    rendered: Option<RenderedExecutionContext>,
-}
-
-#[component]
-fn RenderedContextPreview(props: &RenderedContextPreviewProps) -> Html {
-    let Some(rendered) = props.rendered.as_ref() else {
-        return html! { <p class="empty">{ "No execution context rendered." }</p> };
-    };
-    let omissions = &rendered.omitted;
-    let budget = &rendered.budget;
-    html! {
-        <div class="context-preview">
-            <div class="context-budget">
-                <FlowMeter
-                    label="Prompt tokens"
-                    value={budget.estimated_tokens_used}
-                    max={budget.max_prompt_tokens.max(1)}
-                    tone={if budget.estimated_tokens_used > budget.max_prompt_tokens { "warn" } else { "good" }}
-                />
-                <FlowMeter
-                    label="Objects"
-                    value={rendered.relevant_objects.len()}
-                    max={budget.max_objects.max(1)}
-                    tone="info"
-                />
-                <FlowMeter
-                    label="Fetchable"
-                    value={rendered.fetchable_object_ids.len()}
-                    max={rendered.fetchable_object_ids.len().max(rendered.relevant_objects.len()).max(1)}
-                    tone="neutral"
-                />
-            </div>
-            <KeyMetrics values={vec![
-                ("Packet".to_string(), short_id(&rendered.context_packet_id)),
-                ("Role".to_string(), label_or(&rendered.role, "agent").to_string()),
-                ("Version".to_string(), rendered.context_packet_version.to_string()),
-                ("Full content".to_string(), rendered.full_content_included.to_string()),
-                ("Tools".to_string(), rendered.available_tools.join(", ")),
-                ("Omitted".to_string(), format!(
-                    "{} budget / {} object cap / {} source refs / {} content",
-                    omissions.token_budget_exceeded,
-                    omissions.object_limit_exceeded,
-                    omissions.source_refs_not_rendered,
-                    omissions.full_content_not_rendered
-                )),
-            ]} />
-            <Rows empty="No policy reminders." rows={rendered.must_follow.iter().take(6).map(|item| {
-                ("must_follow".to_string(), item.clone(), "rendered reminder".to_string())
-            }).collect::<Vec<_>>()} />
-            <div class="context-objects">
-                { for rendered.relevant_objects.iter().map(|object| html! {
-                    <article class="context-object" key={object.id.clone()}>
-                        <div>
-                            <span>{ format!("{} / {}", label_or(&object.object_type, "semantic_object"), short_id(&object.id)) }</span>
-                            <strong>{ label_or(&object.title, &object.object_key) }</strong>
-                        </div>
-                        <p>{ label_or(&object.summary, "No summary.") }</p>
-                        <small>{ format!("{} / {}", label_or(&object.trust_level, "trust"), label_or(&object.freshness, "freshness")) }</small>
-                    </article>
-                }) }
-            </div>
-            <JsonPreview value={rendered.ontology_scope.clone()} />
-        </div>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct PackMosaicProps {
-    installations: Vec<WorkflowPackInstallation>,
-    marketplace: WorkflowPackMarketplace,
-}
-
-#[component]
-fn PackMosaic(props: &PackMosaicProps) -> Html {
-    let marketplace_count = props.marketplace.packs.len();
-    let total = props.installations.len().max(marketplace_count).max(1);
-    html! {
-        <div class="pack-mosaic">
-            <div class="mosaic-grid">
-                { for props.installations.iter().take(12).enumerate().map(|(index, pack)| html! {
-                    <article class={classes!("mosaic-tile", status_tone(&pack.status))} key={pack.id.clone()}>
-                        <span>{ index + 1 }</span>
-                        <strong>{ label_or(&pack.pack_id, "pack") }</strong>
-                        <small>{ semantic_scope_summary(&pack.manifest["semantic_scopes"]) }</small>
-                    </article>
-                }) }
-                { if props.installations.is_empty() {
-                    html! {
-                        { for props.marketplace.packs.iter().take(8).enumerate().map(|(index, pack)| html! {
-                            <article class={classes!("mosaic-tile", status_tone(&pack.status))} key={pack.id.clone()}>
-                                <span>{ index + 1 }</span>
-                                <strong>{ label_or(&pack.name, &pack.id) }</strong>
-                                <small>{ format!("{} / {}", label_or(&pack.kind, "kind"), label_or(&pack.version, "version")) }</small>
-                            </article>
-                        }) }
-                    }
-                } else {
-                    html! {}
-                }}
-            </div>
-            <div class="mosaic-side">
-                <FlowMeter label="Marketplace" value={marketplace_count} max={total} tone="neutral" />
-                <FlowMeter label="Installed" value={props.installations.len()} max={total} tone="good" />
-            </div>
-        </div>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct ReadinessRadarProps {
-    readiness: Stage2Readiness,
-    observability: ObservabilitySummary,
-}
-
-#[component]
-fn ReadinessRadar(props: &ReadinessRadarProps) -> Html {
-    let score = props
-        .readiness
-        .readiness_score
-        .unwrap_or_else(|| readiness_from_status(&props.readiness.status));
-    let category_count = json_object_count(&props.readiness.categories);
-    let signal_count = json_object_count(&props.observability.signals);
-    html! {
-        <div class="readiness-radar">
-            <div class="radar-dial" style={gauge_style(score)}>
-                <span>{ format!("{:.0}", score * 100.0) }</span>
-                <small>{ "score" }</small>
-            </div>
-            <div class="radar-bars">
-                <FlowMeter label="Categories" value={category_count} max={category_count.max(1)} tone="info" />
-                <FlowMeter label="Signals" value={signal_count} max={signal_count.max(1)} tone="good" />
-                <FlowMeter label="Observability" value={usize::from(status_tone(&props.observability.status) == "good")} max={1} tone={status_tone(&props.observability.status)} />
-            </div>
-        </div>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct EnterpriseReadinessPanelProps {
-    readiness: EnterpriseProductReadiness,
-}
-
-#[component]
-fn EnterpriseReadinessPanel(props: &EnterpriseReadinessPanelProps) -> Html {
-    let readiness = &props.readiness;
-    let total = readiness.lane_count.max(readiness.lanes.len()).max(1);
-    let next_action = readiness
-        .next_actions
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "No next action reported.".to_string());
-    html! {
-        <div class="enterprise-readiness">
-            <div class="enterprise-summary">
-                <div>
-                    <span>{ label_or(&readiness.required_evidence_class, "customer_grade") }</span>
-                    <strong>{ label_or(&readiness.status, "blocked") }</strong>
-                    <small>{ label_or(&readiness.message, &next_action) }</small>
-                </div>
-                <div class="enterprise-meters">
-                    <FlowMeter label="Ready" value={readiness.ready_lane_count} max={total} tone="good" />
-                    <FlowMeter label="Pilot" value={readiness.pilot_ready_lane_count} max={total} tone="warn" />
-                    <FlowMeter label="Blocked" value={readiness.blocked_lane_count} max={total} tone={if readiness.blocked_lane_count > 0 { "bad" } else { "good" }} />
-                </div>
-            </div>
-            <div class="enterprise-lanes">
-                { for readiness.lanes.iter().map(|lane| {
-                    let blocker = lane.blockers.first().or_else(|| lane.next_actions.first());
-                    html! {
-                        <article class={classes!("enterprise-lane", status_tone(&lane.status))} key={lane.id.clone()}>
-                            <StatusLogo status={lane.status.clone()} />
-                            <div>
-                                <strong>{ label_or(&lane.title, &lane.id) }</strong>
-                                <span>{ format!("{} -> {}", label_or(&lane.current_evidence_class, "evidence"), label_or(&lane.required_evidence_class, "customer_grade")) }</span>
-                                <small>{ blocker.cloned().unwrap_or_else(|| label_or(&lane.production_target, "target").to_string()) }</small>
-                            </div>
-                            <em>{ label_or(&lane.status, "status") }</em>
-                        </article>
-                    }
-                }) }
-            </div>
-        </div>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct PanelProps {
-    title: &'static str,
-    children: Children,
-}
-
-#[component]
-fn Panel(props: &PanelProps) -> Html {
-    html! {
-        <section class="panel">
-            <header><h2>{ props.title }</h2></header>
-            { for props.children.iter() }
-        </section>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct MetricProps {
-    label: &'static str,
-    value: String,
-    #[prop_or("neutral")]
-    tone: &'static str,
-}
-
-#[component]
-fn Metric(props: &MetricProps) -> Html {
-    html! {
-        <div class={classes!("metric", props.tone)}>
-            <span>{ props.label }</span>
-            <strong>{ &props.value }</strong>
-        </div>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct KeyMetricsProps {
-    values: Vec<(String, String)>,
-}
-
-#[component]
-fn KeyMetrics(props: &KeyMetricsProps) -> Html {
-    html! {
-        <div class="key-metrics">
-            { for props.values.iter().map(|(label, value)| html! {
-                <div class="key-value" key={label.clone()}>
-                    <span>{ label }</span>
-                    <strong>{ value }</strong>
-                </div>
-            }) }
-        </div>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct RowsProps {
-    empty: &'static str,
-    rows: Vec<(String, String, String)>,
-}
-
-#[component]
-fn Rows(props: &RowsProps) -> Html {
-    if props.rows.is_empty() {
-        return html! { <p class="empty">{ props.empty }</p> };
-    }
-    html! {
-        <div class="rows">
-            { for props.rows.iter().map(|(status, title, detail)| html! {
-                <article class="row" key={format!("{status}-{title}-{detail}")}>
-                    <StatusLogo status={status.clone()} />
-                    <div>
-                        <strong>{ title }</strong>
-                        <span>{ detail }</span>
-                    </div>
-                    <small>{ status }</small>
-                </article>
-            }) }
-        </div>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct JsonPreviewProps {
-    value: Value,
-}
-
-#[component]
-fn JsonPreview(props: &JsonPreviewProps) -> Html {
-    html! { <pre class="json-preview">{ pretty_json(&props.value) }</pre> }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct StatusLogoProps {
-    status: String,
-}
-
-#[component]
-fn StatusLogo(props: &StatusLogoProps) -> Html {
-    let tone = status_tone(&props.status);
-    let letter = props
-        .status
-        .chars()
-        .find(|ch| ch.is_ascii_alphanumeric())
-        .map(|ch| ch.to_ascii_uppercase().to_string())
-        .unwrap_or_else(|| "I".to_string());
-    html! { <span class={classes!("status-logo", tone)}>{ letter }</span> }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct VersionBlockProps {
-    version: DeploymentVersion,
-}
-
-#[component]
-fn VersionBlock(props: &VersionBlockProps) -> Html {
-    let version = &props.version;
-    html! {
-        <div class="version-block">
-            <div><span>{ "Service" }</span><strong>{ label_or(&version.service, "mandoforge-api") }</strong></div>
-            <div><span>{ "Image tag" }</span><strong>{ version.image_tag.clone().unwrap_or_else(|| "not reported".to_string()) }</strong></div>
-            <div><span>{ "Git SHA" }</span><strong>{ version.git_sha.clone().unwrap_or_else(|| "not reported".to_string()) }</strong></div>
-            <div><span>{ "Build time" }</span><strong>{ version.build_time.clone().unwrap_or_else(|| "not reported".to_string()) }</strong></div>
-        </div>
-    }
 }
 
 #[hook]
@@ -1662,20 +795,504 @@ fn count_errors(data: &ConsoleData) -> usize {
     .count()
 }
 
-fn active_job_count(jobs: &[WorkerJob]) -> usize {
+pub(crate) fn active_job_count(jobs: &[WorkerJob]) -> usize {
     jobs.iter()
         .filter(|job| is_active_status(&job.status))
         .count()
 }
 
-fn is_active_status(status: &str) -> bool {
+pub(crate) fn pending_approval_count(approvals: &[Approval]) -> usize {
+    approvals
+        .iter()
+        .filter(|approval| approval.status == "pending" || approval.status == "requires_action")
+        .count()
+}
+
+pub(crate) fn failed_job_count(jobs: &[WorkerJob]) -> usize {
+    jobs.iter()
+        .filter(|job| status_tone(&job.status) == "bad" || job.last_error.is_some())
+        .count()
+}
+
+pub(crate) fn ready_pack_count(packs: &[WorkflowPackInstallation]) -> usize {
+    packs
+        .iter()
+        .filter(|pack| matches!(pack.status.as_str(), "released" | "ready" | "active"))
+        .count()
+}
+
+pub(crate) fn blocked_pack_count(packs: &[WorkflowPackInstallation]) -> usize {
+    packs
+        .iter()
+        .filter(|pack| status_tone(&pack.status) == "bad" || pack.status == "blocked")
+        .count()
+}
+
+pub(crate) fn json_status(value: &Value) -> String {
+    value
+        .get("status")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("readiness").and_then(Value::as_str))
+        .map(|status| label_or(status, "not reported").to_string())
+        .unwrap_or_else(|| {
+            if value.is_null() {
+                "not reported".to_string()
+            } else {
+                "reported".to_string()
+            }
+        })
+}
+
+pub(crate) fn json_gate_tone(value: &Value) -> &'static str {
+    let status = value
+        .get("status")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("readiness").and_then(Value::as_str))
+        .unwrap_or("");
+    if status.trim().is_empty() {
+        if value.is_null() { "warn" } else { "info" }
+    } else {
+        status_tone(status)
+    }
+}
+
+pub(crate) fn first_lane_blocker(readiness: &EnterpriseProductReadiness) -> Option<String> {
+    readiness.lanes.iter().find_map(|lane| {
+        lane.blockers
+            .first()
+            .or_else(|| lane.next_actions.first())
+            .cloned()
+    })
+}
+
+pub(crate) fn worker_issue_rows(
+    execution_jobs: &[WorkerJob],
+    session_loop_jobs: &[WorkerJob],
+) -> Vec<(String, String, String)> {
+    execution_jobs
+        .iter()
+        .chain(session_loop_jobs.iter())
+        .filter(|job| status_tone(&job.status) == "bad" || job.last_error.is_some())
+        .take(6)
+        .map(|job| {
+            (
+                job.status.clone(),
+                short_id(&job.id),
+                job.last_error
+                    .clone()
+                    .unwrap_or_else(|| label_or(&job.updated_at, "worker issue").to_string()),
+            )
+        })
+        .collect()
+}
+
+pub(crate) fn pack_overview_rows(
+    installations: &[WorkflowPackInstallation],
+    marketplace: &WorkflowPackMarketplace,
+) -> Vec<(String, String, String)> {
+    let installation_rows = installations.iter().take(6).map(|pack| {
+        (
+            pack.status.clone(),
+            label_or(&pack.pack_id, "pack").to_string(),
+            format!(
+                "{} / {} / {}",
+                label_or(&pack.kind, "kind"),
+                label_or(&pack.version, "version"),
+                semantic_scope_summary(&pack.manifest["semantic_scopes"])
+            ),
+        )
+    });
+    let marketplace_rows = marketplace.packs.iter().take(6).map(|pack| {
+        (
+            pack.status.clone(),
+            label_or(&pack.name, &pack.id).to_string(),
+            format!(
+                "{} / {} / {}",
+                label_or(&pack.kind, "kind"),
+                label_or(&pack.version, "version"),
+                label_or(&pack.description, "marketplace pack")
+            ),
+        )
+    });
+    installation_rows.chain(marketplace_rows).take(8).collect()
+}
+
+pub(crate) fn pack_card_models(
+    installations: &[WorkflowPackInstallation],
+    marketplace: &WorkflowPackMarketplace,
+) -> Vec<PackCardModel> {
+    let mut cards = installations
+        .iter()
+        .map(|pack| {
+            let manifest = pack.manifest.clone();
+            PackCardModel {
+                id: pack.pack_id.clone(),
+                name: json_string(&manifest, "name")
+                    .unwrap_or_else(|| label_or(&pack.pack_id, "pack").to_string()),
+                kind: label_or(&pack.kind, "WorkflowPack").to_string(),
+                version: label_or(&pack.version, "version").to_string(),
+                description: json_string(&manifest, "description").unwrap_or_default(),
+                status: label_or(&pack.status, "installed").to_string(),
+                source: "installed".to_string(),
+                manifest,
+            }
+        })
+        .collect::<Vec<_>>();
+    for pack in &marketplace.packs {
+        if cards.iter().any(|card| card.id == pack.id) {
+            continue;
+        }
+        let manifest = if pack.manifest_summary.is_null()
+            || pack
+                .manifest_summary
+                .as_object()
+                .is_some_and(|object| object.is_empty())
+        {
+            pack.validation.clone()
+        } else {
+            pack.manifest_summary.clone()
+        };
+        cards.push(PackCardModel {
+            id: pack.id.clone(),
+            name: label_or(&pack.name, &pack.id).to_string(),
+            kind: label_or(&pack.kind, "WorkflowPack").to_string(),
+            version: label_or(&pack.version, "version").to_string(),
+            description: pack.description.clone(),
+            status: label_or(&pack.status, "available").to_string(),
+            source: "marketplace".to_string(),
+            manifest,
+        });
+    }
+    cards.sort_by(|a, b| {
+        pack_sort_weight(&a.id)
+            .cmp(&pack_sort_weight(&b.id))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    cards
+}
+
+fn pack_sort_weight(id: &str) -> usize {
+    match id {
+        "ecommerce-tmall" => 0,
+        "ecommerce-xiaohongshu" => 1,
+        "ecommerce-taobao" => 2,
+        "ecommerce-tiktok-shop" => 3,
+        "ecommerce-amazon" => 4,
+        "ecommerce-core" => 5,
+        "legal" => 6,
+        "ai-governance" => 7,
+        _ => 20,
+    }
+}
+
+fn json_string(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(ToString::to_string)
+}
+
+pub(crate) fn json_array_len(value: &Value) -> usize {
+    value.as_array().map(Vec::len).unwrap_or(0)
+}
+
+pub(crate) fn pack_metric_count(
+    manifest: &Value,
+    array_key: &str,
+    fallback_count_key: &str,
+) -> usize {
+    json_array_len(&manifest[array_key]).max(
+        manifest
+            .get(fallback_count_key)
+            .and_then(Value::as_u64)
+            .map(|count| count as usize)
+            .unwrap_or(0),
+    )
+}
+
+pub(crate) fn pack_string_list(manifest: &Value, key: &str, limit: usize) -> Vec<String> {
+    manifest
+        .get(key)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(ToString::to_string))
+                .take(limit)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub(crate) fn pack_connector_rows(manifest: &Value) -> Vec<(String, String)> {
+    let rows = manifest
+        .get("connectors")
+        .and_then(Value::as_array)
+        .map(|connectors| {
+            connectors
+                .iter()
+                .take(3)
+                .filter_map(|connector| {
+                    let id = connector.get("id").and_then(Value::as_str)?;
+                    let kind = connector
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .unwrap_or("connector");
+                    let write_label = connector
+                        .get("writes")
+                        .and_then(|writes| writes.get("enabled"))
+                        .and_then(Value::as_bool)
+                        .map(|enabled| if enabled { "writes gated" } else { "read only" })
+                        .unwrap_or("readiness gated");
+                    let quality = connector
+                        .get("data_quality")
+                        .and_then(|quality| quality.get("min_sample_count"))
+                        .and_then(Value::as_u64)
+                        .map(|count| format!("{count} samples"))
+                        .unwrap_or_else(|| "sample gate not declared".to_string());
+                    Some((
+                        id.to_string(),
+                        format!("{kind} / {write_label} / {quality}"),
+                    ))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if rows.is_empty() {
+        vec![(
+            "connector contract".to_string(),
+            "No connector declared in this card payload.".to_string(),
+        )]
+    } else {
+        rows
+    }
+}
+
+pub(crate) fn pack_has_external_writes(manifest: &Value) -> bool {
+    let connector_write = manifest
+        .get("connectors")
+        .and_then(Value::as_array)
+        .map(|connectors| {
+            connectors.iter().any(|connector| {
+                connector
+                    .get("writes")
+                    .and_then(|writes| writes.get("enabled"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+    let agent_external_write = manifest
+        .get("agents")
+        .and_then(Value::as_array)
+        .map(|agents| {
+            agents.iter().any(|agent| {
+                agent
+                    .get("tool_scope")
+                    .and_then(|scope| scope.get("external_write"))
+                    .and_then(Value::as_array)
+                    .is_some_and(|writes| !writes.is_empty())
+                    || agent
+                        .get("external_write_count")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|count| count > 0)
+            })
+        })
+        .unwrap_or(false);
+    connector_write || agent_external_write
+}
+
+pub(crate) fn pack_requires_approval(manifest: &Value) -> bool {
+    let connector_approval = manifest
+        .get("connectors")
+        .and_then(Value::as_array)
+        .map(|connectors| {
+            connectors.iter().any(|connector| {
+                connector
+                    .get("writes")
+                    .and_then(|writes| writes.get("approval_required"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+    let handoff_approval = manifest
+        .get("agents")
+        .and_then(Value::as_array)
+        .map(|agents| {
+            agents.iter().any(|agent| {
+                agent
+                    .get("handoffs")
+                    .and_then(Value::as_array)
+                    .map(|handoffs| {
+                        handoffs.iter().any(|handoff| {
+                            handoff
+                                .get("approval_required")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false)
+                    || agent
+                        .get("approval_handoff_count")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|count| count > 0)
+            })
+        })
+        .unwrap_or(false);
+    connector_approval || handoff_approval
+}
+
+pub(crate) fn pack_lifecycle_steps(
+    status: &str,
+    source: &str,
+) -> Vec<(&'static str, &'static str)> {
+    let order = [
+        ("Install", "installed"),
+        ("Stage", "staged"),
+        ("Onboard", "onboarding"),
+        ("Quality", "quality"),
+        ("Release", "released"),
+        ("Rollback", "rolled_back"),
+    ];
+    if source == "marketplace" {
+        return order
+            .into_iter()
+            .map(|(label, _)| {
+                (
+                    label,
+                    if label == "Install" {
+                        "warn"
+                    } else {
+                        "neutral"
+                    },
+                )
+            })
+            .collect();
+    }
+    order
+        .into_iter()
+        .map(|(label, step_status)| {
+            let tone = if status == step_status {
+                "info"
+            } else if lifecycle_step_passed(status, step_status) {
+                "good"
+            } else if status_tone(status) == "bad" {
+                "bad"
+            } else {
+                "neutral"
+            };
+            (label, tone)
+        })
+        .collect()
+}
+
+fn lifecycle_step_passed(status: &str, step: &str) -> bool {
+    let rank = |value: &str| match value {
+        "installed" => 1,
+        "staged" => 2,
+        "onboarding" => 3,
+        "quality" => 4,
+        "released" => 5,
+        "rolled_back" => 6,
+        "archived" => 7,
+        _ => 0,
+    };
+    rank(status) > rank(step)
+}
+
+pub(crate) fn pack_blocker_summary(
+    card: &PackCardModel,
+    external_writes: bool,
+    release_gate_count: usize,
+) -> String {
+    if card.source == "marketplace" {
+        return "Available pack. Install creates a draft version before staging or release."
+            .to_string();
+    }
+    match card.status.as_str() {
+        "released" if external_writes => {
+            "Released, but buyer-facing writes remain approval-gated and connector-quality-bound."
+                .to_string()
+        }
+        "released" => "Released pack with read/draft governed runtime surfaces.".to_string(),
+        "rolled_back" => {
+            "Rolled back; historical release evidence remains audit-visible.".to_string()
+        }
+        "archived" => {
+            "Archived; hidden from active tenant behavior without deleting evidence.".to_string()
+        }
+        status if status_tone(status) == "bad" => {
+            "Blocked pack. Inspect lifecycle gate evidence before demo or release.".to_string()
+        }
+        _ if release_gate_count > 0 => {
+            "Not released yet. Eval, policy, connector, and approval gates must pass first."
+                .to_string()
+        }
+        _ => "Draft package shape is visible; lifecycle gates are not complete yet.".to_string(),
+    }
+}
+
+pub(crate) fn operator_queue_rows(data: &ConsoleData) -> Vec<(String, String, String)> {
+    let approval_rows = data.approvals.data.iter().filter_map(|approval| {
+        if approval.status == "pending" || approval.status == "requires_action" {
+            Some((
+                approval.status.clone(),
+                label_or(&approval.kind, "approval").to_string(),
+                label_or(&approval.reason, &approval.id).to_string(),
+            ))
+        } else {
+            None
+        }
+    });
+    let job_rows = data
+        .execution_jobs
+        .data
+        .iter()
+        .chain(data.session_loop_jobs.data.iter())
+        .filter_map(|job| {
+            if status_tone(&job.status) == "bad" || job.last_error.is_some() {
+                Some((
+                    job.status.clone(),
+                    short_id(&job.id),
+                    job.last_error
+                        .clone()
+                        .unwrap_or_else(|| label_or(&job.updated_at, "worker issue").to_string()),
+                ))
+            } else {
+                None
+            }
+        });
+    let lane_rows = data
+        .enterprise_product_readiness
+        .data
+        .lanes
+        .iter()
+        .filter_map(|lane| {
+            lane.blockers.first().map(|blocker| {
+                (
+                    lane.status.clone(),
+                    label_or(&lane.title, &lane.id).to_string(),
+                    blocker.clone(),
+                )
+            })
+        });
+    approval_rows
+        .chain(job_rows)
+        .chain(lane_rows)
+        .take(10)
+        .collect()
+}
+
+pub(crate) fn is_active_status(status: &str) -> bool {
     matches!(
         status,
         "running" | "queued" | "claimed" | "in_progress" | "requires_action"
     )
 }
 
-fn board_column(status: &str) -> &'static str {
+pub(crate) fn board_column(status: &str) -> &'static str {
     match status {
         "ready" | "queued" | "claimable" => "ready",
         "running" | "claimed" | "in_progress" => "running",
@@ -1686,20 +1303,25 @@ fn board_column(status: &str) -> &'static str {
     }
 }
 
-fn status_tone(status: &str) -> &'static str {
+pub(crate) fn status_tone(status: &str) -> &'static str {
     match status {
-        "ready" | "completed" | "succeeded" | "active" | "promoted" | "released"
+        "ready"
+        | "completed"
+        | "succeeded"
+        | "active"
+        | "promoted"
+        | "released"
         | "enterprise_product_complete" => "good",
-        "running" | "queued" | "claimed" | "in_progress" => "info",
+        "running" | "queued" | "claimed" | "in_progress" | "installed" | "staged" => "info",
         "pending" | "requires_action" | "review" | "warning" | "attention" | "pilot_ready" => {
             "warn"
         }
-        "failed" | "blocked" | "critical" | "cancelled" => "bad",
+        "failed" | "blocked" | "critical" | "cancelled" | "rolled_back" => "bad",
         _ => "neutral",
     }
 }
 
-fn label_or<'a>(value: &'a str, fallback: &'a str) -> &'a str {
+pub(crate) fn label_or<'a>(value: &'a str, fallback: &'a str) -> &'a str {
     if value.trim().is_empty() {
         fallback
     } else {
@@ -1707,15 +1329,15 @@ fn label_or<'a>(value: &'a str, fallback: &'a str) -> &'a str {
     }
 }
 
-fn short_id(id: &str) -> String {
+pub(crate) fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
-fn compact_json(value: &Value) -> String {
+pub(crate) fn compact_json(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "unserializable".to_string())
 }
 
-fn semantic_scope_summary(scopes: &Value) -> String {
+pub(crate) fn semantic_scope_summary(scopes: &Value) -> String {
     let Some(object) = scopes.as_object() else {
         return "unscoped".to_string();
     };
@@ -1742,7 +1364,7 @@ fn semantic_scope_summary(scopes: &Value) -> String {
     }
 }
 
-fn pretty_json(value: &Value) -> String {
+pub(crate) fn pretty_json(value: &Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_else(|_| "unserializable".to_string())
 }
 
@@ -1767,7 +1389,7 @@ fn state_select(handle: UseStateHandle<String>) -> Callback<Event> {
     })
 }
 
-fn effective_selected(selected: &str, fallback: Option<&str>) -> String {
+pub(crate) fn effective_selected(selected: &str, fallback: Option<&str>) -> String {
     if selected.trim().is_empty() {
         fallback.unwrap_or_default().to_string()
     } else {
@@ -1775,7 +1397,7 @@ fn effective_selected(selected: &str, fallback: Option<&str>) -> String {
     }
 }
 
-fn session_title(session: &Session) -> String {
+pub(crate) fn session_title(session: &Session) -> String {
     if !session.title.trim().is_empty() {
         session.title.clone()
     } else if !session.objective.trim().is_empty() {
@@ -1785,38 +1407,22 @@ fn session_title(session: &Session) -> String {
     }
 }
 
-fn width_style(value: usize, max: usize) -> String {
-    format!("width: {:.1}%;", percent(value, max))
-}
-
-fn height_style(value: usize, max: usize) -> String {
-    format!("height: {:.1}%;", percent(value, max).max(8.0))
-}
-
-fn gauge_style(score: f64) -> String {
+pub(crate) fn gauge_style(score: f64) -> String {
     let pct = score.clamp(0.0, 1.0) * 100.0;
     format!("--gauge: {:.1}%;", pct)
 }
 
-fn position_style(x: f64, y: f64) -> String {
+pub(crate) fn position_style(x: f64, y: f64) -> String {
     format!("left: {:.2}%; top: {:.2}%;", x, y)
 }
 
-fn percent(value: usize, max: usize) -> f64 {
-    if max == 0 {
-        0.0
-    } else {
-        (value as f64 / max as f64 * 100.0).clamp(0.0, 100.0)
-    }
-}
-
-fn orbit_point(index: usize, total: usize, cx: f64, cy: f64, radius: f64) -> (f64, f64) {
+pub(crate) fn orbit_point(index: usize, total: usize, cx: f64, cy: f64, radius: f64) -> (f64, f64) {
     let total = total.max(1) as f64;
     let angle = (index as f64 / total) * std::f64::consts::TAU - std::f64::consts::FRAC_PI_2;
     (cx + radius * angle.cos(), cy + radius * angle.sin())
 }
 
-fn readiness_from_status(status: &str) -> f64 {
+pub(crate) fn readiness_from_status(status: &str) -> f64 {
     match status_tone(status) {
         "good" => 0.92,
         "info" => 0.72,
@@ -1826,26 +1432,12 @@ fn readiness_from_status(status: &str) -> f64 {
     }
 }
 
-fn json_object_count(value: &Value) -> usize {
+pub(crate) fn json_object_count(value: &Value) -> usize {
     match value {
         Value::Array(items) => items.len(),
         Value::Object(map) => map.len(),
         Value::Null => 0,
         _ => 1,
-    }
-}
-
-fn storage_get(key: &str) -> Option<String> {
-    web_sys::window()
-        .and_then(|window| window.local_storage().ok().flatten())
-        .and_then(|storage| storage.get_item(key).ok().flatten())
-}
-
-fn storage_set(key: &str, value: &str) {
-    if let Some(storage) =
-        web_sys::window().and_then(|window| window.local_storage().ok().flatten())
-    {
-        let _ = storage.set_item(key, value);
     }
 }
 
