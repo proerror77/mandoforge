@@ -530,6 +530,8 @@ Mitigation: Desktop MVP explicitly excludes signed updater and enterprise comple
 - Phase 6 runtime smoke passed after replacing the invalid placeholder icon with a Tauri-decodable PNG and adding `core:webview:allow-create-webview-window` to the desktop capability file.
 - Phase 6 embedded local API implemented as an explicit opt-in process-owner contract: `MANDOFORGE_DESKTOP_EMBEDDED_API=1` starts an API command from `MANDOFORGE_DESKTOP_API_COMMAND` on a reserved localhost port, waits for API reachability before opening the WebView, and kills the owned child process on desktop exit.
 - Phase 6 embedded boundary: this is not yet a Tauri packaged sidecar or signed distribution artifact; it is a verified local startup contract. `EMBEDDED_API=1 ./scripts/verify-desktop-runtime-smoke.sh` covers the opt-in path.
+- Phase 3 initial wizard slice implemented: `Wizard` is now a first-run console route with local/repo-pilot/customer-grade access modes, local progress storage, pack selection, identity/runtime/connector/ontology/evidence checks, and a governed pilot session launcher through the existing `/api/sessions` policy boundary.
+- Phase 3 boundary: the wizard does not configure real external connector credentials, does not perform live writes, and does not mark customer-grade completion. It surfaces the current blockers from readiness APIs and links operators back to Packs, Deploy, Semantic, and Agents.
 
 ## Definition Of Done
 
