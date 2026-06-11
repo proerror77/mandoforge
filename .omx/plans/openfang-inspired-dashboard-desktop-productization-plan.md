@@ -520,6 +520,7 @@ Mitigation: Desktop MVP explicitly excludes signed updater and enterprise comple
 ## Execution Progress
 
 - Phase 1 modularization slice implemented: `View`, `ConsoleData`, localStorage bootstrapping, reusable display components, and web notification classification were extracted into `web-ui/src/state.rs`, `web-ui/src/components.rs`, and `web-ui/src/notifications.rs` without changing the API polling contract or the Wizard/Overview runtime behavior.
+- Phase 1 Wizard view extraction implemented: the First-run Enterprise Wizard now lives under `web-ui/src/views/wizard.rs`, with `web-ui/src/main.rs` retaining only the top-level route wiring for that view.
 - Phase 1 boundary: business views still live in `web-ui/src/main.rs`; further extraction should move view-specific code into `web-ui/src/views/*` in small behavior-preserving commits.
 - Phase 2 implemented: Overview is the product home, backed by live console APIs, and avoids the visual command deck pushing first-screen operator signals down.
 - Phase 4 implemented: pack marketplace cards now expose lifecycle, workflows, agents, connectors, actions, release gates, files, connector gate copy, approval posture, and semantic scope from API-backed manifest summaries.
