@@ -10,7 +10,7 @@ use gloo_timers::callback::Interval;
 use notifications::*;
 use serde_json::{Value, json};
 use state::*;
-use views::{OverviewView, WizardView};
+use views::{BoardView, OverviewView, WizardView};
 use wasm_bindgen_futures::spawn_local;
 use web_sys::{HtmlInputElement, HtmlSelectElement, HtmlTextAreaElement};
 use yew::prelude::*;
@@ -607,48 +607,6 @@ fn AgentsView(props: &AgentsProps) -> Html {
                     ("Audit logs".to_string(), "via /api/sessions/{id}/audit-logs".to_string()),
                 ]} />
             </Panel>
-        </div>
-    }
-}
-
-#[component]
-fn BoardView(props: &DataProps) -> Html {
-    let items = &props.data.task_board.data.items;
-    html! {
-        <div class="page-stack">
-            <div class="kanban">
-                { for ["ready", "running", "review", "blocked", "backlog", "done"].iter().map(|column| {
-                    let filtered = items.iter().filter(|item| board_column(&item.status) == *column).collect::<Vec<_>>();
-                    html! {
-                        <section class="board-column">
-                            <header>
-                                <strong>{ column.to_ascii_uppercase() }</strong>
-                                <span>{ filtered.len() }</span>
-                            </header>
-                            { for filtered.into_iter().map(|item| html! {
-                                <article class="board-card" key={item.id.clone()}>
-                                    <strong>{ label_or(&item.title, item.work_item.as_ref().map(|w| w.title.as_str()).unwrap_or("Untitled work")) }</strong>
-                                    <span>{ format!("{} / {}", label_or(&item.priority, "normal"), short_id(&item.id)) }</span>
-                                </article>
-                            }) }
-                        </section>
-                    }
-                }) }
-            </div>
-            <div class="page-grid">
-                <Panel title="Work items">
-                    <Rows empty="No work items." rows={props.data.work_items.data.iter().take(8).map(|item| {
-                        (item.status.clone(), label_or(&item.title, "work item").to_string(), item.priority.clone())
-                    }).collect::<Vec<_>>()} />
-                </Panel>
-                <Panel title="Handoffs and reviews">
-                    <KeyMetrics values={vec![
-                        ("Manager plans".to_string(), props.data.manager_plans.data.len().to_string()),
-                        ("Handoffs".to_string(), props.data.agent_handoffs.data.len().to_string()),
-                        ("Assignments".to_string(), props.data.agent_handoff_assignments.data.len().to_string()),
-                    ]} />
-                </Panel>
-            </div>
         </div>
     }
 }
@@ -2153,7 +2111,7 @@ pub(crate) fn is_active_status(status: &str) -> bool {
     )
 }
 
-fn board_column(status: &str) -> &'static str {
+pub(crate) fn board_column(status: &str) -> &'static str {
     match status {
         "ready" | "queued" | "claimable" => "ready",
         "running" | "claimed" | "in_progress" => "running",
