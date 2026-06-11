@@ -47,6 +47,20 @@ pub struct NotificationStatus {
     pub muted_storage_key: &'static str,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct DesktopHardeningStatus {
+    pub evidence_class: &'static str,
+    pub bundle_active: bool,
+    pub signed_distribution_ready: bool,
+    pub updater_enabled: bool,
+    pub single_instance_enabled: bool,
+    pub autostart_enabled: bool,
+    pub csp_configured: bool,
+    pub native_notifications_enabled: bool,
+    pub enterprise_completion_claimed: bool,
+    pub next_actions: Vec<&'static str>,
+}
+
 impl DesktopState {
     fn from_env() -> Result<Self> {
         if env_bool("MANDOFORGE_DESKTOP_EMBEDDED_API") {
@@ -166,6 +180,7 @@ pub fn run() {
             commands::open_config_dir,
             commands::open_logs_dir,
             commands::get_notification_status,
+            commands::get_desktop_hardening_status,
         ])
         .setup(|app| {
             let state = app.state::<DesktopState>();

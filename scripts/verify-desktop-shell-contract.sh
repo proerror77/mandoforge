@@ -59,7 +59,8 @@ for command in \
   open_browser \
   open_config_dir \
   open_logs_dir \
-  get_notification_status; do
+  get_notification_status \
+  get_desktop_hardening_status; do
   require_text "$DESKTOP_ROOT/src/commands.rs" "fn $command"
   require_text "$DESKTOP_ROOT/src/lib.rs" "commands::$command"
 done
@@ -86,6 +87,12 @@ require_text "$DESKTOP_ROOT/src/lib.rs" "127.0.0.1:0"
 require_text "$DESKTOP_ROOT/src/lib.rs" "api_reachable"
 require_text "$DESKTOP_ROOT/src/lib.rs" "api_unreachable"
 require_text "$DESKTOP_ROOT/src/commands.rs" "native_forwarding_enabled: false"
+require_text "$DESKTOP_ROOT/src/commands.rs" "evidence_class: \"mvp_local_shell\""
+require_text "$DESKTOP_ROOT/src/commands.rs" "signed_distribution_ready: false"
+require_text "$DESKTOP_ROOT/src/commands.rs" "updater_enabled: false"
+require_text "$DESKTOP_ROOT/src/commands.rs" "single_instance_enabled: false"
+require_text "$DESKTOP_ROOT/src/commands.rs" "autostart_enabled: false"
+require_text "$DESKTOP_ROOT/src/commands.rs" "enterprise_completion_claimed: false"
 require_text "$DESKTOP_ROOT/src/commands.rs" "mandoforge.criticalNotificationsMuted"
 require_text "scripts/verify-desktop-runtime-smoke.sh" "START_API"
 require_text "scripts/verify-desktop-runtime-smoke.sh" "EMBEDDED_API"

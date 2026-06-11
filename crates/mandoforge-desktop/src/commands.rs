@@ -1,4 +1,6 @@
-use crate::{DesktopState, DesktopStatus, NotificationStatus, config_dir, logs_dir};
+use crate::{
+    DesktopHardeningStatus, DesktopState, DesktopStatus, NotificationStatus, config_dir, logs_dir,
+};
 use tauri::State;
 
 #[tauri::command]
@@ -39,5 +41,28 @@ pub fn get_notification_status() -> NotificationStatus {
         native_forwarding_enabled: false,
         browser_permission_prompted: false,
         muted_storage_key: "mandoforge.criticalNotificationsMuted",
+    }
+}
+
+#[tauri::command]
+pub fn get_desktop_hardening_status() -> DesktopHardeningStatus {
+    DesktopHardeningStatus {
+        evidence_class: "mvp_local_shell",
+        bundle_active: false,
+        signed_distribution_ready: false,
+        updater_enabled: false,
+        single_instance_enabled: false,
+        autostart_enabled: false,
+        csp_configured: false,
+        native_notifications_enabled: false,
+        enterprise_completion_claimed: false,
+        next_actions: vec![
+            "enable signed bundle metadata before distribution",
+            "add updater only with signed feed evidence",
+            "add single-instance behavior before default desktop launch",
+            "add explicit autostart opt-in before enabling background startup",
+            "configure CSP before packaged WebView distribution",
+            "wire native OS notifications only from critical notification bridge events",
+        ],
     }
 }
