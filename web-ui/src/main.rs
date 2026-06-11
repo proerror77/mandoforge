@@ -1,134 +1,17 @@
 mod api;
+mod components;
+mod notifications;
+mod state;
 
 use api::*;
+use components::*;
 use gloo_timers::callback::Interval;
+use notifications::*;
 use serde_json::{Value, json};
+use state::*;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::{HtmlInputElement, HtmlSelectElement, HtmlTextAreaElement};
 use yew::prelude::*;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum View {
-    Overview,
-    Wizard,
-    Agents,
-    Board,
-    Workflows,
-    Dynamic,
-    Semantic,
-    Packs,
-    Deploy,
-    Settings,
-}
-
-impl View {
-    const ALL: [View; 10] = [
-        View::Overview,
-        View::Wizard,
-        View::Agents,
-        View::Board,
-        View::Workflows,
-        View::Dynamic,
-        View::Semantic,
-        View::Packs,
-        View::Deploy,
-        View::Settings,
-    ];
-
-    fn id(self) -> &'static str {
-        match self {
-            View::Overview => "overview",
-            View::Wizard => "wizard",
-            View::Agents => "agents",
-            View::Board => "board",
-            View::Workflows => "workflows",
-            View::Dynamic => "dynamic",
-            View::Semantic => "semantic",
-            View::Packs => "packs",
-            View::Deploy => "deploy",
-            View::Settings => "settings",
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            View::Overview => "Overview",
-            View::Wizard => "Wizard",
-            View::Agents => "Agents",
-            View::Board => "Board",
-            View::Workflows => "Workflows",
-            View::Dynamic => "Dynamic",
-            View::Semantic => "Semantic",
-            View::Packs => "Packs",
-            View::Deploy => "Deploy",
-            View::Settings => "Settings",
-        }
-    }
-
-    fn title(self) -> &'static str {
-        match self {
-            View::Overview => "Enterprise control overview",
-            View::Wizard => "First-run enterprise wizard",
-            View::Agents => "Managed agent observability",
-            View::Board => "Task board",
-            View::Workflows => "Workflow graph console",
-            View::Dynamic => "Dynamic workflow fleet",
-            View::Semantic => "Semantic memory layer",
-            View::Packs => "Workflow pack operations",
-            View::Deploy => "Deployment truth surface",
-            View::Settings => "Operator settings",
-        }
-    }
-
-    fn from_id(value: &str) -> View {
-        Self::ALL
-            .into_iter()
-            .find(|view| view.id() == value)
-            .unwrap_or(View::Overview)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct ConsoleData {
-    agents: ApiState<Vec<Agent>>,
-    environments: ApiState<Vec<Environment>>,
-    sessions: ApiState<Vec<Session>>,
-    approvals: ApiState<Vec<Approval>>,
-    execution_jobs: ApiState<Vec<WorkerJob>>,
-    session_loop_jobs: ApiState<Vec<WorkerJob>>,
-    tool_calls: ApiState<Vec<ToolCall>>,
-    workflow_runs: ApiState<Vec<WorkflowRun>>,
-    workflow_definitions: ApiState<Vec<WorkflowDefinition>>,
-    dynamic_workflow_plans: ApiState<Vec<DynamicWorkflowPlan>>,
-    task_board: ApiState<TaskBoardSnapshot>,
-    work_items: ApiState<Vec<WorkItem>>,
-    manager_plans: ApiState<Vec<Value>>,
-    agent_handoffs: ApiState<Vec<Value>>,
-    agent_handoff_assignments: ApiState<Vec<Value>>,
-    workflow_pack_installations: ApiState<Vec<WorkflowPackInstallation>>,
-    stage2_readiness: ApiState<Stage2Readiness>,
-    enterprise_product_readiness: ApiState<EnterpriseProductReadiness>,
-    native_connector_production_readiness: ApiState<Value>,
-    observability: ApiState<ObservabilitySummary>,
-    capability_discovery: ApiState<CapabilityDiscovery>,
-    usage: ApiState<Value>,
-    memory_governance: ApiState<Value>,
-    memory_writebacks: ApiState<Value>,
-    memory_writeback_candidates: ApiState<Value>,
-    scheduler_summary: ApiState<Value>,
-    deployment_version: ApiState<DeploymentVersion>,
-    remote_computer_production_path: ApiState<Value>,
-    workflow_pack_marketplace: ApiState<WorkflowPackMarketplace>,
-    semantic_objects: ApiState<Vec<SemanticObject>>,
-    semantic_links: ApiState<Vec<Value>>,
-    semantic_search: ApiState<Value>,
-    semantic_graph: ApiState<SemanticGraphSnapshot>,
-    semantic_workbench: ApiState<Value>,
-    semantic_reflection_queue: ApiState<SemanticReflectionQueue>,
-    ontology_registry: ApiState<OntologyRegistry>,
-    ontology_engine_readiness: ApiState<Value>,
-    semantic_retrieval_backends: ApiState<Value>,
-}
 
 #[component]
 fn App() -> Html {
@@ -622,16 +505,6 @@ struct DataProps {
     data: ConsoleData,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ConsoleNotification {
-    key: String,
-    severity: &'static str,
-    title: String,
-    detail: String,
-    target: View,
-    target_label: &'static str,
-}
-
 #[derive(Properties, Clone, PartialEq)]
 struct AgentsProps {
     data: ConsoleData,
@@ -660,99 +533,12 @@ struct WizardProps {
 }
 
 #[derive(Properties, Clone, PartialEq)]
-struct NotificationCenterProps {
-    notifications: Vec<ConsoleNotification>,
-    critical_muted: bool,
-    on_toggle_critical: Callback<MouseEvent>,
-    on_view: Callback<View>,
-}
-
-#[derive(Properties, Clone, PartialEq)]
 struct WizardStepProps {
     number: AttrValue,
     title: AttrValue,
     status: AttrValue,
     detail: AttrValue,
     tone: AttrValue,
-}
-
-#[component]
-fn NotificationCenter(props: &NotificationCenterProps) -> Html {
-    let critical_count = props
-        .notifications
-        .iter()
-        .filter(|notification| notification.severity == "critical")
-        .count();
-    let visible_notifications = props
-        .notifications
-        .iter()
-        .filter(|notification| !(props.critical_muted && notification.severity == "critical"))
-        .take(5)
-        .cloned()
-        .collect::<Vec<_>>();
-    let has_notifications = !props.notifications.is_empty();
-
-    html! {
-        <section class={classes!("notification-center", (!has_notifications).then_some("quiet"))} aria-label="Operator notification center">
-            <div class="notification-summary">
-                <div>
-                    <span>{ "Operator notifications" }</span>
-                    <strong>{ if has_notifications {
-                        format!("{} actionable / {} critical", props.notifications.len(), critical_count)
-                    } else {
-                        "No actionable notifications".to_string()
-                    } }</strong>
-                </div>
-                <button class="secondary" onclick={props.on_toggle_critical.clone()}>
-                    { if props.critical_muted { "Enable critical" } else { "Mute critical" } }
-                </button>
-            </div>
-            <div class="notification-list">
-                {
-                    if props.critical_muted && critical_count > 0 {
-                        html! {
-                            <article class="notification-item muted">
-                                <div>
-                                    <span>{ "muted" }</span>
-                                    <strong>{ format!("{critical_count} critical notifications hidden") }</strong>
-                                    <p>{ "Critical browser and desktop forwarding stays disabled until re-enabled in Settings." }</p>
-                                </div>
-                            </article>
-                        }
-                    } else if visible_notifications.is_empty() {
-                        html! {
-                            <article class="notification-item neutral">
-                                <div>
-                                    <span>{ "clear" }</span>
-                                    <strong>{ "Queue is clear" }</strong>
-                                    <p>{ "Approvals, failed jobs, connector gates, ontology gates, and enterprise lanes report no current actionable notification." }</p>
-                                </div>
-                            </article>
-                        }
-                    } else {
-                        html! {
-                            { for visible_notifications.into_iter().map(|notification| {
-                                let on_view = props.on_view.clone();
-                                let target = notification.target;
-                                html! {
-                                    <article class={classes!("notification-item", notification.severity)} key={notification.key.clone()}>
-                                        <div>
-                                            <span>{ notification.severity }</span>
-                                            <strong>{ notification.title }</strong>
-                                            <p>{ notification.detail }</p>
-                                        </div>
-                                        <button class="secondary" onclick={Callback::from(move |_| on_view.emit(target))}>
-                                            { notification.target_label }
-                                        </button>
-                                    </article>
-                                }
-                            }) }
-                        }
-                    }
-                }
-            </div>
-        </section>
-    }
 }
 
 #[component]
@@ -2265,179 +2051,6 @@ fn EnterpriseReadinessPanel(props: &EnterpriseReadinessPanelProps) -> Html {
     }
 }
 
-#[derive(Properties, Clone, PartialEq)]
-struct OverviewButtonProps {
-    label: &'static str,
-    target: View,
-    on_view: Callback<View>,
-}
-
-#[component]
-fn OverviewButton(props: &OverviewButtonProps) -> Html {
-    let target = props.target;
-    let on_view = props.on_view.clone();
-    html! {
-        <button
-            class="overview-action"
-            onclick={Callback::from(move |_| on_view.emit(target))}
-        >
-            { props.label }
-        </button>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct OverviewSignalProps {
-    label: &'static str,
-    value: String,
-    detail: String,
-    #[prop_or("neutral")]
-    tone: &'static str,
-    target: View,
-    on_view: Callback<View>,
-}
-
-#[component]
-fn OverviewSignal(props: &OverviewSignalProps) -> Html {
-    let target = props.target;
-    let on_view = props.on_view.clone();
-    html! {
-        <button
-            class={classes!("overview-signal", props.tone)}
-            onclick={Callback::from(move |_| on_view.emit(target))}
-        >
-            <span>{ props.label }</span>
-            <strong>{ &props.value }</strong>
-            <small>{ &props.detail }</small>
-        </button>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct PanelProps {
-    title: &'static str,
-    children: Children,
-}
-
-#[component]
-fn Panel(props: &PanelProps) -> Html {
-    html! {
-        <section class="panel">
-            <header><h2>{ props.title }</h2></header>
-            { for props.children.iter() }
-        </section>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct MetricProps {
-    label: &'static str,
-    value: String,
-    #[prop_or("neutral")]
-    tone: &'static str,
-}
-
-#[component]
-fn Metric(props: &MetricProps) -> Html {
-    html! {
-        <div class={classes!("metric", props.tone)}>
-            <span>{ props.label }</span>
-            <strong>{ &props.value }</strong>
-        </div>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct KeyMetricsProps {
-    values: Vec<(String, String)>,
-}
-
-#[component]
-fn KeyMetrics(props: &KeyMetricsProps) -> Html {
-    html! {
-        <div class="key-metrics">
-            { for props.values.iter().map(|(label, value)| html! {
-                <div class="key-value" key={label.clone()}>
-                    <span>{ label }</span>
-                    <strong>{ value }</strong>
-                </div>
-            }) }
-        </div>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct RowsProps {
-    empty: &'static str,
-    rows: Vec<(String, String, String)>,
-}
-
-#[component]
-fn Rows(props: &RowsProps) -> Html {
-    if props.rows.is_empty() {
-        return html! { <p class="empty">{ props.empty }</p> };
-    }
-    html! {
-        <div class="rows">
-            { for props.rows.iter().map(|(status, title, detail)| html! {
-                <article class="row" key={format!("{status}-{title}-{detail}")}>
-                    <StatusLogo status={status.clone()} />
-                    <div>
-                        <strong>{ title }</strong>
-                        <span>{ detail }</span>
-                    </div>
-                    <small>{ status }</small>
-                </article>
-            }) }
-        </div>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct JsonPreviewProps {
-    value: Value,
-}
-
-#[component]
-fn JsonPreview(props: &JsonPreviewProps) -> Html {
-    html! { <pre class="json-preview">{ pretty_json(&props.value) }</pre> }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct StatusLogoProps {
-    status: String,
-}
-
-#[component]
-fn StatusLogo(props: &StatusLogoProps) -> Html {
-    let tone = status_tone(&props.status);
-    let letter = props
-        .status
-        .chars()
-        .find(|ch| ch.is_ascii_alphanumeric())
-        .map(|ch| ch.to_ascii_uppercase().to_string())
-        .unwrap_or_else(|| "I".to_string());
-    html! { <span class={classes!("status-logo", tone)}>{ letter }</span> }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct VersionBlockProps {
-    version: DeploymentVersion,
-}
-
-#[component]
-fn VersionBlock(props: &VersionBlockProps) -> Html {
-    let version = &props.version;
-    html! {
-        <div class="version-block">
-            <div><span>{ "Service" }</span><strong>{ label_or(&version.service, "mandoforge-api") }</strong></div>
-            <div><span>{ "Image tag" }</span><strong>{ version.image_tag.clone().unwrap_or_else(|| "not reported".to_string()) }</strong></div>
-            <div><span>{ "Git SHA" }</span><strong>{ version.git_sha.clone().unwrap_or_else(|| "not reported".to_string()) }</strong></div>
-            <div><span>{ "Build time" }</span><strong>{ version.build_time.clone().unwrap_or_else(|| "not reported".to_string()) }</strong></div>
-        </div>
-    }
-}
-
 #[hook]
 fn use_polling<T>(path: &'static str, interval_ms: u32) -> ApiState<T>
 where
@@ -2553,7 +2166,7 @@ fn blocked_pack_count(packs: &[WorkflowPackInstallation]) -> usize {
         .count()
 }
 
-fn json_status(value: &Value) -> String {
+pub(crate) fn json_status(value: &Value) -> String {
     value
         .get("status")
         .and_then(Value::as_str)
@@ -2953,244 +2566,6 @@ fn pack_blocker_summary(
     }
 }
 
-fn console_notifications(data: &ConsoleData) -> Vec<ConsoleNotification> {
-    let mut notifications = Vec::new();
-
-    notifications.extend(data.approvals.data.iter().filter_map(|approval| {
-        if approval.status == "pending" || approval.status == "requires_action" {
-            Some(ConsoleNotification {
-                key: format!("approval:{}", approval.id),
-                severity: "warning",
-                title: format!("Approval required: {}", label_or(&approval.kind, "runtime action")),
-                detail: label_or(&approval.reason, &approval.id).to_string(),
-                target: View::Agents,
-                target_label: "Open approvals",
-            })
-        } else {
-            None
-        }
-    }));
-
-    notifications.extend(data.execution_jobs.data.iter().filter_map(|job| {
-        if status_tone(&job.status) == "bad" || job.last_error.is_some() {
-            Some(ConsoleNotification {
-                key: format!("execution-job:{}", job.id),
-                severity: "critical",
-                title: format!("Execution job failed: {}", short_id(&job.id)),
-                detail: job
-                    .last_error
-                    .clone()
-                    .unwrap_or_else(|| format!("status {}", label_or(&job.status, "failed"))),
-                target: View::Workflows,
-                target_label: "Open runs",
-            })
-        } else {
-            None
-        }
-    }));
-
-    notifications.extend(data.session_loop_jobs.data.iter().filter_map(|job| {
-        let stuck = matches!(job.status.as_str(), "stuck" | "timed_out" | "timeout");
-        if stuck || status_tone(&job.status) == "bad" || job.last_error.is_some() {
-            Some(ConsoleNotification {
-                key: format!("session-loop-job:{}", job.id),
-                severity: "critical",
-                title: format!("Session loop attention: {}", short_id(&job.id)),
-                detail: job
-                    .last_error
-                    .clone()
-                    .unwrap_or_else(|| format!("status {}", label_or(&job.status, "stuck"))),
-                target: View::Workflows,
-                target_label: "Open runs",
-            })
-        } else {
-            None
-        }
-    }));
-
-    if let Some(notification) = json_gate_notification(
-        "connector:production-readiness",
-        "Connector production readiness blocked",
-        &data.native_connector_production_readiness.data,
-        View::Deploy,
-        "Open deploy",
-    ) {
-        notifications.push(notification);
-    }
-
-    if let Some(notification) = json_gate_notification(
-        "ontology:engine-readiness",
-        "Ontology engine readiness blocked",
-        &data.ontology_engine_readiness.data,
-        View::Semantic,
-        "Open ontology",
-    ) {
-        notifications.push(notification);
-    }
-
-    notifications.extend(
-        data.enterprise_product_readiness
-            .data
-            .lanes
-            .iter()
-            .filter_map(|lane| {
-                let blocker = lane.blockers.first().or_else(|| lane.next_actions.first());
-                let tone = status_tone(&lane.status);
-                if tone == "bad" || (tone == "warn" && blocker.is_some()) {
-                    Some(ConsoleNotification {
-                        key: format!("enterprise:{}", label_or(&lane.id, &lane.title)),
-                        severity: if tone == "bad" { "critical" } else { "warning" },
-                        title: format!(
-                            "Enterprise lane regression: {}",
-                            label_or(&lane.title, &lane.id)
-                        ),
-                        detail: blocker.cloned().unwrap_or_else(|| {
-                            format!(
-                                "{} -> {}",
-                                label_or(&lane.current_evidence_class, "current evidence"),
-                                label_or(&lane.required_evidence_class, "required evidence")
-                            )
-                        }),
-                        target: View::Deploy,
-                        target_label: "Open readiness",
-                    })
-                } else {
-                    None
-                }
-            }),
-    );
-
-    if data.enterprise_product_readiness.data.completion_blocked
-        && data.enterprise_product_readiness.data.lanes.is_empty()
-    {
-        notifications.push(ConsoleNotification {
-            key: "enterprise:completion-blocked".to_string(),
-            severity: "critical",
-            title: "Enterprise completion blocked".to_string(),
-            detail: data
-                .enterprise_product_readiness
-                .data
-                .next_actions
-                .first()
-                .cloned()
-                .unwrap_or_else(|| {
-                    label_or(
-                        &data.enterprise_product_readiness.data.message,
-                        "Enterprise readiness endpoint reports completion blocked.",
-                    )
-                    .to_string()
-                }),
-            target: View::Deploy,
-            target_label: "Open readiness",
-        });
-    }
-
-    notifications.sort_by(|left, right| {
-        notification_rank(left.severity)
-            .cmp(&notification_rank(right.severity))
-            .then_with(|| left.key.cmp(&right.key))
-    });
-    notifications.dedup_by(|left, right| left.key == right.key);
-    notifications
-}
-
-fn json_gate_notification(
-    key: &str,
-    title: &str,
-    value: &Value,
-    target: View,
-    target_label: &'static str,
-) -> Option<ConsoleNotification> {
-    if value.is_null() {
-        return None;
-    }
-    let status = json_status(value);
-    let tone = status_tone(&status);
-    let blockers = json_blockers(value);
-    if tone != "bad" && tone != "warn" && blockers.is_empty() {
-        return None;
-    }
-    Some(ConsoleNotification {
-        key: key.to_string(),
-        severity: if tone == "bad" || !blockers.is_empty() {
-            "critical"
-        } else {
-            "warning"
-        },
-        title: title.to_string(),
-        detail: blockers
-            .first()
-            .cloned()
-            .unwrap_or_else(|| format!("status {status}")),
-        target,
-        target_label,
-    })
-}
-
-fn json_blockers(value: &Value) -> Vec<String> {
-    let mut blockers = Vec::new();
-    collect_json_blockers(value, 0, &mut blockers);
-    blockers.sort();
-    blockers.dedup();
-    blockers.truncate(5);
-    blockers
-}
-
-fn collect_json_blockers(value: &Value, depth: usize, blockers: &mut Vec<String>) {
-    if depth > 3 || blockers.len() >= 12 {
-        return;
-    }
-    match value {
-        Value::Object(map) => {
-            for (key, child) in map {
-                let key_lower = key.to_ascii_lowercase();
-                let relevant = key_lower.contains("blocker")
-                    || key_lower.contains("blocked")
-                    || key_lower.contains("failure")
-                    || key_lower.contains("error")
-                    || key_lower.contains("next_action")
-                    || key_lower.contains("reason");
-                if relevant {
-                    match child {
-                        Value::String(text) if !text.trim().is_empty() => {
-                            blockers.push(text.to_string())
-                        }
-                        Value::Array(items) => {
-                            for item in items {
-                                if let Some(text) = item.as_str().filter(|text| !text.trim().is_empty())
-                                {
-                                    blockers.push(text.to_string());
-                                } else {
-                                    collect_json_blockers(item, depth + 1, blockers);
-                                }
-                            }
-                        }
-                        Value::Object(_) => collect_json_blockers(child, depth + 1, blockers),
-                        _ => {}
-                    }
-                } else if depth < 2 {
-                    collect_json_blockers(child, depth + 1, blockers);
-                }
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                collect_json_blockers(item, depth + 1, blockers);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn notification_rank(severity: &str) -> usize {
-    match severity {
-        "critical" => 0,
-        "warning" => 1,
-        "info" => 2,
-        _ => 3,
-    }
-}
-
 fn operator_queue_rows(data: &ConsoleData) -> Vec<(String, String, String)> {
     let approval_rows = data.approvals.data.iter().filter_map(|approval| {
         if approval.status == "pending" || approval.status == "requires_action" {
@@ -3255,7 +2630,7 @@ fn board_column(status: &str) -> &'static str {
     }
 }
 
-fn status_tone(status: &str) -> &'static str {
+pub(crate) fn status_tone(status: &str) -> &'static str {
     match status {
         "ready" | "completed" | "succeeded" | "active" | "promoted" | "released"
         | "enterprise_product_complete" => "good",
@@ -3268,7 +2643,7 @@ fn status_tone(status: &str) -> &'static str {
     }
 }
 
-fn label_or<'a>(value: &'a str, fallback: &'a str) -> &'a str {
+pub(crate) fn label_or<'a>(value: &'a str, fallback: &'a str) -> &'a str {
     if value.trim().is_empty() {
         fallback
     } else {
@@ -3276,7 +2651,7 @@ fn label_or<'a>(value: &'a str, fallback: &'a str) -> &'a str {
     }
 }
 
-fn short_id(id: &str) -> String {
+pub(crate) fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
@@ -3311,7 +2686,7 @@ fn semantic_scope_summary(scopes: &Value) -> String {
     }
 }
 
-fn pretty_json(value: &Value) -> String {
+pub(crate) fn pretty_json(value: &Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_else(|_| "unserializable".to_string())
 }
 
@@ -3401,41 +2776,6 @@ fn json_object_count(value: &Value) -> usize {
         Value::Object(map) => map.len(),
         Value::Null => 0,
         _ => 1,
-    }
-}
-
-fn storage_get(key: &str) -> Option<String> {
-    web_sys::window()
-        .and_then(|window| window.local_storage().ok().flatten())
-        .and_then(|storage| storage.get_item(key).ok().flatten())
-}
-
-fn initial_active_view() -> View {
-    let stored = storage_get("mandoforge.activeView");
-    let migrated = storage_get("mandoforge.overviewDefaultMigrated").is_some();
-    if stored.as_deref() == Some("agents") && !migrated {
-        storage_set("mandoforge.activeView", View::Overview.id());
-        storage_set("mandoforge.overviewDefaultMigrated", "1");
-        return View::Overview;
-    }
-    stored
-        .as_deref()
-        .map(View::from_id)
-        .unwrap_or(View::Overview)
-}
-
-fn initial_critical_notifications_muted() -> bool {
-    matches!(
-        storage_get("mandoforge.criticalNotificationsMuted").as_deref(),
-        Some("1" | "true" | "muted")
-    )
-}
-
-fn storage_set(key: &str, value: &str) {
-    if let Some(storage) =
-        web_sys::window().and_then(|window| window.local_storage().ok().flatten())
-    {
-        let _ = storage.set_item(key, value);
     }
 }
 
