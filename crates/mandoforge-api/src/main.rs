@@ -11345,6 +11345,7 @@ fn ontology_join_success_rate(
     matches as f64 / values.len() as f64
 }
 
+#[cfg(test)]
 fn ontology_generate_demo_proposals(
     datasets: &[OntologyOnboardingDataset],
     profiles: &[OntologyDatasetProfile],
@@ -11923,12 +11924,14 @@ async fn list_ontology_onboarding_tool_specs(
     }))
 }
 
+#[cfg(test)]
 async fn create_demo_ontology_onboarding_run_for_test(
     state: &AppState,
 ) -> Result<OntologyOnboardingRun, AppError> {
     create_demo_ontology_onboarding_run_with_actor(state, "test").await
 }
 
+#[cfg(test)]
 async fn review_ontology_onboarding_proposal_for_test(
     state: &AppState,
     proposal_id: Uuid,
@@ -11939,6 +11942,7 @@ async fn review_ontology_onboarding_proposal_for_test(
         .await
 }
 
+#[cfg(test)]
 async fn materialize_ontology_onboarding_run_for_test(
     state: &AppState,
     run_id: Uuid,

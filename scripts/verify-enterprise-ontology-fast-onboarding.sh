@@ -40,7 +40,10 @@ fi
 
 jq -e '.dataset_count == 8 and .proposal_count >= 24' "$run_file" >/dev/null
 
-mapfile -t proposal_ids < <(
+proposal_ids=()
+while IFS= read -r proposal_id; do
+  proposal_ids+=("$proposal_id")
+done < <(
   jq -r '
     .proposals[]
     | select(.proposal_type == "object" or .proposal_type == "relation" or .proposal_type == "action")
