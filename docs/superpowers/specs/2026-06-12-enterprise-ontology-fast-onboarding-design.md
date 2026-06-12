@@ -391,3 +391,10 @@ This design intentionally leaves real external catalog integration for a later
 slice. The next adapter after demo mode should be Tmall dry-run mode because the
 repo already has a real `ecommerce-tmall` DomainPack, `tmall-top` connector
 contract, and Alibaba TOP native adapter boundary.
+
+## Implementation Status
+
+The first ecommerce demo slice is implemented by the API routes under
+`/api/ontology/onboarding/*`, the Semantic console fast-onboarding panel, and
+`scripts/verify-enterprise-ontology-fast-onboarding.sh`. The first slice remains
+demo-source only; Tmall connector input is the next compatible adapter.
