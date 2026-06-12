@@ -11820,23 +11820,10 @@ async fn create_demo_ontology_onboarding_run(
         None,
     )
     .await?;
-    let datasets = ontology_demo_datasets();
-    let profiles = ontology_profile_demo_datasets(&datasets);
-    let run = OntologyOnboardingRun {
-        id: Uuid::new_v4(),
-        status: "draft".to_string(),
-        source_mode: "demo_ecommerce".to_string(),
-        dataset_count: datasets.len(),
-        profile_count: profiles.len(),
-        proposal_count: 0,
-        approved_count: 0,
-        materialized_count: 0,
-        datasets,
-        profiles,
-        proposals: Vec::new(),
-        generated_at: Utc::now(),
-    };
-    Ok(Json(run))
+    let principal = principal_from_request(&state, &headers).await?;
+    Ok(Json(
+        create_demo_ontology_onboarding_run_with_actor(&state, &principal.subject_id).await?,
+    ))
 }
 
 async fn list_ontology_onboarding_runs(
@@ -11851,7 +11838,7 @@ async fn list_ontology_onboarding_runs(
         None,
     )
     .await?;
-    Ok(Json(Vec::new()))
+    Ok(Json(list_ontology_onboarding_runs_for_state(&state).await?))
 }
 
 async fn get_ontology_onboarding_run(
@@ -11867,14 +11854,16 @@ async fn get_ontology_onboarding_run(
         Some(id),
     )
     .await?;
-    Err(AppError::not_found("ontology onboarding run not found"))
+    get_ontology_onboarding_run_for_state(&state, id)
+        .await
+        .map(Json)
 }
 
 async fn review_ontology_onboarding_proposal(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     headers: HeaderMap,
-    Json(_input): Json<ReviewOntologyOnboardingProposalRequest>,
+    Json(input): Json<ReviewOntologyOnboardingProposalRequest>,
 ) -> Result<Json<OntologyOnboardingProposalDraft>, AppError> {
     authorize_request(
         &state,
@@ -11884,9 +11873,16 @@ async fn review_ontology_onboarding_proposal(
         Some(id),
     )
     .await?;
-    Err(AppError::not_found(
-        "ontology onboarding proposal not found",
-    ))
+    let principal = principal_from_request(&state, &headers).await?;
+    review_ontology_onboarding_proposal_with_actor(
+        &state,
+        id,
+        &input.decision,
+        input.reason.as_deref(),
+        &principal.subject_id,
+    )
+    .await
+    .map(Json)
 }
 
 async fn materialize_ontology_onboarding_run(
@@ -11902,7 +11898,10 @@ async fn materialize_ontology_onboarding_run(
         Some(id),
     )
     .await?;
-    Err(AppError::not_found("ontology onboarding run not found"))
+    let principal = principal_from_request(&state, &headers).await?;
+    materialize_ontology_onboarding_run_with_actor(&state, id, &principal.subject_id)
+        .await
+        .map(Json)
 }
 
 async fn list_ontology_onboarding_tool_specs(
@@ -11922,6 +11921,726 @@ async fn list_ontology_onboarding_tool_specs(
         run_id: id,
         tool_specs: Vec::new(),
     }))
+}
+
+async fn create_demo_ontology_onboarding_run_for_test(
+    state: &AppState,
+) -> Result<OntologyOnboardingRun, AppError> {
+    create_demo_ontology_onboarding_run_with_actor(state, "test").await
+}
+
+async fn review_ontology_onboarding_proposal_for_test(
+    state: &AppState,
+    proposal_id: Uuid,
+    decision: &str,
+    reason: Option<&str>,
+) -> Result<OntologyOnboardingProposalDraft, AppError> {
+    review_ontology_onboarding_proposal_with_actor(state, proposal_id, decision, reason, "test")
+        .await
+}
+
+async fn materialize_ontology_onboarding_run_for_test(
+    state: &AppState,
+    run_id: Uuid,
+) -> Result<OntologyOnboardingMaterializationResult, AppError> {
+    materialize_ontology_onboarding_run_with_actor(state, run_id, "test").await
+}
+
+async fn create_demo_ontology_onboarding_run_with_actor(
+    state: &AppState,
+    actor_subject: &str,
+) -> Result<OntologyOnboardingRun, AppError> {
+    let run_id = Uuid::new_v4();
+    let datasets = ontology_demo_datasets();
+    let profiles = ontology_profile_demo_datasets(&datasets);
+    let proposals = ontology_generate_demo_proposals_for_run(run_id, &datasets, &profiles);
+    for proposal in &proposals {
+        state
+            .create_semantic_object(CreateSemanticObject {
+                source_id: None,
+                object_type: "ontology_onboarding_proposal".to_string(),
+                object_key: ontology_onboarding_proposal_object_key(run_id, proposal.id),
+                title: format!("Ontology onboarding proposal: {}", proposal.name),
+                summary: format!(
+                    "{} proposal for ecommerce ontology fast onboarding; review required before materialization.",
+                    proposal.proposal_type
+                ),
+                content: ontology_onboarding_proposal_content(run_id, proposal, false, None)?,
+                semantic_scopes: json!({
+                    "domain_scope": "commerce",
+                    "workflow_scope": "enterprise-ontology-fast-onboarding",
+                    "memory_scope": "ontology",
+                    "share_policy": "review_required",
+                }),
+                source_uri: Some(format!(
+                    "mandoforge://ontology/onboarding/runs/{run_id}/proposals/{}",
+                    proposal.id
+                )),
+                provenance: json!({
+                    "source": "ontology_onboarding.demo_run",
+                    "source_mode": "demo_ecommerce",
+                    "authority": "proposal_only",
+                    "generated_at": Utc::now(),
+                }),
+                trust_level: "source_attested".to_string(),
+                freshness: "current".to_string(),
+                status: "active".to_string(),
+            })
+            .await?;
+    }
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "ontology_onboarding.demo_run_created",
+            "ontology_onboarding_run",
+            Some(run_id),
+            json!({
+                "subject": actor_subject,
+                "run_id": run_id,
+                "dataset_count": datasets.len(),
+                "profile_count": profiles.len(),
+                "proposal_count": proposals.len(),
+                "source_mode": "demo_ecommerce",
+            }),
+        ))
+        .await?;
+    Ok(OntologyOnboardingRun {
+        id: run_id,
+        status: "pending_review".to_string(),
+        source_mode: "demo_ecommerce".to_string(),
+        dataset_count: datasets.len(),
+        profile_count: profiles.len(),
+        proposal_count: proposals.len(),
+        approved_count: 0,
+        materialized_count: 0,
+        datasets,
+        profiles,
+        proposals,
+        generated_at: Utc::now(),
+    })
+}
+
+async fn list_ontology_onboarding_runs_for_state(
+    state: &AppState,
+) -> Result<Vec<OntologyOnboardingRun>, AppError> {
+    let mut grouped = BTreeMap::<Uuid, Vec<SemanticObject>>::new();
+    for object in ontology_onboarding_proposal_objects(state).await? {
+        if let Some(run_id) = ontology_onboarding_object_run_id(&object) {
+            grouped.entry(run_id).or_default().push(object);
+        }
+    }
+    let mut runs = grouped
+        .into_iter()
+        .map(|(run_id, objects)| ontology_onboarding_run_from_objects(run_id, &objects))
+        .collect::<Result<Vec<_>, _>>()?;
+    runs.sort_by(|left, right| right.generated_at.cmp(&left.generated_at));
+    Ok(runs)
+}
+
+async fn get_ontology_onboarding_run_for_state(
+    state: &AppState,
+    run_id: Uuid,
+) -> Result<OntologyOnboardingRun, AppError> {
+    let objects = ontology_onboarding_proposal_objects(state)
+        .await?
+        .into_iter()
+        .filter(|object| ontology_onboarding_object_run_id(object) == Some(run_id))
+        .collect::<Vec<_>>();
+    if objects.is_empty() {
+        return Err(AppError::not_found("ontology onboarding run not found"));
+    }
+    ontology_onboarding_run_from_objects(run_id, &objects)
+}
+
+async fn review_ontology_onboarding_proposal_with_actor(
+    state: &AppState,
+    proposal_id: Uuid,
+    decision: &str,
+    reason: Option<&str>,
+    actor_subject: &str,
+) -> Result<OntologyOnboardingProposalDraft, AppError> {
+    let (decision, review_status) = normalize_ontology_onboarding_review_decision(decision)?;
+    let object = ontology_onboarding_find_proposal_object(state, proposal_id).await?;
+    let run_id = ontology_onboarding_object_run_id(&object)
+        .ok_or_else(|| AppError::bad_request("ontology onboarding proposal missing run_id"))?;
+    let mut proposal = ontology_onboarding_object_proposal(&object)?;
+    proposal.review_status = review_status.clone();
+    let review = json!({
+        "decision": decision,
+        "status": review_status,
+        "reason": reason,
+        "reviewer": actor_subject,
+        "reviewed_at": Utc::now(),
+    });
+    state
+        .update_semantic_object(
+            object.id,
+            UpdateSemanticObject {
+                title: None,
+                summary: None,
+                content: Some(ontology_onboarding_proposal_content(
+                    run_id,
+                    &proposal,
+                    ontology_onboarding_object_materialized(&object),
+                    Some(review.clone()),
+                )?),
+                semantic_scopes: None,
+                source_uri: None,
+                provenance: None,
+                trust_level: None,
+                freshness: None,
+                status: None,
+            },
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "ontology_onboarding.proposal_reviewed",
+            "ontology_onboarding_proposal",
+            Some(proposal_id),
+            json!({
+                "subject": actor_subject,
+                "run_id": run_id,
+                "proposal_id": proposal_id,
+                "proposal_type": proposal.proposal_type,
+                "proposal_name": proposal.name,
+                "review": review,
+            }),
+        ))
+        .await?;
+    Ok(proposal)
+}
+
+async fn materialize_ontology_onboarding_run_with_actor(
+    state: &AppState,
+    run_id: Uuid,
+    actor_subject: &str,
+) -> Result<OntologyOnboardingMaterializationResult, AppError> {
+    let objects = ontology_onboarding_proposal_objects(state)
+        .await?
+        .into_iter()
+        .filter(|object| ontology_onboarding_object_run_id(object) == Some(run_id))
+        .collect::<Vec<_>>();
+    if objects.is_empty() {
+        return Err(AppError::not_found("ontology onboarding run not found"));
+    }
+    let mut semantic_object_ids = Vec::new();
+    let mut semantic_link_ids = Vec::new();
+    let mut tool_spec_count = 0usize;
+    let mut materialized_proposal_count = 0usize;
+    for object in objects {
+        if ontology_onboarding_object_materialized(&object) {
+            continue;
+        }
+        let proposal = ontology_onboarding_object_proposal(&object)?;
+        if proposal.review_status != "approved" {
+            continue;
+        }
+        match proposal.proposal_type.as_str() {
+            "object" => {
+                let semantic_object =
+                    ontology_materialize_business_object(state, &proposal).await?;
+                semantic_object_ids.push(semantic_object.id);
+            }
+            "metric" => {
+                let semantic_object = ontology_materialize_metric(state, &proposal).await?;
+                semantic_object_ids.push(semantic_object.id);
+            }
+            "action" => {
+                let semantic_object = ontology_materialize_action(state, &proposal).await?;
+                semantic_object_ids.push(semantic_object.id);
+                tool_spec_count += 1;
+            }
+            "relation" => {
+                let link = ontology_materialize_relation(state, &proposal).await?;
+                semantic_link_ids.push(link.id);
+            }
+            _ => {}
+        }
+        let review = object.content.get("review").cloned();
+        state
+            .update_semantic_object(
+                object.id,
+                UpdateSemanticObject {
+                    title: None,
+                    summary: None,
+                    content: Some(ontology_onboarding_proposal_content(
+                        run_id, &proposal, true, review,
+                    )?),
+                    semantic_scopes: None,
+                    source_uri: None,
+                    provenance: None,
+                    trust_level: None,
+                    freshness: None,
+                    status: None,
+                },
+            )
+            .await?;
+        materialized_proposal_count += 1;
+    }
+    let result = OntologyOnboardingMaterializationResult {
+        run_id,
+        status: if materialized_proposal_count == 0 {
+            "no_approved_changes".to_string()
+        } else {
+            "materialized".to_string()
+        },
+        semantic_object_count: semantic_object_ids.len(),
+        semantic_link_count: semantic_link_ids.len(),
+        tool_spec_count,
+        semantic_object_ids,
+        semantic_link_ids,
+    };
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "ontology_onboarding.run_materialized",
+            "ontology_onboarding_run",
+            Some(run_id),
+            json!({
+                "subject": actor_subject,
+                "run_id": run_id,
+                "status": result.status,
+                "semantic_object_count": result.semantic_object_count,
+                "semantic_link_count": result.semantic_link_count,
+                "tool_spec_count": result.tool_spec_count,
+            }),
+        ))
+        .await?;
+    Ok(result)
+}
+
+fn ontology_onboarding_proposal_object_key(run_id: Uuid, proposal_id: Uuid) -> String {
+    format!("ontology:onboarding:{run_id}:{proposal_id}")
+}
+
+fn ontology_onboarding_proposal_content(
+    run_id: Uuid,
+    proposal: &OntologyOnboardingProposalDraft,
+    materialized: bool,
+    review: Option<Value>,
+) -> Result<Value, AppError> {
+    let mut content = serde_json::Map::new();
+    content.insert("run_id".to_string(), json!(run_id));
+    content.insert(
+        "proposal".to_string(),
+        serde_json::to_value(proposal).map_err(|error| {
+            AppError::bad_request(format!("invalid ontology onboarding proposal: {error}"))
+        })?,
+    );
+    content.insert("review_status".to_string(), json!(proposal.review_status));
+    content.insert("materialized".to_string(), json!(materialized));
+    if let Some(review) = review {
+        content.insert("review".to_string(), review);
+    }
+    Ok(Value::Object(content))
+}
+
+async fn ontology_onboarding_proposal_objects(
+    state: &AppState,
+) -> Result<Vec<SemanticObject>, AppError> {
+    Ok(state
+        .list_semantic_objects()
+        .await?
+        .into_iter()
+        .filter(|object| {
+            object.object_type == "ontology_onboarding_proposal" && object.status == "active"
+        })
+        .collect())
+}
+
+async fn ontology_onboarding_find_proposal_object(
+    state: &AppState,
+    proposal_id: Uuid,
+) -> Result<SemanticObject, AppError> {
+    ontology_onboarding_proposal_objects(state)
+        .await?
+        .into_iter()
+        .find(|object| {
+            ontology_onboarding_object_proposal(object)
+                .map(|proposal| proposal.id == proposal_id)
+                .unwrap_or(false)
+        })
+        .ok_or_else(|| AppError::not_found("ontology onboarding proposal not found"))
+}
+
+fn ontology_onboarding_object_run_id(object: &SemanticObject) -> Option<Uuid> {
+    object
+        .content
+        .get("run_id")
+        .and_then(Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+}
+
+fn ontology_onboarding_object_proposal(
+    object: &SemanticObject,
+) -> Result<OntologyOnboardingProposalDraft, AppError> {
+    serde_json::from_value(
+        object
+            .content
+            .get("proposal")
+            .cloned()
+            .ok_or_else(|| AppError::bad_request("ontology onboarding proposal missing content"))?,
+    )
+    .map_err(|error| {
+        AppError::bad_request(format!("invalid ontology onboarding proposal: {error}"))
+    })
+}
+
+fn ontology_onboarding_object_materialized(object: &SemanticObject) -> bool {
+    object
+        .content
+        .get("materialized")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn ontology_onboarding_run_from_objects(
+    run_id: Uuid,
+    objects: &[SemanticObject],
+) -> Result<OntologyOnboardingRun, AppError> {
+    let datasets = ontology_demo_datasets();
+    let profiles = ontology_profile_demo_datasets(&datasets);
+    let mut proposals = objects
+        .iter()
+        .map(ontology_onboarding_object_proposal)
+        .collect::<Result<Vec<_>, _>>()?;
+    proposals.sort_by(|left, right| {
+        left.proposal_type
+            .cmp(&right.proposal_type)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    let approved_count = proposals
+        .iter()
+        .filter(|proposal| proposal.review_status == "approved")
+        .count();
+    let materialized_count = objects
+        .iter()
+        .filter(|object| ontology_onboarding_object_materialized(object))
+        .count();
+    let generated_at = objects
+        .iter()
+        .map(|object| object.created_at)
+        .min()
+        .unwrap_or_else(Utc::now);
+    let status = if materialized_count > 0 {
+        "materialized"
+    } else if approved_count > 0 {
+        "reviewing"
+    } else {
+        "pending_review"
+    };
+    Ok(OntologyOnboardingRun {
+        id: run_id,
+        status: status.to_string(),
+        source_mode: "demo_ecommerce".to_string(),
+        dataset_count: datasets.len(),
+        profile_count: profiles.len(),
+        proposal_count: proposals.len(),
+        approved_count,
+        materialized_count,
+        datasets,
+        profiles,
+        proposals,
+        generated_at,
+    })
+}
+
+fn normalize_ontology_onboarding_review_decision(
+    decision: &str,
+) -> Result<(String, String), AppError> {
+    let decision = decision.trim().to_ascii_lowercase().replace('-', "_");
+    match decision.as_str() {
+        "approve" | "approved" => Ok(("approve".to_string(), "approved".to_string())),
+        "reject" | "rejected" => Ok(("reject".to_string(), "rejected".to_string())),
+        "request_changes" | "changes_requested" => Ok((
+            "request_changes".to_string(),
+            "changes_requested".to_string(),
+        )),
+        "merge_into_existing" => Ok((
+            "merge_into_existing".to_string(),
+            "merge_into_existing".to_string(),
+        )),
+        "needs_more_evidence" => Ok((
+            "needs_more_evidence".to_string(),
+            "needs_more_evidence".to_string(),
+        )),
+        _ => Err(AppError::bad_request(
+            "ontology onboarding review decision must be approve, reject, request_changes, merge_into_existing, or needs_more_evidence",
+        )),
+    }
+}
+
+async fn ontology_materialize_business_object(
+    state: &AppState,
+    proposal: &OntologyOnboardingProposalDraft,
+) -> Result<SemanticObject, AppError> {
+    let object_name = proposal
+        .content
+        .get("object_type")
+        .and_then(Value::as_str)
+        .unwrap_or(proposal.name.as_str());
+    ontology_get_or_create_semantic_object(
+        state,
+        CreateSemanticObject {
+            source_id: None,
+            object_type: "business_object".to_string(),
+            object_key: ontology_business_object_key(object_name),
+            title: object_name.to_string(),
+            summary: format!("Approved commerce ontology business object: {object_name}."),
+            content: json!({
+                "object_type": object_name,
+                "proposal_id": proposal.id,
+                "source_mapping": proposal.source_mapping,
+                "properties": proposal.content.get("properties").cloned().unwrap_or_else(|| json!([])),
+            }),
+            semantic_scopes: ontology_commerce_semantic_scopes("published"),
+            source_uri: Some(format!(
+                "mandoforge://ontology/onboarding/proposals/{}/materialized",
+                proposal.id
+            )),
+            provenance: json!({
+                "source": "ontology_onboarding.materialize",
+                "proposal_id": proposal.id,
+                "proposal_type": proposal.proposal_type,
+                "materialized_at": Utc::now(),
+            }),
+            trust_level: "source_attested".to_string(),
+            freshness: "current".to_string(),
+            status: "active".to_string(),
+        },
+    )
+    .await
+}
+
+async fn ontology_materialize_metric(
+    state: &AppState,
+    proposal: &OntologyOnboardingProposalDraft,
+) -> Result<SemanticObject, AppError> {
+    ontology_get_or_create_semantic_object(
+        state,
+        CreateSemanticObject {
+            source_id: None,
+            object_type: "business_metric".to_string(),
+            object_key: format!("commerce.metric.{}", ontology_slug(&proposal.name)),
+            title: proposal.name.clone(),
+            summary: format!("Approved commerce semantic metric: {}.", proposal.name),
+            content: json!({
+                "metric_name": proposal.name,
+                "proposal_id": proposal.id,
+                "source_mapping": proposal.source_mapping,
+                "definition": proposal.content,
+            }),
+            semantic_scopes: ontology_commerce_semantic_scopes("published"),
+            source_uri: Some(format!(
+                "mandoforge://ontology/onboarding/proposals/{}/metric",
+                proposal.id
+            )),
+            provenance: json!({
+                "source": "ontology_onboarding.materialize",
+                "proposal_id": proposal.id,
+                "proposal_type": proposal.proposal_type,
+                "materialized_at": Utc::now(),
+            }),
+            trust_level: "source_attested".to_string(),
+            freshness: "current".to_string(),
+            status: "active".to_string(),
+        },
+    )
+    .await
+}
+
+async fn ontology_materialize_action(
+    state: &AppState,
+    proposal: &OntologyOnboardingProposalDraft,
+) -> Result<SemanticObject, AppError> {
+    ontology_get_or_create_semantic_object(
+        state,
+        CreateSemanticObject {
+            source_id: None,
+            object_type: "ontology_action_type".to_string(),
+            object_key: format!("commerce.action.{}", ontology_slug(&proposal.name)),
+            title: proposal.name.clone(),
+            summary: format!(
+                "Approved commerce ontology action type: {}; policy and audit required.",
+                proposal.name
+            ),
+            content: json!({
+                "proposal_id": proposal.id,
+                "tool_name": format!("commerce.{}", proposal.name),
+                "action_contract": proposal.content,
+            }),
+            semantic_scopes: ontology_commerce_semantic_scopes("published"),
+            source_uri: Some(format!(
+                "mandoforge://ontology/onboarding/proposals/{}/action",
+                proposal.id
+            )),
+            provenance: json!({
+                "source": "ontology_onboarding.materialize",
+                "proposal_id": proposal.id,
+                "proposal_type": proposal.proposal_type,
+                "materialized_at": Utc::now(),
+            }),
+            trust_level: "source_attested".to_string(),
+            freshness: "current".to_string(),
+            status: "active".to_string(),
+        },
+    )
+    .await
+}
+
+async fn ontology_materialize_relation(
+    state: &AppState,
+    proposal: &OntologyOnboardingProposalDraft,
+) -> Result<SemanticLink, AppError> {
+    let from_object = proposal
+        .content
+        .get("from_object")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::bad_request("relation proposal missing from_object"))?;
+    let to_object = proposal
+        .content
+        .get("to_object")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::bad_request("relation proposal missing to_object"))?;
+    let relation = proposal
+        .content
+        .get("relation")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::bad_request("relation proposal missing relation"))?;
+    let from = ontology_ensure_business_object_stub(state, from_object).await?;
+    let to = ontology_ensure_business_object_stub(state, to_object).await?;
+    ontology_create_semantic_link_if_absent(
+        state,
+        CreateSemanticLink {
+            from_entity_type: "semantic_object".to_string(),
+            from_entity_id: from.id.to_string(),
+            relation_type: relation.to_string(),
+            to_entity_type: "semantic_object".to_string(),
+            to_entity_id: to.id.to_string(),
+            metadata: json!({
+                "business_relation": proposal.name,
+                "source_mapping": proposal.source_mapping,
+                "proposal_id": proposal.id,
+                "evidence": proposal.evidence,
+            }),
+            provenance: json!({
+                "source": "ontology_onboarding.materialize",
+                "proposal_id": proposal.id,
+                "proposal_type": proposal.proposal_type,
+                "materialized_at": Utc::now(),
+            }),
+            confidence: proposal.confidence,
+            status: "active".to_string(),
+        },
+    )
+    .await
+}
+
+async fn ontology_ensure_business_object_stub(
+    state: &AppState,
+    object_name: &str,
+) -> Result<SemanticObject, AppError> {
+    ontology_get_or_create_semantic_object(
+        state,
+        CreateSemanticObject {
+            source_id: None,
+            object_type: "business_object".to_string(),
+            object_key: ontology_business_object_key(object_name),
+            title: object_name.to_string(),
+            summary: format!("Commerce ontology business object: {object_name}."),
+            content: json!({
+                "object_type": object_name,
+                "stub_created_for_relation": true,
+            }),
+            semantic_scopes: ontology_commerce_semantic_scopes("published"),
+            source_uri: Some(format!(
+                "mandoforge://ontology/onboarding/business-objects/{}",
+                ontology_slug(object_name)
+            )),
+            provenance: json!({
+                "source": "ontology_onboarding.materialize_relation",
+                "materialized_at": Utc::now(),
+            }),
+            trust_level: "source_attested".to_string(),
+            freshness: "current".to_string(),
+            status: "active".to_string(),
+        },
+    )
+    .await
+}
+
+async fn ontology_get_or_create_semantic_object(
+    state: &AppState,
+    input: CreateSemanticObject,
+) -> Result<SemanticObject, AppError> {
+    if let Some(existing) = state
+        .list_semantic_objects()
+        .await?
+        .into_iter()
+        .find(|object| object.archived_at.is_none() && object.object_key == input.object_key)
+    {
+        return Ok(existing);
+    }
+    state.create_semantic_object(input).await
+}
+
+async fn ontology_create_semantic_link_if_absent(
+    state: &AppState,
+    input: CreateSemanticLink,
+) -> Result<SemanticLink, AppError> {
+    if let Some(existing) = state.list_semantic_links().await?.into_iter().find(|link| {
+        link.archived_at.is_none()
+            && link.from_entity_type == input.from_entity_type
+            && link.from_entity_id == input.from_entity_id
+            && link.relation_type == input.relation_type
+            && link.to_entity_type == input.to_entity_type
+            && link.to_entity_id == input.to_entity_id
+    }) {
+        return Ok(existing);
+    }
+    state.create_semantic_link(input).await
+}
+
+fn ontology_business_object_key(object_name: &str) -> String {
+    format!("commerce.{}", ontology_slug(object_name))
+}
+
+fn ontology_slug(value: &str) -> String {
+    let mut slug = String::new();
+    let mut previous_was_separator = false;
+    for (index, ch) in value.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if index > 0 && !previous_was_separator {
+                slug.push('_');
+            }
+            slug.push(ch.to_ascii_lowercase());
+            previous_was_separator = false;
+        } else if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            previous_was_separator = false;
+        } else if !previous_was_separator && !slug.is_empty() {
+            slug.push('_');
+            previous_was_separator = true;
+        }
+    }
+    slug.trim_matches('_').to_string()
+}
+
+fn ontology_commerce_semantic_scopes(share_policy: &str) -> Value {
+    json!({
+        "domain_scope": "commerce",
+        "workflow_scope": "enterprise-ontology-fast-onboarding",
+        "memory_scope": "ontology",
+        "share_policy": share_policy,
+    })
 }
 
 async fn resolve_semantic_conflict(
@@ -13592,6 +14311,20 @@ fn ontology_registry() -> OntologyRegistry {
                 "workflow graph and task-grant policy",
             ),
             ontology_object_type(
+                "business_object",
+                "Approved enterprise ontology object compiled from reviewed onboarding proposals.",
+                Some("semantic_object"),
+                Some("domain"),
+                "reviewed business ontology boundary",
+            ),
+            ontology_object_type(
+                "business_metric",
+                "Approved semantic metric definition compiled from reviewed onboarding proposals.",
+                Some("semantic_object"),
+                Some("domain"),
+                "reviewed metric definition boundary",
+            ),
+            ontology_object_type(
                 "ontology_action_type",
                 "Operational ontology action contract with parameters, validations, approval, effects, and audit requirements.",
                 Some("ontology_action_type"),
@@ -13604,6 +14337,13 @@ fn ontology_registry() -> OntologyRegistry {
                 Some("semantic_object"),
                 Some("domain"),
                 "semantic ontology governance boundary",
+            ),
+            ontology_object_type(
+                "ontology_onboarding_proposal",
+                "Evidence-backed ontology onboarding proposal that requires human review before materialization.",
+                Some("semantic_object"),
+                Some("domain"),
+                "ontology onboarding proposal boundary",
             ),
             ontology_object_type(
                 "ontology_object_type",
@@ -59828,6 +60568,66 @@ mod tests {
                 && proposal.name == "refund_order"
                 && proposal.content["policy"]["approval_required"].as_bool() == Some(true)
         }));
+    }
+
+    #[tokio::test]
+    async fn ontology_onboarding_demo_review_and_materialize_flow() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        let run = create_demo_ontology_onboarding_run_for_test(&state)
+            .await
+            .expect("demo run");
+
+        assert_eq!(run.dataset_count, 8);
+        assert!(run.proposal_count >= 24);
+
+        let object_proposal = run
+            .proposals
+            .iter()
+            .find(|proposal| proposal.proposal_type == "object" && proposal.name == "Customer")
+            .expect("customer proposal")
+            .id;
+        let relation_proposal = run
+            .proposals
+            .iter()
+            .find(|proposal| {
+                proposal.proposal_type == "relation" && proposal.name == "Customer places Order"
+            })
+            .expect("customer order relation")
+            .id;
+
+        review_ontology_onboarding_proposal_for_test(
+            &state,
+            object_proposal,
+            "approve",
+            Some("seed mapping and profile evidence match"),
+        )
+        .await
+        .expect("approve object");
+        review_ontology_onboarding_proposal_for_test(
+            &state,
+            relation_proposal,
+            "approve",
+            Some("join evidence is above threshold"),
+        )
+        .await
+        .expect("approve relation");
+
+        let materialized = materialize_ontology_onboarding_run_for_test(&state, run.id)
+            .await
+            .expect("materialize");
+        assert!(materialized.semantic_object_count >= 1);
+        assert!(materialized.semantic_link_count >= 1);
+
+        let semantic_objects = state.list_semantic_objects().await.expect("objects");
+        assert!(semantic_objects.iter().any(|object| {
+            object.object_type == "business_object" && object.object_key == "commerce.customer"
+        }));
+        let semantic_links = state.list_semantic_links().await.expect("links");
+        assert!(
+            semantic_links
+                .iter()
+                .any(|link| { link.relation_type == "places" })
+        );
     }
 
     #[test]
