@@ -1,4 +1,7 @@
-use crate::api::{RenderedExecutionContext, SemanticGraphSnapshot, SemanticObject};
+use crate::api::{
+    OntologyOnboardingProposal, OntologyOnboardingRun, OntologyOnboardingToolSpec,
+    RenderedExecutionContext, SemanticGraphSnapshot, SemanticObject,
+};
 use crate::components::{FlowMeter, JsonPreview, KeyMetrics, Panel, Rows};
 use crate::state::ConsoleData;
 use crate::{
@@ -13,16 +16,32 @@ pub(crate) struct SemanticProps {
     pub(crate) source_text: String,
     pub(crate) context_packet_id: String,
     pub(crate) rendered_context: Option<RenderedExecutionContext>,
+    pub(crate) onboarding_run: Option<OntologyOnboardingRun>,
+    pub(crate) onboarding_tool_specs: Vec<OntologyOnboardingToolSpec>,
     pub(crate) on_source: Callback<InputEvent>,
     pub(crate) on_build: Callback<MouseEvent>,
     pub(crate) on_context_packet_id: Callback<InputEvent>,
     pub(crate) on_render_context: Callback<MouseEvent>,
+    pub(crate) on_start_onboarding: Callback<MouseEvent>,
+    pub(crate) on_approve_onboarding_proposal: Callback<String>,
+    pub(crate) on_reject_onboarding_proposal: Callback<String>,
+    pub(crate) on_materialize_onboarding: Callback<MouseEvent>,
 }
 
 #[component]
 pub(crate) fn SemanticView(props: &SemanticProps) -> Html {
     html! {
         <div class="page-grid semantic-grid">
+            <Panel title="Enterprise ontology fast-onboarding">
+                <OnboardingPanel
+                    run={props.onboarding_run.clone()}
+                    tool_specs={props.onboarding_tool_specs.clone()}
+                    on_start={props.on_start_onboarding.clone()}
+                    on_approve={props.on_approve_onboarding_proposal.clone()}
+                    on_reject={props.on_reject_onboarding_proposal.clone()}
+                    on_materialize={props.on_materialize_onboarding.clone()}
+                />
+            </Panel>
             <Panel title="Ontology builder">
                 <div class="form-stack">
                     <textarea value={props.source_text.clone()} oninput={props.on_source.clone()} />
@@ -64,6 +83,112 @@ pub(crate) fn SemanticView(props: &SemanticProps) -> Html {
                 ]} />
             </Panel>
         </div>
+    }
+}
+
+#[derive(Properties, Clone, PartialEq)]
+struct OnboardingPanelProps {
+    run: Option<OntologyOnboardingRun>,
+    tool_specs: Vec<OntologyOnboardingToolSpec>,
+    on_start: Callback<MouseEvent>,
+    on_approve: Callback<String>,
+    on_reject: Callback<String>,
+    on_materialize: Callback<MouseEvent>,
+}
+
+#[component]
+fn OnboardingPanel(props: &OnboardingPanelProps) -> Html {
+    let Some(run) = props.run.as_ref() else {
+        return html! {
+            <div class="ontology-onboarding">
+                <div class="ontology-onboarding-actions">
+                    <button onclick={props.on_start.clone()}>{ "Start ecommerce demo run" }</button>
+                </div>
+                <p class="empty">{ "No onboarding run started." }</p>
+            </div>
+        };
+    };
+    html! {
+        <div class="ontology-onboarding">
+            <div class="ontology-onboarding-actions">
+                <button onclick={props.on_start.clone()}>{ "Start new demo run" }</button>
+                <button onclick={props.on_materialize.clone()}>{ "Materialize approved" }</button>
+            </div>
+            <KeyMetrics values={vec![
+                ("Run".to_string(), short_id(&run.id)),
+                ("Status".to_string(), label_or(&run.status, "pending").to_string()),
+                ("Source".to_string(), label_or(&run.source_mode, "demo").to_string()),
+                ("Datasets".to_string(), run.dataset_count.to_string()),
+                ("Profiles".to_string(), run.profile_count.to_string()),
+                ("Proposals".to_string(), run.proposal_count.to_string()),
+                ("Approved".to_string(), run.approved_count.to_string()),
+                ("Materialized".to_string(), run.materialized_count.to_string()),
+            ]} />
+            <div class="ontology-proposal-list">
+                { for ["object", "relation", "metric", "action"].iter().map(|proposal_type| html! {
+                    <section class="ontology-proposal-group" key={proposal_type.to_string()}>
+                        <h4>{ proposal_type.to_ascii_uppercase() }</h4>
+                        { for run.proposals.iter().filter(|proposal| proposal.proposal_type == *proposal_type).map(|proposal| {
+                            html! {
+                                <OnboardingProposalRow
+                                    key={proposal.id.clone()}
+                                    proposal={proposal.clone()}
+                                    on_approve={props.on_approve.clone()}
+                                    on_reject={props.on_reject.clone()}
+                                />
+                            }
+                        }) }
+                    </section>
+                }) }
+            </div>
+            <div class="ontology-tool-specs">
+                <h4>{ "Compiled agent tools" }</h4>
+                <Rows empty="No tool specs compiled." rows={props.tool_specs.iter().map(|spec| {
+                    (
+                        if spec.approval_required { "approval" } else { "ready" }.to_string(),
+                        spec.name.clone(),
+                        format!("{} / {}", spec.target_object, label_or(&spec.description, "ontology action"))
+                    )
+                }).collect::<Vec<_>>()} />
+            </div>
+        </div>
+    }
+}
+
+#[derive(Properties, Clone, PartialEq)]
+struct OnboardingProposalRowProps {
+    proposal: OntologyOnboardingProposal,
+    on_approve: Callback<String>,
+    on_reject: Callback<String>,
+}
+
+#[component]
+fn OnboardingProposalRow(props: &OnboardingProposalRowProps) -> Html {
+    let approve = {
+        let id = props.proposal.id.clone();
+        let on_approve = props.on_approve.clone();
+        Callback::from(move |_| on_approve.emit(id.clone()))
+    };
+    let reject = {
+        let id = props.proposal.id.clone();
+        let on_reject = props.on_reject.clone();
+        Callback::from(move |_| on_reject.emit(id.clone()))
+    };
+    html! {
+        <article class="ontology-proposal-row">
+            <div class="ontology-proposal-head">
+                <div>
+                    <span>{ format!("{} / {:.0}%", props.proposal.review_status, props.proposal.confidence * 100.0) }</span>
+                    <strong>{ props.proposal.name.clone() }</strong>
+                    <small>{ props.proposal.source_mapping.clone() }</small>
+                </div>
+                <div class="ontology-onboarding-actions">
+                    <button onclick={approve} disabled={props.proposal.review_status == "approved"}>{ "Approve" }</button>
+                    <button onclick={reject} disabled={props.proposal.review_status == "rejected"}>{ "Reject" }</button>
+                </div>
+            </div>
+            <JsonPreview value={props.proposal.evidence.clone()} />
+        </article>
     }
 }
 

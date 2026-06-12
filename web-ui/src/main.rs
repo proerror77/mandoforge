@@ -38,6 +38,8 @@ fn App() -> Html {
     });
     let context_packet_id = use_state(String::new);
     let rendered_context = use_state(|| None::<RenderedExecutionContext>);
+    let onboarding_run = use_state(|| None::<OntologyOnboardingRun>);
+    let onboarding_tool_specs = use_state(Vec::<OntologyOnboardingToolSpec>::new);
     let critical_notifications_muted = use_state(initial_critical_notifications_muted);
 
     let data = ConsoleData {
@@ -190,6 +192,160 @@ fn App() -> Html {
                         compact_json(&payload)
                     )),
                     Err(error) => mutation_status.set(format!("Ontology builder failed: {error}")),
+                }
+            });
+        })
+    };
+
+    let start_ontology_onboarding = {
+        let onboarding_run = onboarding_run.clone();
+        let onboarding_tool_specs = onboarding_tool_specs.clone();
+        let mutation_status = mutation_status.clone();
+        Callback::from(move |_| {
+            let onboarding_run = onboarding_run.clone();
+            let onboarding_tool_specs = onboarding_tool_specs.clone();
+            let mutation_status = mutation_status.clone();
+            spawn_local(async move {
+                mutation_status.set("Starting enterprise ontology onboarding demo...".to_string());
+                match api_post::<OntologyOnboardingRun, _>(
+                    "/api/ontology/onboarding/demo-runs",
+                    &json!({}),
+                )
+                .await
+                {
+                    Ok(run) => {
+                        mutation_status.set(format!(
+                            "Onboarding run ready: {} proposals from {} datasets.",
+                            run.proposal_count, run.dataset_count
+                        ));
+                        onboarding_tool_specs.set(Vec::new());
+                        onboarding_run.set(Some(run));
+                    }
+                    Err(error) => {
+                        mutation_status.set(format!("Onboarding start failed: {error}"));
+                    }
+                }
+            });
+        })
+    };
+
+    let approve_ontology_proposal = {
+        let onboarding_run = onboarding_run.clone();
+        let mutation_status = mutation_status.clone();
+        Callback::from(move |proposal_id: String| {
+            let Some(current_run) = (*onboarding_run).clone() else {
+                mutation_status.set("Approve failed: no onboarding run is active.".to_string());
+                return;
+            };
+            let onboarding_run = onboarding_run.clone();
+            let mutation_status = mutation_status.clone();
+            spawn_local(async move {
+                mutation_status.set("Approving ontology proposal...".to_string());
+                let path = format!("/api/ontology/onboarding/proposals/{proposal_id}/review");
+                let body = json!({
+                    "decision": "approve",
+                    "reason": "operator approved from semantic console",
+                });
+                match api_post::<OntologyOnboardingProposal, _>(&path, &body).await {
+                    Ok(_) => {
+                        let run_path = format!("/api/ontology/onboarding/runs/{}", current_run.id);
+                        match api_get::<OntologyOnboardingRun>(&run_path).await {
+                            Ok(run) => {
+                                mutation_status.set(format!(
+                                    "Proposal approved: {}/{} approved.",
+                                    run.approved_count, run.proposal_count
+                                ));
+                                onboarding_run.set(Some(run));
+                            }
+                            Err(error) => mutation_status
+                                .set(format!("Proposal approved; refresh failed: {error}")),
+                        }
+                    }
+                    Err(error) => mutation_status.set(format!("Proposal approve failed: {error}")),
+                }
+            });
+        })
+    };
+
+    let reject_ontology_proposal = {
+        let onboarding_run = onboarding_run.clone();
+        let mutation_status = mutation_status.clone();
+        Callback::from(move |proposal_id: String| {
+            let Some(current_run) = (*onboarding_run).clone() else {
+                mutation_status.set("Reject failed: no onboarding run is active.".to_string());
+                return;
+            };
+            let onboarding_run = onboarding_run.clone();
+            let mutation_status = mutation_status.clone();
+            spawn_local(async move {
+                mutation_status.set("Rejecting ontology proposal...".to_string());
+                let path = format!("/api/ontology/onboarding/proposals/{proposal_id}/review");
+                let body = json!({
+                    "decision": "reject",
+                    "reason": "operator rejected from semantic console",
+                });
+                match api_post::<OntologyOnboardingProposal, _>(&path, &body).await {
+                    Ok(_) => {
+                        let run_path = format!("/api/ontology/onboarding/runs/{}", current_run.id);
+                        match api_get::<OntologyOnboardingRun>(&run_path).await {
+                            Ok(run) => {
+                                mutation_status.set("Proposal rejected.".to_string());
+                                onboarding_run.set(Some(run));
+                            }
+                            Err(error) => mutation_status
+                                .set(format!("Proposal rejected; refresh failed: {error}")),
+                        }
+                    }
+                    Err(error) => mutation_status.set(format!("Proposal reject failed: {error}")),
+                }
+            });
+        })
+    };
+
+    let materialize_ontology_onboarding = {
+        let onboarding_run = onboarding_run.clone();
+        let onboarding_tool_specs = onboarding_tool_specs.clone();
+        let mutation_status = mutation_status.clone();
+        Callback::from(move |_| {
+            let Some(current_run) = (*onboarding_run).clone() else {
+                mutation_status.set("Materialize failed: no onboarding run is active.".to_string());
+                return;
+            };
+            let onboarding_run = onboarding_run.clone();
+            let onboarding_tool_specs = onboarding_tool_specs.clone();
+            let mutation_status = mutation_status.clone();
+            spawn_local(async move {
+                mutation_status.set("Materializing approved ontology proposals...".to_string());
+                let path = format!(
+                    "/api/ontology/onboarding/runs/{}/materialize",
+                    current_run.id
+                );
+                match api_post::<Value, _>(&path, &json!({})).await {
+                    Ok(_) => {
+                        let run_path = format!("/api/ontology/onboarding/runs/{}", current_run.id);
+                        if let Ok(run) = api_get::<OntologyOnboardingRun>(&run_path).await {
+                            onboarding_run.set(Some(run));
+                        }
+                        let specs_path = format!(
+                            "/api/ontology/onboarding/runs/{}/tool-specs",
+                            current_run.id
+                        );
+                        match api_get::<OntologyOnboardingToolSpecResponse>(&specs_path).await {
+                            Ok(response) => {
+                                mutation_status.set(format!(
+                                    "Ontology materialized: {} agent tools compiled.",
+                                    response.tool_specs.len()
+                                ));
+                                onboarding_tool_specs.set(response.tool_specs);
+                            }
+                            Err(error) => mutation_status.set(format!(
+                                "Ontology materialized; tool refresh failed: {error}"
+                            )),
+                        }
+                    }
+                    Err(error) => {
+                        mutation_status.set(format!("Ontology materialize failed: {error}"))
+                    }
                 }
             });
         })
@@ -487,10 +643,16 @@ fn App() -> Html {
                                 source_text={(*semantic_source).clone()}
                                 context_packet_id={(*context_packet_id).clone()}
                                 rendered_context={(*rendered_context).clone()}
+                                onboarding_run={(*onboarding_run).clone()}
+                                onboarding_tool_specs={(*onboarding_tool_specs).clone()}
                                 on_source={state_textarea(semantic_source.clone())}
                                 on_build={build_ontology.clone()}
                                 on_context_packet_id={state_input(context_packet_id.clone())}
                                 on_render_context={render_context.clone()}
+                                on_start_onboarding={start_ontology_onboarding.clone()}
+                                on_approve_onboarding_proposal={approve_ontology_proposal.clone()}
+                                on_reject_onboarding_proposal={reject_ontology_proposal.clone()}
+                                on_materialize_onboarding={materialize_ontology_onboarding.clone()}
                             />
                         },
                         View::Packs => html! { <PacksView data={data.clone()} /> },

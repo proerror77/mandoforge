@@ -924,6 +924,78 @@ h2 {
   gap: 14px;
 }
 
+.ontology-onboarding {
+  display: grid;
+  gap: 12px;
+}
+
+.ontology-onboarding-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ontology-proposal-list {
+  display: grid;
+  gap: 10px;
+  max-height: 520px;
+  overflow: auto;
+}
+
+.ontology-proposal-group {
+  display: grid;
+  gap: 8px;
+}
+
+.ontology-proposal-group h4,
+.ontology-tool-specs h4 {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0;
+}
+
+.ontology-proposal-row {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-soft);
+}
+
+.ontology-proposal-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+}
+
+.ontology-proposal-head div {
+  min-width: 0;
+}
+
+.ontology-proposal-head span,
+.ontology-proposal-head small {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.ontology-proposal-head strong {
+  display: block;
+  overflow-wrap: anywhere;
+  margin: 2px 0;
+  font-size: 14px;
+}
+
+.ontology-tool-specs {
+  display: grid;
+  gap: 8px;
+}
+
 .agent-topology,
 .semantic-map,
 .pack-mosaic,
