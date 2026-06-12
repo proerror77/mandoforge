@@ -2252,6 +2252,115 @@ struct ReviewOntologyProposalRequest {
     reason: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologyOnboardingField {
+    name: String,
+    field_type: String,
+    sample_values: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologyOnboardingDataset {
+    table_name: String,
+    source_system: String,
+    source_object: String,
+    fields: Vec<OntologyOnboardingField>,
+    rows: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologyForeignKeyCandidate {
+    field: String,
+    references_table: String,
+    references_field: String,
+    join_success_rate: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologyDatasetProfile {
+    table_name: String,
+    row_count: usize,
+    primary_key_candidates: Vec<String>,
+    foreign_key_candidates: Vec<OntologyForeignKeyCandidate>,
+    enum_candidates: Vec<String>,
+    time_dimensions: Vec<String>,
+    currency_fields: Vec<String>,
+    pii_candidates: Vec<String>,
+    field_null_rates: Value,
+    field_uniqueness: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologyOnboardingProposalDraft {
+    id: Uuid,
+    run_id: Uuid,
+    proposal_type: String,
+    name: String,
+    source_mapping: String,
+    confidence: f64,
+    evidence: Value,
+    recommendation: String,
+    review_status: String,
+    content: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologyOnboardingRun {
+    id: Uuid,
+    status: String,
+    source_mode: String,
+    dataset_count: usize,
+    profile_count: usize,
+    proposal_count: usize,
+    approved_count: usize,
+    materialized_count: usize,
+    datasets: Vec<OntologyOnboardingDataset>,
+    profiles: Vec<OntologyDatasetProfile>,
+    proposals: Vec<OntologyOnboardingProposalDraft>,
+    generated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewOntologyOnboardingProposalRequest {
+    decision: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologyOnboardingMaterializationResult {
+    run_id: Uuid,
+    status: String,
+    semantic_object_count: usize,
+    semantic_link_count: usize,
+    tool_spec_count: usize,
+    semantic_object_ids: Vec<Uuid>,
+    semantic_link_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologyOnboardingToolSpec {
+    id: Uuid,
+    run_id: Uuid,
+    name: String,
+    description: String,
+    tool_kind: String,
+    target_object: String,
+    read_only: bool,
+    approval_required: bool,
+    input_schema: Value,
+    effects: Value,
+    policy: Value,
+    audit_event: String,
+    source_proposal_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologyOnboardingToolSpecResponse {
+    run_id: Uuid,
+    tool_specs: Vec<OntologyOnboardingToolSpec>,
+}
+
 #[derive(Debug, Deserialize)]
 struct RunSemanticDreamingRequest {
     session_id: Uuid,
@@ -6661,6 +6770,30 @@ fn build_router(state: AppState) -> Router {
             post(review_semantic_ontology_proposal),
         )
         .route(
+            "/api/ontology/onboarding/demo-runs",
+            post(create_demo_ontology_onboarding_run),
+        )
+        .route(
+            "/api/ontology/onboarding/runs",
+            get(list_ontology_onboarding_runs),
+        )
+        .route(
+            "/api/ontology/onboarding/runs/{id}",
+            get(get_ontology_onboarding_run),
+        )
+        .route(
+            "/api/ontology/onboarding/proposals/{id}/review",
+            post(review_ontology_onboarding_proposal),
+        )
+        .route(
+            "/api/ontology/onboarding/runs/{id}/materialize",
+            post(materialize_ontology_onboarding_run),
+        )
+        .route(
+            "/api/ontology/onboarding/runs/{id}/tool-specs",
+            get(list_ontology_onboarding_tool_specs),
+        )
+        .route(
             "/api/semantic-conflicts/resolve",
             post(resolve_semantic_conflict),
         )
@@ -10850,6 +10983,482 @@ fn normalize_ontology_review_decision(value: &str) -> Result<String, AppError> {
             "ontology proposal review decision must be approve, reject, or request_changes",
         )),
     }
+}
+
+fn ontology_demo_datasets() -> Vec<OntologyOnboardingDataset> {
+    vec![
+        ontology_demo_dataset(
+            "customers",
+            "demo_commerce",
+            "customers",
+            vec![
+                ("id", "string"),
+                ("email", "string"),
+                ("name", "string"),
+                ("created_at", "timestamp"),
+            ],
+            vec![
+                json!({"id":"cus_1","email":"a@example.com","name":"Ada","created_at":"2026-06-01T00:00:00Z"}),
+                json!({"id":"cus_2","email":"b@example.com","name":"Ben","created_at":"2026-06-02T00:00:00Z"}),
+                json!({"id":"cus_3","email":"c@example.com","name":"Cy","created_at":"2026-06-03T00:00:00Z"}),
+                json!({"id":"cus_4","email":"d@example.com","name":"Dee","created_at":"2026-06-04T00:00:00Z"}),
+            ],
+        ),
+        ontology_demo_dataset(
+            "orders",
+            "demo_commerce",
+            "orders",
+            vec![
+                ("id", "string"),
+                ("customer_id", "string"),
+                ("status", "string"),
+                ("total_price", "decimal"),
+                ("created_at", "timestamp"),
+            ],
+            vec![
+                json!({"id":"ord_1","customer_id":"cus_1","status":"paid","total_price":120.0,"created_at":"2026-06-08T00:00:00Z"}),
+                json!({"id":"ord_2","customer_id":"cus_1","status":"refunded","total_price":80.0,"created_at":"2026-06-09T00:00:00Z"}),
+                json!({"id":"ord_3","customer_id":"cus_2","status":"paid","total_price":210.0,"created_at":"2026-06-10T00:00:00Z"}),
+                json!({"id":"ord_4","customer_id":"cus_3","status":"fulfilled","total_price":45.0,"created_at":"2026-06-11T00:00:00Z"}),
+            ],
+        ),
+        ontology_demo_dataset(
+            "order_items",
+            "demo_commerce",
+            "order_items",
+            vec![
+                ("id", "string"),
+                ("order_id", "string"),
+                ("sku_id", "string"),
+                ("quantity", "integer"),
+                ("line_total", "decimal"),
+            ],
+            vec![
+                json!({"id":"oli_1","order_id":"ord_1","sku_id":"sku_1","quantity":1,"line_total":120.0}),
+                json!({"id":"oli_2","order_id":"ord_2","sku_id":"sku_2","quantity":2,"line_total":80.0}),
+                json!({"id":"oli_3","order_id":"ord_3","sku_id":"sku_3","quantity":1,"line_total":210.0}),
+                json!({"id":"oli_4","order_id":"ord_4","sku_id":"sku_1","quantity":1,"line_total":45.0}),
+            ],
+        ),
+        ontology_demo_dataset(
+            "products",
+            "demo_commerce",
+            "products",
+            vec![
+                ("id", "string"),
+                ("title", "string"),
+                ("category", "string"),
+            ],
+            vec![
+                json!({"id":"prd_1","title":"Running Shoe","category":"footwear"}),
+                json!({"id":"prd_2","title":"Trail Jacket","category":"apparel"}),
+                json!({"id":"prd_3","title":"Water Bottle","category":"accessory"}),
+                json!({"id":"prd_4","title":"Yoga Mat","category":"fitness"}),
+            ],
+        ),
+        ontology_demo_dataset(
+            "skus",
+            "demo_commerce",
+            "skus",
+            vec![
+                ("id", "string"),
+                ("product_id", "string"),
+                ("sku_code", "string"),
+                ("price", "decimal"),
+            ],
+            vec![
+                json!({"id":"sku_1","product_id":"prd_1","sku_code":"SHOE-8","price":120.0}),
+                json!({"id":"sku_2","product_id":"prd_2","sku_code":"JACKET-M","price":40.0}),
+                json!({"id":"sku_3","product_id":"prd_3","sku_code":"BOTTLE-1L","price":210.0}),
+                json!({"id":"sku_4","product_id":"prd_4","sku_code":"MAT-BLUE","price":45.0}),
+            ],
+        ),
+        ontology_demo_dataset(
+            "inventory",
+            "demo_commerce",
+            "inventory",
+            vec![
+                ("id", "string"),
+                ("sku_id", "string"),
+                ("warehouse_id", "string"),
+                ("available_quantity", "integer"),
+            ],
+            vec![
+                json!({"id":"inv_1","sku_id":"sku_1","warehouse_id":"wh_1","available_quantity":5}),
+                json!({"id":"inv_2","sku_id":"sku_2","warehouse_id":"wh_1","available_quantity":2}),
+                json!({"id":"inv_3","sku_id":"sku_3","warehouse_id":"wh_2","available_quantity":50}),
+                json!({"id":"inv_4","sku_id":"sku_4","warehouse_id":"wh_2","available_quantity":1}),
+            ],
+        ),
+        ontology_demo_dataset(
+            "refunds",
+            "demo_commerce",
+            "refunds",
+            vec![
+                ("id", "string"),
+                ("order_id", "string"),
+                ("amount", "decimal"),
+                ("reason", "string"),
+                ("status", "string"),
+            ],
+            vec![
+                json!({"id":"ref_1","order_id":"ord_2","amount":80.0,"reason":"size_issue","status":"approved"}),
+                json!({"id":"ref_2","order_id":"ord_3","amount":20.0,"reason":"late_delivery","status":"requested"}),
+                json!({"id":"ref_3","order_id":"ord_1","amount":10.0,"reason":"coupon_adjustment","status":"closed"}),
+                json!({"id":"ref_4","order_id":"ord_4","amount":5.0,"reason":"minor_defect","status":"requested"}),
+            ],
+        ),
+        ontology_demo_dataset(
+            "tickets",
+            "demo_commerce",
+            "tickets",
+            vec![
+                ("id", "string"),
+                ("customer_id", "string"),
+                ("order_id", "string"),
+                ("status", "string"),
+                ("topic", "string"),
+            ],
+            vec![
+                json!({"id":"tic_1","customer_id":"cus_1","order_id":"ord_1","status":"open","topic":"shipping"}),
+                json!({"id":"tic_2","customer_id":"cus_2","order_id":"ord_3","status":"escalated","topic":"refund"}),
+                json!({"id":"tic_3","customer_id":"cus_3","order_id":"ord_4","status":"closed","topic":"coupon"}),
+                json!({"id":"tic_4","customer_id":"cus_4","order_id":null,"status":"open","topic":"product_question"}),
+            ],
+        ),
+    ]
+}
+
+fn ontology_demo_dataset(
+    table_name: &str,
+    source_system: &str,
+    source_object: &str,
+    field_defs: Vec<(&str, &str)>,
+    rows: Vec<Value>,
+) -> OntologyOnboardingDataset {
+    let fields = field_defs
+        .into_iter()
+        .map(|(name, field_type)| OntologyOnboardingField {
+            name: name.to_string(),
+            field_type: field_type.to_string(),
+            sample_values: rows
+                .iter()
+                .filter_map(|row| row.get(name).cloned())
+                .filter(|value| !value.is_null())
+                .take(3)
+                .collect(),
+        })
+        .collect();
+    OntologyOnboardingDataset {
+        table_name: table_name.to_string(),
+        source_system: source_system.to_string(),
+        source_object: source_object.to_string(),
+        fields,
+        rows,
+    }
+}
+
+fn ontology_profile_demo_datasets(
+    datasets: &[OntologyOnboardingDataset],
+) -> Vec<OntologyDatasetProfile> {
+    datasets
+        .iter()
+        .map(|dataset| ontology_profile_dataset(dataset, datasets))
+        .collect()
+}
+
+fn ontology_profile_dataset(
+    dataset: &OntologyOnboardingDataset,
+    datasets: &[OntologyOnboardingDataset],
+) -> OntologyDatasetProfile {
+    let row_count = dataset.rows.len();
+    let mut primary_key_candidates = Vec::new();
+    let mut foreign_key_candidates = Vec::new();
+    let mut enum_candidates = Vec::new();
+    let mut time_dimensions = Vec::new();
+    let mut currency_fields = Vec::new();
+    let mut pii_candidates = Vec::new();
+    let mut field_null_rates = serde_json::Map::new();
+    let mut field_uniqueness = serde_json::Map::new();
+
+    for field in &dataset.fields {
+        let values = ontology_field_values(dataset, &field.name);
+        let non_null_count = values.iter().filter(|value| !value.is_null()).count();
+        let distinct_count = ontology_distinct_value_count(&values);
+        let null_rate = if row_count == 0 {
+            0.0
+        } else {
+            (row_count - non_null_count) as f64 / row_count as f64
+        };
+        let uniqueness = if non_null_count == 0 {
+            0.0
+        } else {
+            distinct_count as f64 / non_null_count as f64
+        };
+        field_null_rates.insert(field.name.clone(), json!(null_rate));
+        field_uniqueness.insert(field.name.clone(), json!(uniqueness));
+
+        if row_count > 0 && non_null_count == row_count && distinct_count == row_count {
+            primary_key_candidates.push(field.name.clone());
+        }
+        if distinct_count > 0 && distinct_count <= 8 && uniqueness < 1.0 {
+            enum_candidates.push(field.name.clone());
+        }
+        if field.name.ends_with("_at") {
+            time_dimensions.push(field.name.clone());
+        }
+        if ontology_is_currency_field(&field.name) {
+            currency_fields.push(field.name.clone());
+        }
+        if ontology_is_pii_field(&field.name) {
+            pii_candidates.push(field.name.clone());
+        }
+        if field.name.ends_with("_id") {
+            foreign_key_candidates.extend(ontology_foreign_key_candidates(
+                dataset,
+                &field.name,
+                datasets,
+            ));
+        }
+    }
+
+    OntologyDatasetProfile {
+        table_name: dataset.table_name.clone(),
+        row_count,
+        primary_key_candidates,
+        foreign_key_candidates,
+        enum_candidates,
+        time_dimensions,
+        currency_fields,
+        pii_candidates,
+        field_null_rates: Value::Object(field_null_rates),
+        field_uniqueness: Value::Object(field_uniqueness),
+    }
+}
+
+fn ontology_field_values(dataset: &OntologyOnboardingDataset, field_name: &str) -> Vec<Value> {
+    dataset
+        .rows
+        .iter()
+        .map(|row| row.get(field_name).cloned().unwrap_or(Value::Null))
+        .collect()
+}
+
+fn ontology_distinct_value_count(values: &[Value]) -> usize {
+    values
+        .iter()
+        .filter(|value| !value.is_null())
+        .map(ontology_normalized_value_key)
+        .collect::<HashSet<_>>()
+        .len()
+}
+
+fn ontology_normalized_value_key(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        _ => value.to_string(),
+    }
+}
+
+fn ontology_is_currency_field(field_name: &str) -> bool {
+    let lower = field_name.to_ascii_lowercase();
+    lower.contains("price") || lower.contains("amount") || lower.contains("total")
+}
+
+fn ontology_is_pii_field(field_name: &str) -> bool {
+    let lower = field_name.to_ascii_lowercase();
+    lower.contains("email") || lower.contains("phone") || lower.contains("address")
+}
+
+fn ontology_foreign_key_candidates(
+    dataset: &OntologyOnboardingDataset,
+    field_name: &str,
+    datasets: &[OntologyOnboardingDataset],
+) -> Vec<OntologyForeignKeyCandidate> {
+    let expected_table = ontology_expected_reference_table(field_name);
+    datasets
+        .iter()
+        .filter(|candidate| candidate.table_name != dataset.table_name)
+        .filter(|candidate| {
+            expected_table
+                .as_ref()
+                .map(|expected| candidate.table_name == *expected)
+                .unwrap_or_else(|| candidate.table_name == field_name.trim_end_matches("_id"))
+        })
+        .filter(|candidate| candidate.fields.iter().any(|field| field.name == "id"))
+        .filter_map(|candidate| {
+            let join_success_rate =
+                ontology_join_success_rate(dataset, field_name, candidate, "id");
+            (join_success_rate > 0.0).then(|| OntologyForeignKeyCandidate {
+                field: field_name.to_string(),
+                references_table: candidate.table_name.clone(),
+                references_field: "id".to_string(),
+                join_success_rate,
+            })
+        })
+        .collect()
+}
+
+fn ontology_expected_reference_table(field_name: &str) -> Option<String> {
+    let base = field_name.strip_suffix("_id")?;
+    Some(
+        match base {
+            "customer" => "customers",
+            "order" => "orders",
+            "product" => "products",
+            "sku" => "skus",
+            "refund" => "refunds",
+            "ticket" => "tickets",
+            "inventory" => "inventory",
+            value => value,
+        }
+        .to_string(),
+    )
+}
+
+fn ontology_join_success_rate(
+    dataset: &OntologyOnboardingDataset,
+    field_name: &str,
+    reference_dataset: &OntologyOnboardingDataset,
+    reference_field: &str,
+) -> f64 {
+    let reference_values = reference_dataset
+        .rows
+        .iter()
+        .filter_map(|row| row.get(reference_field))
+        .filter(|value| !value.is_null())
+        .map(ontology_normalized_value_key)
+        .collect::<HashSet<_>>();
+    let values = dataset
+        .rows
+        .iter()
+        .filter_map(|row| row.get(field_name))
+        .filter(|value| !value.is_null())
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        return 0.0;
+    }
+    let matches = values
+        .iter()
+        .filter(|value| reference_values.contains(&ontology_normalized_value_key(value)))
+        .count();
+    matches as f64 / values.len() as f64
+}
+
+async fn create_demo_ontology_onboarding_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<OntologyOnboardingRun>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsWrite,
+        "ontology_onboarding",
+        None,
+    )
+    .await?;
+    let datasets = ontology_demo_datasets();
+    let profiles = ontology_profile_demo_datasets(&datasets);
+    let run = OntologyOnboardingRun {
+        id: Uuid::new_v4(),
+        status: "draft".to_string(),
+        source_mode: "demo_ecommerce".to_string(),
+        dataset_count: datasets.len(),
+        profile_count: profiles.len(),
+        proposal_count: 0,
+        approved_count: 0,
+        materialized_count: 0,
+        datasets,
+        profiles,
+        proposals: Vec::new(),
+        generated_at: Utc::now(),
+    };
+    Ok(Json(run))
+}
+
+async fn list_ontology_onboarding_runs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<OntologyOnboardingRun>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "ontology_onboarding",
+        None,
+    )
+    .await?;
+    Ok(Json(Vec::new()))
+}
+
+async fn get_ontology_onboarding_run(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<OntologyOnboardingRun>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "ontology_onboarding",
+        Some(id),
+    )
+    .await?;
+    Err(AppError::not_found("ontology onboarding run not found"))
+}
+
+async fn review_ontology_onboarding_proposal(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(_input): Json<ReviewOntologyOnboardingProposalRequest>,
+) -> Result<Json<OntologyOnboardingProposalDraft>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsWrite,
+        "ontology_onboarding",
+        Some(id),
+    )
+    .await?;
+    Err(AppError::not_found(
+        "ontology onboarding proposal not found",
+    ))
+}
+
+async fn materialize_ontology_onboarding_run(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<OntologyOnboardingMaterializationResult>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsWrite,
+        "ontology_onboarding",
+        Some(id),
+    )
+    .await?;
+    Err(AppError::not_found("ontology onboarding run not found"))
+}
+
+async fn list_ontology_onboarding_tool_specs(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<OntologyOnboardingToolSpecResponse>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "ontology_onboarding",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(OntologyOnboardingToolSpecResponse {
+        run_id: id,
+        tool_specs: Vec::new(),
+    }))
 }
 
 async fn resolve_semantic_conflict(
@@ -58679,6 +59288,35 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn ontology_onboarding_demo_profiles_have_expected_tables_and_evidence() {
+        let datasets = ontology_demo_datasets();
+        let profiles = ontology_profile_demo_datasets(&datasets);
+        let table_names = profiles
+            .iter()
+            .map(|profile| profile.table_name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(profiles.len(), 8);
+        assert!(table_names.contains(&"customers"));
+        assert!(table_names.contains(&"orders"));
+        assert!(table_names.contains(&"order_items"));
+
+        let orders = profiles
+            .iter()
+            .find(|profile| profile.table_name == "orders")
+            .expect("orders profile");
+        assert_eq!(orders.row_count, 4);
+        assert!(orders.primary_key_candidates.contains(&"id".to_string()));
+        assert!(orders.foreign_key_candidates.iter().any(|candidate| {
+            candidate.field == "customer_id"
+                && candidate.references_table == "customers"
+                && candidate.references_field == "id"
+                && candidate.join_success_rate >= 0.99
+        }));
+        assert!(orders.currency_fields.contains(&"total_price".to_string()));
     }
 
     #[test]
