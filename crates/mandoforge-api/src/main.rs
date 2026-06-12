@@ -11345,6 +11345,469 @@ fn ontology_join_success_rate(
     matches as f64 / values.len() as f64
 }
 
+fn ontology_generate_demo_proposals(
+    datasets: &[OntologyOnboardingDataset],
+    profiles: &[OntologyDatasetProfile],
+) -> Vec<OntologyOnboardingProposalDraft> {
+    ontology_generate_demo_proposals_for_run(Uuid::new_v4(), datasets, profiles)
+}
+
+fn ontology_generate_demo_proposals_for_run(
+    run_id: Uuid,
+    datasets: &[OntologyOnboardingDataset],
+    profiles: &[OntologyDatasetProfile],
+) -> Vec<OntologyOnboardingProposalDraft> {
+    let mut proposals = Vec::new();
+    let object_mappings = [
+        ("customers", "Customer"),
+        ("orders", "Order"),
+        ("order_items", "OrderLine"),
+        ("products", "Product"),
+        ("skus", "SKU"),
+        ("inventory", "InventoryItem"),
+        ("refunds", "Refund"),
+        ("tickets", "SupportTicket"),
+    ];
+    for (table_name, object_name) in object_mappings {
+        if let (Some(dataset), Some(profile)) = (
+            datasets
+                .iter()
+                .find(|dataset| dataset.table_name == table_name),
+            ontology_profile_by_table(profiles, table_name),
+        ) {
+            proposals.push(ontology_object_proposal(
+                run_id,
+                dataset,
+                profile,
+                object_name,
+            ));
+        }
+    }
+
+    let relation_mappings = [
+        (
+            "Customer places Order",
+            "Customer",
+            "places",
+            "Order",
+            "orders",
+            "customer_id",
+            "customers",
+        ),
+        (
+            "Order contains OrderLine",
+            "Order",
+            "contains",
+            "OrderLine",
+            "order_items",
+            "order_id",
+            "orders",
+        ),
+        (
+            "OrderLine references SKU",
+            "OrderLine",
+            "references",
+            "SKU",
+            "order_items",
+            "sku_id",
+            "skus",
+        ),
+        (
+            "SKU represents Product",
+            "SKU",
+            "represents",
+            "Product",
+            "skus",
+            "product_id",
+            "products",
+        ),
+        (
+            "SKU has InventoryItem",
+            "SKU",
+            "has",
+            "InventoryItem",
+            "inventory",
+            "sku_id",
+            "skus",
+        ),
+        (
+            "Order may_have Refund",
+            "Order",
+            "may_have",
+            "Refund",
+            "refunds",
+            "order_id",
+            "orders",
+        ),
+        (
+            "Customer creates SupportTicket",
+            "Customer",
+            "creates",
+            "SupportTicket",
+            "tickets",
+            "customer_id",
+            "customers",
+        ),
+        (
+            "Order has SupportTicket",
+            "Order",
+            "has",
+            "SupportTicket",
+            "tickets",
+            "order_id",
+            "orders",
+        ),
+    ];
+    for (name, from_object, relation, to_object, source_table, source_field, reference_table) in
+        relation_mappings
+    {
+        if let Some(profile) = ontology_profile_by_table(profiles, source_table) {
+            if let Some(candidate) =
+                ontology_profile_fk(profile, source_field, reference_table, "id")
+            {
+                proposals.push(ontology_relation_proposal(
+                    run_id,
+                    name,
+                    from_object,
+                    relation,
+                    to_object,
+                    source_table,
+                    source_field,
+                    reference_table,
+                    candidate.join_success_rate,
+                ));
+            }
+        }
+    }
+
+    for proposal in [
+        ontology_metric_proposal(
+            run_id,
+            "GMV",
+            "Order",
+            "sum(orders.total_price) where orders.status in ('paid','fulfilled')",
+            json!({
+                "unit": "currency",
+                "base_table": "orders",
+                "measure_field": "total_price",
+                "time_dimension": "created_at"
+            }),
+        ),
+        ontology_metric_proposal(
+            run_id,
+            "AOV",
+            "Order",
+            "GMV / count(distinct orders.id)",
+            json!({
+                "unit": "currency",
+                "depends_on": ["GMV"],
+                "base_table": "orders"
+            }),
+        ),
+        ontology_metric_proposal(
+            run_id,
+            "Refund Rate",
+            "Refund",
+            "count(distinct refunds.order_id) / count(distinct orders.id)",
+            json!({
+                "unit": "ratio",
+                "base_table": "refunds",
+                "join": "refunds.order_id = orders.id"
+            }),
+        ),
+        ontology_metric_proposal(
+            run_id,
+            "Repeat Purchase Rate",
+            "Customer",
+            "customers with count(orders.id) > 1 / active customers",
+            json!({
+                "unit": "ratio",
+                "base_table": "orders",
+                "join": "orders.customer_id = customers.id"
+            }),
+        ),
+        ontology_metric_proposal(
+            run_id,
+            "Inventory Turnover",
+            "InventoryItem",
+            "units_sold / average_inventory",
+            json!({
+                "unit": "ratio",
+                "base_table": "inventory",
+                "join": "inventory.sku_id = skus.id"
+            }),
+        ),
+    ] {
+        proposals.push(proposal);
+    }
+
+    for proposal in [
+        ontology_action_proposal(
+            run_id,
+            "refund_order",
+            "Order",
+            true,
+            json!({
+                "order_id": "string",
+                "amount": "decimal",
+                "reason": "string"
+            }),
+            json!(["Order", "Payment", "Customer"]),
+            json!([
+                {"type": "create_object", "object": "Refund"},
+                {"type": "update_attribute", "target": "Order.status"},
+                {"type": "create_relation", "relation": "Order may_have Refund"}
+            ]),
+            json!({"type": "http_api", "ref": "POST /orders/{order_id}/refund"}),
+        ),
+        ontology_action_proposal(
+            run_id,
+            "issue_coupon",
+            "Customer",
+            true,
+            json!({
+                "customer_id": "string",
+                "coupon_code": "string",
+                "reason": "string"
+            }),
+            json!(["Customer", "Order"]),
+            json!([
+                {"type": "create_object", "object": "Coupon"},
+                {"type": "create_relation", "relation": "Customer receives Coupon"}
+            ]),
+            json!({"type": "http_api", "ref": "POST /customers/{customer_id}/coupons"}),
+        ),
+        ontology_action_proposal(
+            run_id,
+            "adjust_inventory",
+            "InventoryItem",
+            true,
+            json!({
+                "inventory_item_id": "string",
+                "delta_quantity": "integer",
+                "reason": "string"
+            }),
+            json!(["InventoryItem", "SKU"]),
+            json!([
+                {"type": "update_attribute", "target": "InventoryItem.available_quantity"}
+            ]),
+            json!({"type": "http_api", "ref": "POST /inventory/{inventory_item_id}/adjust"}),
+        ),
+        ontology_action_proposal(
+            run_id,
+            "escalate_ticket",
+            "SupportTicket",
+            false,
+            json!({
+                "ticket_id": "string",
+                "reason": "string"
+            }),
+            json!(["SupportTicket", "Customer", "Order"]),
+            json!([
+                {"type": "update_attribute", "target": "SupportTicket.status"}
+            ]),
+            json!({"type": "http_api", "ref": "POST /tickets/{ticket_id}/escalate"}),
+        ),
+    ] {
+        proposals.push(proposal);
+    }
+
+    proposals
+}
+
+fn ontology_object_proposal(
+    run_id: Uuid,
+    dataset: &OntologyOnboardingDataset,
+    profile: &OntologyDatasetProfile,
+    object_name: &str,
+) -> OntologyOnboardingProposalDraft {
+    ontology_proposal(
+        run_id,
+        "object",
+        object_name,
+        format!(
+            "{}.{} -> {object_name}",
+            dataset.source_system, dataset.table_name
+        ),
+        0.94,
+        json!({
+            "table": dataset.table_name,
+            "row_count": profile.row_count,
+            "primary_key_candidates": profile.primary_key_candidates,
+            "time_dimensions": profile.time_dimensions,
+            "currency_fields": profile.currency_fields,
+            "pii_candidates": profile.pii_candidates,
+            "seed_ontology_match": object_name,
+        }),
+        json!({
+            "object_type": object_name,
+            "source_table": dataset.table_name,
+            "source_system": dataset.source_system,
+            "primary_key": profile.primary_key_candidates.first().cloned().unwrap_or_else(|| "id".to_string()),
+            "properties": dataset.fields.iter().map(|field| {
+                json!({
+                    "name": field.name,
+                    "type": field.field_type,
+                    "sample_values": field.sample_values,
+                })
+            }).collect::<Vec<_>>(),
+        }),
+    )
+}
+
+fn ontology_relation_proposal(
+    run_id: Uuid,
+    name: &str,
+    from_object: &str,
+    relation: &str,
+    to_object: &str,
+    source_table: &str,
+    source_field: &str,
+    reference_table: &str,
+    join_success_rate: f64,
+) -> OntologyOnboardingProposalDraft {
+    ontology_proposal(
+        run_id,
+        "relation",
+        name,
+        format!("{source_table}.{source_field} = {reference_table}.id"),
+        if join_success_rate >= 0.99 {
+            0.96
+        } else {
+            0.88
+        },
+        json!({
+            "source_table": source_table,
+            "source_field": source_field,
+            "references_table": reference_table,
+            "references_field": "id",
+            "join_success_rate": join_success_rate,
+            "seed_relation_match": name,
+        }),
+        json!({
+            "from_object": from_object,
+            "relation": relation,
+            "to_object": to_object,
+            "link_type": name,
+            "source_mapping": format!("{source_table}.{source_field} = {reference_table}.id"),
+        }),
+    )
+}
+
+fn ontology_metric_proposal(
+    run_id: Uuid,
+    name: &str,
+    target_object: &str,
+    expression: &str,
+    evidence: Value,
+) -> OntologyOnboardingProposalDraft {
+    ontology_proposal(
+        run_id,
+        "metric",
+        name,
+        expression.to_string(),
+        0.86,
+        json!({
+            "semantic_model": "commerce",
+            "target_object": target_object,
+            "expression": expression,
+            "definition_evidence": evidence,
+        }),
+        json!({
+            "metric_name": name,
+            "target_object": target_object,
+            "expression": expression,
+            "governance": {
+                "requires_owner_review": true,
+                "downstream_tools_use_canonical_definition": true
+            }
+        }),
+    )
+}
+
+fn ontology_action_proposal(
+    run_id: Uuid,
+    name: &str,
+    target_object: &str,
+    approval_required: bool,
+    inputs: Value,
+    reads: Value,
+    effects: Value,
+    executor: Value,
+) -> OntologyOnboardingProposalDraft {
+    ontology_proposal(
+        run_id,
+        "action",
+        name,
+        format!("{name} -> {target_object}"),
+        0.82,
+        json!({
+            "target_object": target_object,
+            "contract_source": "demo_openapi_and_sop_seed",
+            "approval_required": approval_required,
+            "effect_count": effects.as_array().map(Vec::len).unwrap_or_default(),
+        }),
+        json!({
+            "action": name,
+            "target_object": target_object,
+            "inputs": inputs,
+            "reads": reads,
+            "effects": effects,
+            "policy": {
+                "approval_required": approval_required,
+                "approval_required_if": if approval_required { Value::String("external_write_or_financial_impact".to_string()) } else { Value::Null }
+            },
+            "executor": executor,
+            "audit_event": format!("commerce.{name}"),
+        }),
+    )
+}
+
+fn ontology_proposal(
+    run_id: Uuid,
+    proposal_type: &str,
+    name: &str,
+    source_mapping: String,
+    confidence: f64,
+    evidence: Value,
+    content: Value,
+) -> OntologyOnboardingProposalDraft {
+    OntologyOnboardingProposalDraft {
+        id: Uuid::new_v4(),
+        run_id,
+        proposal_type: proposal_type.to_string(),
+        name: name.to_string(),
+        source_mapping,
+        confidence,
+        evidence,
+        recommendation: "approve".to_string(),
+        review_status: "pending".to_string(),
+        content,
+    }
+}
+
+fn ontology_profile_by_table<'a>(
+    profiles: &'a [OntologyDatasetProfile],
+    table_name: &str,
+) -> Option<&'a OntologyDatasetProfile> {
+    profiles
+        .iter()
+        .find(|profile| profile.table_name == table_name)
+}
+
+fn ontology_profile_fk<'a>(
+    profile: &'a OntologyDatasetProfile,
+    field: &str,
+    references_table: &str,
+    references_field: &str,
+) -> Option<&'a OntologyForeignKeyCandidate> {
+    profile.foreign_key_candidates.iter().find(|candidate| {
+        candidate.field == field
+            && candidate.references_table == references_table
+            && candidate.references_field == references_field
+    })
+}
+
 async fn create_demo_ontology_onboarding_run(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -59317,6 +59780,54 @@ mod tests {
                 && candidate.join_success_rate >= 0.99
         }));
         assert!(orders.currency_fields.contains(&"total_price".to_string()));
+    }
+
+    #[test]
+    fn ontology_onboarding_demo_generates_required_proposals() {
+        let datasets = ontology_demo_datasets();
+        let profiles = ontology_profile_demo_datasets(&datasets);
+        let proposals = ontology_generate_demo_proposals(&datasets, &profiles);
+
+        let object_count = proposals
+            .iter()
+            .filter(|proposal| proposal.proposal_type == "object")
+            .count();
+        let relation_count = proposals
+            .iter()
+            .filter(|proposal| proposal.proposal_type == "relation")
+            .count();
+        let metric_count = proposals
+            .iter()
+            .filter(|proposal| proposal.proposal_type == "metric")
+            .count();
+        let action_count = proposals
+            .iter()
+            .filter(|proposal| proposal.proposal_type == "action")
+            .count();
+
+        assert!(object_count >= 8);
+        assert!(relation_count >= 7);
+        assert!(metric_count >= 5);
+        assert!(action_count >= 4);
+        assert!(proposals.iter().all(|proposal| proposal.confidence >= 0.70));
+        assert!(
+            proposals
+                .iter()
+                .all(|proposal| proposal.evidence.is_object())
+        );
+        assert!(proposals.iter().any(|proposal| {
+            proposal.proposal_type == "relation"
+                && proposal.name == "Customer places Order"
+                && proposal.evidence["join_success_rate"]
+                    .as_f64()
+                    .unwrap_or_default()
+                    >= 0.99
+        }));
+        assert!(proposals.iter().any(|proposal| {
+            proposal.proposal_type == "action"
+                && proposal.name == "refund_order"
+                && proposal.content["policy"]["approval_required"].as_bool() == Some(true)
+        }));
     }
 
     #[test]
