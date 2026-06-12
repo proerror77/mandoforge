@@ -11919,7 +11919,7 @@ async fn list_ontology_onboarding_tool_specs(
     .await?;
     Ok(Json(OntologyOnboardingToolSpecResponse {
         run_id: id,
-        tool_specs: Vec::new(),
+        tool_specs: ontology_onboarding_tool_specs_for_run(&state, id).await?,
     }))
 }
 
@@ -11944,6 +11944,79 @@ async fn materialize_ontology_onboarding_run_for_test(
     run_id: Uuid,
 ) -> Result<OntologyOnboardingMaterializationResult, AppError> {
     materialize_ontology_onboarding_run_with_actor(state, run_id, "test").await
+}
+
+async fn ontology_onboarding_tool_specs_for_run(
+    state: &AppState,
+    run_id: Uuid,
+) -> Result<Vec<OntologyOnboardingToolSpec>, AppError> {
+    let mut specs = ontology_onboarding_proposal_objects(state)
+        .await?
+        .into_iter()
+        .filter(|object| ontology_onboarding_object_run_id(object) == Some(run_id))
+        .filter(|object| ontology_onboarding_object_materialized(object))
+        .map(|object| ontology_onboarding_object_proposal(&object))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|proposal| {
+            proposal.proposal_type == "action" && proposal.review_status == "approved"
+        })
+        .map(|proposal| ontology_tool_spec_from_action_proposal(run_id, &proposal))
+        .collect::<Result<Vec<_>, _>>()?;
+    specs.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(specs)
+}
+
+fn ontology_tool_spec_from_action_proposal(
+    run_id: Uuid,
+    proposal: &OntologyOnboardingProposalDraft,
+) -> Result<OntologyOnboardingToolSpec, AppError> {
+    let target_object = proposal
+        .content
+        .get("target_object")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::bad_request("action proposal missing target_object"))?;
+    let policy = proposal
+        .content
+        .get("policy")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let approval_required = policy
+        .get("approval_required")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let audit_event = proposal
+        .content
+        .get("audit_event")
+        .and_then(Value::as_str)
+        .unwrap_or("commerce.action")
+        .to_string();
+    Ok(OntologyOnboardingToolSpec {
+        id: proposal.id,
+        run_id,
+        name: format!("commerce.{}", proposal.name),
+        description: format!(
+            "Compiled ontology action tool for {target_object}: {}.",
+            proposal.name
+        ),
+        tool_kind: "ontology_action".to_string(),
+        target_object: target_object.to_string(),
+        read_only: false,
+        approval_required,
+        input_schema: proposal
+            .content
+            .get("inputs")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+        effects: proposal
+            .content
+            .get("effects")
+            .cloned()
+            .unwrap_or_else(|| json!([])),
+        policy,
+        audit_event,
+        source_proposal_id: proposal.id,
+    })
 }
 
 async fn create_demo_ontology_onboarding_run_with_actor(
@@ -60627,6 +60700,51 @@ mod tests {
             semantic_links
                 .iter()
                 .any(|link| { link.relation_type == "places" })
+        );
+    }
+
+    #[tokio::test]
+    async fn ontology_onboarding_generates_agent_tool_specs() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        let run = create_demo_ontology_onboarding_run_for_test(&state)
+            .await
+            .expect("demo run");
+
+        for proposal in run
+            .proposals
+            .iter()
+            .filter(|proposal| proposal.proposal_type == "action")
+        {
+            review_ontology_onboarding_proposal_for_test(
+                &state,
+                proposal.id,
+                "approve",
+                Some("action contract has policy and audit metadata"),
+            )
+            .await
+            .expect("approve action");
+        }
+
+        let materialized = materialize_ontology_onboarding_run_for_test(&state, run.id)
+            .await
+            .expect("materialize actions");
+        assert!(materialized.tool_spec_count >= 4);
+
+        let specs = ontology_onboarding_tool_specs_for_run(&state, run.id)
+            .await
+            .expect("tool specs");
+        let names = specs
+            .iter()
+            .map(|spec| spec.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"commerce.refund_order"));
+        assert!(names.contains(&"commerce.issue_coupon"));
+        assert!(names.contains(&"commerce.adjust_inventory"));
+        assert!(names.contains(&"commerce.escalate_ticket"));
+        assert!(
+            specs
+                .iter()
+                .any(|spec| spec.name == "commerce.refund_order" && spec.approval_required)
         );
     }
 
