@@ -299,6 +299,72 @@ pub struct OntologyRegistry {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct OntologyOnboardingRun {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub source_mode: String,
+    #[serde(default)]
+    pub dataset_count: usize,
+    #[serde(default)]
+    pub profile_count: usize,
+    #[serde(default)]
+    pub proposal_count: usize,
+    #[serde(default)]
+    pub approved_count: usize,
+    #[serde(default)]
+    pub materialized_count: usize,
+    #[serde(default)]
+    pub proposals: Vec<OntologyOnboardingProposal>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct OntologyOnboardingProposal {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub proposal_type: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub source_mapping: String,
+    #[serde(default)]
+    pub confidence: f64,
+    #[serde(default)]
+    pub recommendation: String,
+    #[serde(default)]
+    pub review_status: String,
+    #[serde(default)]
+    pub evidence: Value,
+    #[serde(default)]
+    pub content: Value,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct OntologyOnboardingToolSpec {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub target_object: String,
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default)]
+    pub approval_required: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct OntologyOnboardingToolSpecResponse {
+    #[serde(default)]
+    pub run_id: String,
+    #[serde(default)]
+    pub tool_specs: Vec<OntologyOnboardingToolSpec>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 pub struct SemanticReflectionQueue {
     #[serde(default)]
     pub status: String,

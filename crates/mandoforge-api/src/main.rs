@@ -2252,6 +2252,191 @@ struct ReviewOntologyProposalRequest {
     reason: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologyOnboardingField {
+    name: String,
+    field_type: String,
+    sample_values: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologyOnboardingDataset {
+    table_name: String,
+    source_system: String,
+    source_object: String,
+    fields: Vec<OntologyOnboardingField>,
+    rows: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologySourceBundle {
+    industry: String,
+    source_mode: String,
+    tool_namespace: String,
+    datasets: Vec<OntologyOnboardingDataset>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologySeedPack {
+    industry: String,
+    domain_scope: String,
+    source_mode: String,
+    tool_namespace: String,
+    objects: Vec<OntologySeedObjectMapping>,
+    relations: Vec<OntologySeedRelationMapping>,
+    metrics: Vec<OntologySeedMetricMapping>,
+    actions: Vec<OntologySeedActionMapping>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologySeedObjectMapping {
+    table_name: String,
+    object_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologySeedRelationMapping {
+    name: String,
+    from_object: String,
+    relation: String,
+    to_object: String,
+    source_table: String,
+    source_field: String,
+    reference_table: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologySeedMetricMapping {
+    name: String,
+    target_object: String,
+    expression: String,
+    evidence: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologySeedActionMapping {
+    name: String,
+    target_object: String,
+    approval_required: bool,
+    inputs: Value,
+    reads: Value,
+    effects: Value,
+    executor: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologyForeignKeyCandidate {
+    field: String,
+    references_table: String,
+    references_field: String,
+    join_success_rate: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologyDatasetProfile {
+    table_name: String,
+    row_count: usize,
+    primary_key_candidates: Vec<String>,
+    foreign_key_candidates: Vec<OntologyForeignKeyCandidate>,
+    enum_candidates: Vec<String>,
+    time_dimensions: Vec<String>,
+    currency_fields: Vec<String>,
+    pii_candidates: Vec<String>,
+    field_null_rates: Value,
+    field_uniqueness: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologyOnboardingProposalDraft {
+    id: Uuid,
+    run_id: Uuid,
+    proposal_type: String,
+    name: String,
+    source_mapping: String,
+    confidence: f64,
+    evidence: Value,
+    recommendation: String,
+    review_status: String,
+    content: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologyOnboardingRun {
+    id: Uuid,
+    status: String,
+    source_mode: String,
+    dataset_count: usize,
+    profile_count: usize,
+    proposal_count: usize,
+    approved_count: usize,
+    materialized_count: usize,
+    datasets: Vec<OntologyOnboardingDataset>,
+    profiles: Vec<OntologyDatasetProfile>,
+    proposals: Vec<OntologyOnboardingProposalDraft>,
+    generated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewOntologyOnboardingProposalRequest {
+    decision: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateOntologyOnboardingRunRequest {
+    #[serde(default)]
+    industry: Option<String>,
+    #[serde(default)]
+    source_mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologySeedPackSummary {
+    industry: String,
+    domain_scope: String,
+    source_mode: String,
+    tool_namespace: String,
+    object_count: usize,
+    relation_count: usize,
+    metric_count: usize,
+    action_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologyOnboardingMaterializationResult {
+    run_id: Uuid,
+    status: String,
+    semantic_object_count: usize,
+    semantic_link_count: usize,
+    tool_spec_count: usize,
+    semantic_object_ids: Vec<Uuid>,
+    semantic_link_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologyOnboardingToolSpec {
+    id: Uuid,
+    run_id: Uuid,
+    name: String,
+    description: String,
+    tool_kind: String,
+    target_object: String,
+    read_only: bool,
+    approval_required: bool,
+    input_schema: Value,
+    effects: Value,
+    policy: Value,
+    audit_event: String,
+    source_proposal_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologyOnboardingToolSpecResponse {
+    run_id: Uuid,
+    tool_specs: Vec<OntologyOnboardingToolSpec>,
+}
+
 #[derive(Debug, Deserialize)]
 struct RunSemanticDreamingRequest {
     session_id: Uuid,
@@ -6661,6 +6846,34 @@ fn build_router(state: AppState) -> Router {
             post(review_semantic_ontology_proposal),
         )
         .route(
+            "/api/ontology/onboarding/demo-runs",
+            post(create_demo_ontology_onboarding_run),
+        )
+        .route(
+            "/api/ontology/onboarding/seed-packs",
+            get(list_ontology_onboarding_seed_packs),
+        )
+        .route(
+            "/api/ontology/onboarding/runs",
+            get(list_ontology_onboarding_runs).post(create_ontology_onboarding_run),
+        )
+        .route(
+            "/api/ontology/onboarding/runs/{id}",
+            get(get_ontology_onboarding_run),
+        )
+        .route(
+            "/api/ontology/onboarding/proposals/{id}/review",
+            post(review_ontology_onboarding_proposal),
+        )
+        .route(
+            "/api/ontology/onboarding/runs/{id}/materialize",
+            post(materialize_ontology_onboarding_run),
+        )
+        .route(
+            "/api/ontology/onboarding/runs/{id}/tool-specs",
+            get(list_ontology_onboarding_tool_specs),
+        )
+        .route(
             "/api/semantic-conflicts/resolve",
             post(resolve_semantic_conflict),
         )
@@ -10852,6 +11065,2173 @@ fn normalize_ontology_review_decision(value: &str) -> Result<String, AppError> {
     }
 }
 
+#[cfg(test)]
+fn ontology_demo_datasets() -> Vec<OntologyOnboardingDataset> {
+    ontology_demo_source_bundle().datasets
+}
+
+fn ontology_demo_source_bundle() -> OntologySourceBundle {
+    OntologySourceBundle {
+        industry: "ecommerce".to_string(),
+        source_mode: "demo_ecommerce".to_string(),
+        tool_namespace: "commerce".to_string(),
+        datasets: ontology_demo_ecommerce_datasets(),
+    }
+}
+
+fn ontology_demo_ecommerce_datasets() -> Vec<OntologyOnboardingDataset> {
+    vec![
+        ontology_demo_dataset(
+            "customers",
+            "demo_commerce",
+            "customers",
+            vec![
+                ("id", "string"),
+                ("email", "string"),
+                ("name", "string"),
+                ("created_at", "timestamp"),
+            ],
+            vec![
+                json!({"id":"cus_1","email":"a@example.com","name":"Ada","created_at":"2026-06-01T00:00:00Z"}),
+                json!({"id":"cus_2","email":"b@example.com","name":"Ben","created_at":"2026-06-02T00:00:00Z"}),
+                json!({"id":"cus_3","email":"c@example.com","name":"Cy","created_at":"2026-06-03T00:00:00Z"}),
+                json!({"id":"cus_4","email":"d@example.com","name":"Dee","created_at":"2026-06-04T00:00:00Z"}),
+            ],
+        ),
+        ontology_demo_dataset(
+            "orders",
+            "demo_commerce",
+            "orders",
+            vec![
+                ("id", "string"),
+                ("customer_id", "string"),
+                ("status", "string"),
+                ("total_price", "decimal"),
+                ("created_at", "timestamp"),
+            ],
+            vec![
+                json!({"id":"ord_1","customer_id":"cus_1","status":"paid","total_price":120.0,"created_at":"2026-06-08T00:00:00Z"}),
+                json!({"id":"ord_2","customer_id":"cus_1","status":"refunded","total_price":80.0,"created_at":"2026-06-09T00:00:00Z"}),
+                json!({"id":"ord_3","customer_id":"cus_2","status":"paid","total_price":210.0,"created_at":"2026-06-10T00:00:00Z"}),
+                json!({"id":"ord_4","customer_id":"cus_3","status":"fulfilled","total_price":45.0,"created_at":"2026-06-11T00:00:00Z"}),
+            ],
+        ),
+        ontology_demo_dataset(
+            "order_items",
+            "demo_commerce",
+            "order_items",
+            vec![
+                ("id", "string"),
+                ("order_id", "string"),
+                ("sku_id", "string"),
+                ("quantity", "integer"),
+                ("line_total", "decimal"),
+            ],
+            vec![
+                json!({"id":"oli_1","order_id":"ord_1","sku_id":"sku_1","quantity":1,"line_total":120.0}),
+                json!({"id":"oli_2","order_id":"ord_2","sku_id":"sku_2","quantity":2,"line_total":80.0}),
+                json!({"id":"oli_3","order_id":"ord_3","sku_id":"sku_3","quantity":1,"line_total":210.0}),
+                json!({"id":"oli_4","order_id":"ord_4","sku_id":"sku_1","quantity":1,"line_total":45.0}),
+            ],
+        ),
+        ontology_demo_dataset(
+            "products",
+            "demo_commerce",
+            "products",
+            vec![
+                ("id", "string"),
+                ("title", "string"),
+                ("category", "string"),
+            ],
+            vec![
+                json!({"id":"prd_1","title":"Running Shoe","category":"footwear"}),
+                json!({"id":"prd_2","title":"Trail Jacket","category":"apparel"}),
+                json!({"id":"prd_3","title":"Water Bottle","category":"accessory"}),
+                json!({"id":"prd_4","title":"Yoga Mat","category":"fitness"}),
+            ],
+        ),
+        ontology_demo_dataset(
+            "skus",
+            "demo_commerce",
+            "skus",
+            vec![
+                ("id", "string"),
+                ("product_id", "string"),
+                ("sku_code", "string"),
+                ("price", "decimal"),
+            ],
+            vec![
+                json!({"id":"sku_1","product_id":"prd_1","sku_code":"SHOE-8","price":120.0}),
+                json!({"id":"sku_2","product_id":"prd_2","sku_code":"JACKET-M","price":40.0}),
+                json!({"id":"sku_3","product_id":"prd_3","sku_code":"BOTTLE-1L","price":210.0}),
+                json!({"id":"sku_4","product_id":"prd_4","sku_code":"MAT-BLUE","price":45.0}),
+            ],
+        ),
+        ontology_demo_dataset(
+            "inventory",
+            "demo_commerce",
+            "inventory",
+            vec![
+                ("id", "string"),
+                ("sku_id", "string"),
+                ("warehouse_id", "string"),
+                ("available_quantity", "integer"),
+            ],
+            vec![
+                json!({"id":"inv_1","sku_id":"sku_1","warehouse_id":"wh_1","available_quantity":5}),
+                json!({"id":"inv_2","sku_id":"sku_2","warehouse_id":"wh_1","available_quantity":2}),
+                json!({"id":"inv_3","sku_id":"sku_3","warehouse_id":"wh_2","available_quantity":50}),
+                json!({"id":"inv_4","sku_id":"sku_4","warehouse_id":"wh_2","available_quantity":1}),
+            ],
+        ),
+        ontology_demo_dataset(
+            "refunds",
+            "demo_commerce",
+            "refunds",
+            vec![
+                ("id", "string"),
+                ("order_id", "string"),
+                ("amount", "decimal"),
+                ("reason", "string"),
+                ("status", "string"),
+            ],
+            vec![
+                json!({"id":"ref_1","order_id":"ord_2","amount":80.0,"reason":"size_issue","status":"approved"}),
+                json!({"id":"ref_2","order_id":"ord_3","amount":20.0,"reason":"late_delivery","status":"requested"}),
+                json!({"id":"ref_3","order_id":"ord_1","amount":10.0,"reason":"coupon_adjustment","status":"closed"}),
+                json!({"id":"ref_4","order_id":"ord_4","amount":5.0,"reason":"minor_defect","status":"requested"}),
+            ],
+        ),
+        ontology_demo_dataset(
+            "tickets",
+            "demo_commerce",
+            "tickets",
+            vec![
+                ("id", "string"),
+                ("customer_id", "string"),
+                ("order_id", "string"),
+                ("status", "string"),
+                ("topic", "string"),
+            ],
+            vec![
+                json!({"id":"tic_1","customer_id":"cus_1","order_id":"ord_1","status":"open","topic":"shipping"}),
+                json!({"id":"tic_2","customer_id":"cus_2","order_id":"ord_3","status":"escalated","topic":"refund"}),
+                json!({"id":"tic_3","customer_id":"cus_3","order_id":"ord_4","status":"closed","topic":"coupon"}),
+                json!({"id":"tic_4","customer_id":"cus_4","order_id":null,"status":"open","topic":"product_question"}),
+            ],
+        ),
+    ]
+}
+
+fn ontology_ecommerce_seed_pack() -> OntologySeedPack {
+    OntologySeedPack {
+        industry: "ecommerce".to_string(),
+        domain_scope: "commerce".to_string(),
+        source_mode: "demo_ecommerce".to_string(),
+        tool_namespace: "commerce".to_string(),
+        objects: vec![
+            ontology_seed_object("customers", "Customer"),
+            ontology_seed_object("orders", "Order"),
+            ontology_seed_object("order_items", "OrderLine"),
+            ontology_seed_object("products", "Product"),
+            ontology_seed_object("skus", "SKU"),
+            ontology_seed_object("inventory", "InventoryItem"),
+            ontology_seed_object("refunds", "Refund"),
+            ontology_seed_object("tickets", "SupportTicket"),
+        ],
+        relations: vec![
+            ontology_seed_relation(
+                "Customer places Order",
+                "Customer",
+                "places",
+                "Order",
+                "orders",
+                "customer_id",
+                "customers",
+            ),
+            ontology_seed_relation(
+                "Order contains OrderLine",
+                "Order",
+                "contains",
+                "OrderLine",
+                "order_items",
+                "order_id",
+                "orders",
+            ),
+            ontology_seed_relation(
+                "OrderLine references SKU",
+                "OrderLine",
+                "references",
+                "SKU",
+                "order_items",
+                "sku_id",
+                "skus",
+            ),
+            ontology_seed_relation(
+                "SKU represents Product",
+                "SKU",
+                "represents",
+                "Product",
+                "skus",
+                "product_id",
+                "products",
+            ),
+            ontology_seed_relation(
+                "SKU has InventoryItem",
+                "SKU",
+                "has",
+                "InventoryItem",
+                "inventory",
+                "sku_id",
+                "skus",
+            ),
+            ontology_seed_relation(
+                "Order may_have Refund",
+                "Order",
+                "may_have",
+                "Refund",
+                "refunds",
+                "order_id",
+                "orders",
+            ),
+            ontology_seed_relation(
+                "Customer creates SupportTicket",
+                "Customer",
+                "creates",
+                "SupportTicket",
+                "tickets",
+                "customer_id",
+                "customers",
+            ),
+            ontology_seed_relation(
+                "Order has SupportTicket",
+                "Order",
+                "has",
+                "SupportTicket",
+                "tickets",
+                "order_id",
+                "orders",
+            ),
+        ],
+        metrics: vec![
+            ontology_seed_metric(
+                "GMV",
+                "Order",
+                "sum(orders.total_price) where orders.status in ('paid','fulfilled')",
+                json!({
+                    "unit": "currency",
+                    "base_table": "orders",
+                    "measure_field": "total_price",
+                    "time_dimension": "created_at"
+                }),
+            ),
+            ontology_seed_metric(
+                "AOV",
+                "Order",
+                "GMV / count(distinct orders.id)",
+                json!({
+                    "unit": "currency",
+                    "depends_on": ["GMV"],
+                    "base_table": "orders"
+                }),
+            ),
+            ontology_seed_metric(
+                "Refund Rate",
+                "Refund",
+                "count(distinct refunds.order_id) / count(distinct orders.id)",
+                json!({
+                    "unit": "ratio",
+                    "base_table": "refunds",
+                    "join": "refunds.order_id = orders.id"
+                }),
+            ),
+            ontology_seed_metric(
+                "Repeat Purchase Rate",
+                "Customer",
+                "customers with count(orders.id) > 1 / active customers",
+                json!({
+                    "unit": "ratio",
+                    "base_table": "orders",
+                    "join": "orders.customer_id = customers.id"
+                }),
+            ),
+            ontology_seed_metric(
+                "Inventory Turnover",
+                "InventoryItem",
+                "units_sold / average_inventory",
+                json!({
+                    "unit": "ratio",
+                    "base_table": "inventory",
+                    "join": "inventory.sku_id = skus.id"
+                }),
+            ),
+        ],
+        actions: vec![
+            ontology_seed_action(
+                "refund_order",
+                "Order",
+                true,
+                json!({
+                    "order_id": "string",
+                    "amount": "decimal",
+                    "reason": "string"
+                }),
+                json!(["Order", "Payment", "Customer"]),
+                json!([
+                    {"type": "create_object", "object": "Refund"},
+                    {"type": "update_attribute", "target": "Order.status"},
+                    {"type": "create_relation", "relation": "Order may_have Refund"}
+                ]),
+                json!({"type": "http_api", "ref": "POST /orders/{order_id}/refund"}),
+            ),
+            ontology_seed_action(
+                "issue_coupon",
+                "Customer",
+                true,
+                json!({
+                    "customer_id": "string",
+                    "coupon_code": "string",
+                    "reason": "string"
+                }),
+                json!(["Customer", "Order"]),
+                json!([
+                    {"type": "create_object", "object": "Coupon"},
+                    {"type": "create_relation", "relation": "Customer receives Coupon"}
+                ]),
+                json!({"type": "http_api", "ref": "POST /customers/{customer_id}/coupons"}),
+            ),
+            ontology_seed_action(
+                "adjust_inventory",
+                "InventoryItem",
+                true,
+                json!({
+                    "inventory_item_id": "string",
+                    "delta_quantity": "integer",
+                    "reason": "string"
+                }),
+                json!(["InventoryItem", "SKU"]),
+                json!([
+                    {"type": "update_attribute", "target": "InventoryItem.available_quantity"}
+                ]),
+                json!({"type": "http_api", "ref": "POST /inventory/{inventory_item_id}/adjust"}),
+            ),
+            ontology_seed_action(
+                "escalate_ticket",
+                "SupportTicket",
+                false,
+                json!({
+                    "ticket_id": "string",
+                    "reason": "string"
+                }),
+                json!(["SupportTicket", "Customer", "Order"]),
+                json!([
+                    {"type": "update_attribute", "target": "SupportTicket.status"}
+                ]),
+                json!({"type": "http_api", "ref": "POST /tickets/{ticket_id}/escalate"}),
+            ),
+        ],
+    }
+}
+
+fn ontology_insurance_demo_source_bundle() -> OntologySourceBundle {
+    OntologySourceBundle {
+        industry: "insurance".to_string(),
+        source_mode: "demo_insurance".to_string(),
+        tool_namespace: "insurance".to_string(),
+        datasets: vec![
+            ontology_demo_dataset(
+                "insureds",
+                "demo_insurance",
+                "insureds",
+                vec![
+                    ("id", "string"),
+                    ("email", "string"),
+                    ("name", "string"),
+                    ("created_at", "timestamp"),
+                ],
+                vec![
+                    json!({"id":"ins_1","email":"a@example.com","name":"Ada","created_at":"2026-06-01T00:00:00Z"}),
+                    json!({"id":"ins_2","email":"b@example.com","name":"Ben","created_at":"2026-06-02T00:00:00Z"}),
+                    json!({"id":"ins_3","email":"c@example.com","name":"Cy","created_at":"2026-06-03T00:00:00Z"}),
+                    json!({"id":"ins_4","email":"d@example.com","name":"Dee","created_at":"2026-06-04T00:00:00Z"}),
+                ],
+            ),
+            ontology_demo_dataset(
+                "policies",
+                "demo_insurance",
+                "policies",
+                vec![
+                    ("id", "string"),
+                    ("insured_id", "string"),
+                    ("policy_number", "string"),
+                    ("premium_amount", "decimal"),
+                    ("effective_at", "timestamp"),
+                ],
+                vec![
+                    json!({"id":"pol_1","insured_id":"ins_1","policy_number":"P-100","premium_amount":1200.0,"effective_at":"2026-06-01T00:00:00Z"}),
+                    json!({"id":"pol_2","insured_id":"ins_2","policy_number":"P-200","premium_amount":950.0,"effective_at":"2026-06-02T00:00:00Z"}),
+                    json!({"id":"pol_3","insured_id":"ins_3","policy_number":"P-300","premium_amount":1800.0,"effective_at":"2026-06-03T00:00:00Z"}),
+                    json!({"id":"pol_4","insured_id":"ins_4","policy_number":"P-400","premium_amount":700.0,"effective_at":"2026-06-04T00:00:00Z"}),
+                ],
+            ),
+            ontology_demo_dataset(
+                "claims",
+                "demo_insurance",
+                "claims",
+                vec![
+                    ("id", "string"),
+                    ("policy_id", "string"),
+                    ("insured_id", "string"),
+                    ("claim_amount", "decimal"),
+                    ("status", "string"),
+                    ("opened_at", "timestamp"),
+                ],
+                vec![
+                    json!({"id":"clm_1","policy_id":"pol_1","insured_id":"ins_1","claim_amount":200.0,"status":"open","opened_at":"2026-06-08T00:00:00Z"}),
+                    json!({"id":"clm_2","policy_id":"pol_2","insured_id":"ins_2","claim_amount":450.0,"status":"approved","opened_at":"2026-06-09T00:00:00Z"}),
+                    json!({"id":"clm_3","policy_id":"pol_3","insured_id":"ins_3","claim_amount":1200.0,"status":"review","opened_at":"2026-06-10T00:00:00Z"}),
+                    json!({"id":"clm_4","policy_id":"pol_4","insured_id":"ins_4","claim_amount":80.0,"status":"closed","opened_at":"2026-06-11T00:00:00Z"}),
+                ],
+            ),
+            ontology_demo_dataset(
+                "brokers",
+                "demo_insurance",
+                "brokers",
+                vec![("id", "string"), ("name", "string"), ("email", "string")],
+                vec![
+                    json!({"id":"bro_1","name":"North Agency","email":"north@example.com"}),
+                    json!({"id":"bro_2","name":"South Agency","email":"south@example.com"}),
+                    json!({"id":"bro_3","name":"East Agency","email":"east@example.com"}),
+                    json!({"id":"bro_4","name":"West Agency","email":"west@example.com"}),
+                ],
+            ),
+        ],
+    }
+}
+
+fn ontology_insurance_seed_pack() -> OntologySeedPack {
+    OntologySeedPack {
+        industry: "insurance".to_string(),
+        domain_scope: "insurance".to_string(),
+        source_mode: "demo_insurance".to_string(),
+        tool_namespace: "insurance".to_string(),
+        objects: vec![
+            ontology_seed_object("insureds", "Insured"),
+            ontology_seed_object("policies", "Policy"),
+            ontology_seed_object("claims", "Claim"),
+            ontology_seed_object("brokers", "Broker"),
+        ],
+        relations: vec![
+            ontology_seed_relation(
+                "Policy covers Insured",
+                "Policy",
+                "covers",
+                "Insured",
+                "policies",
+                "insured_id",
+                "insureds",
+            ),
+            ontology_seed_relation(
+                "Insured files Claim",
+                "Insured",
+                "files",
+                "Claim",
+                "claims",
+                "insured_id",
+                "insureds",
+            ),
+            ontology_seed_relation(
+                "Claim belongs_to Policy",
+                "Claim",
+                "belongs_to",
+                "Policy",
+                "claims",
+                "policy_id",
+                "policies",
+            ),
+        ],
+        metrics: vec![
+            ontology_seed_metric(
+                "Loss Ratio",
+                "Claim",
+                "sum(claims.claim_amount) / sum(policies.premium_amount)",
+                json!({
+                    "unit": "ratio",
+                    "base_table": "claims",
+                    "join": "claims.policy_id = policies.id"
+                }),
+            ),
+            ontology_seed_metric(
+                "Claim Cycle Time",
+                "Claim",
+                "avg(claims.closed_at - claims.opened_at)",
+                json!({
+                    "unit": "duration",
+                    "base_table": "claims",
+                    "time_dimension": "opened_at"
+                }),
+            ),
+        ],
+        actions: vec![
+            ontology_seed_action(
+                "approve_claim",
+                "Claim",
+                true,
+                json!({
+                    "claim_id": "string",
+                    "approved_amount": "decimal",
+                    "reason": "string"
+                }),
+                json!(["Claim", "Policy", "Insured"]),
+                json!([
+                    {"type": "update_attribute", "target": "Claim.status"},
+                    {"type": "create_audit_event", "event": "Claim approved"}
+                ]),
+                json!({"type": "http_api", "ref": "POST /claims/{claim_id}/approve"}),
+            ),
+            ontology_seed_action(
+                "request_documents",
+                "Claim",
+                false,
+                json!({
+                    "claim_id": "string",
+                    "document_types": "array"
+                }),
+                json!(["Claim", "Insured"]),
+                json!([
+                    {"type": "create_object", "object": "DocumentRequest"}
+                ]),
+                json!({"type": "http_api", "ref": "POST /claims/{claim_id}/document-requests"}),
+            ),
+        ],
+    }
+}
+
+fn ontology_demo_dataset(
+    table_name: &str,
+    source_system: &str,
+    source_object: &str,
+    field_defs: Vec<(&str, &str)>,
+    rows: Vec<Value>,
+) -> OntologyOnboardingDataset {
+    let fields = field_defs
+        .into_iter()
+        .map(|(name, field_type)| OntologyOnboardingField {
+            name: name.to_string(),
+            field_type: field_type.to_string(),
+            sample_values: rows
+                .iter()
+                .filter_map(|row| row.get(name).cloned())
+                .filter(|value| !value.is_null())
+                .take(3)
+                .collect(),
+        })
+        .collect();
+    OntologyOnboardingDataset {
+        table_name: table_name.to_string(),
+        source_system: source_system.to_string(),
+        source_object: source_object.to_string(),
+        fields,
+        rows,
+    }
+}
+
+fn ontology_seed_object(table_name: &str, object_name: &str) -> OntologySeedObjectMapping {
+    OntologySeedObjectMapping {
+        table_name: table_name.to_string(),
+        object_name: object_name.to_string(),
+    }
+}
+
+fn ontology_seed_relation(
+    name: &str,
+    from_object: &str,
+    relation: &str,
+    to_object: &str,
+    source_table: &str,
+    source_field: &str,
+    reference_table: &str,
+) -> OntologySeedRelationMapping {
+    OntologySeedRelationMapping {
+        name: name.to_string(),
+        from_object: from_object.to_string(),
+        relation: relation.to_string(),
+        to_object: to_object.to_string(),
+        source_table: source_table.to_string(),
+        source_field: source_field.to_string(),
+        reference_table: reference_table.to_string(),
+    }
+}
+
+fn ontology_seed_metric(
+    name: &str,
+    target_object: &str,
+    expression: &str,
+    evidence: Value,
+) -> OntologySeedMetricMapping {
+    OntologySeedMetricMapping {
+        name: name.to_string(),
+        target_object: target_object.to_string(),
+        expression: expression.to_string(),
+        evidence,
+    }
+}
+
+fn ontology_seed_action(
+    name: &str,
+    target_object: &str,
+    approval_required: bool,
+    inputs: Value,
+    reads: Value,
+    effects: Value,
+    executor: Value,
+) -> OntologySeedActionMapping {
+    OntologySeedActionMapping {
+        name: name.to_string(),
+        target_object: target_object.to_string(),
+        approval_required,
+        inputs,
+        reads,
+        effects,
+        executor,
+    }
+}
+
+fn ontology_profile_demo_datasets(
+    datasets: &[OntologyOnboardingDataset],
+) -> Vec<OntologyDatasetProfile> {
+    datasets
+        .iter()
+        .map(|dataset| ontology_profile_dataset(dataset, datasets))
+        .collect()
+}
+
+fn ontology_profile_dataset(
+    dataset: &OntologyOnboardingDataset,
+    datasets: &[OntologyOnboardingDataset],
+) -> OntologyDatasetProfile {
+    let row_count = dataset.rows.len();
+    let mut primary_key_candidates = Vec::new();
+    let mut foreign_key_candidates = Vec::new();
+    let mut enum_candidates = Vec::new();
+    let mut time_dimensions = Vec::new();
+    let mut currency_fields = Vec::new();
+    let mut pii_candidates = Vec::new();
+    let mut field_null_rates = serde_json::Map::new();
+    let mut field_uniqueness = serde_json::Map::new();
+
+    for field in &dataset.fields {
+        let values = ontology_field_values(dataset, &field.name);
+        let non_null_count = values.iter().filter(|value| !value.is_null()).count();
+        let distinct_count = ontology_distinct_value_count(&values);
+        let null_rate = if row_count == 0 {
+            0.0
+        } else {
+            (row_count - non_null_count) as f64 / row_count as f64
+        };
+        let uniqueness = if non_null_count == 0 {
+            0.0
+        } else {
+            distinct_count as f64 / non_null_count as f64
+        };
+        field_null_rates.insert(field.name.clone(), json!(null_rate));
+        field_uniqueness.insert(field.name.clone(), json!(uniqueness));
+
+        if row_count > 0 && non_null_count == row_count && distinct_count == row_count {
+            primary_key_candidates.push(field.name.clone());
+        }
+        if distinct_count > 0 && distinct_count <= 8 && uniqueness < 1.0 {
+            enum_candidates.push(field.name.clone());
+        }
+        if field.name.ends_with("_at") {
+            time_dimensions.push(field.name.clone());
+        }
+        if ontology_is_currency_field(&field.name) {
+            currency_fields.push(field.name.clone());
+        }
+        if ontology_is_pii_field(&field.name) {
+            pii_candidates.push(field.name.clone());
+        }
+        if field.name.ends_with("_id") {
+            foreign_key_candidates.extend(ontology_foreign_key_candidates(
+                dataset,
+                &field.name,
+                datasets,
+            ));
+        }
+    }
+
+    OntologyDatasetProfile {
+        table_name: dataset.table_name.clone(),
+        row_count,
+        primary_key_candidates,
+        foreign_key_candidates,
+        enum_candidates,
+        time_dimensions,
+        currency_fields,
+        pii_candidates,
+        field_null_rates: Value::Object(field_null_rates),
+        field_uniqueness: Value::Object(field_uniqueness),
+    }
+}
+
+fn ontology_field_values(dataset: &OntologyOnboardingDataset, field_name: &str) -> Vec<Value> {
+    dataset
+        .rows
+        .iter()
+        .map(|row| row.get(field_name).cloned().unwrap_or(Value::Null))
+        .collect()
+}
+
+fn ontology_distinct_value_count(values: &[Value]) -> usize {
+    values
+        .iter()
+        .filter(|value| !value.is_null())
+        .map(ontology_normalized_value_key)
+        .collect::<HashSet<_>>()
+        .len()
+}
+
+fn ontology_normalized_value_key(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        _ => value.to_string(),
+    }
+}
+
+fn ontology_is_currency_field(field_name: &str) -> bool {
+    let lower = field_name.to_ascii_lowercase();
+    lower.contains("price") || lower.contains("amount") || lower.contains("total")
+}
+
+fn ontology_is_pii_field(field_name: &str) -> bool {
+    let lower = field_name.to_ascii_lowercase();
+    lower.contains("email") || lower.contains("phone") || lower.contains("address")
+}
+
+fn ontology_foreign_key_candidates(
+    dataset: &OntologyOnboardingDataset,
+    field_name: &str,
+    datasets: &[OntologyOnboardingDataset],
+) -> Vec<OntologyForeignKeyCandidate> {
+    let expected_table = ontology_expected_reference_table(field_name);
+    datasets
+        .iter()
+        .filter(|candidate| candidate.table_name != dataset.table_name)
+        .filter(|candidate| {
+            expected_table
+                .as_ref()
+                .map(|expected| candidate.table_name == *expected)
+                .unwrap_or_else(|| candidate.table_name == field_name.trim_end_matches("_id"))
+        })
+        .filter(|candidate| candidate.fields.iter().any(|field| field.name == "id"))
+        .filter_map(|candidate| {
+            let join_success_rate =
+                ontology_join_success_rate(dataset, field_name, candidate, "id");
+            (join_success_rate > 0.0).then(|| OntologyForeignKeyCandidate {
+                field: field_name.to_string(),
+                references_table: candidate.table_name.clone(),
+                references_field: "id".to_string(),
+                join_success_rate,
+            })
+        })
+        .collect()
+}
+
+fn ontology_expected_reference_table(field_name: &str) -> Option<String> {
+    let base = field_name.strip_suffix("_id")?;
+    Some(
+        match base {
+            "customer" => "customers",
+            "order" => "orders",
+            "product" => "products",
+            "sku" => "skus",
+            "refund" => "refunds",
+            "ticket" => "tickets",
+            "inventory" => "inventory",
+            "insured" => "insureds",
+            "policy" => "policies",
+            "claim" => "claims",
+            "broker" => "brokers",
+            value => value,
+        }
+        .to_string(),
+    )
+}
+
+fn ontology_join_success_rate(
+    dataset: &OntologyOnboardingDataset,
+    field_name: &str,
+    reference_dataset: &OntologyOnboardingDataset,
+    reference_field: &str,
+) -> f64 {
+    let reference_values = reference_dataset
+        .rows
+        .iter()
+        .filter_map(|row| row.get(reference_field))
+        .filter(|value| !value.is_null())
+        .map(ontology_normalized_value_key)
+        .collect::<HashSet<_>>();
+    let values = dataset
+        .rows
+        .iter()
+        .filter_map(|row| row.get(field_name))
+        .filter(|value| !value.is_null())
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        return 0.0;
+    }
+    let matches = values
+        .iter()
+        .filter(|value| reference_values.contains(&ontology_normalized_value_key(value)))
+        .count();
+    matches as f64 / values.len() as f64
+}
+
+#[cfg(test)]
+fn ontology_generate_demo_proposals(
+    datasets: &[OntologyOnboardingDataset],
+    profiles: &[OntologyDatasetProfile],
+) -> Vec<OntologyOnboardingProposalDraft> {
+    ontology_generate_demo_proposals_for_run(Uuid::new_v4(), datasets, profiles)
+}
+
+#[cfg(test)]
+fn ontology_generate_demo_proposals_for_run(
+    run_id: Uuid,
+    datasets: &[OntologyOnboardingDataset],
+    profiles: &[OntologyDatasetProfile],
+) -> Vec<OntologyOnboardingProposalDraft> {
+    ontology_generate_seed_proposals_for_run(
+        run_id,
+        &ontology_ecommerce_seed_pack(),
+        datasets,
+        profiles,
+    )
+}
+
+fn ontology_generate_seed_proposals_for_run(
+    run_id: Uuid,
+    seed: &OntologySeedPack,
+    datasets: &[OntologyOnboardingDataset],
+    profiles: &[OntologyDatasetProfile],
+) -> Vec<OntologyOnboardingProposalDraft> {
+    let mut proposals = Vec::new();
+    for mapping in &seed.objects {
+        if let (Some(dataset), Some(profile)) = (
+            datasets
+                .iter()
+                .find(|dataset| dataset.table_name == mapping.table_name),
+            ontology_profile_by_table(profiles, &mapping.table_name),
+        ) {
+            proposals.push(ontology_object_proposal(
+                run_id,
+                seed,
+                dataset,
+                profile,
+                &mapping.object_name,
+            ));
+        }
+    }
+
+    for mapping in &seed.relations {
+        if let Some(profile) = ontology_profile_by_table(profiles, &mapping.source_table) {
+            if let Some(candidate) = ontology_profile_fk(
+                profile,
+                &mapping.source_field,
+                &mapping.reference_table,
+                "id",
+            ) {
+                proposals.push(ontology_relation_proposal(
+                    run_id,
+                    seed,
+                    mapping,
+                    candidate.join_success_rate,
+                ));
+            }
+        }
+    }
+
+    for mapping in &seed.metrics {
+        proposals.push(ontology_metric_proposal(run_id, seed, mapping));
+    }
+
+    for mapping in &seed.actions {
+        proposals.push(ontology_action_proposal(run_id, seed, mapping));
+    }
+
+    proposals
+}
+
+fn ontology_object_proposal(
+    run_id: Uuid,
+    seed: &OntologySeedPack,
+    dataset: &OntologyOnboardingDataset,
+    profile: &OntologyDatasetProfile,
+    object_name: &str,
+) -> OntologyOnboardingProposalDraft {
+    ontology_proposal(
+        run_id,
+        "object",
+        object_name,
+        format!(
+            "{}.{} -> {object_name}",
+            dataset.source_system, dataset.table_name
+        ),
+        0.94,
+        json!({
+            "table": dataset.table_name,
+            "row_count": profile.row_count,
+            "industry": seed.industry,
+            "domain_scope": seed.domain_scope,
+            "tool_namespace": seed.tool_namespace,
+            "primary_key_candidates": profile.primary_key_candidates,
+            "time_dimensions": profile.time_dimensions,
+            "currency_fields": profile.currency_fields,
+            "pii_candidates": profile.pii_candidates,
+            "seed_ontology_match": object_name,
+        }),
+        json!({
+            "object_type": object_name,
+            "industry": seed.industry,
+            "domain_scope": seed.domain_scope,
+            "tool_namespace": seed.tool_namespace,
+            "source_table": dataset.table_name,
+            "source_system": dataset.source_system,
+            "primary_key": profile.primary_key_candidates.first().cloned().unwrap_or_else(|| "id".to_string()),
+            "properties": dataset.fields.iter().map(|field| {
+                json!({
+                    "name": field.name,
+                    "type": field.field_type,
+                    "sample_values": field.sample_values,
+                })
+            }).collect::<Vec<_>>(),
+        }),
+    )
+}
+
+fn ontology_relation_proposal(
+    run_id: Uuid,
+    seed: &OntologySeedPack,
+    mapping: &OntologySeedRelationMapping,
+    join_success_rate: f64,
+) -> OntologyOnboardingProposalDraft {
+    ontology_proposal(
+        run_id,
+        "relation",
+        &mapping.name,
+        format!(
+            "{}.{} = {}.id",
+            mapping.source_table, mapping.source_field, mapping.reference_table
+        ),
+        if join_success_rate >= 0.99 {
+            0.96
+        } else {
+            0.88
+        },
+        json!({
+            "industry": seed.industry,
+            "domain_scope": seed.domain_scope,
+            "tool_namespace": seed.tool_namespace,
+            "source_table": mapping.source_table,
+            "source_field": mapping.source_field,
+            "references_table": mapping.reference_table,
+            "references_field": "id",
+            "join_success_rate": join_success_rate,
+            "seed_relation_match": mapping.name,
+        }),
+        json!({
+            "industry": seed.industry,
+            "domain_scope": seed.domain_scope,
+            "tool_namespace": seed.tool_namespace,
+            "from_object": mapping.from_object,
+            "relation": mapping.relation,
+            "to_object": mapping.to_object,
+            "link_type": mapping.name,
+            "source_mapping": format!("{}.{} = {}.id", mapping.source_table, mapping.source_field, mapping.reference_table),
+        }),
+    )
+}
+
+fn ontology_metric_proposal(
+    run_id: Uuid,
+    seed: &OntologySeedPack,
+    mapping: &OntologySeedMetricMapping,
+) -> OntologyOnboardingProposalDraft {
+    ontology_proposal(
+        run_id,
+        "metric",
+        &mapping.name,
+        mapping.expression.clone(),
+        0.86,
+        json!({
+            "semantic_model": seed.domain_scope,
+            "industry": seed.industry,
+            "domain_scope": seed.domain_scope,
+            "tool_namespace": seed.tool_namespace,
+            "target_object": mapping.target_object,
+            "expression": mapping.expression,
+            "definition_evidence": mapping.evidence,
+        }),
+        json!({
+            "metric_name": mapping.name,
+            "industry": seed.industry,
+            "domain_scope": seed.domain_scope,
+            "tool_namespace": seed.tool_namespace,
+            "target_object": mapping.target_object,
+            "expression": mapping.expression,
+            "governance": {
+                "requires_owner_review": true,
+                "downstream_tools_use_canonical_definition": true
+            }
+        }),
+    )
+}
+
+fn ontology_action_proposal(
+    run_id: Uuid,
+    seed: &OntologySeedPack,
+    mapping: &OntologySeedActionMapping,
+) -> OntologyOnboardingProposalDraft {
+    ontology_proposal(
+        run_id,
+        "action",
+        &mapping.name,
+        format!("{} -> {}", mapping.name, mapping.target_object),
+        0.82,
+        json!({
+            "industry": seed.industry,
+            "domain_scope": seed.domain_scope,
+            "tool_namespace": seed.tool_namespace,
+            "target_object": mapping.target_object,
+            "contract_source": "demo_openapi_and_sop_seed",
+            "approval_required": mapping.approval_required,
+            "effect_count": mapping.effects.as_array().map(Vec::len).unwrap_or_default(),
+        }),
+        json!({
+            "action": mapping.name,
+            "industry": seed.industry,
+            "domain_scope": seed.domain_scope,
+            "tool_namespace": seed.tool_namespace,
+            "target_object": mapping.target_object,
+            "inputs": mapping.inputs,
+            "reads": mapping.reads,
+            "effects": mapping.effects,
+            "policy": {
+                "approval_required": mapping.approval_required,
+                "approval_required_if": if mapping.approval_required { Value::String("external_write_or_financial_impact".to_string()) } else { Value::Null }
+            },
+            "executor": mapping.executor,
+            "audit_event": format!("{}.{}", seed.tool_namespace, mapping.name),
+        }),
+    )
+}
+
+fn ontology_proposal(
+    run_id: Uuid,
+    proposal_type: &str,
+    name: &str,
+    source_mapping: String,
+    confidence: f64,
+    evidence: Value,
+    content: Value,
+) -> OntologyOnboardingProposalDraft {
+    OntologyOnboardingProposalDraft {
+        id: Uuid::new_v4(),
+        run_id,
+        proposal_type: proposal_type.to_string(),
+        name: name.to_string(),
+        source_mapping,
+        confidence,
+        evidence,
+        recommendation: "approve".to_string(),
+        review_status: "pending".to_string(),
+        content,
+    }
+}
+
+fn ontology_profile_by_table<'a>(
+    profiles: &'a [OntologyDatasetProfile],
+    table_name: &str,
+) -> Option<&'a OntologyDatasetProfile> {
+    profiles
+        .iter()
+        .find(|profile| profile.table_name == table_name)
+}
+
+fn ontology_profile_fk<'a>(
+    profile: &'a OntologyDatasetProfile,
+    field: &str,
+    references_table: &str,
+    references_field: &str,
+) -> Option<&'a OntologyForeignKeyCandidate> {
+    profile.foreign_key_candidates.iter().find(|candidate| {
+        candidate.field == field
+            && candidate.references_table == references_table
+            && candidate.references_field == references_field
+    })
+}
+
+async fn create_demo_ontology_onboarding_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<OntologyOnboardingRun>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsWrite,
+        "ontology_onboarding",
+        None,
+    )
+    .await?;
+    let principal = principal_from_request(&state, &headers).await?;
+    Ok(Json(
+        create_ontology_onboarding_run_with_actor(
+            &state,
+            "ecommerce",
+            "demo_ecommerce",
+            &principal.subject_id,
+        )
+        .await?,
+    ))
+}
+
+async fn list_ontology_onboarding_seed_packs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<OntologySeedPackSummary>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "ontology_onboarding",
+        None,
+    )
+    .await?;
+    Ok(Json(
+        ontology_available_seed_packs()
+            .into_iter()
+            .map(|seed| OntologySeedPackSummary {
+                industry: seed.industry,
+                domain_scope: seed.domain_scope,
+                source_mode: seed.source_mode,
+                tool_namespace: seed.tool_namespace,
+                object_count: seed.objects.len(),
+                relation_count: seed.relations.len(),
+                metric_count: seed.metrics.len(),
+                action_count: seed.actions.len(),
+            })
+            .collect(),
+    ))
+}
+
+async fn create_ontology_onboarding_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateOntologyOnboardingRunRequest>,
+) -> Result<Json<OntologyOnboardingRun>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsWrite,
+        "ontology_onboarding",
+        None,
+    )
+    .await?;
+    let principal = principal_from_request(&state, &headers).await?;
+    let industry = input.industry.as_deref().unwrap_or("ecommerce");
+    let source_mode = input.source_mode.as_deref().unwrap_or("demo_ecommerce");
+    Ok(Json(
+        create_ontology_onboarding_run_with_actor(
+            &state,
+            industry,
+            source_mode,
+            &principal.subject_id,
+        )
+        .await?,
+    ))
+}
+
+async fn list_ontology_onboarding_runs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<OntologyOnboardingRun>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "ontology_onboarding",
+        None,
+    )
+    .await?;
+    Ok(Json(list_ontology_onboarding_runs_for_state(&state).await?))
+}
+
+async fn get_ontology_onboarding_run(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<OntologyOnboardingRun>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "ontology_onboarding",
+        Some(id),
+    )
+    .await?;
+    get_ontology_onboarding_run_for_state(&state, id)
+        .await
+        .map(Json)
+}
+
+async fn review_ontology_onboarding_proposal(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<ReviewOntologyOnboardingProposalRequest>,
+) -> Result<Json<OntologyOnboardingProposalDraft>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsWrite,
+        "ontology_onboarding",
+        Some(id),
+    )
+    .await?;
+    let principal = principal_from_request(&state, &headers).await?;
+    review_ontology_onboarding_proposal_with_actor(
+        &state,
+        id,
+        &input.decision,
+        input.reason.as_deref(),
+        &principal.subject_id,
+    )
+    .await
+    .map(Json)
+}
+
+async fn materialize_ontology_onboarding_run(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<OntologyOnboardingMaterializationResult>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsWrite,
+        "ontology_onboarding",
+        Some(id),
+    )
+    .await?;
+    let principal = principal_from_request(&state, &headers).await?;
+    materialize_ontology_onboarding_run_with_actor(&state, id, &principal.subject_id)
+        .await
+        .map(Json)
+}
+
+async fn list_ontology_onboarding_tool_specs(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<OntologyOnboardingToolSpecResponse>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "ontology_onboarding",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(OntologyOnboardingToolSpecResponse {
+        run_id: id,
+        tool_specs: ontology_onboarding_tool_specs_for_run(&state, id).await?,
+    }))
+}
+
+#[cfg(test)]
+async fn create_demo_ontology_onboarding_run_for_test(
+    state: &AppState,
+) -> Result<OntologyOnboardingRun, AppError> {
+    create_ontology_onboarding_run_with_actor(state, "ecommerce", "demo_ecommerce", "test").await
+}
+
+#[cfg(test)]
+async fn review_ontology_onboarding_proposal_for_test(
+    state: &AppState,
+    proposal_id: Uuid,
+    decision: &str,
+    reason: Option<&str>,
+) -> Result<OntologyOnboardingProposalDraft, AppError> {
+    review_ontology_onboarding_proposal_with_actor(state, proposal_id, decision, reason, "test")
+        .await
+}
+
+#[cfg(test)]
+async fn materialize_ontology_onboarding_run_for_test(
+    state: &AppState,
+    run_id: Uuid,
+) -> Result<OntologyOnboardingMaterializationResult, AppError> {
+    materialize_ontology_onboarding_run_with_actor(state, run_id, "test").await
+}
+
+async fn ontology_onboarding_tool_specs_for_run(
+    state: &AppState,
+    run_id: Uuid,
+) -> Result<Vec<OntologyOnboardingToolSpec>, AppError> {
+    let mut specs = ontology_onboarding_proposal_objects(state)
+        .await?
+        .into_iter()
+        .filter(|object| ontology_onboarding_object_run_id(object) == Some(run_id))
+        .filter(|object| ontology_onboarding_object_materialized(object))
+        .map(|object| ontology_onboarding_object_proposal(&object))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|proposal| {
+            proposal.proposal_type == "action" && proposal.review_status == "approved"
+        })
+        .map(|proposal| ontology_tool_spec_from_action_proposal(run_id, &proposal))
+        .collect::<Result<Vec<_>, _>>()?;
+    specs.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(specs)
+}
+
+fn ontology_tool_spec_from_action_proposal(
+    run_id: Uuid,
+    proposal: &OntologyOnboardingProposalDraft,
+) -> Result<OntologyOnboardingToolSpec, AppError> {
+    let target_object = proposal
+        .content
+        .get("target_object")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::bad_request("action proposal missing target_object"))?;
+    let policy = proposal
+        .content
+        .get("policy")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let approval_required = policy
+        .get("approval_required")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let audit_event = proposal
+        .content
+        .get("audit_event")
+        .and_then(Value::as_str)
+        .unwrap_or("commerce.action")
+        .to_string();
+    Ok(OntologyOnboardingToolSpec {
+        id: proposal.id,
+        run_id,
+        name: format!(
+            "{}.{}",
+            ontology_proposal_tool_namespace(proposal),
+            proposal.name
+        ),
+        description: format!(
+            "Compiled ontology action tool for {target_object}: {}.",
+            proposal.name
+        ),
+        tool_kind: "ontology_action".to_string(),
+        target_object: target_object.to_string(),
+        read_only: false,
+        approval_required,
+        input_schema: proposal
+            .content
+            .get("inputs")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+        effects: proposal
+            .content
+            .get("effects")
+            .cloned()
+            .unwrap_or_else(|| json!([])),
+        policy,
+        audit_event,
+        source_proposal_id: proposal.id,
+    })
+}
+
+async fn create_ontology_onboarding_run_with_actor(
+    state: &AppState,
+    industry: &str,
+    source_mode: &str,
+    actor_subject: &str,
+) -> Result<OntologyOnboardingRun, AppError> {
+    let run_id = Uuid::new_v4();
+    let (seed, source) = ontology_seed_and_source_for_request(industry, source_mode)?;
+    let datasets = source.datasets.clone();
+    let profiles = ontology_profile_demo_datasets(&datasets);
+    let proposals = ontology_generate_seed_proposals_for_run(run_id, &seed, &datasets, &profiles);
+    for proposal in &proposals {
+        state
+            .create_semantic_object(CreateSemanticObject {
+                source_id: None,
+                object_type: "ontology_onboarding_proposal".to_string(),
+                object_key: ontology_onboarding_proposal_object_key(run_id, proposal.id),
+                title: format!("Ontology onboarding proposal: {}", proposal.name),
+                summary: format!(
+                    "{} proposal for {} ontology fast onboarding; review required before materialization.",
+                    proposal.proposal_type, seed.industry
+                ),
+                content: ontology_onboarding_proposal_content(run_id, proposal, false, None)?,
+                semantic_scopes: json!({
+                    "domain_scope": seed.domain_scope,
+                    "workflow_scope": "enterprise-ontology-fast-onboarding",
+                    "memory_scope": "ontology",
+                    "share_policy": "review_required",
+                }),
+                source_uri: Some(format!(
+                    "mandoforge://ontology/onboarding/runs/{run_id}/proposals/{}",
+                    proposal.id
+                )),
+                provenance: json!({
+                    "source": "ontology_onboarding.demo_run",
+                    "industry": seed.industry,
+                    "source_mode": source.source_mode,
+                    "tool_namespace": source.tool_namespace,
+                    "authority": "proposal_only",
+                    "generated_at": Utc::now(),
+                }),
+                trust_level: "source_attested".to_string(),
+                freshness: "current".to_string(),
+                status: "active".to_string(),
+            })
+            .await?;
+    }
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "ontology_onboarding.demo_run_created",
+            "ontology_onboarding_run",
+            Some(run_id),
+            json!({
+                "subject": actor_subject,
+                "run_id": run_id,
+                "dataset_count": datasets.len(),
+                "profile_count": profiles.len(),
+                "proposal_count": proposals.len(),
+                "industry": seed.industry,
+                "source_mode": source.source_mode,
+            }),
+        ))
+        .await?;
+    Ok(OntologyOnboardingRun {
+        id: run_id,
+        status: "pending_review".to_string(),
+        source_mode: source.source_mode,
+        dataset_count: datasets.len(),
+        profile_count: profiles.len(),
+        proposal_count: proposals.len(),
+        approved_count: 0,
+        materialized_count: 0,
+        datasets,
+        profiles,
+        proposals,
+        generated_at: Utc::now(),
+    })
+}
+
+fn ontology_available_seed_packs() -> Vec<OntologySeedPack> {
+    vec![
+        ontology_ecommerce_seed_pack(),
+        ontology_insurance_seed_pack(),
+    ]
+}
+
+fn ontology_seed_and_source_for_request(
+    industry: &str,
+    source_mode: &str,
+) -> Result<(OntologySeedPack, OntologySourceBundle), AppError> {
+    let industry = industry.trim().to_ascii_lowercase().replace('-', "_");
+    let source_mode = source_mode.trim().to_ascii_lowercase().replace('-', "_");
+    match (industry.as_str(), source_mode.as_str()) {
+        ("ecommerce" | "commerce", "demo_ecommerce" | "demo") => Ok((
+            ontology_ecommerce_seed_pack(),
+            ontology_demo_source_bundle(),
+        )),
+        ("insurance", "demo_insurance" | "demo") => Ok((
+            ontology_insurance_seed_pack(),
+            ontology_insurance_demo_source_bundle(),
+        )),
+        _ => Err(AppError::bad_request(
+            "ontology onboarding supports ecommerce/demo_ecommerce and insurance/demo_insurance in this slice",
+        )),
+    }
+}
+
+async fn list_ontology_onboarding_runs_for_state(
+    state: &AppState,
+) -> Result<Vec<OntologyOnboardingRun>, AppError> {
+    let mut grouped = BTreeMap::<Uuid, Vec<SemanticObject>>::new();
+    for object in ontology_onboarding_proposal_objects(state).await? {
+        if let Some(run_id) = ontology_onboarding_object_run_id(&object) {
+            grouped.entry(run_id).or_default().push(object);
+        }
+    }
+    let mut runs = grouped
+        .into_iter()
+        .map(|(run_id, objects)| ontology_onboarding_run_from_objects(run_id, &objects))
+        .collect::<Result<Vec<_>, _>>()?;
+    runs.sort_by(|left, right| right.generated_at.cmp(&left.generated_at));
+    Ok(runs)
+}
+
+async fn get_ontology_onboarding_run_for_state(
+    state: &AppState,
+    run_id: Uuid,
+) -> Result<OntologyOnboardingRun, AppError> {
+    let objects = ontology_onboarding_proposal_objects(state)
+        .await?
+        .into_iter()
+        .filter(|object| ontology_onboarding_object_run_id(object) == Some(run_id))
+        .collect::<Vec<_>>();
+    if objects.is_empty() {
+        return Err(AppError::not_found("ontology onboarding run not found"));
+    }
+    ontology_onboarding_run_from_objects(run_id, &objects)
+}
+
+async fn review_ontology_onboarding_proposal_with_actor(
+    state: &AppState,
+    proposal_id: Uuid,
+    decision: &str,
+    reason: Option<&str>,
+    actor_subject: &str,
+) -> Result<OntologyOnboardingProposalDraft, AppError> {
+    let (decision, review_status) = normalize_ontology_onboarding_review_decision(decision)?;
+    let object = ontology_onboarding_find_proposal_object(state, proposal_id).await?;
+    let run_id = ontology_onboarding_object_run_id(&object)
+        .ok_or_else(|| AppError::bad_request("ontology onboarding proposal missing run_id"))?;
+    let mut proposal = ontology_onboarding_object_proposal(&object)?;
+    proposal.review_status = review_status.clone();
+    let review = json!({
+        "decision": decision,
+        "status": review_status,
+        "reason": reason,
+        "reviewer": actor_subject,
+        "reviewed_at": Utc::now(),
+    });
+    state
+        .update_semantic_object(
+            object.id,
+            UpdateSemanticObject {
+                title: None,
+                summary: None,
+                content: Some(ontology_onboarding_proposal_content(
+                    run_id,
+                    &proposal,
+                    ontology_onboarding_object_materialized(&object),
+                    Some(review.clone()),
+                )?),
+                semantic_scopes: None,
+                source_uri: None,
+                provenance: None,
+                trust_level: None,
+                freshness: None,
+                status: None,
+            },
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "ontology_onboarding.proposal_reviewed",
+            "ontology_onboarding_proposal",
+            Some(proposal_id),
+            json!({
+                "subject": actor_subject,
+                "run_id": run_id,
+                "proposal_id": proposal_id,
+                "proposal_type": proposal.proposal_type,
+                "proposal_name": proposal.name,
+                "review": review,
+            }),
+        ))
+        .await?;
+    Ok(proposal)
+}
+
+async fn materialize_ontology_onboarding_run_with_actor(
+    state: &AppState,
+    run_id: Uuid,
+    actor_subject: &str,
+) -> Result<OntologyOnboardingMaterializationResult, AppError> {
+    let objects = ontology_onboarding_proposal_objects(state)
+        .await?
+        .into_iter()
+        .filter(|object| ontology_onboarding_object_run_id(object) == Some(run_id))
+        .collect::<Vec<_>>();
+    if objects.is_empty() {
+        return Err(AppError::not_found("ontology onboarding run not found"));
+    }
+    let mut semantic_object_ids = Vec::new();
+    let mut semantic_link_ids = Vec::new();
+    let mut tool_spec_count = 0usize;
+    let mut materialized_proposal_count = 0usize;
+    for object in objects {
+        if ontology_onboarding_object_materialized(&object) {
+            continue;
+        }
+        let proposal = ontology_onboarding_object_proposal(&object)?;
+        if proposal.review_status != "approved" {
+            continue;
+        }
+        match proposal.proposal_type.as_str() {
+            "object" => {
+                let semantic_object =
+                    ontology_materialize_business_object(state, &proposal).await?;
+                semantic_object_ids.push(semantic_object.id);
+            }
+            "metric" => {
+                let semantic_object = ontology_materialize_metric(state, &proposal).await?;
+                semantic_object_ids.push(semantic_object.id);
+            }
+            "action" => {
+                let semantic_object = ontology_materialize_action(state, &proposal).await?;
+                semantic_object_ids.push(semantic_object.id);
+                tool_spec_count += 1;
+            }
+            "relation" => {
+                let link = ontology_materialize_relation(state, &proposal).await?;
+                semantic_link_ids.push(link.id);
+            }
+            _ => {}
+        }
+        let review = object.content.get("review").cloned();
+        state
+            .update_semantic_object(
+                object.id,
+                UpdateSemanticObject {
+                    title: None,
+                    summary: None,
+                    content: Some(ontology_onboarding_proposal_content(
+                        run_id, &proposal, true, review,
+                    )?),
+                    semantic_scopes: None,
+                    source_uri: None,
+                    provenance: None,
+                    trust_level: None,
+                    freshness: None,
+                    status: None,
+                },
+            )
+            .await?;
+        materialized_proposal_count += 1;
+    }
+    let result = OntologyOnboardingMaterializationResult {
+        run_id,
+        status: if materialized_proposal_count == 0 {
+            "no_approved_changes".to_string()
+        } else {
+            "materialized".to_string()
+        },
+        semantic_object_count: semantic_object_ids.len(),
+        semantic_link_count: semantic_link_ids.len(),
+        tool_spec_count,
+        semantic_object_ids,
+        semantic_link_ids,
+    };
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "ontology_onboarding.run_materialized",
+            "ontology_onboarding_run",
+            Some(run_id),
+            json!({
+                "subject": actor_subject,
+                "run_id": run_id,
+                "status": result.status,
+                "semantic_object_count": result.semantic_object_count,
+                "semantic_link_count": result.semantic_link_count,
+                "tool_spec_count": result.tool_spec_count,
+            }),
+        ))
+        .await?;
+    Ok(result)
+}
+
+fn ontology_onboarding_proposal_object_key(run_id: Uuid, proposal_id: Uuid) -> String {
+    format!("ontology:onboarding:{run_id}:{proposal_id}")
+}
+
+fn ontology_onboarding_proposal_content(
+    run_id: Uuid,
+    proposal: &OntologyOnboardingProposalDraft,
+    materialized: bool,
+    review: Option<Value>,
+) -> Result<Value, AppError> {
+    let mut content = serde_json::Map::new();
+    content.insert("run_id".to_string(), json!(run_id));
+    content.insert(
+        "proposal".to_string(),
+        serde_json::to_value(proposal).map_err(|error| {
+            AppError::bad_request(format!("invalid ontology onboarding proposal: {error}"))
+        })?,
+    );
+    content.insert("review_status".to_string(), json!(proposal.review_status));
+    content.insert("materialized".to_string(), json!(materialized));
+    if let Some(review) = review {
+        content.insert("review".to_string(), review);
+    }
+    Ok(Value::Object(content))
+}
+
+async fn ontology_onboarding_proposal_objects(
+    state: &AppState,
+) -> Result<Vec<SemanticObject>, AppError> {
+    Ok(state
+        .list_semantic_objects()
+        .await?
+        .into_iter()
+        .filter(|object| {
+            object.object_type == "ontology_onboarding_proposal" && object.status == "active"
+        })
+        .collect())
+}
+
+async fn ontology_onboarding_find_proposal_object(
+    state: &AppState,
+    proposal_id: Uuid,
+) -> Result<SemanticObject, AppError> {
+    ontology_onboarding_proposal_objects(state)
+        .await?
+        .into_iter()
+        .find(|object| {
+            ontology_onboarding_object_proposal(object)
+                .map(|proposal| proposal.id == proposal_id)
+                .unwrap_or(false)
+        })
+        .ok_or_else(|| AppError::not_found("ontology onboarding proposal not found"))
+}
+
+fn ontology_onboarding_object_run_id(object: &SemanticObject) -> Option<Uuid> {
+    object
+        .content
+        .get("run_id")
+        .and_then(Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+}
+
+fn ontology_onboarding_object_proposal(
+    object: &SemanticObject,
+) -> Result<OntologyOnboardingProposalDraft, AppError> {
+    serde_json::from_value(
+        object
+            .content
+            .get("proposal")
+            .cloned()
+            .ok_or_else(|| AppError::bad_request("ontology onboarding proposal missing content"))?,
+    )
+    .map_err(|error| {
+        AppError::bad_request(format!("invalid ontology onboarding proposal: {error}"))
+    })
+}
+
+fn ontology_onboarding_object_materialized(object: &SemanticObject) -> bool {
+    object
+        .content
+        .get("materialized")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn ontology_onboarding_run_from_objects(
+    run_id: Uuid,
+    objects: &[SemanticObject],
+) -> Result<OntologyOnboardingRun, AppError> {
+    let source = ontology_demo_source_bundle();
+    let datasets = source.datasets;
+    let profiles = ontology_profile_demo_datasets(&datasets);
+    let mut proposals = objects
+        .iter()
+        .map(ontology_onboarding_object_proposal)
+        .collect::<Result<Vec<_>, _>>()?;
+    proposals.sort_by(|left, right| {
+        left.proposal_type
+            .cmp(&right.proposal_type)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    let approved_count = proposals
+        .iter()
+        .filter(|proposal| proposal.review_status == "approved")
+        .count();
+    let materialized_count = objects
+        .iter()
+        .filter(|object| ontology_onboarding_object_materialized(object))
+        .count();
+    let generated_at = objects
+        .iter()
+        .map(|object| object.created_at)
+        .min()
+        .unwrap_or_else(Utc::now);
+    let status = if materialized_count > 0 {
+        "materialized"
+    } else if approved_count > 0 {
+        "reviewing"
+    } else {
+        "pending_review"
+    };
+    Ok(OntologyOnboardingRun {
+        id: run_id,
+        status: status.to_string(),
+        source_mode: source.source_mode,
+        dataset_count: datasets.len(),
+        profile_count: profiles.len(),
+        proposal_count: proposals.len(),
+        approved_count,
+        materialized_count,
+        datasets,
+        profiles,
+        proposals,
+        generated_at,
+    })
+}
+
+fn normalize_ontology_onboarding_review_decision(
+    decision: &str,
+) -> Result<(String, String), AppError> {
+    let decision = decision.trim().to_ascii_lowercase().replace('-', "_");
+    match decision.as_str() {
+        "approve" | "approved" => Ok(("approve".to_string(), "approved".to_string())),
+        "reject" | "rejected" => Ok(("reject".to_string(), "rejected".to_string())),
+        "request_changes" | "changes_requested" => Ok((
+            "request_changes".to_string(),
+            "changes_requested".to_string(),
+        )),
+        "merge_into_existing" => Ok((
+            "merge_into_existing".to_string(),
+            "merge_into_existing".to_string(),
+        )),
+        "needs_more_evidence" => Ok((
+            "needs_more_evidence".to_string(),
+            "needs_more_evidence".to_string(),
+        )),
+        _ => Err(AppError::bad_request(
+            "ontology onboarding review decision must be approve, reject, request_changes, merge_into_existing, or needs_more_evidence",
+        )),
+    }
+}
+
+async fn ontology_materialize_business_object(
+    state: &AppState,
+    proposal: &OntologyOnboardingProposalDraft,
+) -> Result<SemanticObject, AppError> {
+    let domain_scope = ontology_proposal_domain_scope(proposal);
+    let object_name = proposal
+        .content
+        .get("object_type")
+        .and_then(Value::as_str)
+        .unwrap_or(proposal.name.as_str());
+    ontology_get_or_create_semantic_object(
+        state,
+        CreateSemanticObject {
+            source_id: None,
+            object_type: "business_object".to_string(),
+            object_key: ontology_business_object_key(&domain_scope, object_name),
+            title: object_name.to_string(),
+            summary: format!("Approved {domain_scope} ontology business object: {object_name}."),
+            content: json!({
+                "object_type": object_name,
+                "domain_scope": domain_scope,
+                "tool_namespace": ontology_proposal_tool_namespace(proposal),
+                "proposal_id": proposal.id,
+                "source_mapping": proposal.source_mapping,
+                "properties": proposal.content.get("properties").cloned().unwrap_or_else(|| json!([])),
+            }),
+            semantic_scopes: ontology_domain_semantic_scopes(&domain_scope, "published"),
+            source_uri: Some(format!(
+                "mandoforge://ontology/onboarding/proposals/{}/materialized",
+                proposal.id
+            )),
+            provenance: json!({
+                "source": "ontology_onboarding.materialize",
+                "proposal_id": proposal.id,
+                "proposal_type": proposal.proposal_type,
+                "materialized_at": Utc::now(),
+            }),
+            trust_level: "source_attested".to_string(),
+            freshness: "current".to_string(),
+            status: "active".to_string(),
+        },
+    )
+    .await
+}
+
+async fn ontology_materialize_metric(
+    state: &AppState,
+    proposal: &OntologyOnboardingProposalDraft,
+) -> Result<SemanticObject, AppError> {
+    let domain_scope = ontology_proposal_domain_scope(proposal);
+    ontology_get_or_create_semantic_object(
+        state,
+        CreateSemanticObject {
+            source_id: None,
+            object_type: "business_metric".to_string(),
+            object_key: format!(
+                "{}.metric.{}",
+                ontology_slug(&domain_scope),
+                ontology_slug(&proposal.name)
+            ),
+            title: proposal.name.clone(),
+            summary: format!(
+                "Approved {domain_scope} semantic metric: {}.",
+                proposal.name
+            ),
+            content: json!({
+                "metric_name": proposal.name,
+                "domain_scope": domain_scope,
+                "tool_namespace": ontology_proposal_tool_namespace(proposal),
+                "proposal_id": proposal.id,
+                "source_mapping": proposal.source_mapping,
+                "definition": proposal.content,
+            }),
+            semantic_scopes: ontology_domain_semantic_scopes(&domain_scope, "published"),
+            source_uri: Some(format!(
+                "mandoforge://ontology/onboarding/proposals/{}/metric",
+                proposal.id
+            )),
+            provenance: json!({
+                "source": "ontology_onboarding.materialize",
+                "proposal_id": proposal.id,
+                "proposal_type": proposal.proposal_type,
+                "materialized_at": Utc::now(),
+            }),
+            trust_level: "source_attested".to_string(),
+            freshness: "current".to_string(),
+            status: "active".to_string(),
+        },
+    )
+    .await
+}
+
+async fn ontology_materialize_action(
+    state: &AppState,
+    proposal: &OntologyOnboardingProposalDraft,
+) -> Result<SemanticObject, AppError> {
+    let domain_scope = ontology_proposal_domain_scope(proposal);
+    let tool_namespace = ontology_proposal_tool_namespace(proposal);
+    ontology_get_or_create_semantic_object(
+        state,
+        CreateSemanticObject {
+            source_id: None,
+            object_type: "ontology_action_type".to_string(),
+            object_key: format!(
+                "{}.action.{}",
+                ontology_slug(&domain_scope),
+                ontology_slug(&proposal.name)
+            ),
+            title: proposal.name.clone(),
+            summary: format!(
+                "Approved {domain_scope} ontology action type: {}; policy and audit required.",
+                proposal.name
+            ),
+            content: json!({
+                "proposal_id": proposal.id,
+                "tool_name": format!("{}.{}", tool_namespace, proposal.name),
+                "domain_scope": domain_scope,
+                "tool_namespace": tool_namespace,
+                "action_contract": proposal.content,
+            }),
+            semantic_scopes: ontology_domain_semantic_scopes(&domain_scope, "published"),
+            source_uri: Some(format!(
+                "mandoforge://ontology/onboarding/proposals/{}/action",
+                proposal.id
+            )),
+            provenance: json!({
+                "source": "ontology_onboarding.materialize",
+                "proposal_id": proposal.id,
+                "proposal_type": proposal.proposal_type,
+                "materialized_at": Utc::now(),
+            }),
+            trust_level: "source_attested".to_string(),
+            freshness: "current".to_string(),
+            status: "active".to_string(),
+        },
+    )
+    .await
+}
+
+async fn ontology_materialize_relation(
+    state: &AppState,
+    proposal: &OntologyOnboardingProposalDraft,
+) -> Result<SemanticLink, AppError> {
+    let domain_scope = ontology_proposal_domain_scope(proposal);
+    let from_object = proposal
+        .content
+        .get("from_object")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::bad_request("relation proposal missing from_object"))?;
+    let to_object = proposal
+        .content
+        .get("to_object")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::bad_request("relation proposal missing to_object"))?;
+    let relation = proposal
+        .content
+        .get("relation")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::bad_request("relation proposal missing relation"))?;
+    let from = ontology_ensure_business_object_stub(state, &domain_scope, from_object).await?;
+    let to = ontology_ensure_business_object_stub(state, &domain_scope, to_object).await?;
+    ontology_create_semantic_link_if_absent(
+        state,
+        CreateSemanticLink {
+            from_entity_type: "semantic_object".to_string(),
+            from_entity_id: from.id.to_string(),
+            relation_type: relation.to_string(),
+            to_entity_type: "semantic_object".to_string(),
+            to_entity_id: to.id.to_string(),
+            metadata: json!({
+                "business_relation": proposal.name,
+                "source_mapping": proposal.source_mapping,
+                "proposal_id": proposal.id,
+                "evidence": proposal.evidence,
+            }),
+            provenance: json!({
+                "source": "ontology_onboarding.materialize",
+                "proposal_id": proposal.id,
+                "proposal_type": proposal.proposal_type,
+                "materialized_at": Utc::now(),
+            }),
+            confidence: proposal.confidence,
+            status: "active".to_string(),
+        },
+    )
+    .await
+}
+
+async fn ontology_ensure_business_object_stub(
+    state: &AppState,
+    domain_scope: &str,
+    object_name: &str,
+) -> Result<SemanticObject, AppError> {
+    ontology_get_or_create_semantic_object(
+        state,
+        CreateSemanticObject {
+            source_id: None,
+            object_type: "business_object".to_string(),
+            object_key: ontology_business_object_key(domain_scope, object_name),
+            title: object_name.to_string(),
+            summary: format!("{domain_scope} ontology business object: {object_name}."),
+            content: json!({
+                "object_type": object_name,
+                "domain_scope": domain_scope,
+                "stub_created_for_relation": true,
+            }),
+            semantic_scopes: ontology_domain_semantic_scopes(domain_scope, "published"),
+            source_uri: Some(format!(
+                "mandoforge://ontology/onboarding/business-objects/{}",
+                ontology_slug(object_name)
+            )),
+            provenance: json!({
+                "source": "ontology_onboarding.materialize_relation",
+                "materialized_at": Utc::now(),
+            }),
+            trust_level: "source_attested".to_string(),
+            freshness: "current".to_string(),
+            status: "active".to_string(),
+        },
+    )
+    .await
+}
+
+async fn ontology_get_or_create_semantic_object(
+    state: &AppState,
+    input: CreateSemanticObject,
+) -> Result<SemanticObject, AppError> {
+    if let Some(existing) = state
+        .list_semantic_objects()
+        .await?
+        .into_iter()
+        .find(|object| object.archived_at.is_none() && object.object_key == input.object_key)
+    {
+        return Ok(existing);
+    }
+    state.create_semantic_object(input).await
+}
+
+async fn ontology_create_semantic_link_if_absent(
+    state: &AppState,
+    input: CreateSemanticLink,
+) -> Result<SemanticLink, AppError> {
+    if let Some(existing) = state.list_semantic_links().await?.into_iter().find(|link| {
+        link.archived_at.is_none()
+            && link.from_entity_type == input.from_entity_type
+            && link.from_entity_id == input.from_entity_id
+            && link.relation_type == input.relation_type
+            && link.to_entity_type == input.to_entity_type
+            && link.to_entity_id == input.to_entity_id
+    }) {
+        return Ok(existing);
+    }
+    state.create_semantic_link(input).await
+}
+
+fn ontology_proposal_domain_scope(proposal: &OntologyOnboardingProposalDraft) -> String {
+    proposal
+        .content
+        .get("domain_scope")
+        .or_else(|| proposal.evidence.get("domain_scope"))
+        .and_then(Value::as_str)
+        .unwrap_or("commerce")
+        .to_string()
+}
+
+fn ontology_proposal_tool_namespace(proposal: &OntologyOnboardingProposalDraft) -> String {
+    proposal
+        .content
+        .get("tool_namespace")
+        .or_else(|| proposal.evidence.get("tool_namespace"))
+        .and_then(Value::as_str)
+        .unwrap_or("commerce")
+        .to_string()
+}
+
+fn ontology_business_object_key(domain_scope: &str, object_name: &str) -> String {
+    format!(
+        "{}.{}",
+        ontology_slug(domain_scope),
+        ontology_slug(object_name)
+    )
+}
+
+fn ontology_slug(value: &str) -> String {
+    let mut slug = String::new();
+    let mut previous_was_separator = false;
+    for (index, ch) in value.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if index > 0 && !previous_was_separator {
+                slug.push('_');
+            }
+            slug.push(ch.to_ascii_lowercase());
+            previous_was_separator = false;
+        } else if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            previous_was_separator = false;
+        } else if !previous_was_separator && !slug.is_empty() {
+            slug.push('_');
+            previous_was_separator = true;
+        }
+    }
+    slug.trim_matches('_').to_string()
+}
+
+fn ontology_domain_semantic_scopes(domain_scope: &str, share_policy: &str) -> Value {
+    json!({
+        "domain_scope": domain_scope,
+        "workflow_scope": "enterprise-ontology-fast-onboarding",
+        "memory_scope": "ontology",
+        "share_policy": share_policy,
+    })
+}
+
 async fn resolve_semantic_conflict(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -12520,6 +14900,20 @@ fn ontology_registry() -> OntologyRegistry {
                 "workflow graph and task-grant policy",
             ),
             ontology_object_type(
+                "business_object",
+                "Approved enterprise ontology object compiled from reviewed onboarding proposals.",
+                Some("semantic_object"),
+                Some("domain"),
+                "reviewed business ontology boundary",
+            ),
+            ontology_object_type(
+                "business_metric",
+                "Approved semantic metric definition compiled from reviewed onboarding proposals.",
+                Some("semantic_object"),
+                Some("domain"),
+                "reviewed metric definition boundary",
+            ),
+            ontology_object_type(
                 "ontology_action_type",
                 "Operational ontology action contract with parameters, validations, approval, effects, and audit requirements.",
                 Some("ontology_action_type"),
@@ -12532,6 +14926,13 @@ fn ontology_registry() -> OntologyRegistry {
                 Some("semantic_object"),
                 Some("domain"),
                 "semantic ontology governance boundary",
+            ),
+            ontology_object_type(
+                "ontology_onboarding_proposal",
+                "Evidence-backed ontology onboarding proposal that requires human review before materialization.",
+                Some("semantic_object"),
+                Some("domain"),
+                "ontology onboarding proposal boundary",
             ),
             ontology_object_type(
                 "ontology_object_type",
@@ -58679,6 +61080,272 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn ontology_onboarding_demo_profiles_have_expected_tables_and_evidence() {
+        let datasets = ontology_demo_datasets();
+        let profiles = ontology_profile_demo_datasets(&datasets);
+        let table_names = profiles
+            .iter()
+            .map(|profile| profile.table_name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(profiles.len(), 8);
+        assert!(table_names.contains(&"customers"));
+        assert!(table_names.contains(&"orders"));
+        assert!(table_names.contains(&"order_items"));
+
+        let orders = profiles
+            .iter()
+            .find(|profile| profile.table_name == "orders")
+            .expect("orders profile");
+        assert_eq!(orders.row_count, 4);
+        assert!(orders.primary_key_candidates.contains(&"id".to_string()));
+        assert!(orders.foreign_key_candidates.iter().any(|candidate| {
+            candidate.field == "customer_id"
+                && candidate.references_table == "customers"
+                && candidate.references_field == "id"
+                && candidate.join_success_rate >= 0.99
+        }));
+        assert!(orders.currency_fields.contains(&"total_price".to_string()));
+    }
+
+    #[test]
+    fn ontology_onboarding_demo_generates_required_proposals() {
+        let datasets = ontology_demo_datasets();
+        let profiles = ontology_profile_demo_datasets(&datasets);
+        let proposals = ontology_generate_demo_proposals(&datasets, &profiles);
+
+        let object_count = proposals
+            .iter()
+            .filter(|proposal| proposal.proposal_type == "object")
+            .count();
+        let relation_count = proposals
+            .iter()
+            .filter(|proposal| proposal.proposal_type == "relation")
+            .count();
+        let metric_count = proposals
+            .iter()
+            .filter(|proposal| proposal.proposal_type == "metric")
+            .count();
+        let action_count = proposals
+            .iter()
+            .filter(|proposal| proposal.proposal_type == "action")
+            .count();
+
+        assert!(object_count >= 8);
+        assert!(relation_count >= 7);
+        assert!(metric_count >= 5);
+        assert!(action_count >= 4);
+        assert!(proposals.iter().all(|proposal| proposal.confidence >= 0.70));
+        assert!(
+            proposals
+                .iter()
+                .all(|proposal| proposal.evidence.is_object())
+        );
+        assert!(proposals.iter().any(|proposal| {
+            proposal.proposal_type == "relation"
+                && proposal.name == "Customer places Order"
+                && proposal.evidence["join_success_rate"]
+                    .as_f64()
+                    .unwrap_or_default()
+                    >= 0.99
+        }));
+        assert!(proposals.iter().any(|proposal| {
+            proposal.proposal_type == "action"
+                && proposal.name == "refund_order"
+                && proposal.content["policy"]["approval_required"].as_bool() == Some(true)
+        }));
+    }
+
+    #[test]
+    fn ontology_builder_seed_pack_generates_non_ecommerce_proposals() {
+        let source = ontology_insurance_demo_source_bundle();
+        let seed = ontology_insurance_seed_pack();
+        let profiles = ontology_profile_demo_datasets(&source.datasets);
+        let proposals = ontology_generate_seed_proposals_for_run(
+            Uuid::new_v4(),
+            &seed,
+            &source.datasets,
+            &profiles,
+        );
+
+        assert!(proposals.iter().any(|proposal| {
+            proposal.proposal_type == "object"
+                && proposal.name == "Policy"
+                && proposal.content["domain_scope"].as_str() == Some("insurance")
+        }));
+        assert!(proposals.iter().any(|proposal| {
+            proposal.proposal_type == "relation"
+                && proposal.name == "Insured files Claim"
+                && proposal.evidence["join_success_rate"]
+                    .as_f64()
+                    .unwrap_or_default()
+                    >= 0.99
+        }));
+        assert!(proposals.iter().any(|proposal| {
+            proposal.proposal_type == "metric" && proposal.name == "Loss Ratio"
+        }));
+        assert!(proposals.iter().any(|proposal| {
+            proposal.proposal_type == "action"
+                && proposal.name == "approve_claim"
+                && proposal.content["tool_namespace"].as_str() == Some("insurance")
+                && proposal.content["audit_event"].as_str() == Some("insurance.approve_claim")
+        }));
+    }
+
+    #[tokio::test]
+    async fn ontology_onboarding_generic_run_supports_insurance_seed() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        let run = create_ontology_onboarding_run_with_actor(
+            &state,
+            "insurance",
+            "demo_insurance",
+            "test",
+        )
+        .await
+        .expect("insurance run");
+
+        assert_eq!(run.source_mode, "demo_insurance");
+        assert!(
+            run.proposals
+                .iter()
+                .any(|proposal| proposal.proposal_type == "object" && proposal.name == "Claim")
+        );
+        let action_proposal = run
+            .proposals
+            .iter()
+            .find(|proposal| proposal.proposal_type == "action" && proposal.name == "approve_claim")
+            .expect("approve claim proposal")
+            .id;
+        review_ontology_onboarding_proposal_for_test(
+            &state,
+            action_proposal,
+            "approve",
+            Some("insurance action contract has policy and audit metadata"),
+        )
+        .await
+        .expect("approve action");
+
+        let materialized = materialize_ontology_onboarding_run_for_test(&state, run.id)
+            .await
+            .expect("materialize insurance action");
+        assert_eq!(materialized.tool_spec_count, 1);
+
+        let specs = ontology_onboarding_tool_specs_for_run(&state, run.id)
+            .await
+            .expect("tool specs");
+        assert!(specs.iter().any(|spec| {
+            spec.name == "insurance.approve_claim"
+                && spec.target_object == "Claim"
+                && spec.approval_required
+        }));
+    }
+
+    #[tokio::test]
+    async fn ontology_onboarding_demo_review_and_materialize_flow() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        let run = create_demo_ontology_onboarding_run_for_test(&state)
+            .await
+            .expect("demo run");
+
+        assert_eq!(run.dataset_count, 8);
+        assert!(run.proposal_count >= 24);
+
+        let object_proposal = run
+            .proposals
+            .iter()
+            .find(|proposal| proposal.proposal_type == "object" && proposal.name == "Customer")
+            .expect("customer proposal")
+            .id;
+        let relation_proposal = run
+            .proposals
+            .iter()
+            .find(|proposal| {
+                proposal.proposal_type == "relation" && proposal.name == "Customer places Order"
+            })
+            .expect("customer order relation")
+            .id;
+
+        review_ontology_onboarding_proposal_for_test(
+            &state,
+            object_proposal,
+            "approve",
+            Some("seed mapping and profile evidence match"),
+        )
+        .await
+        .expect("approve object");
+        review_ontology_onboarding_proposal_for_test(
+            &state,
+            relation_proposal,
+            "approve",
+            Some("join evidence is above threshold"),
+        )
+        .await
+        .expect("approve relation");
+
+        let materialized = materialize_ontology_onboarding_run_for_test(&state, run.id)
+            .await
+            .expect("materialize");
+        assert!(materialized.semantic_object_count >= 1);
+        assert!(materialized.semantic_link_count >= 1);
+
+        let semantic_objects = state.list_semantic_objects().await.expect("objects");
+        assert!(semantic_objects.iter().any(|object| {
+            object.object_type == "business_object" && object.object_key == "commerce.customer"
+        }));
+        let semantic_links = state.list_semantic_links().await.expect("links");
+        assert!(
+            semantic_links
+                .iter()
+                .any(|link| { link.relation_type == "places" })
+        );
+    }
+
+    #[tokio::test]
+    async fn ontology_onboarding_generates_agent_tool_specs() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        let run = create_demo_ontology_onboarding_run_for_test(&state)
+            .await
+            .expect("demo run");
+
+        for proposal in run
+            .proposals
+            .iter()
+            .filter(|proposal| proposal.proposal_type == "action")
+        {
+            review_ontology_onboarding_proposal_for_test(
+                &state,
+                proposal.id,
+                "approve",
+                Some("action contract has policy and audit metadata"),
+            )
+            .await
+            .expect("approve action");
+        }
+
+        let materialized = materialize_ontology_onboarding_run_for_test(&state, run.id)
+            .await
+            .expect("materialize actions");
+        assert!(materialized.tool_spec_count >= 4);
+
+        let specs = ontology_onboarding_tool_specs_for_run(&state, run.id)
+            .await
+            .expect("tool specs");
+        let names = specs
+            .iter()
+            .map(|spec| spec.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"commerce.refund_order"));
+        assert!(names.contains(&"commerce.issue_coupon"));
+        assert!(names.contains(&"commerce.adjust_inventory"));
+        assert!(names.contains(&"commerce.escalate_ticket"));
+        assert!(
+            specs
+                .iter()
+                .any(|spec| spec.name == "commerce.refund_order" && spec.approval_required)
+        );
     }
 
     #[test]
