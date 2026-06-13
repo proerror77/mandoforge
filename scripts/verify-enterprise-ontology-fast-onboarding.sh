@@ -29,6 +29,12 @@ else
   )
 fi
 
+seed_packs_file="$EVIDENCE_DIR/seed-packs.json"
+curl -sS "${headers[@]}" "$BASE_URL/api/ontology/onboarding/seed-packs" \
+  | tee "$seed_packs_file" >/dev/null
+jq -e 'any(.[]?; .industry == "ecommerce") and any(.[]?; .industry == "insurance")' \
+  "$seed_packs_file" >/dev/null
+
 run_file="$EVIDENCE_DIR/demo-run.json"
 curl -sS -X POST "${headers[@]}" "$BASE_URL/api/ontology/onboarding/demo-runs" \
   | tee "$run_file" >/dev/null
@@ -75,17 +81,29 @@ curl -sS "${headers[@]}" "$BASE_URL/api/ontology/onboarding/runs/$run_id/tool-sp
   | tee "$tool_specs_file" >/dev/null
 jq -e 'any(.tool_specs[]?; .name == "commerce.refund_order")' "$tool_specs_file" >/dev/null
 
+insurance_run_file="$EVIDENCE_DIR/insurance-run.json"
+curl -sS -X POST "${headers[@]}" \
+  -H "content-type: application/json" \
+  -d '{"industry":"insurance","source_mode":"demo_insurance"}' \
+  "$BASE_URL/api/ontology/onboarding/runs" \
+  | tee "$insurance_run_file" >/dev/null
+jq -e '.source_mode == "demo_insurance" and any(.proposals[]?; .name == "approve_claim")' \
+  "$insurance_run_file" >/dev/null
+
 summary_file="$EVIDENCE_DIR/summary.txt"
 {
   echo "run_id=$run_id"
+  echo "seed_packs_file=$seed_packs_file"
   echo "dataset_count=$(jq -r '.dataset_count' "$run_file")"
   echo "proposal_count=$(jq -r '.proposal_count' "$run_file")"
   echo "semantic_object_count=$(jq -r '.semantic_object_count' "$materialized_file")"
   echo "semantic_link_count=$(jq -r '.semantic_link_count' "$materialized_file")"
   echo "tool_spec_count=$(jq -r '.tool_spec_count' "$materialized_file")"
+  echo "insurance_run_id=$(jq -r '.id' "$insurance_run_file")"
   echo "run_file=$run_file"
   echo "materialized_file=$materialized_file"
   echo "tool_specs_file=$tool_specs_file"
+  echo "insurance_run_file=$insurance_run_file"
 } >"$summary_file"
 
 cat "$summary_file"

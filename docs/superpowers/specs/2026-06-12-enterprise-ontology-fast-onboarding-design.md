@@ -398,3 +398,9 @@ The first ecommerce demo slice is implemented by the API routes under
 `/api/ontology/onboarding/*`, the Semantic console fast-onboarding panel, and
 `scripts/verify-enterprise-ontology-fast-onboarding.sh`. The first slice remains
 demo-source only; Tmall connector input is the next compatible adapter.
+
+The builder kernel now separates `OntologySeedPack` from `OntologySourceBundle`.
+Ecommerce and insurance demo seeds both run through the same profiler,
+proposal engine, review flow, materializer, and tool compiler. This keeps the
+current UI compatible while making additional industries a seed/source-adapter
+addition instead of a new ontology-building workflow.
