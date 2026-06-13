@@ -113,6 +113,9 @@ DatasetProfile
 DatasetQualityReport
 CuratedDatasetDraft
 OntologyPromptPacket
+OntologyReviewGraph
+OntologyReviewGraphNode
+OntologyReviewGraphEdge
 ObjectMappingDraft
 RelationMappingDraft
 MetricDraft
@@ -223,6 +226,61 @@ artifact refs, and audit refs. This makes the operator view explain why a node
 is blocked, which stages ran in parallel, and which downstream artifacts were
 invalidated by a change.
 
+### Ontology Review Graph
+
+The builder needs a visual review surface so operators can confirm whether the
+proposed business objects, relations, metrics, logic rules, actions, and tools
+match the actual business process. This is a review graph, not an editing canvas
+and not a separate graph database.
+
+`OntologyReviewGraph` is a bounded JSON projection derived from the current run:
+
+- dataset nodes: raw or curated datasets used as evidence
+- object nodes: proposed or materialized business objects
+- relation edges: proposed or materialized business links
+- metric nodes: metric definitions and their source objects
+- logic nodes: validation, state, mapping, security, or automation rules
+- action nodes: action types with risk and approval metadata
+- tool nodes: compiled agent tool specs
+
+Each graph node must include:
+
+- stable `id`
+- `node_type`: `dataset`, `object`, `metric`, `logic`, `action`, or `tool`
+- display `label`
+- review/materialization `status`
+- `confidence`
+- `risk_tone`: `neutral`, `info`, `warn`, or `bad`
+- `source_refs`
+- compact `evidence`
+- source proposal ID when applicable
+
+Each graph edge must include:
+
+- stable `id`
+- `from`
+- `to`
+- `edge_type`: `maps_to`, `relates_to`, `depends_on`, `validates`,
+  `acts_on`, `compiles_to`, or `uses_metric`
+- review/materialization `status`
+- `confidence`
+- `label`
+
+The first UI should support:
+
+- graph filters by node type and review status
+- visual distinction between pending, approved, rejected, and materialized
+  proposals
+- click-to-inspect side panel with evidence, source mapping, confidence, risk,
+  and review actions
+- highlighting of logic/action dependencies so users can validate whether
+  business logic is attached to the right objects and relations
+- no freeform drag/drop editing in the first slice
+
+The graph must be bounded for browser reliability. The first slice should cap
+the response to a deterministic subset such as 80 nodes and 160 edges, with a
+`truncated=true` flag and omitted counts when the run is larger.
+
 ### Proposal Categories
 
 Generated proposals should use one lifecycle while keeping type-specific
@@ -312,6 +370,7 @@ POST /api/ontology/onboarding/runs
 GET  /api/ontology/onboarding/runs
 GET  /api/ontology/onboarding/runs/{id}
 GET  /api/ontology/onboarding/runs/{id}/dag
+GET  /api/ontology/onboarding/runs/{id}/review-graph
 POST /api/ontology/onboarding/curated-datasets/{id}/review
 GET  /api/ontology/onboarding/runs/{id}/prompt-packet
 POST /api/ontology/onboarding/proposals/{id}/review
@@ -331,6 +390,8 @@ Minimum additions:
 - show curated dataset quality and review status before proposals
 - show the DAG levels and blocked/runnable/completed node status for the current
   onboarding run
+- show an Ontology Review Graph that lets reviewers inspect object, relation,
+  metric, logic, action, and tool dependencies
 - show prompt packet summary: seed pack, datasets, allowed relation triples,
   evidence rules
 - group proposals by object, relation, metric, logic, action
@@ -352,6 +413,8 @@ The implementation should address these while extracting the IR:
   product model.
 - Tool specs are generated only for materialized action proposals. This should
   remain, but the spec should also expose read/write risk and approval policy.
+- The current Semantic graph is a general semantic map. It does not yet provide
+  a run-scoped ontology review graph with proposal evidence and review actions.
 
 ## Testing
 
@@ -360,6 +423,9 @@ Backend tests should prove:
 - invalid DAG definitions with cycles are rejected before execution
 - topological levels place independent nodes in the same runnable batch
 - affected-subgraph recomputation marks only downstream nodes stale
+- review graph projection includes datasets, objects, relations, metrics, logic,
+  actions, tools, statuses, confidence, evidence, and truncation metadata
+- review graph nodes link back to source proposal IDs when applicable
 - ecommerce and insurance runs rehydrate the original source mode and seed
   metadata correctly
 - prompt packet generation includes seed objects, relations, datasets, profiles,
@@ -377,6 +443,7 @@ Verification should extend the existing
 
 - run JSON
 - DAG JSON with levels and node statuses
+- review graph JSON with expected node and edge types
 - curated dataset review JSON
 - prompt packet JSON
 - reviewed proposal JSON
@@ -394,8 +461,9 @@ This design should be implemented in narrow commits:
 4. Add prompt packet compiler and tests.
 5. Add curated dataset drafts and review lifecycle.
 6. Add logic rule proposal generation and materialization.
-7. Update tool spec compiler metadata for action risk and approval.
-8. Update Semantic UI and verification script.
+7. Add review graph projection API.
+8. Update tool spec compiler metadata for action risk and approval.
+9. Update Semantic UI with the run-scoped review graph and verification script.
 
 ## Success Criteria
 
@@ -404,8 +472,11 @@ This design should be implemented in narrow commits:
 - A non-ecommerce seed run rehydrates correctly after list/get.
 - The API can return a structured `OntologyPromptPacket`.
 - The API can return the run DAG with topological levels and node statuses.
+- The API can return a bounded ontology review graph for a run.
 - A cyclic onboarding definition fails before execution starts.
 - A changed source artifact invalidates only downstream nodes.
+- The Semantic UI lets reviewers inspect business-object, relation, logic,
+  action, metric, and tool dependencies before approval.
 - Approved logic and action proposals materialize into semantic objects without
   bypassing review.
 - Generated write tools stay approval-gated.
