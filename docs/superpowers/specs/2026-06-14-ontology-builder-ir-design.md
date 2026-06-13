@@ -32,6 +32,13 @@ Source adapter
   -> governed agent runtime
 ```
 
+Both the Pipeline Mapping path and the Simple LLM Extraction path are workflow
+DAGs, not hardcoded sequential scripts. Each stage produces artifacts consumed
+by downstream stages. The builder must validate dependency edges before
+execution, reject cycles, compute topological execution levels, and support
+rerunning only the affected downstream subgraph when an upstream artifact
+changes.
+
 ## Goals
 
 - Make ontology onboarding industry-neutral instead of demo-specific.
@@ -95,6 +102,10 @@ Core IR:
 
 ```text
 OntologyBuilderRun
+OntologyBuilderDag
+OntologyBuilderNode
+OntologyBuilderEdge
+OntologyBuilderExecutionLevel
 OntologySourceBundle
 DatasetSnapshot
 DatasetFieldSnapshot
@@ -110,6 +121,16 @@ ActionTypeDraft
 OntologyProposalDraft
 CompiledToolSpec
 ```
+
+`OntologyBuilderDag` is the execution contract for both v1 and v2 onboarding
+paths. It must include:
+
+- `nodes`: typed builder stages with stable IDs, stage kind, input artifact
+  refs, output artifact refs, status, and retry policy
+- `edges`: dependency edges where `from` must finish before `to` starts
+- `levels`: topologically sorted batches that can run in parallel
+- `critical_path`: the longest dependency chain for operator diagnostics
+- `affected_subgraph`: downstream nodes to rerun when a node input changes
 
 `DatasetSnapshot` replaces demo-only dataset assumptions. It must include:
 
@@ -146,6 +167,61 @@ free-form prose. It must include:
 
 The prompt packet is useful even before a live LLM integration because it gives
 deterministic builders, tests, and future coding agents the same contract.
+
+### Workflow DAG Execution Model
+
+Ontology onboarding has correctness dependencies. A relation proposal cannot be
+generated before object mapping candidates exist. A tool spec cannot compile
+before an action proposal is approved and materialized. A Simple LLM Extraction
+run cannot validate references before the extraction result exists.
+
+The builder should therefore represent every run as a DAG and execute it with a
+topological scheduler:
+
+```text
+Pipeline Mapping v2:
+connect_source
+  -> snapshot_raw_dataset
+  -> transform_dataset
+  -> profile_curated_dataset
+  -> review_curated_dataset
+  -> compile_prompt_packet
+  -> generate_mapping_proposals
+  -> review_ontology_pr
+  -> materialize_ontology
+  -> compile_agent_tools
+
+Simple LLM Extraction v1:
+upload_documents
+  -> convert_to_markdown
+  -> compile_prompt_packet
+  -> extract_ontology_json
+  -> validate_extraction
+  -> calibrate_confidence
+  -> infer_missing_relations
+  -> generate_ontology_pr
+  -> review_ontology_pr
+  -> materialize_ontology
+  -> compile_agent_tools
+```
+
+The scheduler must enforce:
+
+- producers finish before consumers start
+- cycles are rejected before any node runs
+- nodes in the same topological level may run concurrently
+- fan-in nodes wait for all required upstream artifacts
+- downstream-only reruns when an upstream dataset, prompt, seed pack, or review
+  decision changes
+
+Cycle detection is a definition-time error. The API should return a clear
+validation error that names the offending edge path instead of starting a run
+that later deadlocks.
+
+The run record should store the DAG definition, execution levels, node statuses,
+artifact refs, and audit refs. This makes the operator view explain why a node
+is blocked, which stages ran in parallel, and which downstream artifacts were
+invalidated by a change.
 
 ### Proposal Categories
 
@@ -235,6 +311,7 @@ GET  /api/ontology/onboarding/seed-packs
 POST /api/ontology/onboarding/runs
 GET  /api/ontology/onboarding/runs
 GET  /api/ontology/onboarding/runs/{id}
+GET  /api/ontology/onboarding/runs/{id}/dag
 POST /api/ontology/onboarding/curated-datasets/{id}/review
 GET  /api/ontology/onboarding/runs/{id}/prompt-packet
 POST /api/ontology/onboarding/proposals/{id}/review
@@ -252,6 +329,8 @@ pipeline canvas.
 Minimum additions:
 
 - show curated dataset quality and review status before proposals
+- show the DAG levels and blocked/runnable/completed node status for the current
+  onboarding run
 - show prompt packet summary: seed pack, datasets, allowed relation triples,
   evidence rules
 - group proposals by object, relation, metric, logic, action
@@ -278,6 +357,9 @@ The implementation should address these while extracting the IR:
 
 Backend tests should prove:
 
+- invalid DAG definitions with cycles are rejected before execution
+- topological levels place independent nodes in the same runnable batch
+- affected-subgraph recomputation marks only downstream nodes stale
 - ecommerce and insurance runs rehydrate the original source mode and seed
   metadata correctly
 - prompt packet generation includes seed objects, relations, datasets, profiles,
@@ -294,6 +376,7 @@ Verification should extend the existing
 `scripts/verify-enterprise-ontology-fast-onboarding.sh` gate to capture:
 
 - run JSON
+- DAG JSON with levels and node statuses
 - curated dataset review JSON
 - prompt packet JSON
 - reviewed proposal JSON
@@ -305,12 +388,14 @@ Verification should extend the existing
 This design should be implemented in narrow commits:
 
 1. Extract IR structs and preserve existing behavior.
-2. Store and rehydrate run metadata without ecommerce hardcoding.
-3. Add prompt packet compiler and tests.
-4. Add curated dataset drafts and review lifecycle.
-5. Add logic rule proposal generation and materialization.
-6. Update tool spec compiler metadata for action risk and approval.
-7. Update Semantic UI and verification script.
+2. Add DAG definitions, cycle detection, topological execution levels, and
+   affected-subgraph invalidation.
+3. Store and rehydrate run metadata without ecommerce hardcoding.
+4. Add prompt packet compiler and tests.
+5. Add curated dataset drafts and review lifecycle.
+6. Add logic rule proposal generation and materialization.
+7. Update tool spec compiler metadata for action risk and approval.
+8. Update Semantic UI and verification script.
 
 ## Success Criteria
 
@@ -318,6 +403,9 @@ This design should be implemented in narrow commits:
 - The verification script still proves the ecommerce demo flow.
 - A non-ecommerce seed run rehydrates correctly after list/get.
 - The API can return a structured `OntologyPromptPacket`.
+- The API can return the run DAG with topological levels and node statuses.
+- A cyclic onboarding definition fails before execution starts.
+- A changed source artifact invalidates only downstream nodes.
 - Approved logic and action proposals materialize into semantic objects without
   bypassing review.
 - Generated write tools stay approval-gated.
