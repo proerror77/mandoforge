@@ -355,6 +355,10 @@ pub struct OntologyOnboardingToolSpec {
     #[serde(default)]
     pub approval_required: bool,
     #[serde(default)]
+    pub transaction_profile: String,
+    #[serde(default)]
+    pub execution_mode: String,
+    #[serde(default)]
     pub read_write_risk: String,
     #[serde(default)]
     pub source_refs: Value,
@@ -424,6 +428,54 @@ pub struct OntologyReviewGraphEdge {
     pub evidence: Value,
     #[serde(default)]
     pub source_proposal_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct ConfidenceCalibrationResponse {
+    #[serde(default)]
+    pub run_id: String,
+    #[serde(default)]
+    pub record_count: usize,
+    #[serde(default)]
+    pub records: Vec<ConfidenceCalibrationRecord>,
+    #[serde(default)]
+    pub buckets: Vec<ConfidenceCalibrationBucket>,
+    #[serde(default)]
+    pub threshold_policy: Value,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct ConfidenceCalibrationRecord {
+    #[serde(default)]
+    pub proposal_type: String,
+    #[serde(default)]
+    pub proposal_name: String,
+    #[serde(default)]
+    pub model_confidence: f64,
+    #[serde(default)]
+    pub deterministic_validator_score: f64,
+    #[serde(default)]
+    pub retrieval_similarity_score: Option<f64>,
+    #[serde(default)]
+    pub source_quality_score: f64,
+    #[serde(default)]
+    pub reviewer_status: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct ConfidenceCalibrationBucket {
+    #[serde(default)]
+    pub proposal_type: String,
+    #[serde(default)]
+    pub reviewer_status: String,
+    #[serde(default)]
+    pub count: usize,
+    #[serde(default)]
+    pub average_model_confidence: f64,
+    #[serde(default)]
+    pub average_validator_score: f64,
+    #[serde(default)]
+    pub average_source_quality_score: f64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]

@@ -33,7 +33,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 const DEFAULT_TENANT_ID: &str = "00000000-0000-4000-8000-000000000001";
-const CONSOLE_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-omioZQat3AaxGep5qAb0c0n+pQHYxcIPr2lEB5M8pwc='; connect-src 'self' http://127.0.0.1:* http://localhost:*; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+const CONSOLE_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-iqS2omjbte3O/Dgy6CYh/8hqO9NtxLM+h3pXE+2EZs8='; connect-src 'self' http://127.0.0.1:* http://localhost:*; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
 
 mod authorization;
 mod codex_app_server;
@@ -12501,6 +12501,7 @@ fn ontology_action_proposal(
             "approval_required": approval_required,
             "effect_count": mapping.effects.as_array().map(Vec::len).unwrap_or_default(),
             "transaction_profile": mapping.transaction_profile,
+            "execution_mode": ontology_action_execution_mode(mapping.transaction_profile, !has_effects),
             "cross_system_write": cross_system_write,
         }),
         json!({

@@ -41,6 +41,7 @@ fn App() -> Html {
     let onboarding_run = use_state(|| None::<OntologyOnboardingRun>);
     let onboarding_tool_specs = use_state(Vec::<OntologyOnboardingToolSpec>::new);
     let onboarding_review_graph = use_state(|| None::<OntologyReviewGraph>);
+    let onboarding_calibration = use_state(|| None::<ConfidenceCalibrationResponse>);
     let critical_notifications_muted = use_state(initial_critical_notifications_muted);
 
     let data = ConsoleData {
@@ -202,11 +203,13 @@ fn App() -> Html {
         let onboarding_run = onboarding_run.clone();
         let onboarding_tool_specs = onboarding_tool_specs.clone();
         let onboarding_review_graph = onboarding_review_graph.clone();
+        let onboarding_calibration = onboarding_calibration.clone();
         let mutation_status = mutation_status.clone();
         Callback::from(move |_| {
             let onboarding_run = onboarding_run.clone();
             let onboarding_tool_specs = onboarding_tool_specs.clone();
             let onboarding_review_graph = onboarding_review_graph.clone();
+            let onboarding_calibration = onboarding_calibration.clone();
             let mutation_status = mutation_status.clone();
             spawn_local(async move {
                 mutation_status.set("Starting enterprise ontology onboarding demo...".to_string());
@@ -222,6 +225,12 @@ fn App() -> Html {
                         match api_get::<OntologyReviewGraph>(&graph_path).await {
                             Ok(graph) => onboarding_review_graph.set(Some(graph)),
                             Err(_) => onboarding_review_graph.set(None),
+                        }
+                        let calibration_path =
+                            format!("/api/ontology/intelligence/runs/{}/calibration", run.id);
+                        match api_get::<ConfidenceCalibrationResponse>(&calibration_path).await {
+                            Ok(calibration) => onboarding_calibration.set(Some(calibration)),
+                            Err(_) => onboarding_calibration.set(None),
                         }
                         mutation_status.set(format!(
                             "Onboarding run ready: {} proposals from {} datasets.",
@@ -241,6 +250,7 @@ fn App() -> Html {
     let approve_ontology_proposal = {
         let onboarding_run = onboarding_run.clone();
         let onboarding_review_graph = onboarding_review_graph.clone();
+        let onboarding_calibration = onboarding_calibration.clone();
         let mutation_status = mutation_status.clone();
         Callback::from(move |proposal_id: String| {
             let Some(current_run) = (*onboarding_run).clone() else {
@@ -249,6 +259,7 @@ fn App() -> Html {
             };
             let onboarding_run = onboarding_run.clone();
             let onboarding_review_graph = onboarding_review_graph.clone();
+            let onboarding_calibration = onboarding_calibration.clone();
             let mutation_status = mutation_status.clone();
             spawn_local(async move {
                 mutation_status.set("Approving ontology proposal...".to_string());
@@ -270,6 +281,16 @@ fn App() -> Html {
                                 {
                                     onboarding_review_graph.set(Some(graph));
                                 }
+                                let calibration_path = format!(
+                                    "/api/ontology/intelligence/runs/{}/calibration",
+                                    run.id
+                                );
+                                if let Ok(calibration) =
+                                    api_get::<ConfidenceCalibrationResponse>(&calibration_path)
+                                        .await
+                                {
+                                    onboarding_calibration.set(Some(calibration));
+                                }
                                 mutation_status.set(format!(
                                     "Proposal approved: {}/{} approved.",
                                     run.approved_count, run.proposal_count
@@ -289,6 +310,7 @@ fn App() -> Html {
     let reject_ontology_proposal = {
         let onboarding_run = onboarding_run.clone();
         let onboarding_review_graph = onboarding_review_graph.clone();
+        let onboarding_calibration = onboarding_calibration.clone();
         let mutation_status = mutation_status.clone();
         Callback::from(move |proposal_id: String| {
             let Some(current_run) = (*onboarding_run).clone() else {
@@ -297,6 +319,7 @@ fn App() -> Html {
             };
             let onboarding_run = onboarding_run.clone();
             let onboarding_review_graph = onboarding_review_graph.clone();
+            let onboarding_calibration = onboarding_calibration.clone();
             let mutation_status = mutation_status.clone();
             spawn_local(async move {
                 mutation_status.set("Rejecting ontology proposal...".to_string());
@@ -318,6 +341,16 @@ fn App() -> Html {
                                 {
                                     onboarding_review_graph.set(Some(graph));
                                 }
+                                let calibration_path = format!(
+                                    "/api/ontology/intelligence/runs/{}/calibration",
+                                    run.id
+                                );
+                                if let Ok(calibration) =
+                                    api_get::<ConfidenceCalibrationResponse>(&calibration_path)
+                                        .await
+                                {
+                                    onboarding_calibration.set(Some(calibration));
+                                }
                                 mutation_status.set("Proposal rejected.".to_string());
                                 onboarding_run.set(Some(run));
                             }
@@ -335,6 +368,7 @@ fn App() -> Html {
         let onboarding_run = onboarding_run.clone();
         let onboarding_tool_specs = onboarding_tool_specs.clone();
         let onboarding_review_graph = onboarding_review_graph.clone();
+        let onboarding_calibration = onboarding_calibration.clone();
         let mutation_status = mutation_status.clone();
         Callback::from(move |_| {
             let Some(current_run) = (*onboarding_run).clone() else {
@@ -344,6 +378,7 @@ fn App() -> Html {
             let onboarding_run = onboarding_run.clone();
             let onboarding_tool_specs = onboarding_tool_specs.clone();
             let onboarding_review_graph = onboarding_review_graph.clone();
+            let onboarding_calibration = onboarding_calibration.clone();
             let mutation_status = mutation_status.clone();
             spawn_local(async move {
                 mutation_status.set("Materializing approved ontology proposals...".to_string());
@@ -363,6 +398,15 @@ fn App() -> Html {
                         );
                         if let Ok(graph) = api_get::<OntologyReviewGraph>(&graph_path).await {
                             onboarding_review_graph.set(Some(graph));
+                        }
+                        let calibration_path = format!(
+                            "/api/ontology/intelligence/runs/{}/calibration",
+                            current_run.id
+                        );
+                        if let Ok(calibration) =
+                            api_get::<ConfidenceCalibrationResponse>(&calibration_path).await
+                        {
+                            onboarding_calibration.set(Some(calibration));
                         }
                         let specs_path = format!(
                             "/api/ontology/onboarding/runs/{}/tool-specs",
@@ -684,6 +728,7 @@ fn App() -> Html {
                                 onboarding_run={(*onboarding_run).clone()}
                                 onboarding_tool_specs={(*onboarding_tool_specs).clone()}
                                 onboarding_review_graph={(*onboarding_review_graph).clone()}
+                                onboarding_calibration={(*onboarding_calibration).clone()}
                                 on_source={state_textarea(semantic_source.clone())}
                                 on_build={build_ontology.clone()}
                                 on_context_packet_id={state_input(context_packet_id.clone())}

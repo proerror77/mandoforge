@@ -1041,6 +1041,53 @@ h2 {
   gap: 6px;
 }
 
+.ontology-intelligence-review {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel);
+}
+
+.ontology-intelligence-review-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.ontology-intelligence-review-head strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.ontology-intelligence-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.ontology-intelligence-grid section {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ontology-intelligence-grid h4 {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0;
+}
+
+.ontology-intelligence-wide {
+  grid-column: 1 / -1;
+}
+
 .ontology-proposal-row {
   display: grid;
   gap: 8px;

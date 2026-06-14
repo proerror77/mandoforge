@@ -1,7 +1,7 @@
 use crate::api::{
-    OntologyOnboardingProposal, OntologyOnboardingRun, OntologyOnboardingToolSpec,
-    OntologyReviewGraph, OntologyReviewGraphNode, RenderedExecutionContext, SemanticGraphSnapshot,
-    SemanticObject,
+    ConfidenceCalibrationResponse, OntologyOnboardingProposal, OntologyOnboardingRun,
+    OntologyOnboardingToolSpec, OntologyReviewGraph, OntologyReviewGraphNode,
+    RenderedExecutionContext, SemanticGraphSnapshot, SemanticObject,
 };
 use crate::components::{FlowMeter, JsonPreview, KeyMetrics, Panel, Rows};
 use crate::state::ConsoleData;
@@ -20,6 +20,7 @@ pub(crate) struct SemanticProps {
     pub(crate) onboarding_run: Option<OntologyOnboardingRun>,
     pub(crate) onboarding_tool_specs: Vec<OntologyOnboardingToolSpec>,
     pub(crate) onboarding_review_graph: Option<OntologyReviewGraph>,
+    pub(crate) onboarding_calibration: Option<ConfidenceCalibrationResponse>,
     pub(crate) on_source: Callback<InputEvent>,
     pub(crate) on_build: Callback<MouseEvent>,
     pub(crate) on_context_packet_id: Callback<InputEvent>,
@@ -39,6 +40,7 @@ pub(crate) fn SemanticView(props: &SemanticProps) -> Html {
                     run={props.onboarding_run.clone()}
                     tool_specs={props.onboarding_tool_specs.clone()}
                     review_graph={props.onboarding_review_graph.clone()}
+                    calibration={props.onboarding_calibration.clone()}
                     on_start={props.on_start_onboarding.clone()}
                     on_approve={props.on_approve_onboarding_proposal.clone()}
                     on_reject={props.on_reject_onboarding_proposal.clone()}
@@ -94,6 +96,7 @@ struct OnboardingPanelProps {
     run: Option<OntologyOnboardingRun>,
     tool_specs: Vec<OntologyOnboardingToolSpec>,
     review_graph: Option<OntologyReviewGraph>,
+    calibration: Option<ConfidenceCalibrationResponse>,
     on_start: Callback<MouseEvent>,
     on_approve: Callback<String>,
     on_reject: Callback<String>,
@@ -128,6 +131,10 @@ fn OnboardingPanel(props: &OnboardingPanelProps) -> Html {
                 ("Approved".to_string(), run.approved_count.to_string()),
                 ("Materialized".to_string(), run.materialized_count.to_string()),
             ]} />
+            <OntologyIntelligenceReviewPanel
+                graph={props.review_graph.clone()}
+                calibration={props.calibration.clone()}
+            />
             <OntologyReviewGraphPanel graph={props.review_graph.clone()} />
             <div class="ontology-proposal-list">
                 { for ["object", "relation", "metric", "logic", "action"].iter().map(|proposal_type| html! {
@@ -152,12 +159,218 @@ fn OnboardingPanel(props: &OnboardingPanelProps) -> Html {
                     (
                         if spec.approval_required { "approval" } else { "ready" }.to_string(),
                         spec.name.clone(),
-                        format!("{} / {} / {}", spec.target_object, label_or(&spec.read_write_risk, "risk_unset"), label_or(&spec.description, "ontology action"))
+                        format!(
+                            "{} / {} / {} / {}",
+                            spec.target_object,
+                            label_or(&spec.read_write_risk, "risk_unset"),
+                            label_or(&spec.transaction_profile, "profile_unset"),
+                            label_or(&spec.execution_mode, "mode_unset")
+                        )
                     )
                 }).collect::<Vec<_>>()} />
             </div>
         </div>
     }
+}
+
+#[derive(Properties, Clone, PartialEq)]
+struct OntologyIntelligenceReviewPanelProps {
+    graph: Option<OntologyReviewGraph>,
+    calibration: Option<ConfidenceCalibrationResponse>,
+}
+
+#[component]
+fn OntologyIntelligenceReviewPanel(props: &OntologyIntelligenceReviewPanelProps) -> Html {
+    let merge_rows = props
+        .graph
+        .as_ref()
+        .map(ontology_merge_rows)
+        .unwrap_or_default();
+    let low_confidence_rows = props
+        .graph
+        .as_ref()
+        .map(ontology_low_confidence_rows)
+        .unwrap_or_default();
+    let taxonomy_rows = props
+        .graph
+        .as_ref()
+        .map(ontology_taxonomy_rows)
+        .unwrap_or_default();
+    let transaction_rows = props
+        .graph
+        .as_ref()
+        .map(ontology_transaction_rows)
+        .unwrap_or_default();
+    let calibration_rows = props
+        .calibration
+        .as_ref()
+        .map(ontology_calibration_rows)
+        .unwrap_or_default();
+
+    html! {
+        <div class="ontology-intelligence-review">
+            <div class="ontology-intelligence-review-head">
+                <strong>{ "Intelligence review" }</strong>
+                <span>{ format!("{} calibration records", props.calibration.as_ref().map(|calibration| calibration.record_count).unwrap_or_default()) }</span>
+                <span>{ props.calibration.as_ref().and_then(|calibration| calibration.threshold_policy.get("configuration_surface")).and_then(|surface| surface.get("scope")).and_then(|scope| scope.as_str()).unwrap_or("customer_or_domain_policy") }</span>
+            </div>
+            <div class="ontology-intelligence-grid">
+                <section>
+                    <h4>{ "Merge" }</h4>
+                    <Rows empty="No merge warnings." rows={merge_rows} />
+                </section>
+                <section>
+                    <h4>{ "Low Confidence" }</h4>
+                    <Rows empty="No low-confidence items." rows={low_confidence_rows} />
+                </section>
+                <section>
+                    <h4>{ "Taxonomy" }</h4>
+                    <Rows empty="No taxonomy warnings." rows={taxonomy_rows} />
+                </section>
+                <section>
+                    <h4>{ "Transactions" }</h4>
+                    <Rows empty="No transaction warnings." rows={transaction_rows} />
+                </section>
+                <section class="ontology-intelligence-wide">
+                    <h4>{ "Calibration" }</h4>
+                    <Rows empty="No calibration records." rows={calibration_rows} />
+                </section>
+            </div>
+        </div>
+    }
+}
+
+fn ontology_merge_rows(graph: &OntologyReviewGraph) -> Vec<(String, String, String)> {
+    graph
+        .nodes
+        .iter()
+        .filter(|node| node.node_type == "merge_candidate")
+        .take(6)
+        .map(|node| {
+            (
+                label_or(&node.risk, "merge").to_string(),
+                node.label.clone(),
+                format!(
+                    "{} / {:.0}% / {}",
+                    label_or(&node.status, "pending"),
+                    node.confidence * 100.0,
+                    node.source_proposal_id
+                        .as_deref()
+                        .map(short_id)
+                        .unwrap_or_else(|| "source".to_string())
+                ),
+            )
+        })
+        .collect()
+}
+
+fn ontology_low_confidence_rows(graph: &OntologyReviewGraph) -> Vec<(String, String, String)> {
+    graph
+        .nodes
+        .iter()
+        .filter(|node| node.confidence < 0.90 || node.risk == "needs_review")
+        .take(6)
+        .map(|node| {
+            (
+                node.node_type.clone(),
+                node.label.clone(),
+                format!(
+                    "{:.0}% / {}",
+                    node.confidence * 100.0,
+                    label_or(&node.risk, "low")
+                ),
+            )
+        })
+        .collect()
+}
+
+fn ontology_taxonomy_rows(graph: &OntologyReviewGraph) -> Vec<(String, String, String)> {
+    let object_count = graph
+        .nodes
+        .iter()
+        .filter(|node| node.node_type == "object")
+        .count();
+    let logic_count = graph
+        .nodes
+        .iter()
+        .filter(|node| node.node_type == "logic")
+        .count();
+    let mut rows = Vec::new();
+    if object_count >= 8 {
+        rows.push((
+            "object_scope".to_string(),
+            format!("{object_count} object candidates"),
+            "review granularity before publishing".to_string(),
+        ));
+    }
+    if logic_count > 0 {
+        rows.push((
+            "identity_rules".to_string(),
+            format!("{logic_count} disabled logic rules"),
+            "publish only after owner review".to_string(),
+        ));
+    }
+    rows
+}
+
+fn ontology_transaction_rows(graph: &OntologyReviewGraph) -> Vec<(String, String, String)> {
+    graph
+        .nodes
+        .iter()
+        .filter(|node| {
+            (node.node_type == "action" || node.node_type == "tool")
+                && (node.risk == "approval_required"
+                    || node
+                        .evidence
+                        .get("transaction_profile")
+                        .and_then(|value| value.as_str())
+                        == Some("proposal_only"))
+        })
+        .take(6)
+        .map(|node| {
+            let transaction_profile = node
+                .evidence
+                .get("transaction_profile")
+                .and_then(|value| value.as_str())
+                .unwrap_or("profile_unset");
+            let execution_mode = node
+                .evidence
+                .get("execution_mode")
+                .and_then(|value| value.as_str())
+                .unwrap_or(if transaction_profile == "proposal_only" {
+                    "proposal_only"
+                } else {
+                    "mode_unset"
+                });
+            (
+                label_or(&node.risk, "approval").to_string(),
+                node.label.clone(),
+                format!("{transaction_profile} / {execution_mode}"),
+            )
+        })
+        .collect()
+}
+
+fn ontology_calibration_rows(
+    calibration: &ConfidenceCalibrationResponse,
+) -> Vec<(String, String, String)> {
+    calibration
+        .buckets
+        .iter()
+        .take(6)
+        .map(|bucket| {
+            (
+                bucket.reviewer_status.clone(),
+                format!("{} ({})", bucket.proposal_type, bucket.count),
+                format!(
+                    "model {:.0}% / validator {:.0}% / source {:.0}%",
+                    bucket.average_model_confidence * 100.0,
+                    bucket.average_validator_score * 100.0,
+                    bucket.average_source_quality_score * 100.0
+                ),
+            )
+        })
+        .collect()
 }
 
 #[derive(Properties, Clone, PartialEq)]
