@@ -41,18 +41,18 @@ pub(crate) fn NotificationCenter(props: &NotificationCenterProps) -> Html {
     let has_notifications = !props.notifications.is_empty();
 
     html! {
-        <section class={classes!("notification-center", (!has_notifications).then_some("quiet"))} aria-label="Operator notification center">
+        <section class={classes!("notification-center", (!has_notifications).then_some("quiet"))} aria-label="操作员通知中心">
             <div class="notification-summary">
                 <div>
-                    <span>{ "Operator notifications" }</span>
+                    <span>{ "操作员通知" }</span>
                     <strong>{ if has_notifications {
-                        format!("{} actionable / {} critical", props.notifications.len(), critical_count)
+                        format!("{} 条待处理 / {} 条严重", props.notifications.len(), critical_count)
                     } else {
-                        "No actionable notifications".to_string()
+                        "没有待处理通知".to_string()
                     } }</strong>
                 </div>
                 <button class="secondary" onclick={props.on_toggle_critical.clone()}>
-                    { if props.critical_muted { "Enable critical" } else { "Mute critical" } }
+                    { if props.critical_muted { "恢复严重通知" } else { "静音严重通知" } }
                 </button>
             </div>
             <div class="notification-list">
@@ -61,9 +61,9 @@ pub(crate) fn NotificationCenter(props: &NotificationCenterProps) -> Html {
                         html! {
                             <article class="notification-item muted">
                                 <div>
-                                    <span>{ "muted" }</span>
-                                    <strong>{ format!("{critical_count} critical notifications hidden") }</strong>
-                                    <p>{ "Critical browser and desktop forwarding stays disabled until re-enabled in Settings." }</p>
+                                    <span>{ "已静音" }</span>
+                                    <strong>{ format!("{critical_count} 条严重通知已隐藏") }</strong>
+                                    <p>{ "重新开启前，浏览器和桌面都不会转发严重通知。" }</p>
                                 </div>
                             </article>
                         }
@@ -71,9 +71,9 @@ pub(crate) fn NotificationCenter(props: &NotificationCenterProps) -> Html {
                         html! {
                             <article class="notification-item neutral">
                                 <div>
-                                    <span>{ "clear" }</span>
-                                    <strong>{ "Queue is clear" }</strong>
-                                    <p>{ "Approvals, failed jobs, connector gates, ontology gates, and enterprise lanes report no current actionable notification." }</p>
+                                    <span>{ "正常" }</span>
+                                    <strong>{ "队列为空" }</strong>
+                                    <p>{ "审批、失败任务、连接器、本体闸门和企业上线面目前都没有需要立即处理的通知。" }</p>
                                 </div>
                             </article>
                         }
@@ -85,7 +85,7 @@ pub(crate) fn NotificationCenter(props: &NotificationCenterProps) -> Html {
                                 html! {
                                     <article class={classes!("notification-item", notification.severity)} key={notification.key.clone()}>
                                         <div>
-                                            <span>{ notification.severity }</span>
+                                            <span>{ severity_label(notification.severity) }</span>
                                             <strong>{ notification.title }</strong>
                                             <p>{ notification.detail }</p>
                                         </div>
@@ -103,6 +103,15 @@ pub(crate) fn NotificationCenter(props: &NotificationCenterProps) -> Html {
     }
 }
 
+fn severity_label(severity: &str) -> &'static str {
+    match severity {
+        "critical" => "严重",
+        "warning" => "警告",
+        "neutral" => "正常",
+        _ => "通知",
+    }
+}
+
 pub(crate) fn console_notifications(data: &ConsoleData) -> Vec<ConsoleNotification> {
     let mut notifications = Vec::new();
 
@@ -111,13 +120,10 @@ pub(crate) fn console_notifications(data: &ConsoleData) -> Vec<ConsoleNotificati
             Some(ConsoleNotification {
                 key: format!("approval:{}", approval.id),
                 severity: "warning",
-                title: format!(
-                    "Approval required: {}",
-                    label_or(&approval.kind, "runtime action")
-                ),
+                title: format!("需要审批：{}", label_or(&approval.kind, "运行时动作")),
                 detail: label_or(&approval.reason, &approval.id).to_string(),
                 target: View::Agents,
-                target_label: "Open approvals",
+                target_label: "查看审批",
             })
         } else {
             None
@@ -129,13 +135,13 @@ pub(crate) fn console_notifications(data: &ConsoleData) -> Vec<ConsoleNotificati
             Some(ConsoleNotification {
                 key: format!("execution-job:{}", job.id),
                 severity: "critical",
-                title: format!("Execution job failed: {}", short_id(&job.id)),
+                title: format!("执行任务失败：{}", short_id(&job.id)),
                 detail: job
                     .last_error
                     .clone()
                     .unwrap_or_else(|| format!("status {}", label_or(&job.status, "failed"))),
                 target: View::Workflows,
-                target_label: "Open runs",
+                target_label: "查看运行",
             })
         } else {
             None
@@ -148,13 +154,13 @@ pub(crate) fn console_notifications(data: &ConsoleData) -> Vec<ConsoleNotificati
             Some(ConsoleNotification {
                 key: format!("session-loop-job:{}", job.id),
                 severity: "critical",
-                title: format!("Session loop attention: {}", short_id(&job.id)),
+                title: format!("Session 循环需要处理：{}", short_id(&job.id)),
                 detail: job
                     .last_error
                     .clone()
                     .unwrap_or_else(|| format!("status {}", label_or(&job.status, "stuck"))),
                 target: View::Workflows,
-                target_label: "Open runs",
+                target_label: "查看运行",
             })
         } else {
             None
@@ -163,20 +169,20 @@ pub(crate) fn console_notifications(data: &ConsoleData) -> Vec<ConsoleNotificati
 
     if let Some(notification) = json_gate_notification(
         "connector:production-readiness",
-        "Connector production readiness blocked",
+        "连接器生产就绪被阻塞",
         &data.native_connector_production_readiness.data,
         View::Deploy,
-        "Open deploy",
+        "查看上线",
     ) {
         notifications.push(notification);
     }
 
     if let Some(notification) = json_gate_notification(
         "ontology:engine-readiness",
-        "Ontology engine readiness blocked",
+        "本体引擎就绪被阻塞",
         &data.ontology_engine_readiness.data,
         View::Semantic,
-        "Open ontology",
+        "查看本体",
     ) {
         notifications.push(notification);
     }
@@ -193,10 +199,7 @@ pub(crate) fn console_notifications(data: &ConsoleData) -> Vec<ConsoleNotificati
                     Some(ConsoleNotification {
                         key: format!("enterprise:{}", label_or(&lane.id, &lane.title)),
                         severity: if tone == "bad" { "critical" } else { "warning" },
-                        title: format!(
-                            "Enterprise lane regression: {}",
-                            label_or(&lane.title, &lane.id)
-                        ),
+                        title: format!("企业上线面回退：{}", label_or(&lane.title, &lane.id)),
                         detail: blocker.cloned().unwrap_or_else(|| {
                             format!(
                                 "{} -> {}",
@@ -205,7 +208,7 @@ pub(crate) fn console_notifications(data: &ConsoleData) -> Vec<ConsoleNotificati
                             )
                         }),
                         target: View::Deploy,
-                        target_label: "Open readiness",
+                        target_label: "查看就绪",
                     })
                 } else {
                     None
@@ -219,7 +222,7 @@ pub(crate) fn console_notifications(data: &ConsoleData) -> Vec<ConsoleNotificati
         notifications.push(ConsoleNotification {
             key: "enterprise:completion-blocked".to_string(),
             severity: "critical",
-            title: "Enterprise completion blocked".to_string(),
+            title: "企业级完成状态被阻塞".to_string(),
             detail: data
                 .enterprise_product_readiness
                 .data
@@ -232,9 +235,9 @@ pub(crate) fn console_notifications(data: &ConsoleData) -> Vec<ConsoleNotificati
                         "Enterprise readiness endpoint reports completion blocked.",
                     )
                     .to_string()
-                }),
+            }),
             target: View::Deploy,
-            target_label: "Open readiness",
+            target_label: "查看就绪",
         });
     }
 

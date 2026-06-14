@@ -23,6 +23,11 @@ pub(crate) fn PacksView(props: &PacksProps) -> Html {
     );
     html! {
         <div class="page-stack">
+            <section class="page-purpose">
+                <p class="eyebrow">{ "Capabilities / 能力包" }</p>
+                <h2>{ "把行业连接器、模板、动作和治理边界打包给托管智能体使用。" }</h2>
+                <p>{ "能力包不是一个独立业务流程页面。它声明 Managed Agents 可以调用什么连接器、读取什么语义对象、触发哪些动作，以及哪些动作必须先进入审批。" }</p>
+            </section>
             <section class="pack-product-grid">
                 { for cards.into_iter().map(|card| html! { <PackProductCard card={card} /> }) }
             </section>

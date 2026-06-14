@@ -2,8 +2,8 @@ use crate::api::{Agent, Session};
 use crate::components::{FlowMeter, KeyMetrics, Panel, Rows, RuntimePipeline, VersionBlock};
 use crate::state::ConsoleData;
 use crate::{
-    effective_selected, is_active_status, label_or, orbit_point, position_style, session_title,
-    short_id, status_tone,
+    compact_json, effective_selected, is_active_status, label_or, orbit_point, position_style,
+    session_title, short_id, status_tone,
 };
 use yew::prelude::*;
 
@@ -25,12 +25,26 @@ pub(crate) struct AgentsProps {
 pub(crate) fn AgentsView(props: &AgentsProps) -> Html {
     let data = &props.data;
     html! {
-        <div class="page-grid agents-grid">
+        <div class="page-stack">
+            <section class="page-purpose">
+                <p class="eyebrow">{ "Managed Agents / 托管智能体" }</p>
+                <h2>{ "这里观察和启动托管智能体，不承载业务流程建模。" }</h2>
+                <p>{ "Manager Agent 在这个页面只是观察者和建议者：它汇总运行压力、交接、审批和失败任务，帮助操作者决定下一步。" }</p>
+            </section>
+            <div class="page-grid agents-grid">
+            <Panel title="Manager Agent 观察栏">
+                <ManagerObservationRail data={data.clone()} />
+            </Panel>
             <Panel title="Task launcher">
                 <div class="taskbar">
                     <label>
                         <span>{ "Agent" }</span>
-                        <select value={effective_selected(&props.selected_agent_id, data.agents.data.first().map(|agent| agent.id.as_str()))} onchange={props.on_agent.clone()}>
+                        <select
+                            id="managed-agent-select"
+                            name="managed-agent-select"
+                            value={effective_selected(&props.selected_agent_id, data.agents.data.first().map(|agent| agent.id.as_str()))}
+                            onchange={props.on_agent.clone()}
+                        >
                             { for data.agents.data.iter().map(|agent| html! {
                                 <option value={agent.id.clone()}>{ format!("{} / {}", agent.name, label_or(&agent.agent_role, "agent")) }</option>
                             }) }
@@ -38,7 +52,12 @@ pub(crate) fn AgentsView(props: &AgentsProps) -> Html {
                     </label>
                     <label>
                         <span>{ "Environment" }</span>
-                        <select value={props.selected_environment_id.clone()} onchange={props.on_environment.clone()}>
+                        <select
+                            id="managed-agent-environment"
+                            name="managed-agent-environment"
+                            value={props.selected_environment_id.clone()}
+                            onchange={props.on_environment.clone()}
+                        >
                             <option value="">{ "Default environment" }</option>
                             { for data.environments.data.iter().map(|environment| html! {
                                 <option value={environment.id.clone()}>{ format!("{} / {}", environment.name, label_or(&environment.status, "status")) }</option>
@@ -46,11 +65,15 @@ pub(crate) fn AgentsView(props: &AgentsProps) -> Html {
                         </select>
                     </label>
                     <input
+                        id="managed-agent-task-title"
+                        name="managed-agent-task-title"
                         value={props.task_title.clone()}
                         placeholder="Task title"
                         oninput={props.on_task_title.clone()}
                     />
                     <textarea
+                        id="managed-agent-task-message"
+                        name="managed-agent-task-message"
                         value={props.task_message.clone()}
                         placeholder="Describe the task for the selected agent"
                         oninput={props.on_task_message.clone()}
@@ -107,8 +130,51 @@ pub(crate) fn AgentsView(props: &AgentsProps) -> Html {
                     ("Audit logs".to_string(), "via /api/sessions/{id}/audit-logs".to_string()),
                 ]} />
             </Panel>
+            </div>
         </div>
     }
+}
+
+#[component]
+fn ManagerObservationRail(props: &ManagerObservationRailProps) -> Html {
+    let failed_jobs = props
+        .data
+        .execution_jobs
+        .data
+        .iter()
+        .chain(props.data.session_loop_jobs.data.iter())
+        .filter(|job| status_tone(&job.status) == "bad")
+        .count();
+    let pending_approvals = props
+        .data
+        .approvals
+        .data
+        .iter()
+        .filter(|approval| approval.status == "pending" || approval.status == "requires_action")
+        .count();
+    html! {
+        <div class="manager-rail">
+            <KeyMetrics values={vec![
+                ("Manager plans".to_string(), props.data.manager_plans.data.len().to_string()),
+                ("Handoffs".to_string(), props.data.agent_handoffs.data.len().to_string()),
+                ("Assignments".to_string(), props.data.agent_handoff_assignments.data.len().to_string()),
+                ("Pending approvals".to_string(), pending_approvals.to_string()),
+                ("Failed jobs".to_string(), failed_jobs.to_string()),
+            ]} />
+            <Rows empty="没有 Manager Agent 建议。" rows={props.data.manager_plans.data.iter().take(5).enumerate().map(|(index, plan)| {
+                (
+                    "info".to_string(),
+                    format!("Manager observation {}", index + 1),
+                    compact_json(plan),
+                )
+            }).collect::<Vec<_>>()} />
+        </div>
+    }
+}
+
+#[derive(Properties, Clone, PartialEq)]
+struct ManagerObservationRailProps {
+    data: ConsoleData,
 }
 
 #[derive(Properties, Clone, PartialEq)]

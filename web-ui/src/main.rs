@@ -12,8 +12,8 @@ use notifications::*;
 use serde_json::{Value, json};
 use state::*;
 use views::{
-    AgentsView, BoardView, DeployView, DynamicView, OverviewView, PacksView, SemanticView,
-    SettingsView, WizardView, WorkflowsView,
+    AgentsView, DeployView, OverviewView, PacksView, SemanticView, SettingsView, WizardView,
+    WorkflowsView,
 };
 use wasm_bindgen_futures::spawn_local;
 use web_sys::{HtmlInputElement, HtmlSelectElement, HtmlTextAreaElement};
@@ -34,7 +34,8 @@ fn App() -> Html {
         "Run a multi-agent codebase audit and produce a cross-checked report.".to_string()
     });
     let semantic_source = use_state(|| {
-        "Contract review uses Contract, Party, Clause, Obligation, Risk, Jurisdiction, Template, and Approval Requirement concepts.".to_string()
+        "合同审核会用到合同、当事方、条款、义务、风险、司法辖区、模板和审批要求等业务概念。"
+            .to_string()
     });
     let context_packet_id = use_state(String::new);
     let rendered_context = use_state(|| None::<RenderedExecutionContext>);
@@ -186,14 +187,14 @@ fn App() -> Html {
             let source_text = (*semantic_source).clone();
             let mutation_status = mutation_status.clone();
             spawn_local(async move {
-                mutation_status.set("Building ontology proposal preview...".to_string());
+                mutation_status.set("正在生成本体提案预览...".to_string());
                 let body = ontology_builder_body(&source_text);
                 match api_post::<Value, _>("/api/semantic-ontology/builder", &body).await {
                     Ok(payload) => mutation_status.set(format!(
-                        "Ontology preview ready: {}",
+                        "本体预览已生成：{}",
                         compact_json(&payload)
                     )),
-                    Err(error) => mutation_status.set(format!("Ontology builder failed: {error}")),
+                    Err(error) => mutation_status.set(format!("本体构建失败：{error}")),
                 }
             });
         })
@@ -212,7 +213,7 @@ fn App() -> Html {
             let onboarding_calibration = onboarding_calibration.clone();
             let mutation_status = mutation_status.clone();
             spawn_local(async move {
-                mutation_status.set("Starting enterprise ontology onboarding demo...".to_string());
+                mutation_status.set("正在启动企业本体入职示例...".to_string());
                 match api_post::<OntologyOnboardingRun, _>(
                     "/api/ontology/onboarding/demo-runs",
                     &json!({}),
@@ -233,14 +234,14 @@ fn App() -> Html {
                             Err(_) => onboarding_calibration.set(None),
                         }
                         mutation_status.set(format!(
-                            "Onboarding run ready: {} proposals from {} datasets.",
+                            "本体入职运行已就绪：{} 个提案，来自 {} 个数据集。",
                             run.proposal_count, run.dataset_count
                         ));
                         onboarding_tool_specs.set(Vec::new());
                         onboarding_run.set(Some(run));
                     }
                     Err(error) => {
-                        mutation_status.set(format!("Onboarding start failed: {error}"));
+                        mutation_status.set(format!("本体入职启动失败：{error}"));
                     }
                 }
             });
@@ -262,7 +263,7 @@ fn App() -> Html {
             let onboarding_calibration = onboarding_calibration.clone();
             let mutation_status = mutation_status.clone();
             spawn_local(async move {
-                mutation_status.set("Approving ontology proposal...".to_string());
+                mutation_status.set("正在批准本体提案...".to_string());
                 let path = format!("/api/ontology/onboarding/proposals/{proposal_id}/review");
                 let body = json!({
                     "decision": "approve",
@@ -322,7 +323,7 @@ fn App() -> Html {
             let onboarding_calibration = onboarding_calibration.clone();
             let mutation_status = mutation_status.clone();
             spawn_local(async move {
-                mutation_status.set("Rejecting ontology proposal...".to_string());
+                mutation_status.set("正在拒绝本体提案...".to_string());
                 let path = format!("/api/ontology/onboarding/proposals/{proposal_id}/review");
                 let body = json!({
                     "decision": "reject",
@@ -381,7 +382,7 @@ fn App() -> Html {
             let onboarding_calibration = onboarding_calibration.clone();
             let mutation_status = mutation_status.clone();
             spawn_local(async move {
-                mutation_status.set("Materializing approved ontology proposals...".to_string());
+                mutation_status.set("正在发布已批准的本体提案...".to_string());
                 let path = format!(
                     "/api/ontology/onboarding/runs/{}/materialize",
                     current_run.id
@@ -589,22 +590,22 @@ fn App() -> Html {
         <main class="console-shell">
             <header class="topbar">
                 <div>
-                    <p class="eyebrow">{ "MandoForge Co-Work" }</p>
+                    <p class="eyebrow">{ "MandoForge 协同控制台 / Co-Work Console" }</p>
                     <h1>{ (*active_view).title() }</h1>
                 </div>
                 <div class="status-strip">
-                    <Metric label="Agents running" value={running_agents.to_string()} tone="good" />
-                    <Metric label="Workers active" value={active_job_count(&data.execution_jobs.data).to_string()} tone="good" />
-                    <Metric label="Approvals" value={pending_approvals.to_string()} tone={if pending_approvals > 0 { "warn" } else { "good" }} />
-                    <Metric label="Refreshing" value={fetching_count.to_string()} tone="neutral" />
-                    <Metric label="Errors" value={error_count.to_string()} tone={if error_count > 0 { "bad" } else { "good" }} />
+                    <Metric label="运行智能体" value={running_agents.to_string()} tone="good" />
+                    <Metric label="执行队列" value={active_job_count(&data.execution_jobs.data).to_string()} tone="good" />
+                    <Metric label="待审批" value={pending_approvals.to_string()} tone={if pending_approvals > 0 { "warn" } else { "good" }} />
+                    <Metric label="刷新中" value={fetching_count.to_string()} tone="neutral" />
+                    <Metric label="错误" value={error_count.to_string()} tone={if error_count > 0 { "bad" } else { "good" }} />
                 </div>
             </header>
 
             <section class="auth-strip">
                 <div>
-                    <strong>{ "API auth" }</strong>
-                    <span>{ "Bearer token is used with x-mandoforge identity headers for live gates and production consoles." }</span>
+                    <strong>{ "API 认证" }</strong>
+                    <span>{ "用于访问实时闸门、生产证据和控制台 API 的 Bearer token。" }</span>
                 </div>
                 <input
                     id="mandoforge-admin-token"
@@ -620,19 +621,19 @@ fn App() -> Html {
                         })
                     }}
                 />
-                <button onclick={save_token}>{ "Save token" }</button>
-                <button class="secondary" onclick={clear_token}>{ "Clear" }</button>
+                <button onclick={save_token}>{ "保存" }</button>
+                <button class="secondary" onclick={clear_token}>{ "清除" }</button>
             </section>
 
             <nav class="tabs">
-                { for View::ALL.into_iter().map(|view| {
+                { for View::PRIMARY_NAV.into_iter().map(|view| {
                     let active_view = active_view.clone();
                     let is_active = *active_view == view;
                     html! {
                         <button
                             class={classes!("tab", is_active.then_some("active"))}
                             onclick={Callback::from(move |_| {
-                                storage_set("mandoforge.activeView", view.id());
+                                persist_active_view(view);
                                 active_view.set(view);
                             })}
                         >
@@ -649,7 +650,7 @@ fn App() -> Html {
                 on_view={{
                     let active_view = active_view.clone();
                     Callback::from(move |view: View| {
-                        storage_set("mandoforge.activeView", view.id());
+                        persist_active_view(view);
                         active_view.set(view);
                     })
                 }}
@@ -658,7 +659,13 @@ fn App() -> Html {
             {
                 if matches!(
                     *active_view,
-                    View::Overview | View::Wizard | View::Packs | View::Settings
+                    View::Overview
+                        | View::Wizard
+                        | View::Agents
+                        | View::Semantic
+                        | View::Packs
+                        | View::Deploy
+                        | View::Settings
                 ) {
                     html! {}
                 } else {
@@ -675,7 +682,7 @@ fn App() -> Html {
                                 on_view={{
                                     let active_view = active_view.clone();
                                     Callback::from(move |view: View| {
-                                        storage_set("mandoforge.activeView", view.id());
+                                        persist_active_view(view);
                                         active_view.set(view);
                                     })
                                 }}
@@ -691,7 +698,7 @@ fn App() -> Html {
                                 on_view={{
                                     let active_view = active_view.clone();
                                     Callback::from(move |view: View| {
-                                        storage_set("mandoforge.activeView", view.id());
+                                        persist_active_view(view);
                                         active_view.set(view);
                                     })
                                 }}
@@ -711,10 +718,8 @@ fn App() -> Html {
                                 on_start_task={start_task.clone()}
                             />
                         },
-                        View::Board => html! { <BoardView data={data.clone()} /> },
-                        View::Workflows => html! { <WorkflowsView data={data.clone()} /> },
-                        View::Dynamic => html! {
-                            <DynamicView
+                        View::Board | View::Workflows | View::Dynamic => html! {
+                            <WorkflowsView
                                 data={data.clone()}
                                 objective={(*dynamic_objective).clone()}
                                 on_objective={state_input(dynamic_objective.clone())}
@@ -757,8 +762,8 @@ fn App() -> Html {
             </section>
 
             <footer class="live-log">
-                <strong>{ "Live log stream" }</strong>
-                <span>{ if mutation_status.is_empty() { "No operator action in this browser turn." } else { mutation_status.as_str() } }</span>
+                <strong>{ "实时操作日志" }</strong>
+                <span>{ if mutation_status.is_empty() { "本轮浏览器操作还没有触发后台动作。" } else { mutation_status.as_str() } }</span>
             </footer>
         </main>
     }

@@ -1,7 +1,7 @@
 use crate::api::{
     ConfidenceCalibrationResponse, OntologyOnboardingProposal, OntologyOnboardingRun,
-    OntologyOnboardingToolSpec, OntologyReviewGraph, OntologyReviewGraphNode,
-    RenderedExecutionContext, SemanticGraphSnapshot, SemanticObject,
+    OntologyOnboardingToolSpec, OntologyReviewGraph, OntologyReviewGraphEdge,
+    OntologyReviewGraphNode, RenderedExecutionContext, SemanticGraphSnapshot, SemanticObject,
 };
 use crate::components::{FlowMeter, JsonPreview, KeyMetrics, Panel, Rows};
 use crate::state::ConsoleData;
@@ -9,6 +9,7 @@ use crate::{
     compact_json, label_or, orbit_point, position_style, semantic_scope_summary, short_id,
     status_tone,
 };
+use serde_json::Value;
 use yew::prelude::*;
 
 #[derive(Properties, Clone, PartialEq)]
@@ -31,12 +32,148 @@ pub(crate) struct SemanticProps {
     pub(crate) on_materialize_onboarding: Callback<MouseEvent>,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum SemanticLang {
+    Zh,
+    En,
+}
+
+impl SemanticLang {
+    fn text(self, en: &'static str, zh: &'static str) -> &'static str {
+        match self {
+            Self::En => en,
+            Self::Zh => zh,
+        }
+    }
+}
+
+fn localized_status(lang: SemanticLang, status: &str) -> String {
+    if lang == SemanticLang::En {
+        return status.to_string();
+    }
+    match status {
+        "approved" => "已批准",
+        "rejected" => "已拒绝",
+        "pending" => "待审核",
+        "pending_review" => "待审核",
+        "materialized" => "已发布",
+        "ready" => "就绪",
+        "approval" | "approval_required" | "write_approval_required" => "需审批",
+        "needs_review" => "需复核",
+        "blocked" => "已阻塞",
+        "pilot_ready" => "试点就绪",
+        "active" => "运行中",
+        "completed" => "已完成",
+        "proposal_only" => "仅提案",
+        "profiled" => "已画像",
+        "proposed" => "已提议",
+        "compiled" => "已生成",
+        "referenced" => "被引用",
+        "profile_unset" => "事务未设置",
+        "mode_unset" => "模式未设置",
+        "read_only" => "只读",
+        "" => "未设置",
+        other => other,
+    }
+    .to_string()
+}
+
+fn localized_source_mode(lang: SemanticLang, source_mode: &str) -> String {
+    if lang == SemanticLang::En {
+        return label_or(source_mode, "demo").to_string();
+    }
+    match source_mode {
+        "demo_ecommerce" | "demo" => "电商示例",
+        "demo_insurance" => "保险示例",
+        "" => "示例",
+        other => other,
+    }
+    .to_string()
+}
+
+fn localized_risk(lang: SemanticLang, risk: &str) -> String {
+    if lang == SemanticLang::En {
+        return risk.to_string();
+    }
+    match risk {
+        "low" => "低风险",
+        "medium" => "中风险",
+        "high" => "高风险",
+        "needs_review" => "需复核",
+        "approval_required" => "需审批",
+        "merge" => "合并",
+        "pii_review" => "PII 复核",
+        "merge_review_required" => "合并复核",
+        "possible_match" => "可能匹配",
+        "blocked" => "已阻塞",
+        "risk_unset" => "风险未设置",
+        "" => "未设置",
+        other => other,
+    }
+    .to_string()
+}
+
 #[component]
 pub(crate) fn SemanticView(props: &SemanticProps) -> Html {
+    let lang = use_state(|| SemanticLang::Zh);
+    let current_lang = *lang;
+    let set_zh = {
+        let lang = lang.clone();
+        Callback::from(move |_| lang.set(SemanticLang::Zh))
+    };
+    let set_en = {
+        let lang = lang.clone();
+        Callback::from(move |_| lang.set(SemanticLang::En))
+    };
+    let run = props.onboarding_run.as_ref();
     html! {
-        <div class="page-grid semantic-grid">
-            <Panel title="Enterprise ontology fast-onboarding">
+        <div class="semantic-workbench">
+            <section class="semantic-hero">
+                <div class="semantic-hero-copy">
+                    <span class="semantic-kicker">{ current_lang.text("Ontology Builder", "本体构建器") }</span>
+                    <h1>{ current_lang.text("Turn enterprise data into reviewed agent tools.", "把企业数据变成可审核、可发布的智能体工具。") }</h1>
+                    <p>{ current_lang.text(
+                        "Start with seed ontology and source evidence. Review the proposed business objects, relations, metrics, logic, and actions before anything is materialized.",
+                        "先用行业种子本体和数据证据生成提案。人工确认业务对象、关系、指标、规则和动作之后，才写入语义层。"
+                    ) }</p>
+                </div>
+                <div class="semantic-hero-controls">
+                    <div class="semantic-language-toggle" aria-label="Language">
+                        <button class={classes!((*lang == SemanticLang::Zh).then_some("active"))} onclick={set_zh}>{ "中文" }</button>
+                        <button class={classes!((*lang == SemanticLang::En).then_some("active"))} onclick={set_en}>{ "EN" }</button>
+                    </div>
+                    <div class="semantic-hero-actions">
+                        <button onclick={props.on_start_onboarding.clone()}>{ current_lang.text("Start ecommerce sample", "开始电商示例") }</button>
+                        <button
+                            class="secondary"
+                            onclick={props.on_materialize_onboarding.clone()}
+                            disabled={run.map(|run| run.approved_count == 0).unwrap_or(true)}
+                        >
+                            { current_lang.text("Materialize approved", "发布已批准项") }
+                        </button>
+                    </div>
+                    <KeyMetrics values={vec![
+                        (current_lang.text("Run", "运行").to_string(), run.map(|run| short_id(&run.id)).unwrap_or_else(|| current_lang.text("Not started", "未开始").to_string())),
+                        (current_lang.text("Datasets", "数据集").to_string(), run.map(|run| run.dataset_count.to_string()).unwrap_or_else(|| "0".to_string())),
+                        (current_lang.text("Proposals", "提案").to_string(), run.map(|run| run.proposal_count.to_string()).unwrap_or_else(|| "0".to_string())),
+                        (current_lang.text("Approved", "已批准").to_string(), run.map(|run| run.approved_count.to_string()).unwrap_or_else(|| "0".to_string())),
+                    ]} />
+                </div>
+            </section>
+
+            <SemanticJourney lang={current_lang} run={props.onboarding_run.clone()} tool_count={props.onboarding_tool_specs.len()} />
+
+            <div class="semantic-main-layout">
+                <section class="semantic-primary-card">
+                    <header class="semantic-section-head">
+                        <div>
+                            <span>{ current_lang.text("Ontology map", "本体关系图") }</span>
+                            <h2>{ current_lang.text("Inspect tables, objects, links, and actions", "检查资料表、业务对象、关系和动作") }</h2>
+                        </div>
+                        <small>{ current_lang.text("Start from the graph, then approve the exact proposals behind each edge.", "先看业务关系图，再审核每条关系背后的提案证据。") }</small>
+                    </header>
                 <OnboardingPanel
+                    lang={current_lang}
                     run={props.onboarding_run.clone()}
                     tool_specs={props.onboarding_tool_specs.clone()}
                     review_graph={props.onboarding_review_graph.clone()}
@@ -46,60 +183,243 @@ pub(crate) fn SemanticView(props: &SemanticProps) -> Html {
                     on_reject={props.on_reject_onboarding_proposal.clone()}
                     on_materialize={props.on_materialize_onboarding.clone()}
                 />
-            </Panel>
-            <Panel title="Ontology builder">
-                <div class="form-stack">
-                    <textarea
-                        id="ontology-builder-source"
-                        name="ontology-builder-source"
-                        value={props.source_text.clone()}
-                        oninput={props.on_source.clone()}
-                    />
-                    <button onclick={props.on_build.clone()}>{ "Preview ontology proposal" }</button>
+                </section>
+
+                <aside class="semantic-side-rail">
+                    <section class="semantic-utility-card">
+                        <header class="semantic-section-head compact">
+                            <div>
+                                <span>{ current_lang.text("Quick draft", "快速草稿") }</span>
+                                <h2>{ current_lang.text("Model extraction V1", "模型抽取 V1") }</h2>
+                            </div>
+                        </header>
+                        <div class="form-stack">
+                            <textarea
+                                id="ontology-builder-source"
+                                name="ontology-builder-source"
+                                aria-label={current_lang.text("Ontology builder source text", "本体构建来源文本")}
+                                value={props.source_text.clone()}
+                                oninput={props.on_source.clone()}
+                            />
+                            <button onclick={props.on_build.clone()}>{ current_lang.text("Preview proposal", "预览提案") }</button>
+                        </div>
+                    </section>
+
+                    <section class="semantic-utility-card">
+                        <header class="semantic-section-head compact">
+                            <div>
+                                <span>{ current_lang.text("Readiness", "就绪状态") }</span>
+                                <h2>{ current_lang.text("Engine status", "引擎状态") }</h2>
+                            </div>
+                        </header>
+                        <OntologyReadinessSummary
+                            lang={current_lang}
+                            value={props.data.ontology_engine_readiness.data.clone()}
+                        />
+                    </section>
+
+                    <section class="semantic-utility-card">
+                        <header class="semantic-section-head compact">
+                            <div>
+                                <span>{ current_lang.text("Context", "上下文") }</span>
+                                <h2>{ current_lang.text("Prompt compiler", "提示词上下文编译") }</h2>
+                            </div>
+                        </header>
+                        <div class="form-stack">
+                            <input
+                                id="context-packet-id"
+                                name="context-packet-id"
+                                value={props.context_packet_id.clone()}
+                                placeholder={current_lang.text("Context packet ID", "上下文包 ID")}
+                                oninput={props.on_context_packet_id.clone()}
+                            />
+                            <button onclick={props.on_render_context.clone()}>{ current_lang.text("Render context", "渲染上下文") }</button>
+                            <RenderedContextPreview lang={current_lang} rendered={props.rendered_context.clone()} />
+                        </div>
+                    </section>
+                </aside>
+            </div>
+
+            <details class="semantic-advanced">
+                <summary>{ current_lang.text("Advanced semantic state, graph, and governance", "高级：语义图、对象和治理状态") }</summary>
+                <div class="page-grid semantic-debug-grid">
+                    <Panel title="语义图快照">
+                        <SemanticMap snapshot={props.data.semantic_graph.data.clone()} objects={props.data.semantic_objects.data.clone()} />
+                    </Panel>
+                    <Panel title="语义对象">
+                        <Rows empty="还没有语义对象。" rows={props.data.semantic_objects.data.iter().take(10).map(|object| {
+                            (
+                                object.status.clone(),
+                                label_or(&object.title, &object.object_key).to_string(),
+                                format!("{} / {} / {}", object.object_type, object.trust_level, semantic_scope_summary(&object.semantic_scopes))
+                            )
+                        }).collect::<Vec<_>>()} />
+                    </Panel>
+                    <Panel title="治理状态">
+                        <KeyMetrics values={vec![
+                            ("写回".to_string(), compact_json(&props.data.memory_writebacks.data)),
+                            ("候选写回".to_string(), compact_json(&props.data.memory_writeback_candidates.data)),
+                            ("本体版本".to_string(), props.data.ontology_registry.data.version.clone()),
+                            ("反思队列".to_string(), props.data.semantic_reflection_queue.data.status.clone()),
+                        ]} />
+                    </Panel>
                 </div>
-            </Panel>
-            <Panel title="Ontology engine readiness">
-                <JsonPreview value={props.data.ontology_engine_readiness.data.clone()} />
-            </Panel>
-            <Panel title="Context compiler">
-                <div class="form-stack">
-                    <input
-                        id="context-packet-id"
-                        name="context-packet-id"
-                        value={props.context_packet_id.clone()}
-                        placeholder="Context packet ID"
-                        oninput={props.on_context_packet_id.clone()}
-                    />
-                    <button onclick={props.on_render_context.clone()}>{ "Render execution context" }</button>
-                    <RenderedContextPreview rendered={props.rendered_context.clone()} />
-                </div>
-            </Panel>
-            <Panel title="Semantic graph">
-                <SemanticMap snapshot={props.data.semantic_graph.data.clone()} objects={props.data.semantic_objects.data.clone()} />
-            </Panel>
-            <Panel title="Objects">
-                <Rows empty="No semantic objects." rows={props.data.semantic_objects.data.iter().take(10).map(|object| {
-                    (
-                        object.status.clone(),
-                        label_or(&object.title, &object.object_key).to_string(),
-                        format!("{} / {} / {}", object.object_type, object.trust_level, semantic_scope_summary(&object.semantic_scopes))
-                    )
-                }).collect::<Vec<_>>()} />
-            </Panel>
-            <Panel title="Governance">
-                <KeyMetrics values={vec![
-                    ("Writebacks".to_string(), compact_json(&props.data.memory_writebacks.data)),
-                    ("Candidates".to_string(), compact_json(&props.data.memory_writeback_candidates.data)),
-                    ("Ontology".to_string(), props.data.ontology_registry.data.version.clone()),
-                    ("Reflection".to_string(), props.data.semantic_reflection_queue.data.status.clone()),
-                ]} />
-            </Panel>
+            </details>
         </div>
     }
 }
 
 #[derive(Properties, Clone, PartialEq)]
+struct OntologyReadinessSummaryProps {
+    lang: SemanticLang,
+    value: Value,
+}
+
+#[component]
+fn OntologyReadinessSummary(props: &OntologyReadinessSummaryProps) -> Html {
+    let status = props
+        .value
+        .get("status")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    let ready = props
+        .value
+        .get("ready_check_count")
+        .and_then(|value| value.as_u64())
+        .unwrap_or_default();
+    let pilot = props
+        .value
+        .get("pilot_ready_check_count")
+        .and_then(|value| value.as_u64())
+        .unwrap_or_default();
+    let blocked = props
+        .value
+        .get("blocked_check_count")
+        .and_then(|value| value.as_u64())
+        .unwrap_or_default();
+    let object_types = props
+        .value
+        .get("object_type_count")
+        .and_then(|value| value.as_u64())
+        .unwrap_or_default();
+    let relation_types = props
+        .value
+        .get("relation_type_count")
+        .and_then(|value| value.as_u64())
+        .unwrap_or_default();
+    let registry = props
+        .value
+        .get("registry_version")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+
+    html! {
+        <div class="ontology-readiness-summary">
+            <KeyMetrics values={vec![
+                (props.lang.text("Status", "状态").to_string(), localized_status(props.lang, status)),
+                (props.lang.text("Ready", "已就绪").to_string(), ready.to_string()),
+                (props.lang.text("Pilot", "试点").to_string(), pilot.to_string()),
+                (props.lang.text("Blocked", "阻塞").to_string(), blocked.to_string()),
+                (props.lang.text("Objects", "对象类型").to_string(), object_types.to_string()),
+                (props.lang.text("Relations", "关系类型").to_string(), relation_types.to_string()),
+                (props.lang.text("Registry", "注册表").to_string(), registry.to_string()),
+            ]} />
+            <p>{ props.lang.text(
+                "This summarizes whether ontology proposals can be reviewed and materialized safely. Raw evidence is available below for debugging.",
+                "这里汇总本体提案是否能被安全审核和发布。原始证据保留在下方，供调试使用。"
+            ) }</p>
+            <details class="semantic-inline-details">
+                <summary>{ props.lang.text("Raw readiness JSON", "原始就绪 JSON") }</summary>
+                <JsonPreview value={props.value.clone()} />
+            </details>
+        </div>
+    }
+}
+
+#[derive(Properties, Clone, PartialEq)]
+struct SemanticJourneyProps {
+    lang: SemanticLang,
+    run: Option<OntologyOnboardingRun>,
+    tool_count: usize,
+}
+
+#[component]
+fn SemanticJourney(props: &SemanticJourneyProps) -> Html {
+    let run_started = props.run.is_some();
+    let reviewed = props
+        .run
+        .as_ref()
+        .map(|run| {
+            run.proposals.iter().any(|proposal| {
+                proposal.review_status == "approved" || proposal.review_status == "rejected"
+            })
+        })
+        .unwrap_or(false);
+    let materialized = props
+        .run
+        .as_ref()
+        .map(|run| run.materialized_count > 0)
+        .unwrap_or(false);
+    let tool_ready = props.tool_count > 0;
+    let steps = vec![
+        (
+            "01",
+            props.lang.text("Connect source", "接入数据"),
+            props
+                .lang
+                .text("Use connector or demo bundle", "使用连接器或示例数据包"),
+            true,
+        ),
+        (
+            "02",
+            props.lang.text("Profile evidence", "扫描画像"),
+            props
+                .lang
+                .text("Keys, joins, nulls, samples", "主键、关联、空值、样本"),
+            run_started,
+        ),
+        (
+            "03",
+            props.lang.text("Review proposals", "审核提案"),
+            props
+                .lang
+                .text("Objects, links, metrics, actions", "对象、关系、指标、动作"),
+            reviewed,
+        ),
+        (
+            "04",
+            props.lang.text("Publish ontology", "发布本体"),
+            props
+                .lang
+                .text("Materialize approved semantics", "写入已批准语义"),
+            materialized,
+        ),
+        (
+            "05",
+            props.lang.text("Compile tools", "生成工具"),
+            props
+                .lang
+                .text("Agent tools stay governed", "智能体工具仍受治理"),
+            tool_ready,
+        ),
+    ];
+
+    html! {
+        <section class="semantic-journey" aria-label={props.lang.text("Ontology onboarding journey", "本体入职流程")}>
+            { for steps.into_iter().map(|(number, title, detail, done)| html! {
+                <article class={classes!("semantic-journey-step", done.then_some("done"))} key={number}>
+                    <span>{ number }</span>
+                    <strong>{ title }</strong>
+                    <small>{ detail }</small>
+                </article>
+            }) }
+        </section>
+    }
+}
+
+#[derive(Properties, Clone, PartialEq)]
 struct OnboardingPanelProps {
+    lang: SemanticLang,
     run: Option<OntologyOnboardingRun>,
     tool_specs: Vec<OntologyOnboardingToolSpec>,
     review_graph: Option<OntologyReviewGraph>,
@@ -114,64 +434,69 @@ struct OnboardingPanelProps {
 fn OnboardingPanel(props: &OnboardingPanelProps) -> Html {
     let Some(run) = props.run.as_ref() else {
         return html! {
-            <div class="ontology-onboarding">
-                <div class="ontology-onboarding-actions">
-                    <button onclick={props.on_start.clone()}>{ "Start ecommerce demo run" }</button>
+            <div class="ontology-onboarding empty-state">
+                <div>
+                    <strong>{ props.lang.text("No onboarding run yet.", "还没有本体入职运行。") }</strong>
+                    <p>{ props.lang.text(
+                        "Start the ecommerce sample to see how raw tables become reviewable business objects, relations, metrics, and actions.",
+                        "启动电商示例，查看原始数据表如何变成可审核的业务对象、关系、指标和动作。"
+                    ) }</p>
                 </div>
-                <p class="empty">{ "No onboarding run started." }</p>
+                <button onclick={props.on_start.clone()}>{ props.lang.text("Start ecommerce sample", "开始电商示例") }</button>
             </div>
         };
     };
     html! {
         <div class="ontology-onboarding">
-            <div class="ontology-onboarding-actions">
-                <button onclick={props.on_start.clone()}>{ "Start new demo run" }</button>
-                <button onclick={props.on_materialize.clone()}>{ "Materialize approved" }</button>
-            </div>
             <KeyMetrics values={vec![
-                ("Run".to_string(), short_id(&run.id)),
-                ("Status".to_string(), label_or(&run.status, "pending").to_string()),
-                ("Source".to_string(), label_or(&run.source_mode, "demo").to_string()),
-                ("Datasets".to_string(), run.dataset_count.to_string()),
-                ("Profiles".to_string(), run.profile_count.to_string()),
-                ("Proposals".to_string(), run.proposal_count.to_string()),
-                ("Approved".to_string(), run.approved_count.to_string()),
-                ("Materialized".to_string(), run.materialized_count.to_string()),
+                (props.lang.text("Run", "运行").to_string(), short_id(&run.id)),
+                (props.lang.text("Status", "状态").to_string(), localized_status(props.lang, label_or(&run.status, "pending"))),
+                (props.lang.text("Source", "来源").to_string(), localized_source_mode(props.lang, &run.source_mode)),
+                (props.lang.text("Datasets", "数据集").to_string(), run.dataset_count.to_string()),
+                (props.lang.text("Profiles", "画像").to_string(), run.profile_count.to_string()),
+                (props.lang.text("Proposals", "提案").to_string(), run.proposal_count.to_string()),
+                (props.lang.text("Approved", "已批准").to_string(), run.approved_count.to_string()),
+                (props.lang.text("Materialized", "已发布").to_string(), run.materialized_count.to_string()),
             ]} />
+            <OntologyMindMapPanel lang={props.lang} graph={props.review_graph.clone()} />
             <OntologyIntelligenceReviewPanel
+                lang={props.lang}
                 graph={props.review_graph.clone()}
                 calibration={props.calibration.clone()}
             />
-            <OntologyReviewGraphPanel graph={props.review_graph.clone()} />
-            <div class="ontology-proposal-list">
-                { for ["object", "relation", "metric", "logic", "action"].iter().map(|proposal_type| html! {
-                    <section class="ontology-proposal-group" key={proposal_type.to_string()}>
-                        <h4>{ proposal_type.to_ascii_uppercase() }</h4>
-                        { for run.proposals.iter().filter(|proposal| proposal.proposal_type == *proposal_type).map(|proposal| {
-                            html! {
-                                <OnboardingProposalRow
-                                    key={proposal.id.clone()}
-                                    proposal={proposal.clone()}
-                                    on_approve={props.on_approve.clone()}
-                                    on_reject={props.on_reject.clone()}
-                                />
-                            }
-                        }) }
-                    </section>
-                }) }
-            </div>
+            <details class="ontology-proposal-details">
+                <summary>{ props.lang.text("Review proposal details", "审核提案明细") }</summary>
+                <div class="ontology-proposal-list">
+                    { for ["object", "relation", "metric", "logic", "action"].iter().map(|proposal_type| html! {
+                        <section class="ontology-proposal-group" key={proposal_type.to_string()}>
+                            <h4>{ localized_proposal_type(props.lang, proposal_type) }</h4>
+                            { for run.proposals.iter().filter(|proposal| proposal.proposal_type == *proposal_type).map(|proposal| {
+                                html! {
+                                    <OnboardingProposalRow
+                                        key={proposal.id.clone()}
+                                        lang={props.lang}
+                                        proposal={proposal.clone()}
+                                        on_approve={props.on_approve.clone()}
+                                        on_reject={props.on_reject.clone()}
+                                    />
+                                }
+                            }) }
+                        </section>
+                    }) }
+                </div>
+            </details>
             <div class="ontology-tool-specs">
-                <h4>{ "Compiled agent tools" }</h4>
-                <Rows empty="No tool specs compiled." rows={props.tool_specs.iter().map(|spec| {
+                <h4>{ props.lang.text("Compiled agent tools", "已生成智能体工具") }</h4>
+                <Rows empty={props.lang.text("No tool specs compiled.", "还没有生成工具。")} rows={props.tool_specs.iter().map(|spec| {
                     (
-                        if spec.approval_required { "approval" } else { "ready" }.to_string(),
+                        localized_status(props.lang, if spec.approval_required { "approval" } else { "ready" }),
                         spec.name.clone(),
                         format!(
                             "{} / {} / {} / {}",
                             spec.target_object,
-                            label_or(&spec.read_write_risk, "risk_unset"),
-                            label_or(&spec.transaction_profile, "profile_unset"),
-                            label_or(&spec.execution_mode, "mode_unset")
+                            localized_risk(props.lang, label_or(&spec.read_write_risk, "risk_unset")),
+                            localized_status(props.lang, label_or(&spec.transaction_profile, "profile_unset")),
+                            localized_status(props.lang, label_or(&spec.execution_mode, "mode_unset"))
                         )
                     )
                 }).collect::<Vec<_>>()} />
@@ -180,8 +505,250 @@ fn OnboardingPanel(props: &OnboardingPanelProps) -> Html {
     }
 }
 
+fn localized_proposal_type(lang: SemanticLang, proposal_type: &str) -> String {
+    if lang == SemanticLang::En {
+        return proposal_type.to_ascii_uppercase();
+    }
+    match proposal_type {
+        "object" => "业务对象",
+        "relation" => "关系 Link",
+        "metric" => "指标 Metric",
+        "logic" | "logic_rule" => "规则 Logic",
+        "action" => "动作 Action",
+        other => other,
+    }
+    .to_string()
+}
+
+fn localized_node_type(lang: SemanticLang, node_type: &str) -> String {
+    if lang == SemanticLang::En {
+        return node_type.to_string();
+    }
+    match node_type {
+        "dataset" => "资料表",
+        "object" => "业务对象",
+        "metric" => "指标",
+        "logic" => "规则",
+        "action" => "动作",
+        "tool" => "工具",
+        "subgraph" => "子图",
+        "merge_candidate" => "合并候选",
+        other => other,
+    }
+    .to_string()
+}
+
+fn localized_edge_type(lang: SemanticLang, edge_type: &str) -> String {
+    if lang == SemanticLang::En {
+        return edge_type.to_string();
+    }
+    match edge_type {
+        "maps_to" => "映射为",
+        "relates_to" => "业务关联",
+        "uses_metric" => "计算指标",
+        "depends_on" => "依赖",
+        "validates" => "校验",
+        "acts_on" => "作用于",
+        "compiles_to" => "生成工具",
+        "groups" => "归入子图",
+        "merge_suggests" => "建议合并",
+        other => other,
+    }
+    .to_string()
+}
+
+fn evidence_string(value: &Value, key: &str) -> Option<String> {
+    value.get(key).and_then(|value| {
+        if let Some(text) = value.as_str() {
+            if text.is_empty() {
+                None
+            } else {
+                Some(text.to_string())
+            }
+        } else if value.is_null() {
+            None
+        } else {
+            Some(compact_json(value))
+        }
+    })
+}
+
+fn graph_node_label(graph: &OntologyReviewGraph, node_id: &str) -> String {
+    graph
+        .nodes
+        .iter()
+        .find(|node| node.id == node_id)
+        .map(|node| node.label.clone())
+        .unwrap_or_else(|| node_id.to_string())
+}
+
+fn relation_detail(
+    lang: SemanticLang,
+    graph: &OntologyReviewGraph,
+    edge: &OntologyReviewGraphEdge,
+) -> (String, String, String) {
+    let from = graph_node_label(graph, &edge.from);
+    let to = graph_node_label(graph, &edge.to);
+    let detail = evidence_string(&edge.evidence, "source_mapping")
+        .or_else(|| evidence_string(&edge.evidence, "primary_key"))
+        .or_else(|| evidence_string(&edge.evidence, "expression"))
+        .unwrap_or_else(|| {
+            format!(
+                "{:.0}% / {}",
+                edge.confidence * 100.0,
+                localized_risk(lang, label_or(&edge.risk, "low"))
+            )
+        });
+    (
+        localized_edge_type(lang, &edge.edge_type),
+        format!("{from} -> {to}"),
+        detail,
+    )
+}
+
+fn graph_nodes_of_type<'a>(
+    graph: &'a OntologyReviewGraph,
+    node_types: &[&str],
+    limit: usize,
+) -> Vec<&'a OntologyReviewGraphNode> {
+    graph
+        .nodes
+        .iter()
+        .filter(|node| {
+            node_types
+                .iter()
+                .any(|node_type| *node_type == node.node_type)
+        })
+        .take(limit)
+        .collect()
+}
+
+#[derive(Properties, Clone, PartialEq)]
+struct OntologyMindMapPanelProps {
+    lang: SemanticLang,
+    graph: Option<OntologyReviewGraph>,
+}
+
+#[component]
+fn OntologyMindMapPanel(props: &OntologyMindMapPanelProps) -> Html {
+    let Some(graph) = props.graph.as_ref() else {
+        return html! {
+            <div class="ontology-mindmap empty-state">
+                <div>
+                    <strong>{ props.lang.text("No graph yet.", "还没有关系图。") }</strong>
+                    <p>{ props.lang.text(
+                        "Start an onboarding run to generate table mappings, object links, metrics, actions, and tool edges.",
+                        "先启动入职运行，系统会生成资料表映射、对象关系、指标、动作和工具边。"
+                    ) }</p>
+                </div>
+            </div>
+        };
+    };
+
+    let datasets = graph_nodes_of_type(graph, &["dataset"], 8);
+    let objects = graph_nodes_of_type(graph, &["object", "subgraph", "merge_candidate"], 10);
+    let actions = graph_nodes_of_type(graph, &["metric", "logic", "action", "tool"], 10);
+    let relation_rows = graph
+        .edges
+        .iter()
+        .filter(|edge| {
+            matches!(
+                edge.edge_type.as_str(),
+                "maps_to" | "relates_to" | "acts_on" | "compiles_to" | "uses_metric" | "validates"
+            )
+        })
+        .take(14)
+        .map(|edge| relation_detail(props.lang, graph, edge))
+        .collect::<Vec<_>>();
+
+    html! {
+        <section class="ontology-mindmap">
+            <header class="ontology-mindmap-head">
+                <div>
+                    <span>{ props.lang.text("Business logic graph", "业务逻辑关系图") }</span>
+                    <strong>{ props.lang.text("Tables -> Objects -> Links / Actions / Tools", "资料表 -> 业务对象 -> 关系 / 动作 / 工具") }</strong>
+                </div>
+                <small>{ format!("{} {} / {} {}", graph.nodes.len(), props.lang.text("nodes", "节点"), graph.edges.len(), props.lang.text("edges", "关系")) }</small>
+            </header>
+            <div class="ontology-mindmap-canvas" aria-label={props.lang.text("Ontology relationship mind map", "本体关系脑图")}>
+                <section class="ontology-map-lane source">
+                    <h4>{ props.lang.text("Source tables", "资料表") }</h4>
+                    { for datasets.iter().map(|node| html! {
+                        <OntologyMindMapNode key={node.id.clone()} lang={props.lang} node={(*node).clone()} />
+                    }) }
+                </section>
+                <section class="ontology-map-spine">
+                    <span>{ props.lang.text("profile", "画像") }</span>
+                    <span>{ props.lang.text("map", "映射") }</span>
+                    <span>{ props.lang.text("review", "审核") }</span>
+                </section>
+                <section class="ontology-map-lane object">
+                    <h4>{ props.lang.text("Business objects", "业务对象") }</h4>
+                    { for objects.iter().map(|node| html! {
+                        <OntologyMindMapNode key={node.id.clone()} lang={props.lang} node={(*node).clone()} />
+                    }) }
+                </section>
+                <section class="ontology-map-spine action">
+                    <span>{ props.lang.text("link", "关系") }</span>
+                    <span>{ props.lang.text("metric", "指标") }</span>
+                    <span>{ props.lang.text("tool", "工具") }</span>
+                </section>
+                <section class="ontology-map-lane action">
+                    <h4>{ props.lang.text("Actions and tools", "动作与工具") }</h4>
+                    { for actions.iter().map(|node| html! {
+                        <OntologyMindMapNode key={node.id.clone()} lang={props.lang} node={(*node).clone()} />
+                    }) }
+                </section>
+            </div>
+            <div class="ontology-field-map">
+                <h4>{ props.lang.text("Field and relationship evidence", "字段与关系证据") }</h4>
+                <Rows empty={props.lang.text("No relationship evidence yet.", "还没有关系证据。")} rows={relation_rows} />
+            </div>
+            {
+                if graph.truncated {
+                    html! {
+                        <p class="ontology-map-note">
+                            { format!("{} +{} {} / +{} {}", props.lang.text("Graph truncated:", "关系图已截断："), graph.omitted_node_count, props.lang.text("nodes", "节点"), graph.omitted_edge_count, props.lang.text("edges", "关系")) }
+                        </p>
+                    }
+                } else {
+                    html! {}
+                }
+            }
+        </section>
+    }
+}
+
+#[derive(Properties, Clone, PartialEq)]
+struct OntologyMindMapNodeProps {
+    lang: SemanticLang,
+    node: OntologyReviewGraphNode,
+}
+
+#[component]
+fn OntologyMindMapNode(props: &OntologyMindMapNodeProps) -> Html {
+    let evidence_hint = evidence_string(&props.node.evidence, "source_mapping")
+        .or_else(|| evidence_string(&props.node.evidence, "source_system"))
+        .or_else(|| evidence_string(&props.node.evidence, "target_object"))
+        .unwrap_or_else(|| {
+            format!(
+                "{:.0}% / {}",
+                props.node.confidence * 100.0,
+                localized_risk(props.lang, label_or(&props.node.risk, "low"))
+            )
+        });
+    html! {
+        <article class={classes!("ontology-map-node", props.node.node_type.clone(), status_tone(&props.node.status))}>
+            <span>{ localized_node_type(props.lang, &props.node.node_type) }</span>
+            <strong>{ props.node.label.clone() }</strong>
+            <small>{ format!("{} / {}", localized_status(props.lang, label_or(&props.node.status, "pending")), evidence_hint) }</small>
+        </article>
+    }
+}
+
 #[derive(Properties, Clone, PartialEq)]
 struct OntologyIntelligenceReviewPanelProps {
+    lang: SemanticLang,
     graph: Option<OntologyReviewGraph>,
     calibration: Option<ConfidenceCalibrationResponse>,
 }
@@ -191,63 +758,66 @@ fn OntologyIntelligenceReviewPanel(props: &OntologyIntelligenceReviewPanelProps)
     let merge_rows = props
         .graph
         .as_ref()
-        .map(ontology_merge_rows)
+        .map(|graph| ontology_merge_rows(props.lang, graph))
         .unwrap_or_default();
     let low_confidence_rows = props
         .graph
         .as_ref()
-        .map(ontology_low_confidence_rows)
+        .map(|graph| ontology_low_confidence_rows(props.lang, graph))
         .unwrap_or_default();
     let taxonomy_rows = props
         .graph
         .as_ref()
-        .map(ontology_taxonomy_rows)
+        .map(|graph| ontology_taxonomy_rows(props.lang, graph))
         .unwrap_or_default();
     let transaction_rows = props
         .graph
         .as_ref()
-        .map(ontology_transaction_rows)
+        .map(|graph| ontology_transaction_rows(props.lang, graph))
         .unwrap_or_default();
     let calibration_rows = props
         .calibration
         .as_ref()
-        .map(ontology_calibration_rows)
+        .map(|calibration| ontology_calibration_rows(props.lang, calibration))
         .unwrap_or_default();
 
     html! {
         <div class="ontology-intelligence-review">
             <div class="ontology-intelligence-review-head">
-                <strong>{ "Intelligence review" }</strong>
-                <span>{ format!("{} calibration records", props.calibration.as_ref().map(|calibration| calibration.record_count).unwrap_or_default()) }</span>
+                <strong>{ props.lang.text("Evidence review", "证据审核") }</strong>
+                <span>{ format!("{} {}", props.calibration.as_ref().map(|calibration| calibration.record_count).unwrap_or_default(), props.lang.text("calibration records", "条校准记录")) }</span>
                 <span>{ props.calibration.as_ref().and_then(|calibration| calibration.threshold_policy.get("configuration_surface")).and_then(|surface| surface.get("scope")).and_then(|scope| scope.as_str()).unwrap_or("customer_or_domain_policy") }</span>
             </div>
             <div class="ontology-intelligence-grid">
                 <section>
-                    <h4>{ "Merge" }</h4>
-                    <Rows empty="No merge warnings." rows={merge_rows} />
+                    <h4>{ props.lang.text("Merge", "合并建议") }</h4>
+                    <Rows empty={props.lang.text("No merge warnings.", "没有合并风险。")} rows={merge_rows} />
                 </section>
                 <section>
-                    <h4>{ "Low Confidence" }</h4>
-                    <Rows empty="No low-confidence items." rows={low_confidence_rows} />
+                    <h4>{ props.lang.text("Low Confidence", "低置信度") }</h4>
+                    <Rows empty={props.lang.text("No low-confidence items.", "没有低置信度项目。")} rows={low_confidence_rows} />
                 </section>
                 <section>
-                    <h4>{ "Taxonomy" }</h4>
-                    <Rows empty="No taxonomy warnings." rows={taxonomy_rows} />
+                    <h4>{ props.lang.text("Taxonomy", "层级结构") }</h4>
+                    <Rows empty={props.lang.text("No taxonomy warnings.", "没有层级风险。")} rows={taxonomy_rows} />
                 </section>
                 <section>
-                    <h4>{ "Transactions" }</h4>
-                    <Rows empty="No transaction warnings." rows={transaction_rows} />
+                    <h4>{ props.lang.text("Transactions", "业务动作") }</h4>
+                    <Rows empty={props.lang.text("No transaction warnings.", "没有动作风险。")} rows={transaction_rows} />
                 </section>
                 <section class="ontology-intelligence-wide">
-                    <h4>{ "Calibration" }</h4>
-                    <Rows empty="No calibration records." rows={calibration_rows} />
+                    <h4>{ props.lang.text("Calibration", "置信度校准") }</h4>
+                    <Rows empty={props.lang.text("No calibration records.", "没有校准记录。")} rows={calibration_rows} />
                 </section>
             </div>
         </div>
     }
 }
 
-fn ontology_merge_rows(graph: &OntologyReviewGraph) -> Vec<(String, String, String)> {
+fn ontology_merge_rows(
+    lang: SemanticLang,
+    graph: &OntologyReviewGraph,
+) -> Vec<(String, String, String)> {
     graph
         .nodes
         .iter()
@@ -255,23 +825,26 @@ fn ontology_merge_rows(graph: &OntologyReviewGraph) -> Vec<(String, String, Stri
         .take(6)
         .map(|node| {
             (
-                label_or(&node.risk, "merge").to_string(),
+                localized_risk(lang, label_or(&node.risk, "merge")),
                 node.label.clone(),
                 format!(
                     "{} / {:.0}% / {}",
-                    label_or(&node.status, "pending"),
+                    localized_status(lang, label_or(&node.status, "pending")),
                     node.confidence * 100.0,
                     node.source_proposal_id
                         .as_deref()
                         .map(short_id)
-                        .unwrap_or_else(|| "source".to_string())
+                        .unwrap_or_else(|| lang.text("source", "来源").to_string())
                 ),
             )
         })
         .collect()
 }
 
-fn ontology_low_confidence_rows(graph: &OntologyReviewGraph) -> Vec<(String, String, String)> {
+fn ontology_low_confidence_rows(
+    lang: SemanticLang,
+    graph: &OntologyReviewGraph,
+) -> Vec<(String, String, String)> {
     graph
         .nodes
         .iter()
@@ -279,19 +852,22 @@ fn ontology_low_confidence_rows(graph: &OntologyReviewGraph) -> Vec<(String, Str
         .take(6)
         .map(|node| {
             (
-                node.node_type.clone(),
+                localized_node_type(lang, &node.node_type),
                 node.label.clone(),
                 format!(
                     "{:.0}% / {}",
                     node.confidence * 100.0,
-                    label_or(&node.risk, "low")
+                    localized_risk(lang, label_or(&node.risk, "low"))
                 ),
             )
         })
         .collect()
 }
 
-fn ontology_taxonomy_rows(graph: &OntologyReviewGraph) -> Vec<(String, String, String)> {
+fn ontology_taxonomy_rows(
+    lang: SemanticLang,
+    graph: &OntologyReviewGraph,
+) -> Vec<(String, String, String)> {
     let object_count = graph
         .nodes
         .iter()
@@ -305,22 +881,36 @@ fn ontology_taxonomy_rows(graph: &OntologyReviewGraph) -> Vec<(String, String, S
     let mut rows = Vec::new();
     if object_count >= 8 {
         rows.push((
-            "object_scope".to_string(),
-            format!("{object_count} object candidates"),
-            "review granularity before publishing".to_string(),
+            lang.text("object_scope", "对象范围").to_string(),
+            format!(
+                "{object_count} {}",
+                lang.text("object candidates", "个对象候选")
+            ),
+            lang.text(
+                "review granularity before publishing",
+                "发布前确认颗粒度是否过细",
+            )
+            .to_string(),
         ));
     }
     if logic_count > 0 {
         rows.push((
-            "identity_rules".to_string(),
-            format!("{logic_count} disabled logic rules"),
-            "publish only after owner review".to_string(),
+            lang.text("identity_rules", "识别规则").to_string(),
+            format!(
+                "{logic_count} {}",
+                lang.text("disabled logic rules", "条待启用规则")
+            ),
+            lang.text("publish only after owner review", "业务负责人确认后才发布")
+                .to_string(),
         ));
     }
     rows
 }
 
-fn ontology_transaction_rows(graph: &OntologyReviewGraph) -> Vec<(String, String, String)> {
+fn ontology_transaction_rows(
+    lang: SemanticLang,
+    graph: &OntologyReviewGraph,
+) -> Vec<(String, String, String)> {
     graph
         .nodes
         .iter()
@@ -350,15 +940,20 @@ fn ontology_transaction_rows(graph: &OntologyReviewGraph) -> Vec<(String, String
                     "mode_unset"
                 });
             (
-                label_or(&node.risk, "approval").to_string(),
+                localized_risk(lang, label_or(&node.risk, "approval")),
                 node.label.clone(),
-                format!("{transaction_profile} / {execution_mode}"),
+                format!(
+                    "{} / {}",
+                    localized_status(lang, transaction_profile),
+                    localized_status(lang, execution_mode)
+                ),
             )
         })
         .collect()
 }
 
 fn ontology_calibration_rows(
+    lang: SemanticLang,
     calibration: &ConfidenceCalibrationResponse,
 ) -> Vec<(String, String, String)> {
     calibration
@@ -367,12 +962,15 @@ fn ontology_calibration_rows(
         .take(6)
         .map(|bucket| {
             (
-                bucket.reviewer_status.clone(),
-                format!("{} ({})", bucket.proposal_type, bucket.count),
+                localized_status(lang, &bucket.reviewer_status),
+                format!("{} ({})", localized_proposal_type(lang, &bucket.proposal_type), bucket.count),
                 format!(
-                    "model {:.0}% / validator {:.0}% / source {:.0}%",
+                    "{} {:.0}% / {} {:.0}% / {} {:.0}%",
+                    lang.text("model", "模型"),
                     bucket.average_model_confidence * 100.0,
+                    lang.text("validator", "验证"),
                     bucket.average_validator_score * 100.0,
+                    lang.text("source", "来源"),
                     bucket.average_source_quality_score * 100.0
                 ),
             )
@@ -381,84 +979,8 @@ fn ontology_calibration_rows(
 }
 
 #[derive(Properties, Clone, PartialEq)]
-struct OntologyReviewGraphPanelProps {
-    graph: Option<OntologyReviewGraph>,
-}
-
-#[component]
-fn OntologyReviewGraphPanel(props: &OntologyReviewGraphPanelProps) -> Html {
-    let Some(graph) = props.graph.as_ref() else {
-        return html! {
-            <div class="ontology-review-graph empty">{ "No review graph loaded." }</div>
-        };
-    };
-    let node_types = ["dataset", "object", "metric", "logic", "action", "tool"];
-    html! {
-        <div class="ontology-review-graph">
-            <div class="ontology-review-graph-head">
-                <strong>{ "Ontology review graph" }</strong>
-                <span>{ format!("{} nodes / {} edges", graph.nodes.len(), graph.edges.len()) }</span>
-                {
-                    if graph.truncated {
-                        html! { <span>{ format!("truncated: +{} nodes / +{} edges", graph.omitted_node_count, graph.omitted_edge_count) }</span> }
-                    } else {
-                        html! {}
-                    }
-                }
-            </div>
-            <div class="ontology-review-node-groups">
-                { for node_types.iter().map(|node_type| {
-                    let nodes = graph.nodes.iter().filter(|node| node.node_type == *node_type).collect::<Vec<_>>();
-                    html! {
-                        <section class="ontology-review-node-group" key={node_type.to_string()}>
-                            <h4>{ format!("{} ({})", node_type.to_ascii_uppercase(), nodes.len()) }</h4>
-                            <div class="ontology-review-node-list">
-                                { for nodes.iter().take(8).map(|node| html! {
-                                    <OntologyReviewGraphNodeChip key={node.id.clone()} node={(*node).clone()} />
-                                }) }
-                            </div>
-                        </section>
-                    }
-                }) }
-            </div>
-            <div class="ontology-review-edge-list">
-                <h4>{ "Business logic edges" }</h4>
-                <Rows empty="No graph edges." rows={graph.edges.iter().take(12).map(|edge| {
-                    (
-                        edge.edge_type.clone(),
-                        format!("{} -> {}", edge.from, edge.to),
-                        format!(
-                            "{} / {:.0}% / {} / {}",
-                            label_or(&edge.status, "pending"),
-                            edge.confidence * 100.0,
-                            label_or(&edge.risk, "low"),
-                            edge.source_proposal_id.as_deref().map(short_id).unwrap_or_else(|| "source".to_string())
-                        )
-                    )
-                }).collect::<Vec<_>>()} />
-            </div>
-        </div>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct OntologyReviewGraphNodeChipProps {
-    node: OntologyReviewGraphNode,
-}
-
-#[component]
-fn OntologyReviewGraphNodeChip(props: &OntologyReviewGraphNodeChipProps) -> Html {
-    html! {
-        <div class={classes!("ontology-review-node", status_tone(&props.node.status))}>
-            <strong>{ props.node.label.clone() }</strong>
-            <span>{ format!("{:.0}% / {}", props.node.confidence * 100.0, label_or(&props.node.risk, "low")) }</span>
-            <small>{ format!("{} / {}", label_or(&props.node.status, "pending"), props.node.source_proposal_id.as_deref().map(short_id).unwrap_or_else(|| "source".to_string())) }</small>
-        </div>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
 struct OnboardingProposalRowProps {
+    lang: SemanticLang,
     proposal: OntologyOnboardingProposal,
     on_approve: Callback<String>,
     on_reject: Callback<String>,
@@ -480,13 +1002,13 @@ fn OnboardingProposalRow(props: &OnboardingProposalRowProps) -> Html {
         <article class="ontology-proposal-row">
             <div class="ontology-proposal-head">
                 <div>
-                    <span>{ format!("{} / {:.0}%", props.proposal.review_status, props.proposal.confidence * 100.0) }</span>
+                    <span>{ format!("{} / {:.0}%", localized_status(props.lang, &props.proposal.review_status), props.proposal.confidence * 100.0) }</span>
                     <strong>{ props.proposal.name.clone() }</strong>
                     <small>{ props.proposal.source_mapping.clone() }</small>
                 </div>
                 <div class="ontology-onboarding-actions">
-                    <button onclick={approve} disabled={props.proposal.review_status == "approved"}>{ "Approve" }</button>
-                    <button onclick={reject} disabled={props.proposal.review_status == "rejected"}>{ "Reject" }</button>
+                    <button onclick={approve} disabled={props.proposal.review_status == "approved"}>{ props.lang.text("Approve", "批准") }</button>
+                    <button onclick={reject} disabled={props.proposal.review_status == "rejected"}>{ props.lang.text("Reject", "拒绝") }</button>
                 </div>
             </div>
             <JsonPreview value={props.proposal.evidence.clone()} />
@@ -529,13 +1051,14 @@ fn SemanticMap(props: &SemanticMapProps) -> Html {
 
 #[derive(Properties, Clone, PartialEq)]
 struct RenderedContextPreviewProps {
+    lang: SemanticLang,
     rendered: Option<RenderedExecutionContext>,
 }
 
 #[component]
 fn RenderedContextPreview(props: &RenderedContextPreviewProps) -> Html {
     let Some(rendered) = props.rendered.as_ref() else {
-        return html! { <p class="empty">{ "No execution context rendered." }</p> };
+        return html! { <p class="empty">{ props.lang.text("No execution context rendered.", "还没有渲染执行上下文。") }</p> };
     };
     let omissions = &rendered.omitted;
     let budget = &rendered.budget;
@@ -543,39 +1066,49 @@ fn RenderedContextPreview(props: &RenderedContextPreviewProps) -> Html {
         <div class="context-preview">
             <div class="context-budget">
                 <FlowMeter
-                    label="Prompt tokens"
+                    label={props.lang.text("Prompt tokens", "提示词 token")}
                     value={budget.estimated_tokens_used}
                     max={budget.max_prompt_tokens.max(1)}
                     tone={if budget.estimated_tokens_used > budget.max_prompt_tokens { "warn" } else { "good" }}
                 />
                 <FlowMeter
-                    label="Objects"
+                    label={props.lang.text("Objects", "对象")}
                     value={rendered.relevant_objects.len()}
                     max={budget.max_objects.max(1)}
                     tone="info"
                 />
                 <FlowMeter
-                    label="Fetchable"
+                    label={props.lang.text("Fetchable", "可拉取")}
                     value={rendered.fetchable_object_ids.len()}
                     max={rendered.fetchable_object_ids.len().max(rendered.relevant_objects.len()).max(1)}
                     tone="neutral"
                 />
             </div>
             <KeyMetrics values={vec![
-                ("Packet".to_string(), short_id(&rendered.context_packet_id)),
-                ("Role".to_string(), label_or(&rendered.role, "agent").to_string()),
-                ("Version".to_string(), rendered.context_packet_version.to_string()),
-                ("Full content".to_string(), rendered.full_content_included.to_string()),
-                ("Tools".to_string(), rendered.available_tools.join(", ")),
-                ("Omitted".to_string(), format!(
-                    "{} budget / {} object cap / {} source refs / {} content",
-                    omissions.token_budget_exceeded,
-                    omissions.object_limit_exceeded,
-                    omissions.source_refs_not_rendered,
-                    omissions.full_content_not_rendered
-                )),
+                (props.lang.text("Packet", "上下文包").to_string(), short_id(&rendered.context_packet_id)),
+                (props.lang.text("Role", "角色").to_string(), if props.lang == SemanticLang::Zh && rendered.role == "agent" { "智能体".to_string() } else { label_or(&rendered.role, "agent").to_string() }),
+                (props.lang.text("Version", "版本").to_string(), rendered.context_packet_version.to_string()),
+                (props.lang.text("Full content", "完整内容").to_string(), rendered.full_content_included.to_string()),
+                (props.lang.text("Tools", "工具").to_string(), rendered.available_tools.join(", ")),
+                (props.lang.text("Omitted", "省略").to_string(), if props.lang == SemanticLang::Zh {
+                    format!(
+                        "{} 预算 / {} 对象上限 / {} 来源引用 / {} 正文",
+                        omissions.token_budget_exceeded,
+                        omissions.object_limit_exceeded,
+                        omissions.source_refs_not_rendered,
+                        omissions.full_content_not_rendered
+                    )
+                } else {
+                    format!(
+                        "{} budget / {} object cap / {} source refs / {} content",
+                        omissions.token_budget_exceeded,
+                        omissions.object_limit_exceeded,
+                        omissions.source_refs_not_rendered,
+                        omissions.full_content_not_rendered
+                    )
+                }),
             ]} />
-            <Rows empty="No policy reminders." rows={rendered.must_follow.iter().take(6).map(|item| {
+            <Rows empty={props.lang.text("No policy reminders.", "没有策略提醒。")} rows={rendered.must_follow.iter().take(6).map(|item| {
                 ("must_follow".to_string(), item.clone(), "rendered reminder".to_string())
             }).collect::<Vec<_>>()} />
             <div class="context-objects">

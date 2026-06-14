@@ -18,40 +18,47 @@ pub(crate) struct DeployProps {
 #[component]
 pub(crate) fn DeployView(props: &DeployProps) -> Html {
     html! {
-        <div class="page-grid">
-            <Panel title="Latest deployment">
-                <VersionBlock version={props.data.deployment_version.data.clone()} />
-                <button onclick={props.on_verify.clone()}>{ "Verify deployed version" }</button>
-            </Panel>
-            <Panel title="Stage 2 readiness">
-                <ReadinessRadar readiness={props.data.stage2_readiness.data.clone()} observability={props.data.observability.data.clone()} />
-            </Panel>
-            <Panel title="Enterprise product readiness">
-                <EnterpriseReadinessPanel readiness={props.data.enterprise_product_readiness.data.clone()} />
-            </Panel>
-            <Panel title="Customer-grade evidence closure">
-                <KeyMetrics values={vec![
-                    ("Required evidence".to_string(), label_or(&props.data.enterprise_product_readiness.data.required_evidence_class, "customer_grade").to_string()),
-                    ("Completion blocked".to_string(), props.data.enterprise_product_readiness.data.completion_blocked.to_string()),
-                    ("Blocked lanes".to_string(), props.data.enterprise_product_readiness.data.blocked_lane_count.to_string()),
-                    ("Ready lanes".to_string(), props.data.enterprise_product_readiness.data.ready_lane_count.to_string()),
-                ]} />
-                <Rows empty="No customer-grade evidence requirements." rows={customer_grade_evidence_rows(
-                    &props.data.enterprise_product_readiness.data,
-                    &props.data.native_connector_production_readiness.data,
-                    &props.data.remote_computer_production_path.data,
-                    &props.data.usage.data,
-                )} />
-            </Panel>
-            <Panel title="Live connector production">
-                <JsonPreview value={props.data.native_connector_production_readiness.data.clone()} />
-            </Panel>
-            <Panel title="Remote computer path">
-                <JsonPreview value={props.data.remote_computer_production_path.data.clone()} />
-            </Panel>
-            <Panel title="Usage and finance">
-                <JsonPreview value={props.data.usage.data.clone()} />
-            </Panel>
+        <div class="page-stack">
+            <section class="page-purpose">
+                <p class="eyebrow">{ "System Ops / 系统运维" }</p>
+                <h2>{ "这里检查平台自身是否能上线，不承载客户业务流程配置。" }</h2>
+                <p>{ "System Ops 汇总部署版本、桌面端/连接器安全、审计证据、使用量、成本和企业级 readiness。业务动作仍由 Ontology 与 Capabilities 定义，再由 Managed Agents 执行。" }</p>
+            </section>
+            <div class="page-grid">
+                <Panel title="Latest deployment">
+                    <VersionBlock version={props.data.deployment_version.data.clone()} />
+                    <button onclick={props.on_verify.clone()}>{ "Verify deployed version" }</button>
+                </Panel>
+                <Panel title="Stage 2 readiness">
+                    <ReadinessRadar readiness={props.data.stage2_readiness.data.clone()} observability={props.data.observability.data.clone()} />
+                </Panel>
+                <Panel title="Enterprise product readiness">
+                    <EnterpriseReadinessPanel readiness={props.data.enterprise_product_readiness.data.clone()} />
+                </Panel>
+                <Panel title="Customer-grade evidence closure">
+                    <KeyMetrics values={vec![
+                        ("Required evidence".to_string(), label_or(&props.data.enterprise_product_readiness.data.required_evidence_class, "customer_grade").to_string()),
+                        ("Completion blocked".to_string(), props.data.enterprise_product_readiness.data.completion_blocked.to_string()),
+                        ("Blocked lanes".to_string(), props.data.enterprise_product_readiness.data.blocked_lane_count.to_string()),
+                        ("Ready lanes".to_string(), props.data.enterprise_product_readiness.data.ready_lane_count.to_string()),
+                    ]} />
+                    <Rows empty="No customer-grade evidence requirements." rows={customer_grade_evidence_rows(
+                        &props.data.enterprise_product_readiness.data,
+                        &props.data.native_connector_production_readiness.data,
+                        &props.data.remote_computer_production_path.data,
+                        &props.data.usage.data,
+                    )} />
+                </Panel>
+                <Panel title="Live connector production">
+                    <JsonPreview value={props.data.native_connector_production_readiness.data.clone()} />
+                </Panel>
+                <Panel title="Remote computer path">
+                    <JsonPreview value={props.data.remote_computer_production_path.data.clone()} />
+                </Panel>
+                <Panel title="Usage and finance">
+                    <JsonPreview value={props.data.usage.data.clone()} />
+                </Panel>
+            </div>
         </div>
     }
 }

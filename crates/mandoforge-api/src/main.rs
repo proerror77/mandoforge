@@ -33,7 +33,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 const DEFAULT_TENANT_ID: &str = "00000000-0000-4000-8000-000000000001";
-const CONSOLE_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-tewAhCIOkfzyO/4aKmydPukJzq38z4WcagZ2gp1GDoA='; connect-src 'self' http://127.0.0.1:* http://localhost:*; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+const CONSOLE_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-pLW6DovRb1Z3TqfUyj5XmNNyLiIlaK3b2HzjwMvz0oo='; connect-src 'self' http://127.0.0.1:* http://localhost:*; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
 
 mod authorization;
 mod codex_app_server;
