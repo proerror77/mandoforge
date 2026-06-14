@@ -171,6 +171,13 @@ free-form prose. It must include:
 The prompt packet is useful even before a live LLM integration because it gives
 deterministic builders, tests, and future coding agents the same contract.
 
+The follow-on intelligence layer is documented in
+`docs/superpowers/specs/2026-06-14-ontology-builder-intelligence-engine-design.md`.
+This IR remains the governed review/control plane. The intelligence engine feeds
+it better schema understanding, subgraph proposals, entity resolution, and
+confidence calibration records, but it does not bypass proposal review or
+materialization policy.
+
 ### Workflow DAG Execution Model
 
 Ontology onboarding has correctness dependencies. A relation proposal cannot be
