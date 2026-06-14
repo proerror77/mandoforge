@@ -955,6 +955,92 @@ h2 {
   letter-spacing: 0;
 }
 
+.ontology-review-graph {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-soft);
+}
+
+.ontology-review-graph.empty {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.ontology-review-graph-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.ontology-review-graph-head strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.ontology-review-node-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+}
+
+.ontology-review-node-group {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ontology-review-node-group h4,
+.ontology-review-edge-list h4 {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0;
+}
+
+.ontology-review-node-list {
+  display: grid;
+  gap: 6px;
+}
+
+.ontology-review-node {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 7px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+}
+
+.ontology-review-node strong,
+.ontology-review-node span,
+.ontology-review-node small {
+  overflow-wrap: anywhere;
+}
+
+.ontology-review-node strong {
+  font-size: 12px;
+}
+
+.ontology-review-node span,
+.ontology-review-node small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.ontology-review-edge-list {
+  display: grid;
+  gap: 6px;
+}
+
 .ontology-proposal-row {
   display: grid;
   gap: 8px;

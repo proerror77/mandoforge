@@ -40,6 +40,7 @@ fn App() -> Html {
     let rendered_context = use_state(|| None::<RenderedExecutionContext>);
     let onboarding_run = use_state(|| None::<OntologyOnboardingRun>);
     let onboarding_tool_specs = use_state(Vec::<OntologyOnboardingToolSpec>::new);
+    let onboarding_review_graph = use_state(|| None::<OntologyReviewGraph>);
     let critical_notifications_muted = use_state(initial_critical_notifications_muted);
 
     let data = ConsoleData {
@@ -200,10 +201,12 @@ fn App() -> Html {
     let start_ontology_onboarding = {
         let onboarding_run = onboarding_run.clone();
         let onboarding_tool_specs = onboarding_tool_specs.clone();
+        let onboarding_review_graph = onboarding_review_graph.clone();
         let mutation_status = mutation_status.clone();
         Callback::from(move |_| {
             let onboarding_run = onboarding_run.clone();
             let onboarding_tool_specs = onboarding_tool_specs.clone();
+            let onboarding_review_graph = onboarding_review_graph.clone();
             let mutation_status = mutation_status.clone();
             spawn_local(async move {
                 mutation_status.set("Starting enterprise ontology onboarding demo...".to_string());
@@ -214,6 +217,12 @@ fn App() -> Html {
                 .await
                 {
                     Ok(run) => {
+                        let graph_path =
+                            format!("/api/ontology/onboarding/runs/{}/review-graph", run.id);
+                        match api_get::<OntologyReviewGraph>(&graph_path).await {
+                            Ok(graph) => onboarding_review_graph.set(Some(graph)),
+                            Err(_) => onboarding_review_graph.set(None),
+                        }
                         mutation_status.set(format!(
                             "Onboarding run ready: {} proposals from {} datasets.",
                             run.proposal_count, run.dataset_count
@@ -231,6 +240,7 @@ fn App() -> Html {
 
     let approve_ontology_proposal = {
         let onboarding_run = onboarding_run.clone();
+        let onboarding_review_graph = onboarding_review_graph.clone();
         let mutation_status = mutation_status.clone();
         Callback::from(move |proposal_id: String| {
             let Some(current_run) = (*onboarding_run).clone() else {
@@ -238,6 +248,7 @@ fn App() -> Html {
                 return;
             };
             let onboarding_run = onboarding_run.clone();
+            let onboarding_review_graph = onboarding_review_graph.clone();
             let mutation_status = mutation_status.clone();
             spawn_local(async move {
                 mutation_status.set("Approving ontology proposal...".to_string());
@@ -251,6 +262,14 @@ fn App() -> Html {
                         let run_path = format!("/api/ontology/onboarding/runs/{}", current_run.id);
                         match api_get::<OntologyOnboardingRun>(&run_path).await {
                             Ok(run) => {
+                                let graph_path = format!(
+                                    "/api/ontology/onboarding/runs/{}/review-graph",
+                                    run.id
+                                );
+                                if let Ok(graph) = api_get::<OntologyReviewGraph>(&graph_path).await
+                                {
+                                    onboarding_review_graph.set(Some(graph));
+                                }
                                 mutation_status.set(format!(
                                     "Proposal approved: {}/{} approved.",
                                     run.approved_count, run.proposal_count
@@ -269,6 +288,7 @@ fn App() -> Html {
 
     let reject_ontology_proposal = {
         let onboarding_run = onboarding_run.clone();
+        let onboarding_review_graph = onboarding_review_graph.clone();
         let mutation_status = mutation_status.clone();
         Callback::from(move |proposal_id: String| {
             let Some(current_run) = (*onboarding_run).clone() else {
@@ -276,6 +296,7 @@ fn App() -> Html {
                 return;
             };
             let onboarding_run = onboarding_run.clone();
+            let onboarding_review_graph = onboarding_review_graph.clone();
             let mutation_status = mutation_status.clone();
             spawn_local(async move {
                 mutation_status.set("Rejecting ontology proposal...".to_string());
@@ -289,6 +310,14 @@ fn App() -> Html {
                         let run_path = format!("/api/ontology/onboarding/runs/{}", current_run.id);
                         match api_get::<OntologyOnboardingRun>(&run_path).await {
                             Ok(run) => {
+                                let graph_path = format!(
+                                    "/api/ontology/onboarding/runs/{}/review-graph",
+                                    run.id
+                                );
+                                if let Ok(graph) = api_get::<OntologyReviewGraph>(&graph_path).await
+                                {
+                                    onboarding_review_graph.set(Some(graph));
+                                }
                                 mutation_status.set("Proposal rejected.".to_string());
                                 onboarding_run.set(Some(run));
                             }
@@ -305,6 +334,7 @@ fn App() -> Html {
     let materialize_ontology_onboarding = {
         let onboarding_run = onboarding_run.clone();
         let onboarding_tool_specs = onboarding_tool_specs.clone();
+        let onboarding_review_graph = onboarding_review_graph.clone();
         let mutation_status = mutation_status.clone();
         Callback::from(move |_| {
             let Some(current_run) = (*onboarding_run).clone() else {
@@ -313,6 +343,7 @@ fn App() -> Html {
             };
             let onboarding_run = onboarding_run.clone();
             let onboarding_tool_specs = onboarding_tool_specs.clone();
+            let onboarding_review_graph = onboarding_review_graph.clone();
             let mutation_status = mutation_status.clone();
             spawn_local(async move {
                 mutation_status.set("Materializing approved ontology proposals...".to_string());
@@ -325,6 +356,13 @@ fn App() -> Html {
                         let run_path = format!("/api/ontology/onboarding/runs/{}", current_run.id);
                         if let Ok(run) = api_get::<OntologyOnboardingRun>(&run_path).await {
                             onboarding_run.set(Some(run));
+                        }
+                        let graph_path = format!(
+                            "/api/ontology/onboarding/runs/{}/review-graph",
+                            current_run.id
+                        );
+                        if let Ok(graph) = api_get::<OntologyReviewGraph>(&graph_path).await {
+                            onboarding_review_graph.set(Some(graph));
                         }
                         let specs_path = format!(
                             "/api/ontology/onboarding/runs/{}/tool-specs",
@@ -645,6 +683,7 @@ fn App() -> Html {
                                 rendered_context={(*rendered_context).clone()}
                                 onboarding_run={(*onboarding_run).clone()}
                                 onboarding_tool_specs={(*onboarding_tool_specs).clone()}
+                                onboarding_review_graph={(*onboarding_review_graph).clone()}
                                 on_source={state_textarea(semantic_source.clone())}
                                 on_build={build_ontology.clone()}
                                 on_context_packet_id={state_input(context_packet_id.clone())}

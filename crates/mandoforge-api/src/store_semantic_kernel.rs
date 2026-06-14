@@ -828,9 +828,11 @@ fn normalize_semantic_object_type(value: &str) -> Result<String, AppError> {
         | "ontology_onboarding_proposal"
         | "ontology_object_type"
         | "ontology_relation_type"
-        | "ontology_action_type" => Ok(normalized),
+        | "ontology_action_type"
+        | "ontology_logic_rule"
+        | "ontology_curated_dataset_review" => Ok(normalized),
         _ => Err(AppError::bad_request(
-            "semantic object_type must be action, agent, connector, decision, eval, profile, release_gate, runbook, schema, skill, code_module, workflow, policy, memory, artifact, project, repo, service, pack, work_item, business_object, business_metric, ontology_expansion, ontology_onboarding_proposal, ontology_object_type, ontology_relation_type, or ontology_action_type",
+            "semantic object_type must be action, agent, connector, decision, eval, profile, release_gate, runbook, schema, skill, code_module, workflow, policy, memory, artifact, project, repo, service, pack, work_item, business_object, business_metric, ontology_expansion, ontology_onboarding_proposal, ontology_object_type, ontology_relation_type, ontology_action_type, ontology_logic_rule, or ontology_curated_dataset_review",
         )),
     }
 }

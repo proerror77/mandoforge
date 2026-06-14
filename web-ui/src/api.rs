@@ -354,6 +354,10 @@ pub struct OntologyOnboardingToolSpec {
     pub read_only: bool,
     #[serde(default)]
     pub approval_required: bool,
+    #[serde(default)]
+    pub read_write_risk: String,
+    #[serde(default)]
+    pub source_refs: Value,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
@@ -362,6 +366,64 @@ pub struct OntologyOnboardingToolSpecResponse {
     pub run_id: String,
     #[serde(default)]
     pub tool_specs: Vec<OntologyOnboardingToolSpec>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct OntologyReviewGraph {
+    #[serde(default)]
+    pub run_id: String,
+    #[serde(default)]
+    pub nodes: Vec<OntologyReviewGraphNode>,
+    #[serde(default)]
+    pub edges: Vec<OntologyReviewGraphEdge>,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default)]
+    pub omitted_node_count: usize,
+    #[serde(default)]
+    pub omitted_edge_count: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct OntologyReviewGraphNode {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub node_type: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub confidence: f64,
+    #[serde(default)]
+    pub risk: String,
+    #[serde(default)]
+    pub evidence: Value,
+    #[serde(default)]
+    pub source_proposal_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct OntologyReviewGraphEdge {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub from: String,
+    #[serde(default)]
+    pub to: String,
+    #[serde(default)]
+    pub edge_type: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub confidence: f64,
+    #[serde(default)]
+    pub risk: String,
+    #[serde(default)]
+    pub evidence: Value,
+    #[serde(default)]
+    pub source_proposal_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]

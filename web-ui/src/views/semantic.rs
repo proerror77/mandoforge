@@ -1,6 +1,7 @@
 use crate::api::{
     OntologyOnboardingProposal, OntologyOnboardingRun, OntologyOnboardingToolSpec,
-    RenderedExecutionContext, SemanticGraphSnapshot, SemanticObject,
+    OntologyReviewGraph, OntologyReviewGraphNode, RenderedExecutionContext, SemanticGraphSnapshot,
+    SemanticObject,
 };
 use crate::components::{FlowMeter, JsonPreview, KeyMetrics, Panel, Rows};
 use crate::state::ConsoleData;
@@ -18,6 +19,7 @@ pub(crate) struct SemanticProps {
     pub(crate) rendered_context: Option<RenderedExecutionContext>,
     pub(crate) onboarding_run: Option<OntologyOnboardingRun>,
     pub(crate) onboarding_tool_specs: Vec<OntologyOnboardingToolSpec>,
+    pub(crate) onboarding_review_graph: Option<OntologyReviewGraph>,
     pub(crate) on_source: Callback<InputEvent>,
     pub(crate) on_build: Callback<MouseEvent>,
     pub(crate) on_context_packet_id: Callback<InputEvent>,
@@ -36,6 +38,7 @@ pub(crate) fn SemanticView(props: &SemanticProps) -> Html {
                 <OnboardingPanel
                     run={props.onboarding_run.clone()}
                     tool_specs={props.onboarding_tool_specs.clone()}
+                    review_graph={props.onboarding_review_graph.clone()}
                     on_start={props.on_start_onboarding.clone()}
                     on_approve={props.on_approve_onboarding_proposal.clone()}
                     on_reject={props.on_reject_onboarding_proposal.clone()}
@@ -90,6 +93,7 @@ pub(crate) fn SemanticView(props: &SemanticProps) -> Html {
 struct OnboardingPanelProps {
     run: Option<OntologyOnboardingRun>,
     tool_specs: Vec<OntologyOnboardingToolSpec>,
+    review_graph: Option<OntologyReviewGraph>,
     on_start: Callback<MouseEvent>,
     on_approve: Callback<String>,
     on_reject: Callback<String>,
@@ -124,8 +128,9 @@ fn OnboardingPanel(props: &OnboardingPanelProps) -> Html {
                 ("Approved".to_string(), run.approved_count.to_string()),
                 ("Materialized".to_string(), run.materialized_count.to_string()),
             ]} />
+            <OntologyReviewGraphPanel graph={props.review_graph.clone()} />
             <div class="ontology-proposal-list">
-                { for ["object", "relation", "metric", "action"].iter().map(|proposal_type| html! {
+                { for ["object", "relation", "metric", "logic", "action"].iter().map(|proposal_type| html! {
                     <section class="ontology-proposal-group" key={proposal_type.to_string()}>
                         <h4>{ proposal_type.to_ascii_uppercase() }</h4>
                         { for run.proposals.iter().filter(|proposal| proposal.proposal_type == *proposal_type).map(|proposal| {
@@ -147,10 +152,87 @@ fn OnboardingPanel(props: &OnboardingPanelProps) -> Html {
                     (
                         if spec.approval_required { "approval" } else { "ready" }.to_string(),
                         spec.name.clone(),
-                        format!("{} / {}", spec.target_object, label_or(&spec.description, "ontology action"))
+                        format!("{} / {} / {}", spec.target_object, label_or(&spec.read_write_risk, "risk_unset"), label_or(&spec.description, "ontology action"))
                     )
                 }).collect::<Vec<_>>()} />
             </div>
+        </div>
+    }
+}
+
+#[derive(Properties, Clone, PartialEq)]
+struct OntologyReviewGraphPanelProps {
+    graph: Option<OntologyReviewGraph>,
+}
+
+#[component]
+fn OntologyReviewGraphPanel(props: &OntologyReviewGraphPanelProps) -> Html {
+    let Some(graph) = props.graph.as_ref() else {
+        return html! {
+            <div class="ontology-review-graph empty">{ "No review graph loaded." }</div>
+        };
+    };
+    let node_types = ["dataset", "object", "metric", "logic", "action", "tool"];
+    html! {
+        <div class="ontology-review-graph">
+            <div class="ontology-review-graph-head">
+                <strong>{ "Ontology review graph" }</strong>
+                <span>{ format!("{} nodes / {} edges", graph.nodes.len(), graph.edges.len()) }</span>
+                {
+                    if graph.truncated {
+                        html! { <span>{ format!("truncated: +{} nodes / +{} edges", graph.omitted_node_count, graph.omitted_edge_count) }</span> }
+                    } else {
+                        html! {}
+                    }
+                }
+            </div>
+            <div class="ontology-review-node-groups">
+                { for node_types.iter().map(|node_type| {
+                    let nodes = graph.nodes.iter().filter(|node| node.node_type == *node_type).collect::<Vec<_>>();
+                    html! {
+                        <section class="ontology-review-node-group" key={node_type.to_string()}>
+                            <h4>{ format!("{} ({})", node_type.to_ascii_uppercase(), nodes.len()) }</h4>
+                            <div class="ontology-review-node-list">
+                                { for nodes.iter().take(8).map(|node| html! {
+                                    <OntologyReviewGraphNodeChip key={node.id.clone()} node={(*node).clone()} />
+                                }) }
+                            </div>
+                        </section>
+                    }
+                }) }
+            </div>
+            <div class="ontology-review-edge-list">
+                <h4>{ "Business logic edges" }</h4>
+                <Rows empty="No graph edges." rows={graph.edges.iter().take(12).map(|edge| {
+                    (
+                        edge.edge_type.clone(),
+                        format!("{} -> {}", edge.from, edge.to),
+                        format!(
+                            "{} / {:.0}% / {} / {}",
+                            label_or(&edge.status, "pending"),
+                            edge.confidence * 100.0,
+                            label_or(&edge.risk, "low"),
+                            edge.source_proposal_id.as_deref().map(short_id).unwrap_or_else(|| "source".to_string())
+                        )
+                    )
+                }).collect::<Vec<_>>()} />
+            </div>
+        </div>
+    }
+}
+
+#[derive(Properties, Clone, PartialEq)]
+struct OntologyReviewGraphNodeChipProps {
+    node: OntologyReviewGraphNode,
+}
+
+#[component]
+fn OntologyReviewGraphNodeChip(props: &OntologyReviewGraphNodeChipProps) -> Html {
+    html! {
+        <div class={classes!("ontology-review-node", status_tone(&props.node.status))}>
+            <strong>{ props.node.label.clone() }</strong>
+            <span>{ format!("{:.0}% / {}", props.node.confidence * 100.0, label_or(&props.node.risk, "low")) }</span>
+            <small>{ format!("{} / {}", label_or(&props.node.status, "pending"), props.node.source_proposal_id.as_deref().map(short_id).unwrap_or_else(|| "source".to_string())) }</small>
         </div>
     }
 }

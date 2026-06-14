@@ -33,7 +33,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 const DEFAULT_TENANT_ID: &str = "00000000-0000-4000-8000-000000000001";
-const CONSOLE_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' http://127.0.0.1:* http://localhost:*; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+const CONSOLE_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-omioZQat3AaxGep5qAb0c0n+pQHYxcIPr2lEB5M8pwc='; connect-src 'self' http://127.0.0.1:* http://localhost:*; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
 
 mod authorization;
 mod codex_app_server;
@@ -2384,6 +2384,13 @@ struct ReviewOntologyOnboardingProposalRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct ReviewOntologyCuratedDatasetRequest {
+    decision: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct CreateOntologyOnboardingRunRequest {
     #[serde(default)]
     industry: Option<String>,
@@ -2427,6 +2434,8 @@ struct OntologyOnboardingToolSpec {
     input_schema: Value,
     effects: Value,
     policy: Value,
+    read_write_risk: String,
+    source_refs: Value,
     audit_event: String,
     source_proposal_id: Uuid,
 }
@@ -2435,6 +2444,105 @@ struct OntologyOnboardingToolSpec {
 struct OntologyOnboardingToolSpecResponse {
     run_id: Uuid,
     tool_specs: Vec<OntologyOnboardingToolSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologyBuilderNode {
+    id: String,
+    label: String,
+    node_type: String,
+    status: String,
+    summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologyBuilderEdge {
+    from: String,
+    to: String,
+    edge_type: String,
+    reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologyBuilderExecutionLevel {
+    level: usize,
+    node_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologyBuilderDag {
+    run_id: Option<Uuid>,
+    mode: String,
+    nodes: Vec<OntologyBuilderNode>,
+    edges: Vec<OntologyBuilderEdge>,
+    execution_levels: Vec<OntologyBuilderExecutionLevel>,
+    stale_node_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CuratedDatasetDraft {
+    id: String,
+    table_name: String,
+    source_system: String,
+    object_candidate: Option<String>,
+    quality_score: f64,
+    review_status: String,
+    issues: Vec<String>,
+    schema_version: String,
+    reviewer_metadata: Value,
+    sample_rows: Vec<Value>,
+    profile: OntologyDatasetProfile,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologyPromptPacket {
+    run_id: Uuid,
+    industry: String,
+    source_mode: String,
+    domain_scope: String,
+    tool_namespace: String,
+    seed_pack: OntologySeedPack,
+    curated_datasets: Vec<CuratedDatasetDraft>,
+    profiles: Vec<OntologyDatasetProfile>,
+    allowed_ontology_triples: Vec<Value>,
+    evidence_rules: Vec<String>,
+    policy_reminders: Vec<String>,
+    proposal_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologyReviewGraphNode {
+    id: String,
+    node_type: String,
+    label: String,
+    status: String,
+    confidence: f64,
+    risk: String,
+    evidence: Value,
+    source_proposal_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologyReviewGraphEdge {
+    id: String,
+    from: String,
+    to: String,
+    edge_type: String,
+    status: String,
+    confidence: f64,
+    risk: String,
+    evidence: Value,
+    source_proposal_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologyReviewGraph {
+    run_id: Uuid,
+    nodes: Vec<OntologyReviewGraphNode>,
+    edges: Vec<OntologyReviewGraphEdge>,
+    truncated: bool,
+    omitted_node_count: usize,
+    omitted_edge_count: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -6862,6 +6970,18 @@ fn build_router(state: AppState) -> Router {
             get(get_ontology_onboarding_run),
         )
         .route(
+            "/api/ontology/onboarding/runs/{id}/dag",
+            get(get_ontology_onboarding_dag),
+        )
+        .route(
+            "/api/ontology/onboarding/runs/{id}/prompt-packet",
+            get(get_ontology_onboarding_prompt_packet),
+        )
+        .route(
+            "/api/ontology/onboarding/runs/{id}/review-graph",
+            get(get_ontology_onboarding_review_graph),
+        )
+        .route(
             "/api/ontology/onboarding/proposals/{id}/review",
             post(review_ontology_onboarding_proposal),
         )
@@ -6872,6 +6992,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/ontology/onboarding/runs/{id}/tool-specs",
             get(list_ontology_onboarding_tool_specs),
+        )
+        .route(
+            "/api/ontology/onboarding/curated-datasets/{id}/review",
+            post(review_ontology_curated_dataset),
         )
         .route(
             "/api/semantic-conflicts/resolve",
@@ -11931,6 +12055,13 @@ fn ontology_generate_seed_proposals_for_run(
                 profile,
                 &mapping.object_name,
             ));
+            proposals.push(ontology_logic_rule_proposal(
+                run_id,
+                seed,
+                dataset,
+                profile,
+                &mapping.object_name,
+            ));
         }
     }
 
@@ -11983,6 +12114,7 @@ fn ontology_object_proposal(
             "table": dataset.table_name,
             "row_count": profile.row_count,
             "industry": seed.industry,
+            "source_mode": seed.source_mode,
             "domain_scope": seed.domain_scope,
             "tool_namespace": seed.tool_namespace,
             "primary_key_candidates": profile.primary_key_candidates,
@@ -11994,6 +12126,7 @@ fn ontology_object_proposal(
         json!({
             "object_type": object_name,
             "industry": seed.industry,
+            "source_mode": seed.source_mode,
             "domain_scope": seed.domain_scope,
             "tool_namespace": seed.tool_namespace,
             "source_table": dataset.table_name,
@@ -12031,6 +12164,7 @@ fn ontology_relation_proposal(
         },
         json!({
             "industry": seed.industry,
+            "source_mode": seed.source_mode,
             "domain_scope": seed.domain_scope,
             "tool_namespace": seed.tool_namespace,
             "source_table": mapping.source_table,
@@ -12042,6 +12176,7 @@ fn ontology_relation_proposal(
         }),
         json!({
             "industry": seed.industry,
+            "source_mode": seed.source_mode,
             "domain_scope": seed.domain_scope,
             "tool_namespace": seed.tool_namespace,
             "from_object": mapping.from_object,
@@ -12067,6 +12202,7 @@ fn ontology_metric_proposal(
         json!({
             "semantic_model": seed.domain_scope,
             "industry": seed.industry,
+            "source_mode": seed.source_mode,
             "domain_scope": seed.domain_scope,
             "tool_namespace": seed.tool_namespace,
             "target_object": mapping.target_object,
@@ -12076,6 +12212,7 @@ fn ontology_metric_proposal(
         json!({
             "metric_name": mapping.name,
             "industry": seed.industry,
+            "source_mode": seed.source_mode,
             "domain_scope": seed.domain_scope,
             "tool_namespace": seed.tool_namespace,
             "target_object": mapping.target_object,
@@ -12101,6 +12238,7 @@ fn ontology_action_proposal(
         0.82,
         json!({
             "industry": seed.industry,
+            "source_mode": seed.source_mode,
             "domain_scope": seed.domain_scope,
             "tool_namespace": seed.tool_namespace,
             "target_object": mapping.target_object,
@@ -12111,6 +12249,7 @@ fn ontology_action_proposal(
         json!({
             "action": mapping.name,
             "industry": seed.industry,
+            "source_mode": seed.source_mode,
             "domain_scope": seed.domain_scope,
             "tool_namespace": seed.tool_namespace,
             "target_object": mapping.target_object,
@@ -12123,6 +12262,68 @@ fn ontology_action_proposal(
             },
             "executor": mapping.executor,
             "audit_event": format!("{}.{}", seed.tool_namespace, mapping.name),
+        }),
+    )
+}
+
+fn ontology_logic_rule_proposal(
+    run_id: Uuid,
+    seed: &OntologySeedPack,
+    dataset: &OntologyOnboardingDataset,
+    profile: &OntologyDatasetProfile,
+    object_name: &str,
+) -> OntologyOnboardingProposalDraft {
+    let primary_key = profile
+        .primary_key_candidates
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "id".to_string());
+    let rule_name = format!("{object_name} identity rule");
+    ontology_proposal(
+        run_id,
+        "logic",
+        &rule_name,
+        format!(
+            "validate {object_name}.{primary_key} from {}",
+            dataset.table_name
+        ),
+        if profile.primary_key_candidates.is_empty() {
+            0.72
+        } else {
+            0.91
+        },
+        json!({
+            "industry": seed.industry,
+            "source_mode": seed.source_mode,
+            "domain_scope": seed.domain_scope,
+            "tool_namespace": seed.tool_namespace,
+            "source_table": dataset.table_name,
+            "target_object": object_name,
+            "primary_key": primary_key,
+            "primary_key_candidates": profile.primary_key_candidates,
+            "enum_candidates": profile.enum_candidates,
+            "pii_candidates": profile.pii_candidates,
+            "field_null_rates": profile.field_null_rates,
+        }),
+        json!({
+            "logic_rule": rule_name,
+            "industry": seed.industry,
+            "source_mode": seed.source_mode,
+            "domain_scope": seed.domain_scope,
+            "tool_namespace": seed.tool_namespace,
+            "target_object": object_name,
+            "source_table": dataset.table_name,
+            "rule_kind": "validation",
+            "enabled": false,
+            "expression": {
+                "type": "primary_key_unique",
+                "field": primary_key,
+                "requires_non_null": true
+            },
+            "policy": {
+                "requires_owner_review": true,
+                "disabled_until_publish_policy": true
+            }
         }),
     )
 }
@@ -12285,6 +12486,57 @@ async fn get_ontology_onboarding_run(
         .map(Json)
 }
 
+async fn get_ontology_onboarding_dag(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<OntologyBuilderDag>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "ontology_onboarding",
+        Some(id),
+    )
+    .await?;
+    let run = get_ontology_onboarding_run_for_state(&state, id).await?;
+    ontology_builder_dag_for_mode("pipeline_mapping_v2", Some(run.id), None).map(Json)
+}
+
+async fn get_ontology_onboarding_prompt_packet(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<OntologyPromptPacket>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "ontology_onboarding",
+        Some(id),
+    )
+    .await?;
+    let run = get_ontology_onboarding_run_for_state(&state, id).await?;
+    ontology_prompt_packet_for_run(&run).map(Json)
+}
+
+async fn get_ontology_onboarding_review_graph(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<OntologyReviewGraph>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "ontology_onboarding",
+        Some(id),
+    )
+    .await?;
+    let run = get_ontology_onboarding_run_for_state(&state, id).await?;
+    ontology_review_graph_for_run(&state, &run).await.map(Json)
+}
+
 async fn review_ontology_onboarding_proposal(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -12347,6 +12599,32 @@ async fn list_ontology_onboarding_tool_specs(
         run_id: id,
         tool_specs: ontology_onboarding_tool_specs_for_run(&state, id).await?,
     }))
+}
+
+async fn review_ontology_curated_dataset(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<ReviewOntologyCuratedDatasetRequest>,
+) -> Result<Json<CuratedDatasetDraft>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsWrite,
+        "ontology_onboarding",
+        None,
+    )
+    .await?;
+    let principal = principal_from_request(&state, &headers).await?;
+    review_ontology_curated_dataset_with_actor(
+        &state,
+        &id,
+        &input.decision,
+        input.reason.as_deref(),
+        &principal.subject_id,
+    )
+    .await
+    .map(Json)
 }
 
 #[cfg(test)]
@@ -12447,9 +12725,1168 @@ fn ontology_tool_spec_from_action_proposal(
             .cloned()
             .unwrap_or_else(|| json!([])),
         policy,
+        read_write_risk: if approval_required {
+            "write_approval_required".to_string()
+        } else {
+            "read_or_low_risk_update".to_string()
+        },
+        source_refs: json!({
+            "proposal_id": proposal.id,
+            "proposal_type": proposal.proposal_type,
+            "source_mapping": proposal.source_mapping,
+            "target_object": target_object,
+            "evidence": proposal.evidence,
+        }),
         audit_event,
         source_proposal_id: proposal.id,
     })
+}
+
+async fn review_ontology_curated_dataset_with_actor(
+    state: &AppState,
+    draft_id: &str,
+    decision: &str,
+    reason: Option<&str>,
+    actor_subject: &str,
+) -> Result<CuratedDatasetDraft, AppError> {
+    let (_decision, review_status) = normalize_ontology_onboarding_review_decision(decision)?;
+    let (run_id, table_name) = ontology_parse_curated_dataset_id(draft_id)?;
+    let run = get_ontology_onboarding_run_for_state(state, run_id).await?;
+    let seed =
+        ontology_seed_and_source_for_request(&ontology_run_industry(&run), &run.source_mode)?.0;
+    let mut draft = ontology_curated_dataset_drafts_for_run(&run, &seed)
+        .into_iter()
+        .find(|draft| draft.table_name == table_name)
+        .ok_or_else(|| AppError::not_found("ontology curated dataset draft not found"))?;
+    let review = json!({
+        "decision": decision,
+        "status": review_status,
+        "reason": reason,
+        "reviewer": actor_subject,
+        "reviewed_at": Utc::now(),
+    });
+    draft.review_status = review_status.clone();
+    draft.reviewer_metadata = review.clone();
+    ontology_upsert_curated_dataset_review_object(state, run_id, &draft, review.clone()).await?;
+    ontology_apply_curated_dataset_review_to_proposals(
+        state,
+        run_id,
+        &table_name,
+        &review_status,
+        actor_subject,
+    )
+    .await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "ontology_onboarding.curated_dataset_reviewed",
+            "ontology_curated_dataset",
+            Some(run_id),
+            json!({
+                "subject": actor_subject,
+                "run_id": run_id,
+                "draft_id": draft.id,
+                "table_name": table_name,
+                "review": review,
+            }),
+        ))
+        .await?;
+    Ok(draft)
+}
+
+fn ontology_parse_curated_dataset_id(draft_id: &str) -> Result<(Uuid, String), AppError> {
+    let mut parts = draft_id.splitn(3, ':');
+    let Some(prefix) = parts.next() else {
+        return Err(AppError::bad_request("invalid curated dataset draft id"));
+    };
+    let Some(run_id) = parts.next() else {
+        return Err(AppError::bad_request("invalid curated dataset draft id"));
+    };
+    let Some(table_name) = parts.next() else {
+        return Err(AppError::bad_request("invalid curated dataset draft id"));
+    };
+    if prefix != "curated" || table_name.trim().is_empty() {
+        return Err(AppError::bad_request(
+            "curated dataset draft id must be curated:{run_id}:{table_name}",
+        ));
+    }
+    let run_id = Uuid::parse_str(run_id)
+        .map_err(|_| AppError::bad_request("curated dataset draft id has invalid run_id"))?;
+    Ok((run_id, table_name.to_string()))
+}
+
+async fn ontology_upsert_curated_dataset_review_object(
+    state: &AppState,
+    run_id: Uuid,
+    draft: &CuratedDatasetDraft,
+    review: Value,
+) -> Result<(), AppError> {
+    let object_key = ontology_curated_dataset_review_object_key(run_id, &draft.table_name);
+    let content = json!({
+        "run_id": run_id,
+        "draft": draft,
+        "review": review,
+    });
+    if let Some(existing) = state
+        .list_semantic_objects()
+        .await?
+        .into_iter()
+        .find(|object| object.object_key == object_key && object.archived_at.is_none())
+    {
+        state
+            .update_semantic_object(
+                existing.id,
+                UpdateSemanticObject {
+                    title: None,
+                    summary: None,
+                    content: Some(content),
+                    semantic_scopes: None,
+                    source_uri: None,
+                    provenance: None,
+                    trust_level: None,
+                    freshness: None,
+                    status: None,
+                },
+            )
+            .await?;
+        return Ok(());
+    }
+    state
+        .create_semantic_object(CreateSemanticObject {
+            source_id: None,
+            object_type: "ontology_curated_dataset_review".to_string(),
+            object_key,
+            title: format!("Curated dataset review: {}", draft.table_name),
+            summary: format!(
+                "Review boundary for ontology curated dataset draft {}.",
+                draft.table_name
+            ),
+            content,
+            semantic_scopes: json!({
+                "domain_scope": "ontology",
+                "workflow_scope": "enterprise-ontology-fast-onboarding",
+                "memory_scope": "ontology",
+                "share_policy": "review_required",
+            }),
+            source_uri: Some(format!(
+                "mandoforge://ontology/onboarding/curated-datasets/{}",
+                draft.id
+            )),
+            provenance: json!({
+                "source": "ontology_onboarding.curated_dataset_review",
+                "run_id": run_id,
+                "table_name": draft.table_name,
+                "reviewed_at": Utc::now(),
+            }),
+            trust_level: "source_attested".to_string(),
+            freshness: "current".to_string(),
+            status: "active".to_string(),
+        })
+        .await?;
+    Ok(())
+}
+
+async fn ontology_apply_curated_dataset_review_to_proposals(
+    state: &AppState,
+    run_id: Uuid,
+    table_name: &str,
+    review_status: &str,
+    actor_subject: &str,
+) -> Result<(), AppError> {
+    let recommendation = match review_status {
+        "approved" => "approve",
+        "rejected" | "changes_requested" | "needs_more_evidence" => "needs_more_evidence",
+        _ => return Ok(()),
+    };
+    for object in ontology_onboarding_proposal_objects(state)
+        .await?
+        .into_iter()
+        .filter(|object| ontology_onboarding_object_run_id(object) == Some(run_id))
+    {
+        let mut proposal = ontology_onboarding_object_proposal(&object)?;
+        if !ontology_proposal_references_table(&proposal, table_name) {
+            continue;
+        }
+        proposal.recommendation = recommendation.to_string();
+        state
+            .update_semantic_object(
+                object.id,
+                UpdateSemanticObject {
+                    title: None,
+                    summary: None,
+                    content: Some(ontology_onboarding_proposal_content(
+                        run_id,
+                        &proposal,
+                        ontology_onboarding_object_materialized(&object),
+                        object.content.get("review").cloned(),
+                    )?),
+                    semantic_scopes: None,
+                    source_uri: None,
+                    provenance: None,
+                    trust_level: None,
+                    freshness: None,
+                    status: None,
+                },
+            )
+            .await?;
+    }
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "system",
+            None,
+            "ontology_onboarding.proposal_recommendations_refreshed",
+            "ontology_onboarding_run",
+            Some(run_id),
+            json!({
+                "subject": actor_subject,
+                "run_id": run_id,
+                "table_name": table_name,
+                "curated_dataset_review_status": review_status,
+                "recommendation": recommendation,
+            }),
+        ))
+        .await?;
+    Ok(())
+}
+
+fn ontology_proposal_references_table(
+    proposal: &OntologyOnboardingProposalDraft,
+    table_name: &str,
+) -> bool {
+    let table_matches = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_str)
+            .map(|value| value == table_name)
+            .unwrap_or(false)
+    };
+    table_matches(proposal.content.get("source_table"))
+        || table_matches(proposal.evidence.get("source_table"))
+        || table_matches(proposal.evidence.get("table"))
+        || table_matches(proposal.evidence.get("references_table"))
+}
+
+fn ontology_curated_dataset_review_object_key(run_id: Uuid, table_name: &str) -> String {
+    format!(
+        "ontology:curated-dataset-review:{run_id}:{}",
+        ontology_slug(table_name)
+    )
+}
+
+fn ontology_builder_dag_for_mode(
+    mode: &str,
+    run_id: Option<Uuid>,
+    changed_node_id: Option<&str>,
+) -> Result<OntologyBuilderDag, AppError> {
+    let mode = mode.trim().to_ascii_lowercase().replace('-', "_");
+    let (nodes, edges) = match mode.as_str() {
+        "pipeline_mapping_v2" => ontology_pipeline_mapping_v2_dag_parts(),
+        "simple_llm_extraction_v1" => ontology_simple_llm_extraction_v1_dag_parts(),
+        _ => {
+            return Err(AppError::bad_request(
+                "ontology builder DAG mode must be pipeline_mapping_v2 or simple_llm_extraction_v1",
+            ));
+        }
+    };
+    let execution_levels = ontology_topological_execution_levels(&nodes, &edges)?;
+    let stale_node_ids = changed_node_id
+        .map(|node_id| ontology_downstream_node_ids(node_id, &edges))
+        .unwrap_or_default();
+    Ok(OntologyBuilderDag {
+        run_id,
+        mode,
+        nodes,
+        edges,
+        execution_levels,
+        stale_node_ids,
+    })
+}
+
+fn ontology_pipeline_mapping_v2_dag_parts() -> (Vec<OntologyBuilderNode>, Vec<OntologyBuilderEdge>)
+{
+    let nodes = vec![
+        ontology_builder_node(
+            "connector_sync",
+            "Connector sync",
+            "ingestion",
+            "stable",
+            "Replicate source objects into raw storage.",
+        ),
+        ontology_builder_node(
+            "raw_snapshot",
+            "Raw snapshot",
+            "raw",
+            "stable",
+            "Preserve source payload, batch, and lineage fields.",
+        ),
+        ontology_builder_node(
+            "metadata_scan",
+            "Metadata scan",
+            "catalog",
+            "stable",
+            "Collect table, field, owner, lineage, and usage metadata.",
+        ),
+        ontology_builder_node(
+            "schema_profile",
+            "Schema profile",
+            "profile",
+            "stable",
+            "Measure keys, null rates, joins, enums, time, currency, and PII.",
+        ),
+        ontology_builder_node(
+            "curated_dataset_draft",
+            "Curated dataset draft",
+            "curation",
+            "review_required",
+            "Create reviewable curated dataset candidates.",
+        ),
+        ontology_builder_node(
+            "prompt_packet",
+            "Ontology prompt packet",
+            "ai_context",
+            "stable",
+            "Bundle seed ontology, catalog, profiles, samples, policies, and allowed triples.",
+        ),
+        ontology_builder_node(
+            "proposal_engine",
+            "Proposal engine",
+            "ai_inference",
+            "review_required",
+            "Propose objects, relations, metrics, logic rules, actions, and mappings.",
+        ),
+        ontology_builder_node(
+            "review_graph",
+            "Review graph",
+            "visual_review",
+            "review_required",
+            "Project proposals into an operator graph for business-logic validation.",
+        ),
+        ontology_builder_node(
+            "human_review",
+            "Human review",
+            "approval",
+            "review_required",
+            "Accept, reject, modify, merge, or request evidence.",
+        ),
+        ontology_builder_node(
+            "semantic_materialize",
+            "Semantic materialization",
+            "ontology_store",
+            "approval_gated",
+            "Write approved ontology objects, links, metrics, and disabled logic rules.",
+        ),
+        ontology_builder_node(
+            "tool_compile",
+            "Semantic tool compile",
+            "agent_tools",
+            "approval_gated",
+            "Compile approved action types into governed agent tools.",
+        ),
+    ];
+    let edges = vec![
+        ontology_builder_edge(
+            "connector_sync",
+            "raw_snapshot",
+            "produces",
+            "Raw data depends on connector sync.",
+        ),
+        ontology_builder_edge(
+            "raw_snapshot",
+            "metadata_scan",
+            "catalogs",
+            "Catalog scans raw tables.",
+        ),
+        ontology_builder_edge(
+            "raw_snapshot",
+            "schema_profile",
+            "profiles",
+            "Profiler samples raw tables.",
+        ),
+        ontology_builder_edge(
+            "metadata_scan",
+            "curated_dataset_draft",
+            "informs",
+            "Curated drafts need catalog metadata.",
+        ),
+        ontology_builder_edge(
+            "schema_profile",
+            "curated_dataset_draft",
+            "informs",
+            "Curated drafts need data quality evidence.",
+        ),
+        ontology_builder_edge(
+            "curated_dataset_draft",
+            "prompt_packet",
+            "feeds",
+            "Prompt packet uses reviewed dataset candidates.",
+        ),
+        ontology_builder_edge(
+            "metadata_scan",
+            "prompt_packet",
+            "feeds",
+            "Prompt packet includes catalog context.",
+        ),
+        ontology_builder_edge(
+            "schema_profile",
+            "prompt_packet",
+            "feeds",
+            "Prompt packet includes profile evidence.",
+        ),
+        ontology_builder_edge(
+            "prompt_packet",
+            "proposal_engine",
+            "constrains",
+            "AI proposals must cite packet evidence.",
+        ),
+        ontology_builder_edge(
+            "proposal_engine",
+            "review_graph",
+            "projects",
+            "Graph visualizes proposal dependencies.",
+        ),
+        ontology_builder_edge(
+            "review_graph",
+            "human_review",
+            "supports",
+            "Operators review graph evidence before approval.",
+        ),
+        ontology_builder_edge(
+            "human_review",
+            "semantic_materialize",
+            "gates",
+            "Only approved changes materialize.",
+        ),
+        ontology_builder_edge(
+            "semantic_materialize",
+            "tool_compile",
+            "feeds",
+            "Tools compile from approved ontology actions.",
+        ),
+    ];
+    (nodes, edges)
+}
+
+fn ontology_simple_llm_extraction_v1_dag_parts()
+-> (Vec<OntologyBuilderNode>, Vec<OntologyBuilderEdge>) {
+    let nodes = vec![
+        ontology_builder_node(
+            "document_upload",
+            "Document upload",
+            "document",
+            "stable",
+            "Receive uploaded SOP, contract, or manual.",
+        ),
+        ontology_builder_node(
+            "prompt_select",
+            "Prompt select",
+            "configuration",
+            "stable",
+            "Select extraction prompt and model.",
+        ),
+        ontology_builder_node(
+            "llm_extract",
+            "LLM extract",
+            "ai_inference",
+            "review_required",
+            "Extract draft graph facts from bounded document text.",
+        ),
+        ontology_builder_node(
+            "schema_validate",
+            "Schema validate",
+            "validation",
+            "stable",
+            "Validate extracted facts against ontology IR schema.",
+        ),
+        ontology_builder_node(
+            "review_graph",
+            "Review graph",
+            "visual_review",
+            "review_required",
+            "Show extracted objects and relations for confirmation.",
+        ),
+        ontology_builder_node(
+            "human_review",
+            "Human review",
+            "approval",
+            "review_required",
+            "Approve or reject extracted graph changes.",
+        ),
+        ontology_builder_node(
+            "semantic_materialize",
+            "Semantic materialization",
+            "ontology_store",
+            "approval_gated",
+            "Store approved graph facts.",
+        ),
+    ];
+    let edges = vec![
+        ontology_builder_edge(
+            "document_upload",
+            "llm_extract",
+            "feeds",
+            "Extraction reads uploaded document text.",
+        ),
+        ontology_builder_edge(
+            "prompt_select",
+            "llm_extract",
+            "configures",
+            "Extraction depends on prompt/model choice.",
+        ),
+        ontology_builder_edge(
+            "llm_extract",
+            "schema_validate",
+            "validates",
+            "Schema validation checks LLM output.",
+        ),
+        ontology_builder_edge(
+            "schema_validate",
+            "review_graph",
+            "projects",
+            "Only valid facts are visualized.",
+        ),
+        ontology_builder_edge(
+            "review_graph",
+            "human_review",
+            "supports",
+            "Operators inspect graph before approval.",
+        ),
+        ontology_builder_edge(
+            "human_review",
+            "semantic_materialize",
+            "gates",
+            "Only approved graph facts materialize.",
+        ),
+    ];
+    (nodes, edges)
+}
+
+fn ontology_builder_node(
+    id: &str,
+    label: &str,
+    node_type: &str,
+    status: &str,
+    summary: &str,
+) -> OntologyBuilderNode {
+    OntologyBuilderNode {
+        id: id.to_string(),
+        label: label.to_string(),
+        node_type: node_type.to_string(),
+        status: status.to_string(),
+        summary: summary.to_string(),
+    }
+}
+
+fn ontology_builder_edge(
+    from: &str,
+    to: &str,
+    edge_type: &str,
+    reason: &str,
+) -> OntologyBuilderEdge {
+    OntologyBuilderEdge {
+        from: from.to_string(),
+        to: to.to_string(),
+        edge_type: edge_type.to_string(),
+        reason: reason.to_string(),
+    }
+}
+
+fn ontology_topological_execution_levels(
+    nodes: &[OntologyBuilderNode],
+    edges: &[OntologyBuilderEdge],
+) -> Result<Vec<OntologyBuilderExecutionLevel>, AppError> {
+    let node_ids = nodes
+        .iter()
+        .map(|node| node.id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut in_degree = node_ids
+        .iter()
+        .map(|node_id| (node_id.clone(), 0usize))
+        .collect::<BTreeMap<_, _>>();
+    let mut outgoing = BTreeMap::<String, Vec<String>>::new();
+    for edge in edges {
+        if !node_ids.contains(&edge.from) || !node_ids.contains(&edge.to) {
+            return Err(AppError::bad_request(
+                "ontology builder DAG edge references an unknown node",
+            ));
+        }
+        *in_degree.entry(edge.to.clone()).or_default() += 1;
+        outgoing
+            .entry(edge.from.clone())
+            .or_default()
+            .push(edge.to.clone());
+    }
+    let mut ready = in_degree
+        .iter()
+        .filter_map(|(node_id, degree)| (*degree == 0).then(|| node_id.clone()))
+        .collect::<Vec<_>>();
+    ready.sort();
+    let mut visited = 0usize;
+    let mut levels = Vec::new();
+    while !ready.is_empty() {
+        let current = ready;
+        visited += current.len();
+        levels.push(OntologyBuilderExecutionLevel {
+            level: levels.len(),
+            node_ids: current.clone(),
+        });
+        let mut next_ready = Vec::new();
+        for node_id in current {
+            if let Some(children) = outgoing.get(&node_id) {
+                for child in children {
+                    if let Some(degree) = in_degree.get_mut(child) {
+                        *degree = degree.saturating_sub(1);
+                        if *degree == 0 {
+                            next_ready.push(child.clone());
+                        }
+                    }
+                }
+            }
+        }
+        next_ready.sort();
+        next_ready.dedup();
+        ready = next_ready;
+    }
+    if visited != nodes.len() {
+        return Err(AppError::bad_request(
+            "ontology builder DAG contains a cycle; execution rejected before start",
+        ));
+    }
+    Ok(levels)
+}
+
+fn ontology_downstream_node_ids(node_id: &str, edges: &[OntologyBuilderEdge]) -> Vec<String> {
+    let mut visited = BTreeSet::new();
+    let mut stack = vec![node_id.to_string()];
+    while let Some(current) = stack.pop() {
+        for edge in edges.iter().filter(|edge| edge.from == current) {
+            if visited.insert(edge.to.clone()) {
+                stack.push(edge.to.clone());
+            }
+        }
+    }
+    visited.into_iter().collect()
+}
+
+fn ontology_prompt_packet_for_run(
+    run: &OntologyOnboardingRun,
+) -> Result<OntologyPromptPacket, AppError> {
+    let (seed, _) =
+        ontology_seed_and_source_for_request(&ontology_run_industry(run), &run.source_mode)?;
+    let curated_datasets = ontology_curated_dataset_drafts_for_run(run, &seed);
+    Ok(OntologyPromptPacket {
+        run_id: run.id,
+        industry: seed.industry.clone(),
+        source_mode: run.source_mode.clone(),
+        domain_scope: seed.domain_scope.clone(),
+        tool_namespace: seed.tool_namespace.clone(),
+        seed_pack: seed.clone(),
+        curated_datasets,
+        profiles: run.profiles.clone(),
+        allowed_ontology_triples: seed
+            .relations
+            .iter()
+            .map(|relation| {
+                json!({
+                    "from_object": relation.from_object,
+                    "relation": relation.relation,
+                    "to_object": relation.to_object,
+                    "link_type": relation.name,
+                })
+            })
+            .collect(),
+        evidence_rules: vec![
+            "Every object mapping must cite source table, primary key evidence, and field coverage.".to_string(),
+            "Every relation must cite join success rate and null-rate evidence.".to_string(),
+            "Metrics must use canonical semantic definitions and owner review.".to_string(),
+            "Actions must declare reads, effects, executor, policy, and audit event.".to_string(),
+        ],
+        policy_reminders: vec![
+            "Do not materialize unapproved ontology proposals.".to_string(),
+            "PII-bearing fields require owner review and least-privilege access.".to_string(),
+            "Write-like actions stay approval-gated until production policy enables execution.".to_string(),
+            "Logic rules are created disabled until a publish policy enables enforcement.".to_string(),
+        ],
+        proposal_count: run.proposals.len(),
+    })
+}
+
+fn ontology_curated_dataset_drafts_for_run(
+    run: &OntologyOnboardingRun,
+    seed: &OntologySeedPack,
+) -> Vec<CuratedDatasetDraft> {
+    run.datasets
+        .iter()
+        .filter_map(|dataset| {
+            let profile = run
+                .profiles
+                .iter()
+                .find(|profile| profile.table_name == dataset.table_name)?;
+            let object_candidate = seed
+                .objects
+                .iter()
+                .find(|mapping| mapping.table_name == dataset.table_name)
+                .map(|mapping| mapping.object_name.clone());
+            let null_issue_count = profile
+                .field_null_rates
+                .as_object()
+                .map(|rates| {
+                    rates
+                        .values()
+                        .filter(|rate| rate.as_f64().unwrap_or_default() > 0.20)
+                        .count()
+                })
+                .unwrap_or_default();
+            let quality_score = (0.98 - (null_issue_count as f64 * 0.05)).clamp(0.50, 0.99);
+            let mut issues = Vec::new();
+            if profile.primary_key_candidates.is_empty() {
+                issues.push("no_primary_key_candidate".to_string());
+            }
+            if !profile.pii_candidates.is_empty() {
+                issues.push("pii_review_required".to_string());
+            }
+            Some(CuratedDatasetDraft {
+                id: format!("curated:{}:{}", run.id, dataset.table_name),
+                table_name: dataset.table_name.clone(),
+                source_system: dataset.source_system.clone(),
+                object_candidate,
+                quality_score,
+                review_status: if issues
+                    .iter()
+                    .any(|issue| issue == "no_primary_key_candidate")
+                {
+                    "needs_more_evidence".to_string()
+                } else {
+                    "pending_review".to_string()
+                },
+                issues,
+                schema_version: "draft.v1".to_string(),
+                reviewer_metadata: json!({}),
+                sample_rows: dataset.rows.iter().take(3).cloned().collect(),
+                profile: profile.clone(),
+            })
+        })
+        .collect()
+}
+
+async fn ontology_review_graph_for_run(
+    state: &AppState,
+    run: &OntologyOnboardingRun,
+) -> Result<OntologyReviewGraph, AppError> {
+    const NODE_LIMIT: usize = 96;
+    const EDGE_LIMIT: usize = 160;
+    let mut nodes = BTreeMap::<String, OntologyReviewGraphNode>::new();
+    let mut edges = BTreeMap::<String, OntologyReviewGraphEdge>::new();
+    for dataset in &run.datasets {
+        ontology_review_graph_insert_node(
+            &mut nodes,
+            OntologyReviewGraphNode {
+                id: ontology_graph_dataset_id(&dataset.table_name),
+                node_type: "dataset".to_string(),
+                label: dataset.table_name.clone(),
+                status: "profiled".to_string(),
+                confidence: 1.0,
+                risk: if dataset
+                    .fields
+                    .iter()
+                    .any(|field| ontology_is_pii_field(&field.name))
+                {
+                    "pii_review".to_string()
+                } else {
+                    "low".to_string()
+                },
+                evidence: json!({
+                    "source_system": dataset.source_system,
+                    "source_object": dataset.source_object,
+                    "field_count": dataset.fields.len(),
+                    "sample_row_count": dataset.rows.len(),
+                }),
+                source_proposal_id: None,
+            },
+        );
+    }
+    for proposal in &run.proposals {
+        match proposal.proposal_type.as_str() {
+            "object" => ontology_review_graph_project_object(&mut nodes, &mut edges, proposal),
+            "relation" => ontology_review_graph_project_relation(&mut nodes, &mut edges, proposal),
+            "metric" => ontology_review_graph_project_metric(&mut nodes, &mut edges, proposal),
+            "logic" | "logic_rule" => {
+                ontology_review_graph_project_logic(&mut nodes, &mut edges, proposal)
+            }
+            "action" => ontology_review_graph_project_action(&mut nodes, &mut edges, proposal),
+            _ => {}
+        }
+    }
+    let materialized_specs = ontology_onboarding_tool_specs_for_run(state, run.id).await?;
+    let materialized_tool_ids = materialized_specs
+        .iter()
+        .map(|spec| spec.source_proposal_id)
+        .collect::<BTreeSet<_>>();
+    for proposal in run
+        .proposals
+        .iter()
+        .filter(|proposal| proposal.proposal_type == "action")
+    {
+        let tool_node_id =
+            ontology_graph_tool_id(&ontology_proposal_tool_namespace(proposal), &proposal.name);
+        ontology_review_graph_insert_node(
+            &mut nodes,
+            OntologyReviewGraphNode {
+                id: tool_node_id.clone(),
+                node_type: "tool".to_string(),
+                label: format!(
+                    "{}.{}",
+                    ontology_proposal_tool_namespace(proposal),
+                    proposal.name
+                ),
+                status: if materialized_tool_ids.contains(&proposal.id) {
+                    "compiled".to_string()
+                } else {
+                    "proposed".to_string()
+                },
+                confidence: proposal.confidence,
+                risk: ontology_proposal_risk(proposal),
+                evidence: json!({
+                    "approval_required": proposal.content["policy"]["approval_required"],
+                    "audit_event": proposal.content["audit_event"],
+                    "source_mapping": proposal.source_mapping,
+                }),
+                source_proposal_id: Some(proposal.id),
+            },
+        );
+        let action_node_id = ontology_graph_action_id(&proposal.name);
+        ontology_review_graph_insert_edge(
+            &mut edges,
+            OntologyReviewGraphEdge {
+                id: format!("{action_node_id}->{tool_node_id}:compiles_to"),
+                from: action_node_id,
+                to: tool_node_id,
+                edge_type: "compiles_to".to_string(),
+                status: proposal.review_status.clone(),
+                confidence: proposal.confidence,
+                risk: ontology_proposal_risk(proposal),
+                evidence: json!({
+                    "approval_required": proposal.content["policy"]["approval_required"],
+                    "read_only": false,
+                }),
+                source_proposal_id: Some(proposal.id),
+            },
+        );
+    }
+    let omitted_node_count = nodes.len().saturating_sub(NODE_LIMIT);
+    let omitted_edge_count = edges.len().saturating_sub(EDGE_LIMIT);
+    Ok(OntologyReviewGraph {
+        run_id: run.id,
+        nodes: nodes.into_values().take(NODE_LIMIT).collect(),
+        edges: edges.into_values().take(EDGE_LIMIT).collect(),
+        truncated: omitted_node_count > 0 || omitted_edge_count > 0,
+        omitted_node_count,
+        omitted_edge_count,
+    })
+}
+
+fn ontology_review_graph_project_object(
+    nodes: &mut BTreeMap<String, OntologyReviewGraphNode>,
+    edges: &mut BTreeMap<String, OntologyReviewGraphEdge>,
+    proposal: &OntologyOnboardingProposalDraft,
+) {
+    let object_name = proposal
+        .content
+        .get("object_type")
+        .and_then(Value::as_str)
+        .unwrap_or(&proposal.name);
+    let object_node_id = ontology_graph_object_id(object_name);
+    ontology_review_graph_insert_node(
+        nodes,
+        OntologyReviewGraphNode {
+            id: object_node_id.clone(),
+            node_type: "object".to_string(),
+            label: object_name.to_string(),
+            status: proposal.review_status.clone(),
+            confidence: proposal.confidence,
+            risk: ontology_proposal_risk(proposal),
+            evidence: proposal.evidence.clone(),
+            source_proposal_id: Some(proposal.id),
+        },
+    );
+    if let Some(source_table) = proposal.content.get("source_table").and_then(Value::as_str) {
+        let dataset_node_id = ontology_graph_dataset_id(source_table);
+        ontology_review_graph_insert_edge(
+            edges,
+            OntologyReviewGraphEdge {
+                id: format!("{dataset_node_id}->{object_node_id}:maps_to"),
+                from: dataset_node_id,
+                to: object_node_id,
+                edge_type: "maps_to".to_string(),
+                status: proposal.review_status.clone(),
+                confidence: proposal.confidence,
+                risk: ontology_proposal_risk(proposal),
+                evidence: json!({
+                    "source_mapping": proposal.source_mapping,
+                    "primary_key": proposal.content["primary_key"],
+                }),
+                source_proposal_id: Some(proposal.id),
+            },
+        );
+    }
+}
+
+fn ontology_review_graph_project_relation(
+    _nodes: &mut BTreeMap<String, OntologyReviewGraphNode>,
+    edges: &mut BTreeMap<String, OntologyReviewGraphEdge>,
+    proposal: &OntologyOnboardingProposalDraft,
+) {
+    let from_object = proposal.content.get("from_object").and_then(Value::as_str);
+    let to_object = proposal.content.get("to_object").and_then(Value::as_str);
+    if let (Some(from_object), Some(to_object)) = (from_object, to_object) {
+        let from_node = ontology_graph_object_id(from_object);
+        let to_node = ontology_graph_object_id(to_object);
+        ontology_review_graph_insert_edge(
+            edges,
+            OntologyReviewGraphEdge {
+                id: format!("{from_node}->{to_node}:{}", ontology_slug(&proposal.name)),
+                from: from_node,
+                to: to_node,
+                edge_type: "relates_to".to_string(),
+                status: proposal.review_status.clone(),
+                confidence: proposal.confidence,
+                risk: ontology_proposal_risk(proposal),
+                evidence: proposal.evidence.clone(),
+                source_proposal_id: Some(proposal.id),
+            },
+        );
+    }
+}
+
+fn ontology_review_graph_project_metric(
+    nodes: &mut BTreeMap<String, OntologyReviewGraphNode>,
+    edges: &mut BTreeMap<String, OntologyReviewGraphEdge>,
+    proposal: &OntologyOnboardingProposalDraft,
+) {
+    let metric_node_id = ontology_graph_metric_id(&proposal.name);
+    ontology_review_graph_insert_node(
+        nodes,
+        OntologyReviewGraphNode {
+            id: metric_node_id.clone(),
+            node_type: "metric".to_string(),
+            label: proposal.name.clone(),
+            status: proposal.review_status.clone(),
+            confidence: proposal.confidence,
+            risk: ontology_proposal_risk(proposal),
+            evidence: proposal.evidence.clone(),
+            source_proposal_id: Some(proposal.id),
+        },
+    );
+    if let Some(target_object) = proposal
+        .content
+        .get("target_object")
+        .and_then(Value::as_str)
+    {
+        let object_node_id = ontology_graph_object_id(target_object);
+        ontology_review_graph_insert_edge(
+            edges,
+            OntologyReviewGraphEdge {
+                id: format!("{metric_node_id}->{object_node_id}:uses_metric"),
+                from: metric_node_id.clone(),
+                to: object_node_id,
+                edge_type: "uses_metric".to_string(),
+                status: proposal.review_status.clone(),
+                confidence: proposal.confidence,
+                risk: ontology_proposal_risk(proposal),
+                evidence: json!({"expression": proposal.content["expression"]}),
+                source_proposal_id: Some(proposal.id),
+            },
+        );
+    }
+    if let Some(depends_on) = proposal
+        .evidence
+        .get("definition_evidence")
+        .and_then(|value| value.get("depends_on"))
+        .and_then(Value::as_array)
+    {
+        for dependency in depends_on.iter().filter_map(Value::as_str) {
+            let dependency_node_id = ontology_graph_metric_id(dependency);
+            ontology_review_graph_insert_node(
+                nodes,
+                OntologyReviewGraphNode {
+                    id: dependency_node_id.clone(),
+                    node_type: "metric".to_string(),
+                    label: dependency.to_string(),
+                    status: "referenced".to_string(),
+                    confidence: proposal.confidence,
+                    risk: "needs_review".to_string(),
+                    evidence: json!({"referenced_by": proposal.name}),
+                    source_proposal_id: Some(proposal.id),
+                },
+            );
+            ontology_review_graph_insert_edge(
+                edges,
+                OntologyReviewGraphEdge {
+                    id: format!("{metric_node_id}->{dependency_node_id}:depends_on"),
+                    from: metric_node_id.clone(),
+                    to: dependency_node_id,
+                    edge_type: "depends_on".to_string(),
+                    status: proposal.review_status.clone(),
+                    confidence: proposal.confidence,
+                    risk: ontology_proposal_risk(proposal),
+                    evidence: json!({"source_mapping": proposal.source_mapping}),
+                    source_proposal_id: Some(proposal.id),
+                },
+            );
+        }
+    }
+}
+
+fn ontology_review_graph_project_logic(
+    nodes: &mut BTreeMap<String, OntologyReviewGraphNode>,
+    edges: &mut BTreeMap<String, OntologyReviewGraphEdge>,
+    proposal: &OntologyOnboardingProposalDraft,
+) {
+    let logic_node_id = ontology_graph_logic_id(&proposal.name);
+    ontology_review_graph_insert_node(
+        nodes,
+        OntologyReviewGraphNode {
+            id: logic_node_id.clone(),
+            node_type: "logic".to_string(),
+            label: proposal.name.clone(),
+            status: proposal.review_status.clone(),
+            confidence: proposal.confidence,
+            risk: ontology_proposal_risk(proposal),
+            evidence: proposal.evidence.clone(),
+            source_proposal_id: Some(proposal.id),
+        },
+    );
+    if let Some(target_object) = proposal
+        .content
+        .get("target_object")
+        .and_then(Value::as_str)
+    {
+        let object_node_id = ontology_graph_object_id(target_object);
+        ontology_review_graph_insert_edge(
+            edges,
+            OntologyReviewGraphEdge {
+                id: format!("{logic_node_id}->{object_node_id}:validates"),
+                from: logic_node_id,
+                to: object_node_id,
+                edge_type: "validates".to_string(),
+                status: proposal.review_status.clone(),
+                confidence: proposal.confidence,
+                risk: ontology_proposal_risk(proposal),
+                evidence: proposal.content.clone(),
+                source_proposal_id: Some(proposal.id),
+            },
+        );
+    }
+}
+
+fn ontology_review_graph_project_action(
+    nodes: &mut BTreeMap<String, OntologyReviewGraphNode>,
+    edges: &mut BTreeMap<String, OntologyReviewGraphEdge>,
+    proposal: &OntologyOnboardingProposalDraft,
+) {
+    let action_node_id = ontology_graph_action_id(&proposal.name);
+    ontology_review_graph_insert_node(
+        nodes,
+        OntologyReviewGraphNode {
+            id: action_node_id.clone(),
+            node_type: "action".to_string(),
+            label: proposal.name.clone(),
+            status: proposal.review_status.clone(),
+            confidence: proposal.confidence,
+            risk: ontology_proposal_risk(proposal),
+            evidence: proposal.evidence.clone(),
+            source_proposal_id: Some(proposal.id),
+        },
+    );
+    if let Some(target_object) = proposal
+        .content
+        .get("target_object")
+        .and_then(Value::as_str)
+    {
+        let object_node_id = ontology_graph_object_id(target_object);
+        ontology_review_graph_insert_edge(
+            edges,
+            OntologyReviewGraphEdge {
+                id: format!("{action_node_id}->{object_node_id}:acts_on"),
+                from: action_node_id,
+                to: object_node_id,
+                edge_type: "acts_on".to_string(),
+                status: proposal.review_status.clone(),
+                confidence: proposal.confidence,
+                risk: ontology_proposal_risk(proposal),
+                evidence: proposal.content.clone(),
+                source_proposal_id: Some(proposal.id),
+            },
+        );
+    }
+}
+
+fn ontology_review_graph_insert_node(
+    nodes: &mut BTreeMap<String, OntologyReviewGraphNode>,
+    node: OntologyReviewGraphNode,
+) {
+    nodes.entry(node.id.clone()).or_insert(node);
+}
+
+fn ontology_review_graph_insert_edge(
+    edges: &mut BTreeMap<String, OntologyReviewGraphEdge>,
+    edge: OntologyReviewGraphEdge,
+) {
+    edges.entry(edge.id.clone()).or_insert(edge);
+}
+
+fn ontology_graph_dataset_id(table_name: &str) -> String {
+    format!("dataset:{}", ontology_slug(table_name))
+}
+
+fn ontology_graph_object_id(object_name: &str) -> String {
+    format!("object:{}", ontology_slug(object_name))
+}
+
+fn ontology_graph_metric_id(metric_name: &str) -> String {
+    format!("metric:{}", ontology_slug(metric_name))
+}
+
+fn ontology_graph_logic_id(logic_name: &str) -> String {
+    format!("logic:{}", ontology_slug(logic_name))
+}
+
+fn ontology_graph_action_id(action_name: &str) -> String {
+    format!("action:{}", ontology_slug(action_name))
+}
+
+fn ontology_graph_tool_id(tool_namespace: &str, action_name: &str) -> String {
+    format!(
+        "tool:{}:{}",
+        ontology_slug(tool_namespace),
+        ontology_slug(action_name)
+    )
+}
+
+fn ontology_proposal_risk(proposal: &OntologyOnboardingProposalDraft) -> String {
+    if proposal.proposal_type == "action"
+        && proposal
+            .content
+            .get("policy")
+            .and_then(|policy| policy.get("approval_required"))
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
+    {
+        "approval_required".to_string()
+    } else if proposal
+        .evidence
+        .get("pii_candidates")
+        .and_then(Value::as_array)
+        .map(|values| !values.is_empty())
+        .unwrap_or(false)
+    {
+        "pii_review".to_string()
+    } else if proposal.confidence < 0.90 {
+        "needs_review".to_string()
+    } else {
+        "low".to_string()
+    }
 }
 
 async fn create_ontology_onboarding_run_with_actor(
@@ -12696,6 +14133,10 @@ async fn materialize_ontology_onboarding_run_with_actor(
                 semantic_object_ids.push(semantic_object.id);
                 tool_spec_count += 1;
             }
+            "logic" | "logic_rule" => {
+                let semantic_object = ontology_materialize_logic_rule(state, &proposal).await?;
+                semantic_object_ids.push(semantic_object.id);
+            }
             "relation" => {
                 let link = ontology_materialize_relation(state, &proposal).await?;
                 semantic_link_ids.push(link.id);
@@ -12846,13 +14287,35 @@ fn ontology_onboarding_run_from_objects(
     run_id: Uuid,
     objects: &[SemanticObject],
 ) -> Result<OntologyOnboardingRun, AppError> {
-    let source = ontology_demo_source_bundle();
-    let datasets = source.datasets;
-    let profiles = ontology_profile_demo_datasets(&datasets);
     let mut proposals = objects
         .iter()
         .map(ontology_onboarding_object_proposal)
         .collect::<Result<Vec<_>, _>>()?;
+    let industry = proposals
+        .iter()
+        .find_map(|proposal| {
+            proposal
+                .content
+                .get("industry")
+                .or_else(|| proposal.evidence.get("industry"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "ecommerce".to_string());
+    let source_mode = proposals
+        .iter()
+        .find_map(|proposal| {
+            proposal
+                .content
+                .get("source_mode")
+                .or_else(|| proposal.evidence.get("source_mode"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "demo_ecommerce".to_string());
+    let (_, source) = ontology_seed_and_source_for_request(&industry, &source_mode)?;
+    let datasets = source.datasets;
+    let profiles = ontology_profile_demo_datasets(&datasets);
     proposals.sort_by(|left, right| {
         left.proposal_type
             .cmp(&right.proposal_type)
@@ -13058,6 +14521,53 @@ async fn ontology_materialize_action(
     .await
 }
 
+async fn ontology_materialize_logic_rule(
+    state: &AppState,
+    proposal: &OntologyOnboardingProposalDraft,
+) -> Result<SemanticObject, AppError> {
+    let domain_scope = ontology_proposal_domain_scope(proposal);
+    ontology_get_or_create_semantic_object(
+        state,
+        CreateSemanticObject {
+            source_id: None,
+            object_type: "ontology_logic_rule".to_string(),
+            object_key: format!(
+                "{}.logic.{}",
+                ontology_slug(&domain_scope),
+                ontology_slug(&proposal.name)
+            ),
+            title: proposal.name.clone(),
+            summary: format!(
+                "Approved {domain_scope} ontology logic rule: {}; disabled until publish policy enables it.",
+                proposal.name
+            ),
+            content: json!({
+                "proposal_id": proposal.id,
+                "domain_scope": domain_scope,
+                "tool_namespace": ontology_proposal_tool_namespace(proposal),
+                "enabled": false,
+                "logic_rule": proposal.content,
+            }),
+            semantic_scopes: ontology_domain_semantic_scopes(&domain_scope, "published"),
+            source_uri: Some(format!(
+                "mandoforge://ontology/onboarding/proposals/{}/logic",
+                proposal.id
+            )),
+            provenance: json!({
+                "source": "ontology_onboarding.materialize",
+                "proposal_id": proposal.id,
+                "proposal_type": proposal.proposal_type,
+                "materialized_at": Utc::now(),
+                "enabled": false,
+            }),
+            trust_level: "source_attested".to_string(),
+            freshness: "current".to_string(),
+            status: "active".to_string(),
+        },
+    )
+    .await
+}
+
 async fn ontology_materialize_relation(
     state: &AppState,
     proposal: &OntologyOnboardingProposalDraft,
@@ -13192,6 +14702,26 @@ fn ontology_proposal_tool_namespace(proposal: &OntologyOnboardingProposalDraft) 
         .and_then(Value::as_str)
         .unwrap_or("commerce")
         .to_string()
+}
+
+fn ontology_run_industry(run: &OntologyOnboardingRun) -> String {
+    run.proposals
+        .iter()
+        .find_map(|proposal| {
+            proposal
+                .content
+                .get("industry")
+                .or_else(|| proposal.evidence.get("industry"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| {
+            if run.source_mode.contains("insurance") {
+                "insurance".to_string()
+            } else {
+                "ecommerce".to_string()
+            }
+        })
 }
 
 fn ontology_business_object_key(domain_scope: &str, object_name: &str) -> String {
@@ -61133,11 +62663,16 @@ mod tests {
             .iter()
             .filter(|proposal| proposal.proposal_type == "action")
             .count();
+        let logic_count = proposals
+            .iter()
+            .filter(|proposal| proposal.proposal_type == "logic")
+            .count();
 
         assert!(object_count >= 8);
         assert!(relation_count >= 7);
         assert!(metric_count >= 5);
         assert!(action_count >= 4);
+        assert!(logic_count >= 8);
         assert!(proposals.iter().all(|proposal| proposal.confidence >= 0.70));
         assert!(
             proposals
@@ -61157,6 +62692,32 @@ mod tests {
                 && proposal.name == "refund_order"
                 && proposal.content["policy"]["approval_required"].as_bool() == Some(true)
         }));
+        assert!(proposals.iter().any(|proposal| {
+            proposal.proposal_type == "logic"
+                && proposal.name == "Customer identity rule"
+                && proposal.content["enabled"].as_bool() == Some(false)
+        }));
+    }
+
+    #[test]
+    fn ontology_builder_dag_validates_execution_levels_and_cycles() {
+        let dag = ontology_builder_dag_for_mode("pipeline_mapping_v2", None, Some("raw_snapshot"))
+            .expect("pipeline mapping dag");
+        assert!(dag.execution_levels.iter().any(|level| {
+            level.node_ids.contains(&"metadata_scan".to_string())
+                && level.node_ids.contains(&"schema_profile".to_string())
+        }));
+        assert!(dag.stale_node_ids.contains(&"proposal_engine".to_string()));
+
+        let nodes = vec![
+            ontology_builder_node("a", "A", "test", "ready", "A"),
+            ontology_builder_node("b", "B", "test", "ready", "B"),
+        ];
+        let edges = vec![
+            ontology_builder_edge("a", "b", "depends_on", "A before B"),
+            ontology_builder_edge("b", "a", "depends_on", "B before A"),
+        ];
+        assert!(ontology_topological_execution_levels(&nodes, &edges).is_err());
     }
 
     #[test]
@@ -61193,6 +62754,11 @@ mod tests {
                 && proposal.content["tool_namespace"].as_str() == Some("insurance")
                 && proposal.content["audit_event"].as_str() == Some("insurance.approve_claim")
         }));
+        assert!(proposals.iter().any(|proposal| {
+            proposal.proposal_type == "logic"
+                && proposal.name == "Policy identity rule"
+                && proposal.content["source_mode"].as_str() == Some("demo_insurance")
+        }));
     }
 
     #[tokio::test]
@@ -61213,6 +62779,14 @@ mod tests {
                 .iter()
                 .any(|proposal| proposal.proposal_type == "object" && proposal.name == "Claim")
         );
+        let rehydrated = get_ontology_onboarding_run_for_state(&state, run.id)
+            .await
+            .expect("rehydrated insurance run");
+        assert_eq!(rehydrated.source_mode, "demo_insurance");
+        assert_eq!(rehydrated.dataset_count, 4);
+        assert!(rehydrated.datasets.iter().any(|dataset| {
+            dataset.table_name == "claims" && dataset.source_system == "demo_insurance"
+        }));
         let action_proposal = run
             .proposals
             .iter()
@@ -61240,6 +62814,137 @@ mod tests {
             spec.name == "insurance.approve_claim"
                 && spec.target_object == "Claim"
                 && spec.approval_required
+        }));
+    }
+
+    #[tokio::test]
+    async fn ontology_onboarding_prompt_packet_and_review_graph_are_operator_ready() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        let run = create_demo_ontology_onboarding_run_for_test(&state)
+            .await
+            .expect("demo run");
+
+        let prompt_packet = ontology_prompt_packet_for_run(&run).expect("prompt packet");
+        assert_eq!(prompt_packet.industry, "ecommerce");
+        assert_eq!(prompt_packet.curated_datasets.len(), 8);
+        assert!(
+            prompt_packet
+                .allowed_ontology_triples
+                .iter()
+                .any(|triple| triple["from_object"] == json!("Customer")
+                    && triple["to_object"] == json!("Order"))
+        );
+        assert!(
+            prompt_packet
+                .policy_reminders
+                .iter()
+                .any(|reminder| reminder.contains("approval-gated"))
+        );
+
+        let graph = ontology_review_graph_for_run(&state, &run)
+            .await
+            .expect("review graph");
+        assert!(graph.nodes.iter().any(|node| node.node_type == "dataset"));
+        assert!(graph.nodes.iter().any(|node| {
+            node.node_type == "object"
+                && node.label == "Customer"
+                && node.source_proposal_id.is_some()
+        }));
+        assert!(graph.nodes.iter().any(|node| node.node_type == "logic"));
+        assert!(graph.nodes.iter().any(|node| node.node_type == "action"));
+        assert!(graph.nodes.iter().any(|node| node.node_type == "tool"));
+        assert!(
+            graph
+                .edges
+                .iter()
+                .any(|edge| edge.edge_type == "maps_to" && edge.source_proposal_id.is_some())
+        );
+        assert!(
+            graph
+                .edges
+                .iter()
+                .any(|edge| edge.edge_type == "relates_to")
+        );
+        assert!(
+            graph
+                .edges
+                .iter()
+                .any(|edge| edge.edge_type == "depends_on")
+        );
+        assert!(graph.edges.iter().any(|edge| edge.edge_type == "validates"));
+        assert!(
+            graph
+                .edges
+                .iter()
+                .any(|edge| edge.edge_type == "compiles_to")
+        );
+    }
+
+    #[tokio::test]
+    async fn ontology_onboarding_curated_dataset_review_updates_proposal_recommendation() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        let run = create_demo_ontology_onboarding_run_for_test(&state)
+            .await
+            .expect("demo run");
+        let draft_id = format!("curated:{}:orders", run.id);
+        let reviewed = review_ontology_curated_dataset_with_actor(
+            &state,
+            &draft_id,
+            "reject",
+            Some("orders curated draft needs owner clarification"),
+            "test",
+        )
+        .await
+        .expect("review curated dataset");
+        assert_eq!(reviewed.review_status, "rejected");
+        assert_eq!(reviewed.reviewer_metadata["reviewer"], json!("test"));
+
+        let refreshed = get_ontology_onboarding_run_for_state(&state, run.id)
+            .await
+            .expect("refreshed run");
+        assert!(refreshed.proposals.iter().any(|proposal| {
+            proposal.name == "Order"
+                && proposal.proposal_type == "object"
+                && proposal.recommendation == "needs_more_evidence"
+        }));
+        assert!(refreshed.proposals.iter().any(|proposal| {
+            proposal.name == "Customer places Order"
+                && proposal.proposal_type == "relation"
+                && proposal.recommendation == "needs_more_evidence"
+        }));
+    }
+
+    #[tokio::test]
+    async fn ontology_onboarding_logic_rule_materializes_disabled() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        let run = create_demo_ontology_onboarding_run_for_test(&state)
+            .await
+            .expect("demo run");
+        let logic_proposal = run
+            .proposals
+            .iter()
+            .find(|proposal| {
+                proposal.proposal_type == "logic" && proposal.name == "Customer identity rule"
+            })
+            .expect("logic proposal")
+            .id;
+        review_ontology_onboarding_proposal_for_test(
+            &state,
+            logic_proposal,
+            "approve",
+            Some("identity rule should be stored disabled"),
+        )
+        .await
+        .expect("approve logic");
+        let materialized = materialize_ontology_onboarding_run_for_test(&state, run.id)
+            .await
+            .expect("materialize logic");
+        assert_eq!(materialized.semantic_object_count, 1);
+        let semantic_objects = state.list_semantic_objects().await.expect("objects");
+        assert!(semantic_objects.iter().any(|object| {
+            object.object_type == "ontology_logic_rule"
+                && object.object_key == "commerce.logic.customer_identity_rule"
+                && object.content["enabled"].as_bool() == Some(false)
         }));
     }
 
@@ -61341,11 +63046,10 @@ mod tests {
         assert!(names.contains(&"commerce.issue_coupon"));
         assert!(names.contains(&"commerce.adjust_inventory"));
         assert!(names.contains(&"commerce.escalate_ticket"));
-        assert!(
-            specs
-                .iter()
-                .any(|spec| spec.name == "commerce.refund_order" && spec.approval_required)
-        );
+        assert!(specs.iter().any(|spec| spec.name == "commerce.refund_order"
+            && spec.approval_required
+            && spec.read_write_risk == "write_approval_required"
+            && spec.source_refs["source_mapping"].is_string()));
     }
 
     #[test]
