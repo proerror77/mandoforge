@@ -39,10 +39,17 @@ pub(crate) fn NotificationCenter(props: &NotificationCenterProps) -> Html {
         .cloned()
         .collect::<Vec<_>>();
     let has_notifications = !props.notifications.is_empty();
+    let on_toggle_critical = {
+        let on_toggle_critical = props.on_toggle_critical.clone();
+        Callback::from(move |event: MouseEvent| {
+            event.stop_propagation();
+            on_toggle_critical.emit(event);
+        })
+    };
 
     html! {
-        <section class={classes!("notification-center", (!has_notifications).then_some("quiet"))} aria-label="操作员通知中心">
-            <div class="notification-summary">
+        <details class={classes!("notification-center", (!has_notifications).then_some("quiet"))} aria-label="操作员通知中心">
+            <summary class="notification-summary">
                 <div>
                     <span>{ "操作员通知" }</span>
                     <strong>{ if has_notifications {
@@ -51,10 +58,10 @@ pub(crate) fn NotificationCenter(props: &NotificationCenterProps) -> Html {
                         "没有待处理通知".to_string()
                     } }</strong>
                 </div>
-                <button class="secondary" onclick={props.on_toggle_critical.clone()}>
+                <button class="secondary" onclick={on_toggle_critical}>
                     { if props.critical_muted { "恢复严重通知" } else { "静音严重通知" } }
                 </button>
-            </div>
+            </summary>
             <div class="notification-list">
                 {
                     if props.critical_muted && critical_count > 0 {
@@ -99,7 +106,7 @@ pub(crate) fn NotificationCenter(props: &NotificationCenterProps) -> Html {
                     }
                 }
             </div>
-        </section>
+        </details>
     }
 }
 
