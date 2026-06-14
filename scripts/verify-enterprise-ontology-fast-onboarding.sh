@@ -61,6 +61,28 @@ jq -e '
   and any(.candidates[]?; .table_name == "orders" and .evidence.llm_status == "not_invoked")
 ' "$schema_understanding_file" >/dev/null
 
+subgraph_file="$EVIDENCE_DIR/subgraph-order.json"
+curl -sS -X POST "${headers[@]}" \
+  -H "content-type: application/json" \
+  -d "{\"run_id\":\"$run_id\",\"target_object\":\"Order\"}" \
+  "$BASE_URL/api/ontology/intelligence/subgraph-proposals" \
+  | tee "$subgraph_file" >/dev/null
+jq -e '
+  .industry == "ecommerce"
+  and .source_mode == "demo_ecommerce"
+  and .subgraph_count == 1
+  and any(.subgraphs[]?; .target_object == "Order" and .review_status == "pending")
+  and any(.subgraphs[]?.members[]?; .name == "Customer")
+  and any(.subgraphs[]?.members[]?; .name == "Order")
+  and any(.subgraphs[]?.members[]?; .name == "OrderLine")
+  and any(.subgraphs[]?.members[]?; .name == "SKU")
+  and any(.subgraphs[]?.members[]?; .name == "Customer places Order")
+  and any(.subgraphs[]?.members[]?; .name == "Order contains OrderLine")
+  and any(.subgraphs[]?.members[]?; .name == "GMV")
+  and any(.subgraphs[]?.members[]?; .name == "refund_order")
+  and all(.subgraphs[]?.members[]?; .proposal_id != null)
+' "$subgraph_file" >/dev/null
+
 dag_file="$EVIDENCE_DIR/dag.json"
 curl -sS "${headers[@]}" "$BASE_URL/api/ontology/onboarding/runs/$run_id/dag" \
   | tee "$dag_file" >/dev/null
@@ -101,10 +123,12 @@ curl -sS "${headers[@]}" "$BASE_URL/api/ontology/onboarding/runs/$run_id/review-
   | tee "$review_graph_file" >/dev/null
 jq -e '
   any(.nodes[]?; .node_type == "object" and .label == "Customer" and .source_proposal_id != null)
+  and any(.nodes[]?; .node_type == "subgraph" and .label == "Order business subgraph" and .source_proposal_id != null)
   and any(.nodes[]?; .node_type == "logic")
   and any(.nodes[]?; .node_type == "action")
   and any(.nodes[]?; .node_type == "tool")
   and any(.edges[]?; .edge_type == "maps_to" and .source_proposal_id != null)
+  and any(.edges[]?; .edge_type == "groups" and .source_proposal_id != null)
   and any(.edges[]?; .edge_type == "relates_to")
   and any(.edges[]?; .edge_type == "depends_on")
   and any(.edges[]?; .edge_type == "validates")
@@ -184,6 +208,7 @@ summary_file="$EVIDENCE_DIR/summary.txt"
   echo "semantic_link_count=$(jq -r '.semantic_link_count' "$materialized_file")"
   echo "tool_spec_count=$(jq -r '.tool_spec_count' "$materialized_file")"
   echo "schema_understanding_file=$schema_understanding_file"
+  echo "subgraph_file=$subgraph_file"
   echo "dag_file=$dag_file"
   echo "prompt_packet_file=$prompt_packet_file"
   echo "curated_review_file=$curated_review_file"

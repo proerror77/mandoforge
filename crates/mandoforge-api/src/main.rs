@@ -2451,6 +2451,54 @@ struct SchemaUnderstandingResponse {
     candidates: Vec<SchemaUnderstandingCandidate>,
 }
 
+#[derive(Debug, Deserialize)]
+struct SubgraphProposalRequest {
+    #[serde(default)]
+    run_id: Option<Uuid>,
+    #[serde(default)]
+    industry: Option<String>,
+    #[serde(default)]
+    source_mode: Option<String>,
+    #[serde(default)]
+    target_object: Option<String>,
+    #[serde(default)]
+    review_decision: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SubgraphProposalMember {
+    proposal_id: Uuid,
+    proposal_type: String,
+    name: String,
+    role: String,
+    confidence: f64,
+    review_status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SubgraphProposalDraft {
+    id: String,
+    run_id: Option<Uuid>,
+    name: String,
+    target_object: String,
+    review_status: String,
+    confidence: f64,
+    recommendation: String,
+    members: Vec<SubgraphProposalMember>,
+    evidence: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SubgraphProposalResponse {
+    run_id: Option<Uuid>,
+    industry: String,
+    source_mode: String,
+    domain_scope: String,
+    tool_namespace: String,
+    subgraph_count: usize,
+    subgraphs: Vec<SubgraphProposalDraft>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct OntologySeedPackSummary {
     industry: String,
@@ -7053,6 +7101,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/ontology/intelligence/schema-understanding",
             post(run_ontology_schema_understanding),
+        )
+        .route(
+            "/api/ontology/intelligence/subgraph-proposals",
+            post(run_ontology_subgraph_proposals),
         )
         .route(
             "/api/semantic-conflicts/resolve",
@@ -12702,6 +12754,24 @@ async fn run_ontology_schema_understanding(
         .map(Json)
 }
 
+async fn run_ontology_subgraph_proposals(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<SubgraphProposalRequest>,
+) -> Result<Json<SubgraphProposalResponse>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "ontology_intelligence",
+        input.run_id,
+    )
+    .await?;
+    ontology_subgraph_proposals_for_request(&state, &input)
+        .await
+        .map(Json)
+}
+
 #[cfg(test)]
 async fn create_demo_ontology_onboarding_run_for_test(
     state: &AppState,
@@ -13883,6 +13953,304 @@ fn ontology_title_case(value: &str) -> String {
         .collect::<String>()
 }
 
+async fn ontology_subgraph_proposals_for_request(
+    state: &AppState,
+    input: &SubgraphProposalRequest,
+) -> Result<SubgraphProposalResponse, AppError> {
+    let run = if let Some(run_id) = input.run_id {
+        get_ontology_onboarding_run_for_state(state, run_id).await?
+    } else {
+        let industry = input.industry.as_deref().unwrap_or("ecommerce");
+        let source_mode = input.source_mode.as_deref().unwrap_or("demo_ecommerce");
+        let (seed, source) = ontology_seed_and_source_for_request(industry, source_mode)?;
+        let profiles = ontology_profile_demo_datasets(&source.datasets);
+        let run_id = Uuid::new_v4();
+        let proposals =
+            ontology_generate_seed_proposals_for_run(run_id, &seed, &source.datasets, &profiles);
+        OntologyOnboardingRun {
+            id: run_id,
+            status: "draft_preview".to_string(),
+            source_mode: source.source_mode,
+            dataset_count: source.datasets.len(),
+            profile_count: profiles.len(),
+            proposal_count: proposals.len(),
+            approved_count: 0,
+            materialized_count: 0,
+            datasets: source.datasets,
+            profiles,
+            proposals,
+            generated_at: Utc::now(),
+        }
+    };
+    let (seed, _) =
+        ontology_seed_and_source_for_request(&ontology_run_industry(&run), &run.source_mode)?;
+    let review_status = input
+        .review_decision
+        .as_deref()
+        .map(ontology_normalize_subgraph_review_status)
+        .transpose()?
+        .unwrap_or_else(|| "pending".to_string());
+    let target_filter = input.target_object.as_deref();
+    let subgraphs = ontology_subgraph_proposals_for_run(&run, &seed, target_filter, &review_status);
+    Ok(SubgraphProposalResponse {
+        run_id: Some(run.id),
+        industry: seed.industry.clone(),
+        source_mode: run.source_mode.clone(),
+        domain_scope: seed.domain_scope.clone(),
+        tool_namespace: seed.tool_namespace.clone(),
+        subgraph_count: subgraphs.len(),
+        subgraphs,
+    })
+}
+
+fn ontology_subgraph_proposals_for_run(
+    run: &OntologyOnboardingRun,
+    seed: &OntologySeedPack,
+    target_filter: Option<&str>,
+    review_status: &str,
+) -> Vec<SubgraphProposalDraft> {
+    let mut target_objects = run
+        .proposals
+        .iter()
+        .filter(|proposal| proposal.proposal_type == "object")
+        .filter_map(|proposal| {
+            proposal
+                .content
+                .get("object_type")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .collect::<BTreeSet<_>>();
+    for action in &seed.actions {
+        target_objects.insert(action.target_object.clone());
+    }
+    let mut subgraphs = target_objects
+        .into_iter()
+        .filter(|target| {
+            target_filter
+                .map(|filter| ontology_slug(filter) == ontology_slug(target))
+                .unwrap_or(true)
+        })
+        .map(|target| ontology_subgraph_proposal_for_object(run, seed, &target, review_status))
+        .filter(|subgraph| !subgraph.members.is_empty())
+        .collect::<Vec<_>>();
+    subgraphs.sort_by(|left, right| left.target_object.cmp(&right.target_object));
+    subgraphs
+}
+
+fn ontology_subgraph_proposal_for_object(
+    run: &OntologyOnboardingRun,
+    seed: &OntologySeedPack,
+    target_object: &str,
+    review_status: &str,
+) -> SubgraphProposalDraft {
+    let mut members = BTreeMap::<Uuid, SubgraphProposalMember>::new();
+    let related_objects = ontology_subgraph_related_objects(run, target_object, 2);
+    for proposal in &run.proposals {
+        if ontology_proposal_belongs_to_subgraph(proposal, seed, target_object, &related_objects) {
+            members.insert(
+                proposal.id,
+                SubgraphProposalMember {
+                    proposal_id: proposal.id,
+                    proposal_type: proposal.proposal_type.clone(),
+                    name: proposal.name.clone(),
+                    role: ontology_subgraph_member_role(proposal, target_object),
+                    confidence: proposal.confidence,
+                    review_status: proposal.review_status.clone(),
+                },
+            );
+        }
+    }
+    let members = members.into_values().collect::<Vec<_>>();
+    let confidence = if members.is_empty() {
+        0.0
+    } else {
+        members.iter().map(|member| member.confidence).sum::<f64>() / members.len() as f64
+    };
+    let recommendation = if review_status == "rejected" {
+        "do_not_materialize_children".to_string()
+    } else if confidence >= 0.90 {
+        "quick_review".to_string()
+    } else {
+        "needs_review".to_string()
+    };
+    SubgraphProposalDraft {
+        id: ontology_subgraph_id(run.id, target_object),
+        run_id: Some(run.id),
+        name: format!("{target_object} business subgraph"),
+        target_object: target_object.to_string(),
+        review_status: review_status.to_string(),
+        confidence,
+        recommendation,
+        evidence: json!({
+            "engine": "deterministic_subgraph_proposal_v1",
+            "authority": "proposal_only",
+            "target_object": target_object,
+            "related_objects": related_objects,
+            "member_count": members.len(),
+            "member_proposal_ids": members.iter().map(|member| member.proposal_id).collect::<Vec<_>>(),
+            "materialization_policy": "subgraph review does not materialize child proposals",
+            "industry": seed.industry,
+            "source_mode": seed.source_mode,
+            "domain_scope": seed.domain_scope,
+            "tool_namespace": seed.tool_namespace,
+        }),
+        members,
+    }
+}
+
+fn ontology_subgraph_related_objects(
+    run: &OntologyOnboardingRun,
+    target_object: &str,
+    max_depth: usize,
+) -> BTreeSet<String> {
+    let mut related = BTreeSet::from([ontology_slug(target_object)]);
+    for _ in 0..max_depth {
+        let before = related.len();
+        for proposal in run
+            .proposals
+            .iter()
+            .filter(|proposal| proposal.proposal_type == "relation")
+        {
+            let Some(from_object) = proposal.content.get("from_object").and_then(Value::as_str)
+            else {
+                continue;
+            };
+            let Some(to_object) = proposal.content.get("to_object").and_then(Value::as_str) else {
+                continue;
+            };
+            let from_slug = ontology_slug(from_object);
+            let to_slug = ontology_slug(to_object);
+            if related.contains(&from_slug) || related.contains(&to_slug) {
+                related.insert(from_slug);
+                related.insert(to_slug);
+            }
+        }
+        if related.len() == before {
+            break;
+        }
+    }
+    related
+}
+
+fn ontology_proposal_belongs_to_subgraph(
+    proposal: &OntologyOnboardingProposalDraft,
+    seed: &OntologySeedPack,
+    target_object: &str,
+    related_objects: &BTreeSet<String>,
+) -> bool {
+    let target_slug = ontology_slug(target_object);
+    match proposal.proposal_type.as_str() {
+        "object" => proposal
+            .content
+            .get("object_type")
+            .and_then(Value::as_str)
+            .map(|object| related_objects.contains(&ontology_slug(object)))
+            .unwrap_or(false),
+        "logic" | "logic_rule" => proposal
+            .content
+            .get("target_object")
+            .and_then(Value::as_str)
+            .map(|object| related_objects.contains(&ontology_slug(object)))
+            .unwrap_or(false),
+        "relation" => {
+            let from_matches = proposal
+                .content
+                .get("from_object")
+                .and_then(Value::as_str)
+                .map(|object| related_objects.contains(&ontology_slug(object)))
+                .unwrap_or(false);
+            let to_matches = proposal
+                .content
+                .get("to_object")
+                .and_then(Value::as_str)
+                .map(|object| related_objects.contains(&ontology_slug(object)))
+                .unwrap_or(false);
+            from_matches || to_matches
+        }
+        "metric" => {
+            proposal
+                .content
+                .get("target_object")
+                .and_then(Value::as_str)
+                .map(|object| {
+                    ontology_slug(object) == target_slug
+                        || related_objects.contains(&ontology_slug(object))
+                })
+                .unwrap_or(false)
+                || seed
+                    .metrics
+                    .iter()
+                    .find(|metric| metric.name == proposal.name)
+                    .map(|metric| ontology_metric_expression_mentions_object(metric, target_object))
+                    .unwrap_or(false)
+        }
+        "action" => proposal
+            .content
+            .get("target_object")
+            .and_then(Value::as_str)
+            .map(|object| ontology_slug(object) == target_slug)
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+fn ontology_metric_expression_mentions_object(
+    metric: &OntologySeedMetricMapping,
+    target_object: &str,
+) -> bool {
+    let object_slug = ontology_slug(target_object);
+    let expression = metric.expression.to_ascii_lowercase();
+    let evidence = metric.evidence.to_string().to_ascii_lowercase();
+    object_slug
+        .split('_')
+        .any(|part| !part.is_empty() && (expression.contains(part) || evidence.contains(part)))
+}
+
+fn ontology_subgraph_member_role(
+    proposal: &OntologyOnboardingProposalDraft,
+    target_object: &str,
+) -> String {
+    match proposal.proposal_type.as_str() {
+        "object" => "anchor_object".to_string(),
+        "relation" => {
+            let from_matches = proposal
+                .content
+                .get("from_object")
+                .and_then(Value::as_str)
+                .map(|object| ontology_slug(object) == ontology_slug(target_object))
+                .unwrap_or(false);
+            if from_matches {
+                "outbound_relation".to_string()
+            } else {
+                "inbound_relation".to_string()
+            }
+        }
+        "metric" => "metric".to_string(),
+        "logic" | "logic_rule" => "validation_logic".to_string(),
+        "action" => "action".to_string(),
+        _ => "supporting_proposal".to_string(),
+    }
+}
+
+fn ontology_normalize_subgraph_review_status(decision: &str) -> Result<String, AppError> {
+    let decision = decision.trim().to_ascii_lowercase().replace('-', "_");
+    match decision.as_str() {
+        "pending" => Ok("pending".to_string()),
+        "approve" | "approved" => Ok("approved".to_string()),
+        "reject" | "rejected" => Ok("rejected".to_string()),
+        "request_changes" | "changes_requested" => Ok("changes_requested".to_string()),
+        "needs_more_evidence" => Ok("needs_more_evidence".to_string()),
+        _ => Err(AppError::bad_request(
+            "subgraph review decision must be pending, approve, reject, request_changes, or needs_more_evidence",
+        )),
+    }
+}
+
+fn ontology_subgraph_id(run_id: Uuid, target_object: &str) -> String {
+    format!("subgraph:{run_id}:{}", ontology_slug(target_object))
+}
+
 async fn ontology_review_graph_for_run(
     state: &AppState,
     run: &OntologyOnboardingRun,
@@ -13930,6 +14298,11 @@ async fn ontology_review_graph_for_run(
             "action" => ontology_review_graph_project_action(&mut nodes, &mut edges, proposal),
             _ => {}
         }
+    }
+    let (seed, _) =
+        ontology_seed_and_source_for_request(&ontology_run_industry(run), &run.source_mode)?;
+    for subgraph in ontology_subgraph_proposals_for_run(run, &seed, None, "pending") {
+        ontology_review_graph_project_subgraph(&mut nodes, &mut edges, &subgraph);
     }
     let materialized_specs = ontology_onboarding_tool_specs_for_run(state, run.id).await?;
     let materialized_tool_ids = materialized_specs
@@ -14235,6 +14608,86 @@ fn ontology_review_graph_project_action(
     }
 }
 
+fn ontology_review_graph_project_subgraph(
+    nodes: &mut BTreeMap<String, OntologyReviewGraphNode>,
+    edges: &mut BTreeMap<String, OntologyReviewGraphEdge>,
+    subgraph: &SubgraphProposalDraft,
+) {
+    let subgraph_node_id = ontology_graph_subgraph_id(&subgraph.target_object);
+    let member_ids = subgraph
+        .members
+        .iter()
+        .map(|member| member.proposal_id)
+        .collect::<Vec<_>>();
+    ontology_review_graph_insert_node(
+        nodes,
+        OntologyReviewGraphNode {
+            id: subgraph_node_id.clone(),
+            node_type: "subgraph".to_string(),
+            label: subgraph.name.clone(),
+            status: subgraph.review_status.clone(),
+            confidence: subgraph.confidence,
+            risk: if subgraph.review_status == "rejected" {
+                "blocked".to_string()
+            } else if subgraph.confidence < 0.90 {
+                "needs_review".to_string()
+            } else {
+                "low".to_string()
+            },
+            evidence: json!({
+                "target_object": subgraph.target_object,
+                "member_count": subgraph.members.len(),
+                "member_proposal_ids": member_ids,
+                "recommendation": subgraph.recommendation,
+                "authority": "proposal_only",
+            }),
+            source_proposal_id: subgraph.members.first().map(|member| member.proposal_id),
+        },
+    );
+    for member in &subgraph.members {
+        if let Some(member_node_id) = ontology_graph_node_id_for_subgraph_member(member) {
+            ontology_review_graph_insert_edge(
+                edges,
+                OntologyReviewGraphEdge {
+                    id: format!("{subgraph_node_id}->{member_node_id}:groups"),
+                    from: subgraph_node_id.clone(),
+                    to: member_node_id,
+                    edge_type: "groups".to_string(),
+                    status: subgraph.review_status.clone(),
+                    confidence: member.confidence,
+                    risk: if subgraph.review_status == "rejected" {
+                        "blocked".to_string()
+                    } else if member.confidence < 0.90 {
+                        "needs_review".to_string()
+                    } else {
+                        "low".to_string()
+                    },
+                    evidence: json!({
+                        "subgraph_id": subgraph.id,
+                        "target_object": subgraph.target_object,
+                        "member_role": member.role,
+                        "member_proposal_type": member.proposal_type,
+                        "member_review_status": member.review_status,
+                        "materialization_policy": "subgraph review does not materialize child proposals",
+                    }),
+                    source_proposal_id: Some(member.proposal_id),
+                },
+            );
+        }
+    }
+}
+
+fn ontology_graph_node_id_for_subgraph_member(member: &SubgraphProposalMember) -> Option<String> {
+    match member.proposal_type.as_str() {
+        "object" => Some(ontology_graph_object_id(&member.name)),
+        "relation" => None,
+        "metric" => Some(ontology_graph_metric_id(&member.name)),
+        "logic" | "logic_rule" => Some(ontology_graph_logic_id(&member.name)),
+        "action" => Some(ontology_graph_action_id(&member.name)),
+        _ => None,
+    }
+}
+
 fn ontology_review_graph_insert_node(
     nodes: &mut BTreeMap<String, OntologyReviewGraphNode>,
     node: OntologyReviewGraphNode,
@@ -14275,6 +14728,10 @@ fn ontology_graph_tool_id(tool_namespace: &str, action_name: &str) -> String {
         ontology_slug(tool_namespace),
         ontology_slug(action_name)
     )
+}
+
+fn ontology_graph_subgraph_id(target_object: &str) -> String {
+    format!("subgraph:{}", ontology_slug(target_object))
 }
 
 fn ontology_proposal_risk(proposal: &OntologyOnboardingProposalDraft) -> String {
@@ -63283,6 +63740,116 @@ mod tests {
         assert!(candidate.taxonomy_layers.iter().any(|layer| {
             layer.layer == 3 && layer.rationale.contains("requires human review")
         }));
+    }
+
+    #[tokio::test]
+    async fn ontology_intelligence_order_subgraph_contains_business_context() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        let run = create_demo_ontology_onboarding_run_for_test(&state)
+            .await
+            .expect("demo run");
+        let response = ontology_subgraph_proposals_for_request(
+            &state,
+            &SubgraphProposalRequest {
+                run_id: Some(run.id),
+                industry: None,
+                source_mode: None,
+                target_object: Some("Order".to_string()),
+                review_decision: None,
+            },
+        )
+        .await
+        .expect("subgraph proposals");
+
+        assert_eq!(response.run_id, Some(run.id));
+        assert_eq!(response.subgraph_count, 1);
+        let order_subgraph = response.subgraphs.first().expect("order subgraph");
+        let member_names = order_subgraph
+            .members
+            .iter()
+            .map(|member| member.name.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert!(member_names.contains("Customer"));
+        assert!(member_names.contains("Order"));
+        assert!(member_names.contains("OrderLine"));
+        assert!(member_names.contains("SKU"));
+        assert!(member_names.contains("Customer places Order"));
+        assert!(member_names.contains("Order contains OrderLine"));
+        assert!(member_names.contains("GMV"));
+        assert!(member_names.contains("refund_order"));
+        assert!(
+            order_subgraph
+                .members
+                .iter()
+                .all(|member| member.proposal_id != Uuid::nil())
+        );
+        assert_eq!(
+            order_subgraph.evidence["authority"].as_str(),
+            Some("proposal_only")
+        );
+    }
+
+    #[tokio::test]
+    async fn ontology_intelligence_subgraph_nodes_are_projected_into_review_graph() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        let run = create_demo_ontology_onboarding_run_for_test(&state)
+            .await
+            .expect("demo run");
+        let graph = ontology_review_graph_for_run(&state, &run)
+            .await
+            .expect("review graph");
+
+        let order_subgraph = graph
+            .nodes
+            .iter()
+            .find(|node| node.node_type == "subgraph" && node.label == "Order business subgraph")
+            .expect("order subgraph node");
+        assert!(order_subgraph.source_proposal_id.is_some());
+        assert!(
+            order_subgraph
+                .evidence
+                .get("member_proposal_ids")
+                .and_then(Value::as_array)
+                .map(|ids| !ids.is_empty())
+                .unwrap_or(false)
+        );
+        assert!(graph.edges.iter().any(|edge| {
+            edge.edge_type == "groups"
+                && edge.from == "subgraph:order"
+                && edge.source_proposal_id.is_some()
+        }));
+    }
+
+    #[tokio::test]
+    async fn ontology_intelligence_rejected_subgraph_does_not_materialize_children() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        let run = create_demo_ontology_onboarding_run_for_test(&state)
+            .await
+            .expect("demo run");
+        let response = ontology_subgraph_proposals_for_request(
+            &state,
+            &SubgraphProposalRequest {
+                run_id: Some(run.id),
+                industry: None,
+                source_mode: None,
+                target_object: Some("Order".to_string()),
+                review_decision: Some("reject".to_string()),
+            },
+        )
+        .await
+        .expect("rejected subgraph preview");
+
+        let order_subgraph = response.subgraphs.first().expect("order subgraph");
+        assert_eq!(order_subgraph.review_status, "rejected");
+        assert_eq!(order_subgraph.recommendation, "do_not_materialize_children");
+
+        let materialized = materialize_ontology_onboarding_run_for_test(&state, run.id)
+            .await
+            .expect("materialize after rejected subgraph preview");
+        assert_eq!(materialized.semantic_object_count, 0);
+        assert_eq!(materialized.semantic_link_count, 0);
+        assert_eq!(materialized.tool_spec_count, 0);
     }
 
     #[tokio::test]
