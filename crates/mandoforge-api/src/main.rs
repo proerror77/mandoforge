@@ -2398,6 +2398,59 @@ struct CreateOntologyOnboardingRunRequest {
     source_mode: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct SchemaUnderstandingRequest {
+    #[serde(default)]
+    run_id: Option<Uuid>,
+    #[serde(default)]
+    industry: Option<String>,
+    #[serde(default)]
+    source_mode: Option<String>,
+    #[serde(default)]
+    max_sample_rows: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PropertyUnderstandingCandidate {
+    field_name: String,
+    field_type: String,
+    semantic_role: String,
+    confidence: f64,
+    evidence: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TaxonomyLayerCandidate {
+    layer: usize,
+    label: String,
+    confidence: f64,
+    rationale: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SchemaUnderstandingCandidate {
+    table_name: String,
+    source_system: String,
+    source_object: String,
+    object_type_candidate: String,
+    confidence: f64,
+    recommendation: String,
+    properties: Vec<PropertyUnderstandingCandidate>,
+    taxonomy_layers: Vec<TaxonomyLayerCandidate>,
+    evidence: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SchemaUnderstandingResponse {
+    run_id: Option<Uuid>,
+    industry: String,
+    source_mode: String,
+    domain_scope: String,
+    tool_namespace: String,
+    candidate_count: usize,
+    candidates: Vec<SchemaUnderstandingCandidate>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct OntologySeedPackSummary {
     industry: String,
@@ -6996,6 +7049,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/ontology/onboarding/curated-datasets/{id}/review",
             post(review_ontology_curated_dataset),
+        )
+        .route(
+            "/api/ontology/intelligence/schema-understanding",
+            post(run_ontology_schema_understanding),
         )
         .route(
             "/api/semantic-conflicts/resolve",
@@ -12627,6 +12684,24 @@ async fn review_ontology_curated_dataset(
     .map(Json)
 }
 
+async fn run_ontology_schema_understanding(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<SchemaUnderstandingRequest>,
+) -> Result<Json<SchemaUnderstandingResponse>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "ontology_intelligence",
+        input.run_id,
+    )
+    .await?;
+    ontology_schema_understanding_for_request(&state, &input)
+        .await
+        .map(Json)
+}
+
 #[cfg(test)]
 async fn create_demo_ontology_onboarding_run_for_test(
     state: &AppState,
@@ -13468,6 +13543,344 @@ fn ontology_curated_dataset_drafts_for_run(
             })
         })
         .collect()
+}
+
+async fn ontology_schema_understanding_for_request(
+    state: &AppState,
+    input: &SchemaUnderstandingRequest,
+) -> Result<SchemaUnderstandingResponse, AppError> {
+    let max_sample_rows = input.max_sample_rows.unwrap_or(5).clamp(1, 10);
+    if let Some(run_id) = input.run_id {
+        let run = get_ontology_onboarding_run_for_state(state, run_id).await?;
+        let (seed, _) =
+            ontology_seed_and_source_for_request(&ontology_run_industry(&run), &run.source_mode)?;
+        return Ok(ontology_schema_understanding_for_datasets(
+            Some(run.id),
+            &seed,
+            &run.datasets,
+            &run.profiles,
+            max_sample_rows,
+        ));
+    }
+    let industry = input.industry.as_deref().unwrap_or("ecommerce");
+    let source_mode = input.source_mode.as_deref().unwrap_or("demo_ecommerce");
+    let (seed, source) = ontology_seed_and_source_for_request(industry, source_mode)?;
+    let profiles = ontology_profile_demo_datasets(&source.datasets);
+    Ok(ontology_schema_understanding_for_datasets(
+        None,
+        &seed,
+        &source.datasets,
+        &profiles,
+        max_sample_rows,
+    ))
+}
+
+fn ontology_schema_understanding_for_datasets(
+    run_id: Option<Uuid>,
+    seed: &OntologySeedPack,
+    datasets: &[OntologyOnboardingDataset],
+    profiles: &[OntologyDatasetProfile],
+    max_sample_rows: usize,
+) -> SchemaUnderstandingResponse {
+    let candidates = datasets
+        .iter()
+        .filter_map(|dataset| {
+            let profile = profiles
+                .iter()
+                .find(|profile| profile.table_name == dataset.table_name)?;
+            Some(ontology_schema_understanding_candidate(
+                seed,
+                dataset,
+                profile,
+                max_sample_rows,
+            ))
+        })
+        .collect::<Vec<_>>();
+    SchemaUnderstandingResponse {
+        run_id,
+        industry: seed.industry.clone(),
+        source_mode: seed.source_mode.clone(),
+        domain_scope: seed.domain_scope.clone(),
+        tool_namespace: seed.tool_namespace.clone(),
+        candidate_count: candidates.len(),
+        candidates,
+    }
+}
+
+fn ontology_schema_understanding_candidate(
+    seed: &OntologySeedPack,
+    dataset: &OntologyOnboardingDataset,
+    profile: &OntologyDatasetProfile,
+    max_sample_rows: usize,
+) -> SchemaUnderstandingCandidate {
+    let seed_match = seed
+        .objects
+        .iter()
+        .find(|mapping| mapping.table_name == dataset.table_name)
+        .map(|mapping| mapping.object_name.clone());
+    let object_type_candidate = seed_match
+        .clone()
+        .unwrap_or_else(|| ontology_infer_object_type_from_table(&dataset.table_name));
+    let profile_score =
+        ontology_schema_understanding_profile_score(seed_match.is_some(), profile, dataset);
+    let confidence =
+        ontology_schema_understanding_confidence(seed_match.is_some(), profile, dataset);
+    let recommendation = ontology_schema_understanding_recommendation(confidence);
+    let sample_row_refs = dataset
+        .rows
+        .iter()
+        .take(max_sample_rows)
+        .enumerate()
+        .map(|(index, _)| {
+            format!(
+                "mandoforge://ontology/sources/{}/{}/rows/{index}",
+                dataset.source_system, dataset.table_name
+            )
+        })
+        .collect::<Vec<_>>();
+    SchemaUnderstandingCandidate {
+        table_name: dataset.table_name.clone(),
+        source_system: dataset.source_system.clone(),
+        source_object: dataset.source_object.clone(),
+        object_type_candidate: object_type_candidate.clone(),
+        confidence,
+        recommendation,
+        properties: dataset
+            .fields
+            .iter()
+            .map(|field| ontology_property_understanding_candidate(field, profile))
+            .collect(),
+        taxonomy_layers: ontology_taxonomy_layers_for_candidate(
+            seed,
+            &object_type_candidate,
+            seed_match.is_some(),
+            confidence,
+        ),
+        evidence: json!({
+            "engine": "deterministic_schema_understanding_v1",
+            "llm_status": "not_invoked",
+            "profile_score": profile_score,
+            "seed_ontology_match": seed_match,
+            "primary_key_candidates": profile.primary_key_candidates,
+            "foreign_key_candidates": profile.foreign_key_candidates,
+            "pii_candidates": profile.pii_candidates,
+            "currency_fields": profile.currency_fields,
+            "time_dimensions": profile.time_dimensions,
+            "row_count": profile.row_count,
+            "field_count": dataset.fields.len(),
+            "sample_row_refs": sample_row_refs,
+            "source_mode": seed.source_mode,
+            "industry": seed.industry,
+            "domain_scope": seed.domain_scope,
+            "tool_namespace": seed.tool_namespace,
+        }),
+    }
+}
+
+fn ontology_schema_understanding_profile_score(
+    has_seed_match: bool,
+    profile: &OntologyDatasetProfile,
+    dataset: &OntologyOnboardingDataset,
+) -> f64 {
+    let mut score: f64 = 0.20;
+    if profile.row_count > 0 {
+        score += 0.15;
+    }
+    if has_seed_match {
+        score += 0.25;
+    }
+    if !profile.primary_key_candidates.is_empty() {
+        score += 0.15;
+    }
+    if dataset.fields.len() >= 3 {
+        score += 0.10;
+    }
+    if !profile.foreign_key_candidates.is_empty() {
+        score += 0.08;
+    }
+    if !profile.time_dimensions.is_empty() || !profile.currency_fields.is_empty() {
+        score += 0.04;
+    }
+    if ontology_profile_has_low_null_pressure(profile) {
+        score += 0.03;
+    }
+    score.clamp(0.0, 1.0)
+}
+
+fn ontology_schema_understanding_confidence(
+    has_seed_match: bool,
+    profile: &OntologyDatasetProfile,
+    dataset: &OntologyOnboardingDataset,
+) -> f64 {
+    let profile_score =
+        ontology_schema_understanding_profile_score(has_seed_match, profile, dataset);
+    let confidence = 0.45 + (profile_score * 0.50);
+    confidence.clamp(0.40, 0.96)
+}
+
+fn ontology_schema_understanding_recommendation(confidence: f64) -> String {
+    if confidence >= 0.90 {
+        "draft_ready".to_string()
+    } else if confidence >= 0.70 {
+        "quick_review".to_string()
+    } else {
+        "needs_review".to_string()
+    }
+}
+
+fn ontology_profile_has_low_null_pressure(profile: &OntologyDatasetProfile) -> bool {
+    profile
+        .field_null_rates
+        .as_object()
+        .map(|rates| {
+            rates
+                .values()
+                .all(|rate| rate.as_f64().unwrap_or_default() <= 0.20)
+        })
+        .unwrap_or(false)
+}
+
+fn ontology_property_understanding_candidate(
+    field: &OntologyOnboardingField,
+    profile: &OntologyDatasetProfile,
+) -> PropertyUnderstandingCandidate {
+    let semantic_role = ontology_property_semantic_role(&field.name, profile);
+    let null_rate = profile
+        .field_null_rates
+        .get(&field.name)
+        .and_then(Value::as_f64)
+        .unwrap_or_default();
+    let uniqueness = profile
+        .field_uniqueness
+        .get(&field.name)
+        .and_then(Value::as_f64)
+        .unwrap_or_default();
+    let confidence = match semantic_role.as_str() {
+        "primary_key" => 0.96,
+        "foreign_key" => 0.92,
+        "pii" | "currency" | "time_dimension" => 0.88,
+        "enum" => 0.82,
+        _ => 0.74,
+    };
+    PropertyUnderstandingCandidate {
+        field_name: field.name.clone(),
+        field_type: field.field_type.clone(),
+        semantic_role,
+        confidence,
+        evidence: json!({
+            "null_rate": null_rate,
+            "uniqueness": uniqueness,
+            "sample_values": field.sample_values,
+            "is_primary_key_candidate": profile.primary_key_candidates.contains(&field.name),
+            "foreign_key_candidates": profile.foreign_key_candidates
+                .iter()
+                .filter(|candidate| candidate.field == field.name)
+                .collect::<Vec<_>>(),
+        }),
+    }
+}
+
+fn ontology_property_semantic_role(field_name: &str, profile: &OntologyDatasetProfile) -> String {
+    if profile
+        .primary_key_candidates
+        .iter()
+        .any(|field| field == field_name)
+        && field_name == "id"
+    {
+        "primary_key".to_string()
+    } else if profile
+        .foreign_key_candidates
+        .iter()
+        .any(|candidate| candidate.field == field_name)
+    {
+        "foreign_key".to_string()
+    } else if profile
+        .pii_candidates
+        .iter()
+        .any(|field| field == field_name)
+    {
+        "pii".to_string()
+    } else if profile
+        .currency_fields
+        .iter()
+        .any(|field| field == field_name)
+    {
+        "currency".to_string()
+    } else if profile
+        .time_dimensions
+        .iter()
+        .any(|field| field == field_name)
+    {
+        "time_dimension".to_string()
+    } else if profile
+        .enum_candidates
+        .iter()
+        .any(|field| field == field_name)
+    {
+        "enum".to_string()
+    } else {
+        "attribute".to_string()
+    }
+}
+
+fn ontology_taxonomy_layers_for_candidate(
+    seed: &OntologySeedPack,
+    object_type_candidate: &str,
+    has_seed_match: bool,
+    confidence: f64,
+) -> Vec<TaxonomyLayerCandidate> {
+    vec![
+        TaxonomyLayerCandidate {
+            layer: 1,
+            label: "Business Entity".to_string(),
+            confidence: 0.90,
+            rationale: "All schema-understanding candidates are business-facing ontology drafts."
+                .to_string(),
+        },
+        TaxonomyLayerCandidate {
+            layer: 2,
+            label: ontology_title_case(&seed.domain_scope),
+            confidence: if has_seed_match { 0.92 } else { 0.70 },
+            rationale: format!(
+                "Candidate belongs to the {} domain scope.",
+                seed.domain_scope
+            ),
+        },
+        TaxonomyLayerCandidate {
+            layer: 3,
+            label: object_type_candidate.to_string(),
+            confidence,
+            rationale: if has_seed_match {
+                "Matched a seed ontology object mapping with profile evidence.".to_string()
+            } else {
+                "Inferred from table naming and profile evidence; requires human review."
+                    .to_string()
+            },
+        },
+    ]
+}
+
+fn ontology_infer_object_type_from_table(table_name: &str) -> String {
+    let trimmed = table_name
+        .trim_start_matches("raw_")
+        .trim_start_matches("stg_")
+        .trim_start_matches("curated_");
+    let singular = trimmed.strip_suffix('s').unwrap_or(trimmed);
+    ontology_title_case(singular)
+}
+
+fn ontology_title_case(value: &str) -> String {
+    value
+        .split(|character: char| character == '_' || character == '-' || character == ' ')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_ascii_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<String>()
 }
 
 async fn ontology_review_graph_for_run(
@@ -62758,6 +63171,117 @@ mod tests {
             proposal.proposal_type == "logic"
                 && proposal.name == "Policy identity rule"
                 && proposal.content["source_mode"].as_str() == Some("demo_insurance")
+        }));
+    }
+
+    #[test]
+    fn ontology_intelligence_schema_understanding_maps_ecommerce_orders() {
+        let source = ontology_demo_source_bundle();
+        let seed = ontology_ecommerce_seed_pack();
+        let profiles = ontology_profile_demo_datasets(&source.datasets);
+        let response =
+            ontology_schema_understanding_for_datasets(None, &seed, &source.datasets, &profiles, 5);
+
+        assert_eq!(response.industry, "ecommerce");
+        assert_eq!(response.source_mode, "demo_ecommerce");
+        assert_eq!(response.candidate_count, 8);
+        let orders = response
+            .candidates
+            .iter()
+            .find(|candidate| candidate.table_name == "orders")
+            .expect("orders candidate");
+        assert_eq!(orders.object_type_candidate, "Order");
+        assert!(orders.confidence >= 0.90);
+        assert_eq!(orders.recommendation, "draft_ready");
+        assert_eq!(
+            orders.evidence["seed_ontology_match"].as_str(),
+            Some("Order")
+        );
+        assert!(
+            orders
+                .properties
+                .iter()
+                .any(|property| property.field_name == "id"
+                    && property.semantic_role == "primary_key")
+        );
+        assert!(orders.properties.iter().any(|property| {
+            property.field_name == "customer_id" && property.semantic_role == "foreign_key"
+        }));
+        assert!(
+            orders
+                .taxonomy_layers
+                .iter()
+                .any(|layer| { layer.layer == 2 && layer.label == "Commerce" })
+        );
+    }
+
+    #[tokio::test]
+    async fn ontology_intelligence_schema_understanding_preserves_insurance_source_mode() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        let run = create_ontology_onboarding_run_with_actor(
+            &state,
+            "insurance",
+            "demo_insurance",
+            "test",
+        )
+        .await
+        .expect("insurance run");
+        let response = ontology_schema_understanding_for_request(
+            &state,
+            &SchemaUnderstandingRequest {
+                run_id: Some(run.id),
+                industry: None,
+                source_mode: None,
+                max_sample_rows: Some(2),
+            },
+        )
+        .await
+        .expect("schema understanding");
+
+        assert_eq!(response.run_id, Some(run.id));
+        assert_eq!(response.industry, "insurance");
+        assert_eq!(response.source_mode, "demo_insurance");
+        assert!(response.candidates.iter().any(|candidate| {
+            candidate.table_name == "claims"
+                && candidate.object_type_candidate == "Claim"
+                && candidate.evidence["source_mode"].as_str() == Some("demo_insurance")
+        }));
+    }
+
+    #[test]
+    fn ontology_intelligence_schema_understanding_marks_low_evidence_for_review() {
+        let dataset = ontology_demo_dataset(
+            "mystery_events",
+            "demo_unknown",
+            "mystery_events",
+            vec![("payload", "string"), ("note", "string")],
+            vec![
+                json!({"payload":"opaque","note":null}),
+                json!({"payload":"opaque","note":null}),
+            ],
+        );
+        let datasets = vec![dataset];
+        let profiles = ontology_profile_demo_datasets(&datasets);
+        let seed = OntologySeedPack {
+            industry: "unknown".to_string(),
+            domain_scope: "unknown".to_string(),
+            source_mode: "demo_unknown".to_string(),
+            tool_namespace: "unknown".to_string(),
+            objects: Vec::new(),
+            relations: Vec::new(),
+            metrics: Vec::new(),
+            actions: Vec::new(),
+        };
+        let response =
+            ontology_schema_understanding_for_datasets(None, &seed, &datasets, &profiles, 5);
+        let candidate = response.candidates.first().expect("candidate");
+
+        assert_eq!(candidate.object_type_candidate, "MysteryEvent");
+        assert!(candidate.confidence < 0.70);
+        assert_eq!(candidate.recommendation, "needs_review");
+        assert!(candidate.evidence["seed_ontology_match"].is_null());
+        assert!(candidate.taxonomy_layers.iter().any(|layer| {
+            layer.layer == 3 && layer.rationale.contains("requires human review")
         }));
     }
 

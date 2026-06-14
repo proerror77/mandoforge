@@ -46,6 +46,21 @@ fi
 
 jq -e '.dataset_count == 8 and .proposal_count >= 32' "$run_file" >/dev/null
 
+schema_understanding_file="$EVIDENCE_DIR/schema-understanding.json"
+curl -sS -X POST "${headers[@]}" \
+  -H "content-type: application/json" \
+  -d "{\"run_id\":\"$run_id\",\"max_sample_rows\":5}" \
+  "$BASE_URL/api/ontology/intelligence/schema-understanding" \
+  | tee "$schema_understanding_file" >/dev/null
+jq -e '
+  .industry == "ecommerce"
+  and .source_mode == "demo_ecommerce"
+  and .candidate_count == 8
+  and any(.candidates[]?; .table_name == "orders" and .object_type_candidate == "Order" and .recommendation == "draft_ready")
+  and any(.candidates[]?; .table_name == "orders" and any(.properties[]?; .field_name == "customer_id" and .semantic_role == "foreign_key"))
+  and any(.candidates[]?; .table_name == "orders" and .evidence.llm_status == "not_invoked")
+' "$schema_understanding_file" >/dev/null
+
 dag_file="$EVIDENCE_DIR/dag.json"
 curl -sS "${headers[@]}" "$BASE_URL/api/ontology/onboarding/runs/$run_id/dag" \
   | tee "$dag_file" >/dev/null
@@ -147,6 +162,18 @@ curl -sS -X POST "${headers[@]}" \
 jq -e '.source_mode == "demo_insurance" and any(.proposals[]?; .name == "approve_claim")' \
   "$insurance_run_file" >/dev/null
 
+insurance_schema_understanding_file="$EVIDENCE_DIR/insurance-schema-understanding.json"
+curl -sS -X POST "${headers[@]}" \
+  -H "content-type: application/json" \
+  -d '{"industry":"insurance","source_mode":"demo_insurance"}' \
+  "$BASE_URL/api/ontology/intelligence/schema-understanding" \
+  | tee "$insurance_schema_understanding_file" >/dev/null
+jq -e '
+  .industry == "insurance"
+  and .source_mode == "demo_insurance"
+  and any(.candidates[]?; .table_name == "claims" and .object_type_candidate == "Claim")
+' "$insurance_schema_understanding_file" >/dev/null
+
 summary_file="$EVIDENCE_DIR/summary.txt"
 {
   echo "run_id=$run_id"
@@ -156,6 +183,7 @@ summary_file="$EVIDENCE_DIR/summary.txt"
   echo "semantic_object_count=$(jq -r '.semantic_object_count' "$materialized_file")"
   echo "semantic_link_count=$(jq -r '.semantic_link_count' "$materialized_file")"
   echo "tool_spec_count=$(jq -r '.tool_spec_count' "$materialized_file")"
+  echo "schema_understanding_file=$schema_understanding_file"
   echo "dag_file=$dag_file"
   echo "prompt_packet_file=$prompt_packet_file"
   echo "curated_review_file=$curated_review_file"
@@ -167,6 +195,7 @@ summary_file="$EVIDENCE_DIR/summary.txt"
   echo "materialized_file=$materialized_file"
   echo "tool_specs_file=$tool_specs_file"
   echo "insurance_run_file=$insurance_run_file"
+  echo "insurance_schema_understanding_file=$insurance_schema_understanding_file"
 } >"$summary_file"
 
 cat "$summary_file"
