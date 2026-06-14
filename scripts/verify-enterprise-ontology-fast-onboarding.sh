@@ -225,7 +225,7 @@ tool_specs_file="$EVIDENCE_DIR/tool-specs.json"
 curl -sS "${headers[@]}" "$BASE_URL/api/ontology/onboarding/runs/$run_id/tool-specs" \
   | tee "$tool_specs_file" >/dev/null
 jq -e 'any(.tool_specs[]?; .name == "commerce.refund_order")' "$tool_specs_file" >/dev/null
-jq -e 'any(.tool_specs[]?; .name == "commerce.refund_order" and .read_write_risk == "write_approval_required" and .source_refs.source_mapping != null)' "$tool_specs_file" >/dev/null
+jq -e 'any(.tool_specs[]?; .name == "commerce.refund_order" and .read_write_risk == "write_approval_required" and .transaction_profile == "proposal_only" and .execution_mode == "proposal_only" and .source_refs.source_mapping != null)' "$tool_specs_file" >/dev/null
 
 insurance_run_file="$EVIDENCE_DIR/insurance-run.json"
 curl -sS -X POST "${headers[@]}" \

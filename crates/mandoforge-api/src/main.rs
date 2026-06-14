@@ -2322,6 +2322,16 @@ struct OntologySeedActionMapping {
     reads: Value,
     effects: Value,
     executor: Value,
+    transaction_profile: OntologyActionTransactionProfile,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum OntologyActionTransactionProfile {
+    ProposalOnly,
+    LocalSerializable,
+    EventSourced,
+    Saga,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2628,6 +2638,8 @@ struct OntologyOnboardingToolSpec {
     input_schema: Value,
     effects: Value,
     policy: Value,
+    transaction_profile: OntologyActionTransactionProfile,
+    execution_mode: String,
     read_write_risk: String,
     source_refs: Value,
     audit_event: String,
@@ -12020,6 +12032,7 @@ fn ontology_seed_action(
     effects: Value,
     executor: Value,
 ) -> OntologySeedActionMapping {
+    let transaction_profile = ontology_default_action_transaction_profile(&effects, &executor);
     OntologySeedActionMapping {
         name: name.to_string(),
         target_object: target_object.to_string(),
@@ -12028,7 +12041,33 @@ fn ontology_seed_action(
         reads,
         effects,
         executor,
+        transaction_profile,
     }
+}
+
+fn ontology_default_action_transaction_profile(
+    effects: &Value,
+    executor: &Value,
+) -> OntologyActionTransactionProfile {
+    if ontology_action_has_effects(effects) && ontology_action_executor_is_cross_system(executor) {
+        OntologyActionTransactionProfile::ProposalOnly
+    } else {
+        OntologyActionTransactionProfile::LocalSerializable
+    }
+}
+
+fn ontology_action_has_effects(effects: &Value) -> bool {
+    effects
+        .as_array()
+        .map(|values| !values.is_empty())
+        .unwrap_or(false)
+}
+
+fn ontology_action_executor_is_cross_system(executor: &Value) -> bool {
+    matches!(
+        executor.get("type").and_then(Value::as_str),
+        Some("http_api" | "external_api" | "webhook" | "mcp_connector")
+    )
 }
 
 fn ontology_profile_demo_datasets(
@@ -12440,6 +12479,12 @@ fn ontology_action_proposal(
     seed: &OntologySeedPack,
     mapping: &OntologySeedActionMapping,
 ) -> OntologyOnboardingProposalDraft {
+    let has_effects = ontology_action_has_effects(&mapping.effects);
+    let cross_system_write =
+        has_effects && ontology_action_executor_is_cross_system(&mapping.executor);
+    let approval_required = mapping.approval_required
+        || (cross_system_write
+            && mapping.transaction_profile == OntologyActionTransactionProfile::ProposalOnly);
     ontology_proposal(
         run_id,
         "action",
@@ -12453,8 +12498,10 @@ fn ontology_action_proposal(
             "tool_namespace": seed.tool_namespace,
             "target_object": mapping.target_object,
             "contract_source": "demo_openapi_and_sop_seed",
-            "approval_required": mapping.approval_required,
+            "approval_required": approval_required,
             "effect_count": mapping.effects.as_array().map(Vec::len).unwrap_or_default(),
+            "transaction_profile": mapping.transaction_profile,
+            "cross_system_write": cross_system_write,
         }),
         json!({
             "action": mapping.name,
@@ -12467,8 +12514,18 @@ fn ontology_action_proposal(
             "reads": mapping.reads,
             "effects": mapping.effects,
             "policy": {
-                "approval_required": mapping.approval_required,
-                "approval_required_if": if mapping.approval_required { Value::String("external_write_or_financial_impact".to_string()) } else { Value::Null }
+                "approval_required": approval_required,
+                "approval_required_if": if approval_required { Value::String("external_write_or_financial_impact".to_string()) } else { Value::Null },
+                "transaction_profile": mapping.transaction_profile,
+                "cross_system_write": cross_system_write
+            },
+            "transaction_profile": mapping.transaction_profile,
+            "transaction_policy": {
+                "profile": mapping.transaction_profile,
+                "execution_mode": ontology_action_execution_mode(mapping.transaction_profile, !has_effects),
+                "requires_human_approval": approval_required,
+                "compensation_required": mapping.transaction_profile == OntologyActionTransactionProfile::Saga,
+                "cross_system_write": cross_system_write
             },
             "executor": mapping.executor,
             "audit_event": format!("{}.{}", seed.tool_namespace, mapping.name),
@@ -12965,7 +13022,7 @@ fn ontology_tool_spec_from_action_proposal(
         .get("target_object")
         .and_then(Value::as_str)
         .ok_or_else(|| AppError::bad_request("action proposal missing target_object"))?;
-    let policy = proposal
+    let mut policy = proposal
         .content
         .get("policy")
         .cloned()
@@ -12974,6 +13031,25 @@ fn ontology_tool_spec_from_action_proposal(
         .get("approval_required")
         .and_then(Value::as_bool)
         .unwrap_or(true);
+    let effects = proposal
+        .content
+        .get("effects")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let read_only = !ontology_action_has_effects(&effects);
+    let transaction_profile =
+        ontology_action_transaction_profile_for_proposal(proposal, read_only)?;
+    let approval_required = approval_required
+        || (!read_only && transaction_profile == OntologyActionTransactionProfile::ProposalOnly);
+    let execution_mode = ontology_action_execution_mode(transaction_profile, read_only);
+    if let Some(policy) = policy.as_object_mut() {
+        policy.insert("approval_required".to_string(), json!(approval_required));
+        policy.insert(
+            "transaction_profile".to_string(),
+            json!(transaction_profile),
+        );
+        policy.insert("execution_mode".to_string(), json!(execution_mode));
+    }
     let audit_event = proposal
         .content
         .get("audit_event")
@@ -12994,34 +13070,78 @@ fn ontology_tool_spec_from_action_proposal(
         ),
         tool_kind: "ontology_action".to_string(),
         target_object: target_object.to_string(),
-        read_only: false,
+        read_only,
         approval_required,
         input_schema: proposal
             .content
             .get("inputs")
             .cloned()
             .unwrap_or_else(|| json!({})),
-        effects: proposal
-            .content
-            .get("effects")
-            .cloned()
-            .unwrap_or_else(|| json!([])),
+        effects,
         policy,
+        transaction_profile,
+        execution_mode: execution_mode.to_string(),
         read_write_risk: if approval_required {
             "write_approval_required".to_string()
+        } else if read_only {
+            "read_only".to_string()
         } else {
-            "read_or_low_risk_update".to_string()
+            "write_low_risk_update".to_string()
         },
         source_refs: json!({
             "proposal_id": proposal.id,
             "proposal_type": proposal.proposal_type,
             "source_mapping": proposal.source_mapping,
             "target_object": target_object,
+            "transaction_profile": transaction_profile,
+            "execution_mode": execution_mode,
             "evidence": proposal.evidence,
         }),
         audit_event,
         source_proposal_id: proposal.id,
     })
+}
+
+fn ontology_action_transaction_profile_for_proposal(
+    proposal: &OntologyOnboardingProposalDraft,
+    read_only: bool,
+) -> Result<OntologyActionTransactionProfile, AppError> {
+    if read_only {
+        return Ok(OntologyActionTransactionProfile::LocalSerializable);
+    }
+    let Some(value) = proposal.content.get("transaction_profile") else {
+        return Err(AppError::bad_request(
+            "action proposal missing transaction_profile",
+        ));
+    };
+    ontology_action_transaction_profile_from_value(value)
+}
+
+fn ontology_action_transaction_profile_from_value(
+    value: &Value,
+) -> Result<OntologyActionTransactionProfile, AppError> {
+    match value.as_str() {
+        Some("proposal_only") => Ok(OntologyActionTransactionProfile::ProposalOnly),
+        Some("local_serializable") => Ok(OntologyActionTransactionProfile::LocalSerializable),
+        Some("event_sourced") => Ok(OntologyActionTransactionProfile::EventSourced),
+        Some("saga") => Ok(OntologyActionTransactionProfile::Saga),
+        _ => Err(AppError::bad_request(
+            "transaction_profile must be proposal_only, local_serializable, event_sourced, or saga",
+        )),
+    }
+}
+
+fn ontology_action_execution_mode(
+    transaction_profile: OntologyActionTransactionProfile,
+    read_only: bool,
+) -> &'static str {
+    if read_only {
+        "read_only"
+    } else if transaction_profile == OntologyActionTransactionProfile::ProposalOnly {
+        "proposal_only"
+    } else {
+        "executable_after_approval"
+    }
 }
 
 async fn review_ontology_curated_dataset_with_actor(
@@ -14757,6 +14877,8 @@ async fn ontology_review_graph_for_run(
                 evidence: json!({
                     "approval_required": proposal.content["policy"]["approval_required"],
                     "audit_event": proposal.content["audit_event"],
+                    "transaction_profile": proposal.content["transaction_profile"],
+                    "execution_mode": proposal.content["transaction_policy"]["execution_mode"],
                     "source_mapping": proposal.source_mapping,
                 }),
                 source_proposal_id: Some(proposal.id),
@@ -14775,7 +14897,9 @@ async fn ontology_review_graph_for_run(
                 risk: ontology_proposal_risk(proposal),
                 evidence: json!({
                     "approval_required": proposal.content["policy"]["approval_required"],
-                    "read_only": false,
+                    "transaction_profile": proposal.content["transaction_profile"],
+                    "execution_mode": proposal.content["transaction_policy"]["execution_mode"],
+                    "read_only": proposal.content["effects"].as_array().map(|effects| effects.is_empty()).unwrap_or(false),
                 }),
                 source_proposal_id: Some(proposal.id),
             },
@@ -15238,12 +15362,17 @@ fn ontology_graph_merge_candidate_id(proposal_id: Uuid, object_id: Uuid) -> Stri
 
 fn ontology_proposal_risk(proposal: &OntologyOnboardingProposalDraft) -> String {
     if proposal.proposal_type == "action"
-        && proposal
+        && (proposal
             .content
-            .get("policy")
-            .and_then(|policy| policy.get("approval_required"))
-            .and_then(Value::as_bool)
-            .unwrap_or(true)
+            .get("transaction_profile")
+            .and_then(Value::as_str)
+            == Some("proposal_only")
+            || proposal
+                .content
+                .get("policy")
+                .and_then(|policy| policy.get("approval_required"))
+                .and_then(Value::as_bool)
+                .unwrap_or(true))
     {
         "approval_required".to_string()
     } else if proposal
@@ -16167,6 +16296,15 @@ async fn ontology_materialize_action(
 ) -> Result<SemanticObject, AppError> {
     let domain_scope = ontology_proposal_domain_scope(proposal);
     let tool_namespace = ontology_proposal_tool_namespace(proposal);
+    let effects = proposal
+        .content
+        .get("effects")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let read_only = !ontology_action_has_effects(&effects);
+    let transaction_profile =
+        ontology_action_transaction_profile_for_proposal(proposal, read_only)?;
+    let execution_mode = ontology_action_execution_mode(transaction_profile, read_only);
     ontology_get_or_create_semantic_object(
         state,
         CreateSemanticObject {
@@ -16187,6 +16325,8 @@ async fn ontology_materialize_action(
                 "tool_name": format!("{}.{}", tool_namespace, proposal.name),
                 "domain_scope": domain_scope,
                 "tool_namespace": tool_namespace,
+                "transaction_profile": transaction_profile,
+                "execution_mode": execution_mode,
                 "action_contract": proposal.content,
             }),
             semantic_scopes: ontology_domain_semantic_scopes(&domain_scope, "published"),
@@ -64378,6 +64518,9 @@ mod tests {
             proposal.proposal_type == "action"
                 && proposal.name == "refund_order"
                 && proposal.content["policy"]["approval_required"].as_bool() == Some(true)
+                && proposal.content["transaction_profile"].as_str() == Some("proposal_only")
+                && proposal.content["transaction_policy"]["execution_mode"].as_str()
+                    == Some("proposal_only")
         }));
         assert!(proposals.iter().any(|proposal| {
             proposal.proposal_type == "logic"
@@ -65256,7 +65399,106 @@ mod tests {
         assert!(specs.iter().any(|spec| spec.name == "commerce.refund_order"
             && spec.approval_required
             && spec.read_write_risk == "write_approval_required"
+            && spec.transaction_profile == OntologyActionTransactionProfile::ProposalOnly
+            && spec.execution_mode == "proposal_only"
             && spec.source_refs["source_mapping"].is_string()));
+    }
+
+    #[tokio::test]
+    async fn ontology_onboarding_action_materialization_stores_transaction_profile() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        let run = create_demo_ontology_onboarding_run_for_test(&state)
+            .await
+            .expect("demo run");
+        let refund_proposal = run
+            .proposals
+            .iter()
+            .find(|proposal| proposal.proposal_type == "action" && proposal.name == "refund_order")
+            .expect("refund proposal")
+            .id;
+
+        review_ontology_onboarding_proposal_for_test(
+            &state,
+            refund_proposal,
+            "approve",
+            Some("refund action remains proposal-only until transaction policy is configured"),
+        )
+        .await
+        .expect("approve refund action");
+        materialize_ontology_onboarding_run_for_test(&state, run.id)
+            .await
+            .expect("materialize action");
+
+        let objects = state.list_semantic_objects().await.expect("objects");
+        assert!(objects.iter().any(|object| {
+            object.object_type == "ontology_action_type"
+                && object.object_key == "commerce.action.refund_order"
+                && object.content["transaction_profile"] == json!("proposal_only")
+                && object.content["execution_mode"] == json!("proposal_only")
+        }));
+    }
+
+    #[test]
+    fn ontology_onboarding_cross_system_action_without_profile_cannot_compile() {
+        let run_id = Uuid::new_v4();
+        let proposal = ontology_proposal(
+            run_id,
+            "action",
+            "unsafe_refund",
+            "unsafe_refund -> Order".to_string(),
+            0.82,
+            json!({"domain_scope":"commerce","tool_namespace":"commerce"}),
+            json!({
+                "action": "unsafe_refund",
+                "domain_scope": "commerce",
+                "tool_namespace": "commerce",
+                "target_object": "Order",
+                "inputs": {"order_id": "string"},
+                "effects": [{"type": "update_attribute", "target": "Order.status"}],
+                "policy": {"approval_required": true},
+                "executor": {"type": "http_api", "ref": "POST /orders/{order_id}/refund"},
+                "audit_event": "commerce.unsafe_refund"
+            }),
+        );
+
+        let error = ontology_tool_spec_from_action_proposal(run_id, &proposal)
+            .expect_err("missing transaction profile must fail closed");
+        assert!(error.message.contains("missing transaction_profile"));
+    }
+
+    #[test]
+    fn ontology_onboarding_read_only_tool_is_not_marked_write_approval_required() {
+        let run_id = Uuid::new_v4();
+        let proposal = ontology_proposal(
+            run_id,
+            "action",
+            "inspect_order",
+            "inspect_order -> Order".to_string(),
+            0.82,
+            json!({"domain_scope":"commerce","tool_namespace":"commerce"}),
+            json!({
+                "action": "inspect_order",
+                "domain_scope": "commerce",
+                "tool_namespace": "commerce",
+                "target_object": "Order",
+                "inputs": {"order_id": "string"},
+                "effects": [],
+                "policy": {"approval_required": false},
+                "executor": {"type": "local_query", "ref": "orders.by_id"},
+                "audit_event": "commerce.inspect_order"
+            }),
+        );
+
+        let spec = ontology_tool_spec_from_action_proposal(run_id, &proposal)
+            .expect("read-only tool spec");
+        assert!(spec.read_only);
+        assert!(!spec.approval_required);
+        assert_eq!(spec.read_write_risk, "read_only");
+        assert_eq!(
+            spec.transaction_profile,
+            OntologyActionTransactionProfile::LocalSerializable
+        );
+        assert_eq!(spec.execution_mode, "read_only");
     }
 
     #[test]
