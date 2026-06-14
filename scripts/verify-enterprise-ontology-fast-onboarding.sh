@@ -83,6 +83,39 @@ jq -e '
   and all(.subgraphs[]?.members[]?; .proposal_id != null)
 ' "$subgraph_file" >/dev/null
 
+client_object_file="$EVIDENCE_DIR/client-semantic-object.json"
+curl -sS -X POST "${headers[@]}" \
+  -H "content-type: application/json" \
+  -d '{
+    "object_type":"business_object",
+    "object_key":"commerce.client",
+    "title":"Client",
+    "summary":"Gate fixture for entity resolution.",
+    "content":{"object_type":"Client","domain_scope":"commerce"},
+    "semantic_scopes":{"domain_scope":"commerce","workflow_scope":"entity-resolution-gate","memory_scope":"ontology","share_policy":"test"},
+    "source_uri":"mandoforge://gate/entity-resolution/client",
+    "provenance":{"source":"verify-enterprise-ontology-fast-onboarding"},
+    "trust_level":"source_attested",
+    "freshness":"current",
+    "status":"active"
+  }' \
+  "$BASE_URL/api/semantic-objects" \
+  | tee "$client_object_file" >/dev/null
+
+entity_resolution_file="$EVIDENCE_DIR/entity-resolution-customer.json"
+curl -sS -X POST "${headers[@]}" \
+  -H "content-type: application/json" \
+  -d '{"candidate_name":"Customer","candidate_object_type":"Customer","domain_scope":"commerce"}' \
+  "$BASE_URL/api/ontology/intelligence/entity-resolution" \
+  | tee "$entity_resolution_file" >/dev/null
+jq -e '
+  .candidate_count == 1
+  and .candidates[0].decision.is_duplicate == true
+  and .candidates[0].decision.decision == "merge_into_existing"
+  and .candidates[0].decision.review_required == true
+  and any(.candidates[0].retrieval_hits[]?; .title == "Client" and (.match_reasons | index("alias_synonym")))
+' "$entity_resolution_file" >/dev/null
+
 dag_file="$EVIDENCE_DIR/dag.json"
 curl -sS "${headers[@]}" "$BASE_URL/api/ontology/onboarding/runs/$run_id/dag" \
   | tee "$dag_file" >/dev/null
@@ -124,11 +157,13 @@ curl -sS "${headers[@]}" "$BASE_URL/api/ontology/onboarding/runs/$run_id/review-
 jq -e '
   any(.nodes[]?; .node_type == "object" and .label == "Customer" and .source_proposal_id != null)
   and any(.nodes[]?; .node_type == "subgraph" and .label == "Order business subgraph" and .source_proposal_id != null)
+  and any(.nodes[]?; .node_type == "merge_candidate" and .label == "Client" and .source_proposal_id != null)
   and any(.nodes[]?; .node_type == "logic")
   and any(.nodes[]?; .node_type == "action")
   and any(.nodes[]?; .node_type == "tool")
   and any(.edges[]?; .edge_type == "maps_to" and .source_proposal_id != null)
   and any(.edges[]?; .edge_type == "groups" and .source_proposal_id != null)
+  and any(.edges[]?; .edge_type == "merge_suggests" and .source_proposal_id != null)
   and any(.edges[]?; .edge_type == "relates_to")
   and any(.edges[]?; .edge_type == "depends_on")
   and any(.edges[]?; .edge_type == "validates")
@@ -209,6 +244,7 @@ summary_file="$EVIDENCE_DIR/summary.txt"
   echo "tool_spec_count=$(jq -r '.tool_spec_count' "$materialized_file")"
   echo "schema_understanding_file=$schema_understanding_file"
   echo "subgraph_file=$subgraph_file"
+  echo "entity_resolution_file=$entity_resolution_file"
   echo "dag_file=$dag_file"
   echo "prompt_packet_file=$prompt_packet_file"
   echo "curated_review_file=$curated_review_file"

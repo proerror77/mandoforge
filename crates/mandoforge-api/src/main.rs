@@ -2499,6 +2499,62 @@ struct SubgraphProposalResponse {
     subgraphs: Vec<SubgraphProposalDraft>,
 }
 
+#[derive(Debug, Deserialize)]
+struct EntityResolutionRequest {
+    #[serde(default)]
+    run_id: Option<Uuid>,
+    #[serde(default)]
+    candidate_name: Option<String>,
+    #[serde(default)]
+    candidate_object_type: Option<String>,
+    #[serde(default)]
+    domain_scope: Option<String>,
+    #[serde(default)]
+    min_score: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EntityResolutionRetrievalHit {
+    object_id: Uuid,
+    object_key: String,
+    title: String,
+    object_type: String,
+    domain_scope: String,
+    normalized_name: String,
+    score: f64,
+    match_reasons: Vec<String>,
+    evidence: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EntityResolutionDecisionDraft {
+    is_duplicate: bool,
+    canonical_name: String,
+    existing_node_uuid: Option<Uuid>,
+    confidence: f64,
+    decision: String,
+    review_required: bool,
+    rationale: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EntityResolutionCandidate {
+    candidate_name: String,
+    candidate_object_type: String,
+    domain_scope: String,
+    normalized_name: String,
+    retrieval_hits: Vec<EntityResolutionRetrievalHit>,
+    decision: EntityResolutionDecisionDraft,
+    evidence: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EntityResolutionResponse {
+    run_id: Option<Uuid>,
+    candidate_count: usize,
+    candidates: Vec<EntityResolutionCandidate>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct OntologySeedPackSummary {
     industry: String,
@@ -7105,6 +7161,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/ontology/intelligence/subgraph-proposals",
             post(run_ontology_subgraph_proposals),
+        )
+        .route(
+            "/api/ontology/intelligence/entity-resolution",
+            post(run_ontology_entity_resolution),
         )
         .route(
             "/api/semantic-conflicts/resolve",
@@ -12772,6 +12832,24 @@ async fn run_ontology_subgraph_proposals(
         .map(Json)
 }
 
+async fn run_ontology_entity_resolution(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<EntityResolutionRequest>,
+) -> Result<Json<EntityResolutionResponse>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "ontology_intelligence",
+        input.run_id,
+    )
+    .await?;
+    ontology_entity_resolution_for_request(&state, &input)
+        .await
+        .map(Json)
+}
+
 #[cfg(test)]
 async fn create_demo_ontology_onboarding_run_for_test(
     state: &AppState,
@@ -14251,6 +14329,288 @@ fn ontology_subgraph_id(run_id: Uuid, target_object: &str) -> String {
     format!("subgraph:{run_id}:{}", ontology_slug(target_object))
 }
 
+async fn ontology_entity_resolution_for_request(
+    state: &AppState,
+    input: &EntityResolutionRequest,
+) -> Result<EntityResolutionResponse, AppError> {
+    let min_score = input.min_score.unwrap_or(0.50).clamp(0.0, 1.0);
+    let candidates = if let Some(run_id) = input.run_id {
+        let run = get_ontology_onboarding_run_for_state(state, run_id).await?;
+        run.proposals
+            .iter()
+            .filter(|proposal| proposal.proposal_type == "object")
+            .filter_map(|proposal| {
+                let candidate_name = proposal
+                    .content
+                    .get("object_type")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&proposal.name)
+                    .to_string();
+                let domain_scope = ontology_proposal_domain_scope(proposal);
+                Some((candidate_name.clone(), candidate_name, domain_scope))
+            })
+            .collect::<Vec<_>>()
+    } else {
+        vec![(
+            input.candidate_name.clone().ok_or_else(|| {
+                AppError::bad_request("entity resolution requires candidate_name or run_id")
+            })?,
+            input
+                .candidate_object_type
+                .clone()
+                .or_else(|| input.candidate_name.clone())
+                .ok_or_else(|| {
+                    AppError::bad_request(
+                        "entity resolution requires candidate_object_type or candidate_name",
+                    )
+                })?,
+            input
+                .domain_scope
+                .clone()
+                .unwrap_or_else(|| "commerce".to_string()),
+        )]
+    };
+    let semantic_objects = state.list_semantic_objects().await?;
+    let resolved = candidates
+        .into_iter()
+        .map(|(candidate_name, candidate_object_type, domain_scope)| {
+            ontology_entity_resolution_candidate(
+                &candidate_name,
+                &candidate_object_type,
+                &domain_scope,
+                &semantic_objects,
+                min_score,
+            )
+        })
+        .collect::<Vec<_>>();
+    Ok(EntityResolutionResponse {
+        run_id: input.run_id,
+        candidate_count: resolved.len(),
+        candidates: resolved,
+    })
+}
+
+fn ontology_entity_resolution_candidate(
+    candidate_name: &str,
+    candidate_object_type: &str,
+    domain_scope: &str,
+    semantic_objects: &[SemanticObject],
+    min_score: f64,
+) -> EntityResolutionCandidate {
+    let normalized_name = ontology_resolution_normalized_name(candidate_name);
+    let mut retrieval_hits = semantic_objects
+        .iter()
+        .filter(|object| object.status == "active" && object.archived_at.is_none())
+        .filter_map(|object| {
+            ontology_entity_resolution_hit(
+                candidate_name,
+                candidate_object_type,
+                domain_scope,
+                &normalized_name,
+                object,
+            )
+        })
+        .filter(|hit| hit.score >= min_score)
+        .collect::<Vec<_>>();
+    retrieval_hits.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.title.cmp(&right.title))
+    });
+    retrieval_hits.truncate(5);
+    let decision = ontology_entity_resolution_decision(candidate_name, &retrieval_hits);
+    EntityResolutionCandidate {
+        candidate_name: candidate_name.to_string(),
+        candidate_object_type: candidate_object_type.to_string(),
+        domain_scope: domain_scope.to_string(),
+        normalized_name,
+        retrieval_hits,
+        decision,
+        evidence: json!({
+            "engine": "deterministic_entity_resolution_v1",
+            "retrieval": ["exact_normalized_name", "alias_synonym", "token_overlap", "object_type_compatibility"],
+            "vector_status": "not_configured",
+            "bm25_status": "deterministic_token_overlap",
+            "llm_status": "not_invoked",
+        }),
+    }
+}
+
+fn ontology_entity_resolution_hit(
+    candidate_name: &str,
+    candidate_object_type: &str,
+    domain_scope: &str,
+    normalized_name: &str,
+    object: &SemanticObject,
+) -> Option<EntityResolutionRetrievalHit> {
+    let object_domain = ontology_semantic_object_domain_scope(object);
+    let object_business_type = ontology_semantic_object_business_type(object);
+    let object_label = object_business_type
+        .clone()
+        .unwrap_or_else(|| object.title.clone());
+    let object_normalized = ontology_resolution_normalized_name(&object_label);
+    let candidate_business_type = ontology_resolution_normalized_name(candidate_object_type);
+    let mut score: f64 = 0.0;
+    let mut match_reasons = Vec::new();
+
+    if object_domain == domain_scope {
+        score += 0.10;
+        match_reasons.push("same_domain_scope".to_string());
+    }
+    if object_normalized == normalized_name {
+        score += 0.55;
+        match_reasons.push("exact_normalized_name".to_string());
+    }
+    if ontology_resolution_alias_match(normalized_name, &object_normalized) {
+        score += 0.50;
+        match_reasons.push("alias_synonym".to_string());
+    }
+    let token_overlap = ontology_resolution_token_overlap(normalized_name, &object_normalized);
+    if token_overlap > 0.0 {
+        score += token_overlap * 0.25;
+        match_reasons.push("token_overlap".to_string());
+    }
+    let compatible_type = object.object_type == "business_object"
+        || object.object_type == "ontology_object_type"
+        || object.object_type == "ontology_onboarding_proposal";
+    if compatible_type {
+        score += 0.10;
+        match_reasons.push("object_type_compatible".to_string());
+    }
+    if object_normalized == candidate_business_type
+        || ontology_resolution_alias_match(&candidate_business_type, &object_normalized)
+    {
+        score += 0.15;
+        match_reasons.push("business_type_compatible".to_string());
+    }
+    if match_reasons.is_empty() {
+        return None;
+    }
+    Some(EntityResolutionRetrievalHit {
+        object_id: object.id,
+        object_key: object.object_key.clone(),
+        title: object.title.clone(),
+        object_type: object.object_type.clone(),
+        domain_scope: object_domain,
+        normalized_name: object_normalized,
+        score: score.clamp(0.0, 1.0),
+        match_reasons,
+        evidence: json!({
+            "candidate_name": candidate_name,
+            "candidate_object_type": candidate_object_type,
+            "semantic_object_type": object.object_type,
+            "semantic_object_title": object.title,
+            "semantic_object_key": object.object_key,
+            "business_type": object_business_type,
+        }),
+    })
+}
+
+fn ontology_entity_resolution_decision(
+    candidate_name: &str,
+    retrieval_hits: &[EntityResolutionRetrievalHit],
+) -> EntityResolutionDecisionDraft {
+    let Some(best_hit) = retrieval_hits.first() else {
+        return EntityResolutionDecisionDraft {
+            is_duplicate: false,
+            canonical_name: candidate_name.to_string(),
+            existing_node_uuid: None,
+            confidence: 0.0,
+            decision: "new_entity".to_string(),
+            review_required: false,
+            rationale: "No compatible existing ontology object passed retrieval threshold."
+                .to_string(),
+        };
+    };
+    let is_duplicate = best_hit.score >= 0.80;
+    EntityResolutionDecisionDraft {
+        is_duplicate,
+        canonical_name: if is_duplicate {
+            best_hit.title.clone()
+        } else {
+            candidate_name.to_string()
+        },
+        existing_node_uuid: is_duplicate.then_some(best_hit.object_id),
+        confidence: best_hit.score,
+        decision: if is_duplicate {
+            "merge_into_existing".to_string()
+        } else if best_hit.score >= 0.60 {
+            "possible_match_needs_review".to_string()
+        } else {
+            "new_entity".to_string()
+        },
+        review_required: best_hit.score >= 0.60,
+        rationale: if is_duplicate {
+            "High-confidence deterministic retrieval suggests this candidate duplicates an existing ontology object.".to_string()
+        } else {
+            "Retrieval evidence is not strong enough to merge automatically.".to_string()
+        },
+    }
+}
+
+fn ontology_semantic_object_domain_scope(object: &SemanticObject) -> String {
+    object
+        .content
+        .get("domain_scope")
+        .or_else(|| object.semantic_scopes.get("domain_scope"))
+        .and_then(Value::as_str)
+        .unwrap_or("global")
+        .to_string()
+}
+
+fn ontology_semantic_object_business_type(object: &SemanticObject) -> Option<String> {
+    object
+        .content
+        .get("object_type")
+        .or_else(|| object.content.get("business_object"))
+        .or_else(|| object.content.get("target_object"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn ontology_resolution_normalized_name(value: &str) -> String {
+    ontology_slug(value)
+}
+
+fn ontology_resolution_alias_match(left: &str, right: &str) -> bool {
+    left == right
+        || ontology_resolution_aliases(left).contains(right)
+        || ontology_resolution_aliases(right).contains(left)
+}
+
+fn ontology_resolution_aliases(value: &str) -> BTreeSet<&'static str> {
+    match value {
+        "customer" | "client" | "account" | "buyer" | "insured" => {
+            BTreeSet::from(["customer", "client", "account", "buyer", "insured"])
+        }
+        "order" | "trade" | "sales_order" => BTreeSet::from(["order", "trade", "sales_order"]),
+        "ticket" | "support_ticket" | "case" => {
+            BTreeSet::from(["ticket", "support_ticket", "case"])
+        }
+        "claim" | "insurance_claim" => BTreeSet::from(["claim", "insurance_claim"]),
+        _ => BTreeSet::new(),
+    }
+}
+
+fn ontology_resolution_token_overlap(left: &str, right: &str) -> f64 {
+    let left_tokens = left
+        .split('_')
+        .filter(|token| !token.is_empty())
+        .collect::<BTreeSet<_>>();
+    let right_tokens = right
+        .split('_')
+        .filter(|token| !token.is_empty())
+        .collect::<BTreeSet<_>>();
+    if left_tokens.is_empty() || right_tokens.is_empty() {
+        return 0.0;
+    }
+    let intersection = left_tokens.intersection(&right_tokens).count();
+    let union = left_tokens.union(&right_tokens).count();
+    intersection as f64 / union as f64
+}
+
 async fn ontology_review_graph_for_run(
     state: &AppState,
     run: &OntologyOnboardingRun,
@@ -14304,6 +14664,8 @@ async fn ontology_review_graph_for_run(
     for subgraph in ontology_subgraph_proposals_for_run(run, &seed, None, "pending") {
         ontology_review_graph_project_subgraph(&mut nodes, &mut edges, &subgraph);
     }
+    let semantic_objects = state.list_semantic_objects().await?;
+    ontology_review_graph_project_entity_resolution(&mut nodes, &mut edges, run, &semantic_objects);
     let materialized_specs = ontology_onboarding_tool_specs_for_run(state, run.id).await?;
     let materialized_tool_ids = materialized_specs
         .iter()
@@ -14677,6 +15039,83 @@ fn ontology_review_graph_project_subgraph(
     }
 }
 
+fn ontology_review_graph_project_entity_resolution(
+    nodes: &mut BTreeMap<String, OntologyReviewGraphNode>,
+    edges: &mut BTreeMap<String, OntologyReviewGraphEdge>,
+    run: &OntologyOnboardingRun,
+    semantic_objects: &[SemanticObject],
+) {
+    for proposal in run
+        .proposals
+        .iter()
+        .filter(|proposal| proposal.proposal_type == "object")
+    {
+        let candidate_name = proposal
+            .content
+            .get("object_type")
+            .and_then(Value::as_str)
+            .unwrap_or(&proposal.name);
+        let domain_scope = ontology_proposal_domain_scope(proposal);
+        let candidate = ontology_entity_resolution_candidate(
+            candidate_name,
+            candidate_name,
+            &domain_scope,
+            semantic_objects,
+            0.60,
+        );
+        let Some(best_hit) = candidate.retrieval_hits.first() else {
+            continue;
+        };
+        if !candidate.decision.review_required {
+            continue;
+        }
+        let object_node_id = ontology_graph_object_id(candidate_name);
+        let merge_node_id = ontology_graph_merge_candidate_id(proposal.id, best_hit.object_id);
+        ontology_review_graph_insert_node(
+            nodes,
+            OntologyReviewGraphNode {
+                id: merge_node_id.clone(),
+                node_type: "merge_candidate".to_string(),
+                label: best_hit.title.clone(),
+                status: candidate.decision.decision.clone(),
+                confidence: candidate.decision.confidence,
+                risk: if candidate.decision.is_duplicate {
+                    "merge_review_required".to_string()
+                } else {
+                    "possible_match".to_string()
+                },
+                evidence: json!({
+                    "candidate_name": candidate.candidate_name,
+                    "canonical_name": candidate.decision.canonical_name,
+                    "existing_node_uuid": candidate.decision.existing_node_uuid,
+                    "best_hit": best_hit,
+                    "decision": candidate.decision.clone(),
+                    "authority": "proposal_only",
+                }),
+                source_proposal_id: Some(proposal.id),
+            },
+        );
+        ontology_review_graph_insert_edge(
+            edges,
+            OntologyReviewGraphEdge {
+                id: format!("{object_node_id}->{merge_node_id}:merge_suggests"),
+                from: object_node_id,
+                to: merge_node_id,
+                edge_type: "merge_suggests".to_string(),
+                status: "needs_review".to_string(),
+                confidence: candidate.decision.confidence,
+                risk: "merge_review_required".to_string(),
+                evidence: json!({
+                    "match_reasons": best_hit.match_reasons.clone(),
+                    "review_required": true,
+                    "materialization_policy": "merge suggestions never materialize without human review",
+                }),
+                source_proposal_id: Some(proposal.id),
+            },
+        );
+    }
+}
+
 fn ontology_graph_node_id_for_subgraph_member(member: &SubgraphProposalMember) -> Option<String> {
     match member.proposal_type.as_str() {
         "object" => Some(ontology_graph_object_id(&member.name)),
@@ -14732,6 +15171,10 @@ fn ontology_graph_tool_id(tool_namespace: &str, action_name: &str) -> String {
 
 fn ontology_graph_subgraph_id(target_object: &str) -> String {
     format!("subgraph:{}", ontology_slug(target_object))
+}
+
+fn ontology_graph_merge_candidate_id(proposal_id: Uuid, object_id: Uuid) -> String {
+    format!("merge:{proposal_id}:{object_id}")
 }
 
 fn ontology_proposal_risk(proposal: &OntologyOnboardingProposalDraft) -> String {
@@ -14986,6 +15429,11 @@ async fn materialize_ontology_onboarding_run_with_actor(
         }
         let proposal = ontology_onboarding_object_proposal(&object)?;
         if proposal.review_status != "approved" {
+            continue;
+        }
+        if proposal.proposal_type == "object"
+            && ontology_object_proposal_has_unreviewed_merge_risk(state, &proposal).await?
+        {
             continue;
         }
         match proposal.proposal_type.as_str() {
@@ -15295,6 +15743,27 @@ async fn ontology_materialize_business_object(
         },
     )
     .await
+}
+
+async fn ontology_object_proposal_has_unreviewed_merge_risk(
+    state: &AppState,
+    proposal: &OntologyOnboardingProposalDraft,
+) -> Result<bool, AppError> {
+    let candidate_name = proposal
+        .content
+        .get("object_type")
+        .and_then(Value::as_str)
+        .unwrap_or(&proposal.name);
+    let domain_scope = ontology_proposal_domain_scope(proposal);
+    let semantic_objects = state.list_semantic_objects().await?;
+    let candidate = ontology_entity_resolution_candidate(
+        candidate_name,
+        candidate_name,
+        &domain_scope,
+        &semantic_objects,
+        0.80,
+    );
+    Ok(candidate.decision.is_duplicate && candidate.decision.review_required)
 }
 
 async fn ontology_materialize_metric(
@@ -63850,6 +64319,156 @@ mod tests {
         assert_eq!(materialized.semantic_object_count, 0);
         assert_eq!(materialized.semantic_link_count, 0);
         assert_eq!(materialized.tool_spec_count, 0);
+    }
+
+    async fn create_resolution_business_object(
+        state: &AppState,
+        domain_scope: &str,
+        object_name: &str,
+    ) -> SemanticObject {
+        state
+            .create_semantic_object(CreateSemanticObject {
+                source_id: None,
+                object_type: "business_object".to_string(),
+                object_key: format!(
+                    "{}.{}",
+                    ontology_slug(domain_scope),
+                    ontology_slug(object_name)
+                ),
+                title: object_name.to_string(),
+                summary: format!("{domain_scope} ontology object {object_name}"),
+                content: json!({
+                    "object_type": object_name,
+                    "domain_scope": domain_scope,
+                }),
+                semantic_scopes: json!({
+                    "domain_scope": domain_scope,
+                    "workflow_scope": "entity-resolution-test",
+                    "memory_scope": "ontology",
+                    "share_policy": "test",
+                }),
+                source_uri: Some(format!(
+                    "mandoforge://tests/entity-resolution/{}",
+                    ontology_slug(object_name)
+                )),
+                provenance: json!({"source": "test"}),
+                trust_level: "source_attested".to_string(),
+                freshness: "current".to_string(),
+                status: "active".to_string(),
+            })
+            .await
+            .expect("business object")
+    }
+
+    #[tokio::test]
+    async fn ontology_intelligence_entity_resolution_suggests_customer_client_merge() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        let client = create_resolution_business_object(&state, "commerce", "Client").await;
+        let response = ontology_entity_resolution_for_request(
+            &state,
+            &EntityResolutionRequest {
+                run_id: None,
+                candidate_name: Some("Customer".to_string()),
+                candidate_object_type: Some("Customer".to_string()),
+                domain_scope: Some("commerce".to_string()),
+                min_score: Some(0.50),
+            },
+        )
+        .await
+        .expect("entity resolution");
+
+        let candidate = response.candidates.first().expect("candidate");
+        assert_eq!(candidate.candidate_name, "Customer");
+        assert!(candidate.decision.is_duplicate);
+        assert_eq!(candidate.decision.existing_node_uuid, Some(client.id));
+        assert_eq!(candidate.decision.decision, "merge_into_existing");
+        assert!(candidate.decision.review_required);
+        assert!(candidate.retrieval_hits.iter().any(|hit| {
+            hit.object_id == client.id
+                && hit
+                    .match_reasons
+                    .iter()
+                    .any(|reason| reason == "alias_synonym")
+        }));
+    }
+
+    #[tokio::test]
+    async fn ontology_intelligence_entity_resolution_rejects_incompatible_merge() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        create_resolution_business_object(&state, "commerce", "Customer").await;
+        let response = ontology_entity_resolution_for_request(
+            &state,
+            &EntityResolutionRequest {
+                run_id: None,
+                candidate_name: Some("Claim".to_string()),
+                candidate_object_type: Some("Claim".to_string()),
+                domain_scope: Some("commerce".to_string()),
+                min_score: Some(0.50),
+            },
+        )
+        .await
+        .expect("entity resolution");
+
+        let candidate = response.candidates.first().expect("candidate");
+        assert!(!candidate.decision.is_duplicate);
+        assert_eq!(candidate.decision.decision, "new_entity");
+        assert!(candidate.retrieval_hits.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ontology_intelligence_entity_resolution_projects_merge_suggestion_to_graph() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        create_resolution_business_object(&state, "commerce", "Client").await;
+        let run = create_demo_ontology_onboarding_run_for_test(&state)
+            .await
+            .expect("demo run");
+        let graph = ontology_review_graph_for_run(&state, &run)
+            .await
+            .expect("review graph");
+
+        assert!(graph.nodes.iter().any(|node| {
+            node.node_type == "merge_candidate"
+                && node.label == "Client"
+                && node.source_proposal_id.is_some()
+        }));
+        assert!(graph.edges.iter().any(|edge| {
+            edge.edge_type == "merge_suggests"
+                && edge.from == "object:customer"
+                && edge.source_proposal_id.is_some()
+        }));
+    }
+
+    #[tokio::test]
+    async fn ontology_intelligence_merge_risk_blocks_object_materialization() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        create_resolution_business_object(&state, "commerce", "Client").await;
+        let run = create_demo_ontology_onboarding_run_for_test(&state)
+            .await
+            .expect("demo run");
+        let customer_proposal = run
+            .proposals
+            .iter()
+            .find(|proposal| proposal.proposal_type == "object" && proposal.name == "Customer")
+            .expect("customer proposal")
+            .id;
+        review_ontology_onboarding_proposal_for_test(
+            &state,
+            customer_proposal,
+            "approve",
+            Some("approved but should be blocked by merge risk"),
+        )
+        .await
+        .expect("approve customer");
+        let materialized = materialize_ontology_onboarding_run_for_test(&state, run.id)
+            .await
+            .expect("materialize");
+
+        assert_eq!(materialized.semantic_object_count, 0);
+        assert_eq!(materialized.semantic_link_count, 0);
+        let objects = state.list_semantic_objects().await.expect("objects");
+        assert!(!objects.iter().any(|object| {
+            object.object_type == "business_object" && object.object_key == "commerce.customer"
+        }));
     }
 
     #[tokio::test]
