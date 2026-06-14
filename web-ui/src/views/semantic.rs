@@ -1207,6 +1207,7 @@ fn OnboardingProposalRow(props: &OnboardingProposalRowProps) -> Html {
         let on_reject = props.on_reject.clone();
         Callback::from(move |_| on_reject.emit(id.clone()))
     };
+    let evidence_chips = proposal_evidence_chips(props.lang, &props.proposal);
     html! {
         <article class="ontology-proposal-row">
             <div class="ontology-proposal-head">
@@ -1220,8 +1221,140 @@ fn OnboardingProposalRow(props: &OnboardingProposalRowProps) -> Html {
                     <button onclick={reject} disabled={props.proposal.review_status == "rejected"}>{ props.lang.text("Reject", "拒绝") }</button>
                 </div>
             </div>
-            <JsonPreview value={props.proposal.evidence.clone()} />
+            <div class="ontology-proposal-evidence-chips">
+                { for evidence_chips.iter().map(|(label, value)| html! {
+                    <span class="ontology-proposal-chip" key={format!("{label}:{value}")}>
+                        <small>{ label }</small>
+                        <strong>{ value }</strong>
+                    </span>
+                }) }
+            </div>
+            <details class="ontology-proposal-json">
+                <summary>{ props.lang.text("Evidence JSON", "证据 JSON") }</summary>
+                <JsonPreview value={props.proposal.evidence.clone()} />
+            </details>
         </article>
+    }
+}
+
+fn proposal_evidence_chips(
+    lang: SemanticLang,
+    proposal: &OntologyOnboardingProposal,
+) -> Vec<(String, String)> {
+    let mut chips = Vec::new();
+    let keys = match proposal.proposal_type.as_str() {
+        "object" => [
+            "table",
+            "seed_ontology_match",
+            "primary_key_candidates",
+            "row_count",
+            "pii_candidates",
+            "time_dimensions",
+        ]
+        .as_slice(),
+        "relation" => [
+            "source_table",
+            "source_field",
+            "references_table",
+            "references_field",
+            "join_success_rate",
+            "seed_relation_match",
+        ]
+        .as_slice(),
+        "metric" => [
+            "target_object",
+            "expression",
+            "semantic_model",
+            "definition_evidence",
+            "domain_scope",
+            "tool_namespace",
+        ]
+        .as_slice(),
+        "logic" => [
+            "target_object",
+            "source_table",
+            "primary_key",
+            "enum_candidates",
+            "pii_candidates",
+            "field_null_rates",
+        ]
+        .as_slice(),
+        "action" => [
+            "target_object",
+            "execution_mode",
+            "transaction_profile",
+            "approval_required",
+            "effect_count",
+            "contract_source",
+        ]
+        .as_slice(),
+        _ => ["domain_scope", "industry", "tool_namespace", "source_mode"].as_slice(),
+    };
+
+    for key in keys {
+        let Some(value) = evidence_string(&proposal.evidence, key) else {
+            continue;
+        };
+        chips.push((
+            localized_evidence_key(lang, key).to_string(),
+            truncate_text(&value, 80),
+        ));
+    }
+
+    if chips.is_empty() {
+        chips.push((
+            lang.text("Recommendation", "建议").to_string(),
+            localized_status(lang, label_or(&proposal.recommendation, "review")),
+        ));
+    }
+
+    chips.into_iter().take(6).collect()
+}
+
+fn localized_evidence_key<'a>(lang: SemanticLang, key: &'a str) -> &'a str {
+    if lang == SemanticLang::En {
+        return key;
+    }
+    match key {
+        "approval_required" => "审批",
+        "contract_source" => "动作来源",
+        "definition_evidence" => "定义证据",
+        "domain_scope" => "领域",
+        "effect_count" => "影响数",
+        "enum_candidates" => "枚举候选",
+        "execution_mode" => "执行模式",
+        "expression" => "指标公式",
+        "field_null_rates" => "空值率",
+        "industry" => "行业",
+        "join_success_rate" => "关联成功率",
+        "pii_candidates" => "PII 候选",
+        "primary_key" => "主键",
+        "primary_key_candidates" => "主键候选",
+        "references_field" => "目标字段",
+        "references_table" => "目标表",
+        "row_count" => "样本行",
+        "seed_ontology_match" => "种子对象",
+        "seed_relation_match" => "种子关系",
+        "semantic_model" => "语义模型",
+        "source_field" => "来源字段",
+        "source_mode" => "来源模式",
+        "source_table" => "来源表",
+        "table" => "资料表",
+        "target_object" => "目标对象",
+        "time_dimensions" => "时间维度",
+        "tool_namespace" => "工具命名空间",
+        "transaction_profile" => "事务策略",
+        other => other,
+    }
+}
+
+fn truncate_text(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
     }
 }
 
