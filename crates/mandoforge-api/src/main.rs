@@ -2556,6 +2556,43 @@ struct EntityResolutionResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct ConfidenceCalibrationRecord {
+    id: Uuid,
+    run_id: Uuid,
+    proposal_id: Uuid,
+    proposal_type: String,
+    proposal_name: String,
+    model_confidence: f64,
+    deterministic_validator_score: f64,
+    retrieval_similarity_score: Option<f64>,
+    source_quality_score: f64,
+    reviewer_decision: String,
+    reviewer_status: String,
+    runtime_outcome: Option<String>,
+    evidence: Value,
+    recorded_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ConfidenceCalibrationBucket {
+    proposal_type: String,
+    reviewer_status: String,
+    count: usize,
+    average_model_confidence: f64,
+    average_validator_score: f64,
+    average_source_quality_score: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ConfidenceCalibrationResponse {
+    run_id: Uuid,
+    record_count: usize,
+    records: Vec<ConfidenceCalibrationRecord>,
+    buckets: Vec<ConfidenceCalibrationBucket>,
+    threshold_policy: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct OntologySeedPackSummary {
     industry: String,
     domain_scope: String,
@@ -7165,6 +7202,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/ontology/intelligence/entity-resolution",
             post(run_ontology_entity_resolution),
+        )
+        .route(
+            "/api/ontology/intelligence/runs/{id}/calibration",
+            get(get_ontology_confidence_calibration),
         )
         .route(
             "/api/semantic-conflicts/resolve",
@@ -12850,6 +12891,24 @@ async fn run_ontology_entity_resolution(
         .map(Json)
 }
 
+async fn get_ontology_confidence_calibration(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<ConfidenceCalibrationResponse>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "ontology_intelligence",
+        Some(id),
+    )
+    .await?;
+    ontology_confidence_calibration_for_run(&state, id)
+        .await
+        .map(Json)
+}
+
 #[cfg(test)]
 async fn create_demo_ontology_onboarding_run_for_test(
     state: &AppState,
@@ -15403,6 +15462,15 @@ async fn review_ontology_onboarding_proposal_with_actor(
             }),
         ))
         .await?;
+    ontology_record_confidence_calibration(
+        state,
+        run_id,
+        &proposal,
+        &decision,
+        &review_status,
+        actor_subject,
+    )
+    .await?;
     Ok(proposal)
 }
 
@@ -15673,6 +15741,286 @@ fn ontology_onboarding_run_from_objects(
         proposals,
         generated_at,
     })
+}
+
+async fn ontology_record_confidence_calibration(
+    state: &AppState,
+    run_id: Uuid,
+    proposal: &OntologyOnboardingProposalDraft,
+    reviewer_decision: &str,
+    reviewer_status: &str,
+    reviewer: &str,
+) -> Result<(), AppError> {
+    let deterministic_validator_score = ontology_calibration_validator_score(proposal);
+    let source_quality_score = ontology_calibration_source_quality_score(proposal);
+    let retrieval_similarity_score =
+        ontology_calibration_retrieval_similarity_score(state, proposal).await?;
+    let record_id = Uuid::new_v4();
+    let recorded_at = Utc::now();
+    let record = ConfidenceCalibrationRecord {
+        id: record_id,
+        run_id,
+        proposal_id: proposal.id,
+        proposal_type: proposal.proposal_type.clone(),
+        proposal_name: proposal.name.clone(),
+        model_confidence: proposal.confidence,
+        deterministic_validator_score,
+        retrieval_similarity_score,
+        source_quality_score,
+        reviewer_decision: reviewer_decision.to_string(),
+        reviewer_status: reviewer_status.to_string(),
+        runtime_outcome: None,
+        evidence: json!({
+            "engine": "deterministic_confidence_calibration_v1",
+            "reviewer": reviewer,
+            "threshold_policy_ref": "advisory_default_v1",
+            "thresholds_are_customer_tunable": true,
+            "proposal_evidence": proposal.evidence,
+        }),
+        recorded_at,
+    };
+    state
+        .create_semantic_object(CreateSemanticObject {
+            source_id: None,
+            object_type: "ontology_confidence_calibration".to_string(),
+            object_key: ontology_confidence_calibration_object_key(run_id, proposal.id, record_id),
+            title: format!("Confidence calibration: {}", proposal.name),
+            summary: format!(
+                "{} proposal calibration outcome: {}.",
+                proposal.proposal_type, reviewer_status
+            ),
+            content: serde_json::to_value(&record).map_err(|error| {
+                AppError::bad_request(format!("invalid confidence calibration record: {error}"))
+            })?,
+            semantic_scopes: json!({
+                "domain_scope": ontology_proposal_domain_scope(proposal),
+                "workflow_scope": "enterprise-ontology-fast-onboarding",
+                "memory_scope": "ontology",
+                "share_policy": "review_required",
+            }),
+            source_uri: Some(format!(
+                "mandoforge://ontology/intelligence/runs/{run_id}/calibration/{record_id}"
+            )),
+            provenance: json!({
+                "source": "ontology_confidence_calibration.review",
+                "run_id": run_id,
+                "proposal_id": proposal.id,
+                "recorded_at": recorded_at,
+            }),
+            trust_level: "source_attested".to_string(),
+            freshness: "current".to_string(),
+            status: "active".to_string(),
+        })
+        .await?;
+    Ok(())
+}
+
+async fn ontology_confidence_calibration_for_run(
+    state: &AppState,
+    run_id: Uuid,
+) -> Result<ConfidenceCalibrationResponse, AppError> {
+    let mut records = state
+        .list_semantic_objects()
+        .await?
+        .into_iter()
+        .filter(|object| {
+            object.object_type == "ontology_confidence_calibration"
+                && object.status == "active"
+                && object
+                    .content
+                    .get("run_id")
+                    .and_then(Value::as_str)
+                    .and_then(|value| Uuid::parse_str(value).ok())
+                    == Some(run_id)
+        })
+        .map(|object| {
+            serde_json::from_value::<ConfidenceCalibrationRecord>(object.content).map_err(|error| {
+                AppError::bad_request(format!("invalid confidence calibration record: {error}"))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    records.sort_by(|left, right| left.recorded_at.cmp(&right.recorded_at));
+    let buckets = ontology_confidence_calibration_buckets(&records);
+    Ok(ConfidenceCalibrationResponse {
+        run_id,
+        record_count: records.len(),
+        records,
+        buckets,
+        threshold_policy: ontology_confidence_threshold_policy(),
+    })
+}
+
+fn ontology_confidence_calibration_buckets(
+    records: &[ConfidenceCalibrationRecord],
+) -> Vec<ConfidenceCalibrationBucket> {
+    let mut grouped = BTreeMap::<(String, String), Vec<&ConfidenceCalibrationRecord>>::new();
+    for record in records {
+        grouped
+            .entry((record.proposal_type.clone(), record.reviewer_status.clone()))
+            .or_default()
+            .push(record);
+    }
+    grouped
+        .into_iter()
+        .map(|((proposal_type, reviewer_status), records)| {
+            let count = records.len();
+            ConfidenceCalibrationBucket {
+                proposal_type,
+                reviewer_status,
+                count,
+                average_model_confidence: ontology_average(
+                    records.iter().map(|record| record.model_confidence),
+                    count,
+                ),
+                average_validator_score: ontology_average(
+                    records
+                        .iter()
+                        .map(|record| record.deterministic_validator_score),
+                    count,
+                ),
+                average_source_quality_score: ontology_average(
+                    records.iter().map(|record| record.source_quality_score),
+                    count,
+                ),
+            }
+        })
+        .collect()
+}
+
+fn ontology_average(values: impl Iterator<Item = f64>, count: usize) -> f64 {
+    if count == 0 {
+        0.0
+    } else {
+        values.sum::<f64>() / count as f64
+    }
+}
+
+fn ontology_confidence_threshold_policy() -> Value {
+    json!({
+        "policy_id": "advisory_default_v1",
+        "customer_tunable": true,
+        "not_a_global_production_benchmark": true,
+        "configuration_surface": {
+            "scope": "customer_or_domain_policy",
+            "override_field": "confidence_threshold_policy",
+            "stored_as": "review_policy_metadata"
+        },
+        "bands": [
+            {"min": 0.90, "max": 1.00, "action": "draft_ready"},
+            {"min": 0.70, "max": 0.89, "action": "quick_review"},
+            {"min": 0.50, "max": 0.69, "action": "detailed_review"},
+            {"min": 0.00, "max": 0.49, "action": "retry_or_discard"}
+        ]
+    })
+}
+
+fn ontology_calibration_validator_score(proposal: &OntologyOnboardingProposalDraft) -> f64 {
+    match proposal.proposal_type.as_str() {
+        "object" => {
+            let has_seed = proposal.evidence.get("seed_ontology_match").is_some();
+            let has_pk = proposal
+                .evidence
+                .get("primary_key_candidates")
+                .and_then(Value::as_array)
+                .map(|values| !values.is_empty())
+                .unwrap_or(false);
+            let mut score: f64 = 0.50;
+            if has_seed {
+                score += 0.25;
+            }
+            if has_pk {
+                score += 0.20;
+            }
+            score.clamp(0.0, 1.0)
+        }
+        "relation" => proposal
+            .evidence
+            .get("join_success_rate")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.50)
+            .clamp(0.0, 1.0),
+        "metric" => 0.75,
+        "logic" | "logic_rule" => {
+            if proposal
+                .evidence
+                .get("primary_key_candidates")
+                .and_then(Value::as_array)
+                .map(|values| !values.is_empty())
+                .unwrap_or(false)
+            {
+                0.88
+            } else {
+                0.60
+            }
+        }
+        "action" => {
+            let has_policy = proposal.content.get("policy").is_some();
+            let has_effects = proposal.content.get("effects").is_some();
+            let has_audit = proposal.content.get("audit_event").is_some();
+            0.50 + (has_policy as u8 as f64 * 0.15)
+                + (has_effects as u8 as f64 * 0.15)
+                + (has_audit as u8 as f64 * 0.15)
+        }
+        _ => 0.50,
+    }
+    .clamp(0.0, 1.0)
+}
+
+fn ontology_calibration_source_quality_score(proposal: &OntologyOnboardingProposalDraft) -> f64 {
+    let row_count = proposal
+        .evidence
+        .get("row_count")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let mut score: f64 = if row_count > 0 { 0.55 } else { 0.35 };
+    if proposal.evidence.get("source_mode").is_some() {
+        score += 0.10;
+    }
+    if proposal
+        .evidence
+        .get("pii_candidates")
+        .and_then(Value::as_array)
+        .map(|values| !values.is_empty())
+        .unwrap_or(false)
+    {
+        score -= 0.05;
+    }
+    if proposal.evidence.get("join_success_rate").is_some() {
+        score += 0.25;
+    }
+    score.clamp(0.0, 1.0)
+}
+
+async fn ontology_calibration_retrieval_similarity_score(
+    state: &AppState,
+    proposal: &OntologyOnboardingProposalDraft,
+) -> Result<Option<f64>, AppError> {
+    if proposal.proposal_type != "object" {
+        return Ok(None);
+    }
+    let candidate_name = proposal
+        .content
+        .get("object_type")
+        .and_then(Value::as_str)
+        .unwrap_or(&proposal.name);
+    let domain_scope = ontology_proposal_domain_scope(proposal);
+    let semantic_objects = state.list_semantic_objects().await?;
+    let candidate = ontology_entity_resolution_candidate(
+        candidate_name,
+        candidate_name,
+        &domain_scope,
+        &semantic_objects,
+        0.0,
+    );
+    Ok(candidate.retrieval_hits.first().map(|hit| hit.score))
+}
+
+fn ontology_confidence_calibration_object_key(
+    run_id: Uuid,
+    proposal_id: Uuid,
+    record_id: Uuid,
+) -> String {
+    format!("ontology:calibration:{run_id}:{proposal_id}:{record_id}")
 }
 
 fn normalize_ontology_onboarding_review_decision(
@@ -64469,6 +64817,155 @@ mod tests {
         assert!(!objects.iter().any(|object| {
             object.object_type == "business_object" && object.object_key == "commerce.customer"
         }));
+    }
+
+    #[tokio::test]
+    async fn ontology_intelligence_review_appends_confidence_calibration_record() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        let run = create_demo_ontology_onboarding_run_for_test(&state)
+            .await
+            .expect("demo run");
+        let customer_proposal = run
+            .proposals
+            .iter()
+            .find(|proposal| proposal.proposal_type == "object" && proposal.name == "Customer")
+            .expect("customer proposal")
+            .id;
+
+        review_ontology_onboarding_proposal_for_test(
+            &state,
+            customer_proposal,
+            "approve",
+            Some("seed mapping and profile evidence match"),
+        )
+        .await
+        .expect("approve customer");
+
+        let calibration = ontology_confidence_calibration_for_run(&state, run.id)
+            .await
+            .expect("calibration");
+        assert_eq!(calibration.record_count, 1);
+        let record = calibration.records.first().expect("record");
+        assert_eq!(record.run_id, run.id);
+        assert_eq!(record.proposal_id, customer_proposal);
+        assert_eq!(record.proposal_type, "object");
+        assert_eq!(record.proposal_name, "Customer");
+        assert_eq!(record.reviewer_decision, "approve");
+        assert_eq!(record.reviewer_status, "approved");
+        assert!(record.model_confidence > 0.0);
+        assert!(record.deterministic_validator_score > 0.0);
+        assert!(record.source_quality_score > 0.0);
+        assert_eq!(
+            record.evidence["thresholds_are_customer_tunable"].as_bool(),
+            Some(true)
+        );
+
+        let objects = state.list_semantic_objects().await.expect("objects");
+        assert!(objects.iter().any(|object| {
+            object.object_type == "ontology_confidence_calibration"
+                && object.content["proposal_id"] == json!(customer_proposal)
+                && object.content["reviewer_status"] == json!("approved")
+        }));
+    }
+
+    #[tokio::test]
+    async fn ontology_intelligence_calibration_summary_buckets_by_type_and_outcome() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        let run = create_demo_ontology_onboarding_run_for_test(&state)
+            .await
+            .expect("demo run");
+        let object_proposal = run
+            .proposals
+            .iter()
+            .find(|proposal| proposal.proposal_type == "object" && proposal.name == "Order")
+            .expect("order proposal")
+            .id;
+        let relation_proposal = run
+            .proposals
+            .iter()
+            .find(|proposal| {
+                proposal.proposal_type == "relation" && proposal.name == "Customer places Order"
+            })
+            .expect("customer order relation")
+            .id;
+
+        review_ontology_onboarding_proposal_for_test(
+            &state,
+            object_proposal,
+            "approve",
+            Some("object evidence is sufficient"),
+        )
+        .await
+        .expect("approve object");
+        review_ontology_onboarding_proposal_for_test(
+            &state,
+            relation_proposal,
+            "reject",
+            Some("gate exercises rejected relation calibration"),
+        )
+        .await
+        .expect("reject relation");
+
+        let calibration = ontology_confidence_calibration_for_run(&state, run.id)
+            .await
+            .expect("calibration");
+        assert_eq!(calibration.record_count, 2);
+        assert!(calibration.buckets.iter().any(|bucket| {
+            bucket.proposal_type == "object"
+                && bucket.reviewer_status == "approved"
+                && bucket.count == 1
+                && bucket.average_model_confidence > 0.0
+                && bucket.average_validator_score > 0.0
+        }));
+        assert!(calibration.buckets.iter().any(|bucket| {
+            bucket.proposal_type == "relation"
+                && bucket.reviewer_status == "rejected"
+                && bucket.count == 1
+                && bucket.average_source_quality_score > 0.0
+        }));
+    }
+
+    #[tokio::test]
+    async fn ontology_intelligence_calibration_threshold_policy_is_advisory() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        let run = create_demo_ontology_onboarding_run_for_test(&state)
+            .await
+            .expect("demo run");
+        let action_proposal = run
+            .proposals
+            .iter()
+            .find(|proposal| proposal.proposal_type == "action" && proposal.name == "refund_order")
+            .expect("refund action proposal")
+            .id;
+
+        review_ontology_onboarding_proposal_for_test(
+            &state,
+            action_proposal,
+            "approve",
+            Some("action remains approval gated"),
+        )
+        .await
+        .expect("approve action");
+
+        let calibration = ontology_confidence_calibration_for_run(&state, run.id)
+            .await
+            .expect("calibration");
+        assert_eq!(
+            calibration.threshold_policy["customer_tunable"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            calibration.threshold_policy["not_a_global_production_benchmark"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            calibration.threshold_policy["configuration_surface"]["scope"].as_str(),
+            Some("customer_or_domain_policy")
+        );
+        assert_eq!(
+            calibration.records[0].evidence["threshold_policy_ref"].as_str(),
+            Some("advisory_default_v1")
+        );
     }
 
     #[tokio::test]

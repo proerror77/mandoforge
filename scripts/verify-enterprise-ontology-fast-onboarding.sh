@@ -194,6 +194,21 @@ for proposal_id in "${proposal_ids[@]}"; do
     >"$EVIDENCE_DIR/review-$proposal_id.json"
 done
 
+calibration_file="$EVIDENCE_DIR/calibration.json"
+curl -sS "${headers[@]}" "$BASE_URL/api/ontology/intelligence/runs/$run_id/calibration" \
+  | tee "$calibration_file" >/dev/null
+jq -e --arg run_id "$run_id" --argjson expected_count "${#proposal_ids[@]}" '
+  .run_id == $run_id
+  and .record_count >= $expected_count
+  and any(.records[]?; .proposal_type == "object" and .reviewer_status == "approved")
+  and any(.records[]?; .proposal_type == "relation" and .reviewer_status == "approved")
+  and any(.records[]?; .proposal_type == "action" and .reviewer_status == "approved")
+  and any(.buckets[]?; .proposal_type == "object" and .reviewer_status == "approved" and .count >= 1)
+  and .threshold_policy.customer_tunable == true
+  and .threshold_policy.not_a_global_production_benchmark == true
+  and .threshold_policy.configuration_surface.scope == "customer_or_domain_policy"
+' "$calibration_file" >/dev/null
+
 materialized_file="$EVIDENCE_DIR/materialized.json"
 curl -sS -X POST "${headers[@]}" "$BASE_URL/api/ontology/onboarding/runs/$run_id/materialize" \
   | tee "$materialized_file" >/dev/null
@@ -251,6 +266,7 @@ summary_file="$EVIDENCE_DIR/summary.txt"
   echo "run_after_curated_review_file=$run_after_curated_review_file"
   echo "review_graph_file=$review_graph_file"
   echo "review_graph_after_file=$review_graph_after_file"
+  echo "calibration_file=$calibration_file"
   echo "insurance_run_id=$(jq -r '.id' "$insurance_run_file")"
   echo "run_file=$run_file"
   echo "materialized_file=$materialized_file"
