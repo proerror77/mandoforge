@@ -133,8 +133,8 @@ pub(crate) fn SemanticView(props: &SemanticProps) -> Html {
                     <span class="semantic-kicker">{ current_lang.text("Ontology Builder", "本体构建器") }</span>
                     <h1>{ current_lang.text("Turn enterprise data into reviewed agent tools.", "把企业数据变成可审核、可发布的智能体工具。") }</h1>
                     <p>{ current_lang.text(
-                        "Start with seed ontology and source evidence. Review the proposed business objects, relations, metrics, logic, and actions before anything is materialized.",
-                        "先用行业种子本体和数据证据生成提案。人工确认业务对象、关系、指标、规则和动作之后，才写入语义层。"
+                        "The LLM loop mines schemas, profiles, samples, and lineage into ontology proposals. Humans approve the business meaning before anything is materialized.",
+                        "LLM 循环挖掘 schema、画像、样本和血缘，生成本体提案；人工确认业务含义之后，才写入语义层。"
                     ) }</p>
                 </div>
                 <div class="semantic-hero-controls">
@@ -349,6 +349,11 @@ struct SemanticJourneyProps {
 #[component]
 fn SemanticJourney(props: &SemanticJourneyProps) -> Html {
     let run_started = props.run.is_some();
+    let proposed = props
+        .run
+        .as_ref()
+        .map(|run| run.proposal_count > 0)
+        .unwrap_or(false);
     let reviewed = props
         .run
         .as_ref()
@@ -383,14 +388,22 @@ fn SemanticJourney(props: &SemanticJourneyProps) -> Html {
         ),
         (
             "03",
-            props.lang.text("Review proposals", "审核提案"),
+            props.lang.text("LLM mining loop", "LLM 循环挖掘"),
             props
                 .lang
-                .text("Objects, links, metrics, actions", "对象、关系、指标、动作"),
-            reviewed,
+                .text("Objects, links, metrics, actions", "挖掘对象、关系、指标、动作"),
+            proposed,
         ),
         (
             "04",
+            props.lang.text("Human review", "人工确认"),
+            props
+                .lang
+                .text("Approve business meaning", "确认业务含义再批准"),
+            reviewed,
+        ),
+        (
+            "05",
             props.lang.text("Publish ontology", "发布本体"),
             props
                 .lang
@@ -398,7 +411,7 @@ fn SemanticJourney(props: &SemanticJourneyProps) -> Html {
             materialized,
         ),
         (
-            "05",
+            "06",
             props.lang.text("Compile tools", "生成工具"),
             props
                 .lang
@@ -451,7 +464,12 @@ fn OnboardingPanel(props: &OnboardingPanelProps) -> Html {
     };
     html! {
         <div class="ontology-onboarding">
-            <OntologyMindMapPanel lang={props.lang} graph={props.review_graph.clone()} />
+            <OntologyMindMapPanel
+                lang={props.lang}
+                graph={props.review_graph.clone()}
+                on_approve={props.on_approve.clone()}
+                on_reject={props.on_reject.clone()}
+            />
             <OntologyRunSummary
                 lang={props.lang}
                 run={run.clone()}
@@ -731,6 +749,8 @@ fn graph_nodes_of_type<'a>(
 struct OntologyMindMapPanelProps {
     lang: SemanticLang,
     graph: Option<OntologyReviewGraph>,
+    on_approve: Callback<String>,
+    on_reject: Callback<String>,
 }
 
 #[component]
@@ -753,10 +773,9 @@ fn OntologyMindMapPanel(props: &OntologyMindMapPanelProps) -> Html {
     let objects = graph_nodes_of_type(graph, &["object", "subgraph", "merge_candidate"], 10);
     let actions = graph_nodes_of_type(graph, &["metric", "logic", "action", "tool"], 10);
     let selected_node_id = use_state(|| {
-        objects
-            .first()
-            .or_else(|| datasets.first())
-            .or_else(|| actions.first())
+        graph_focus_node(graph)
+            .or_else(|| datasets.first().copied())
+            .or_else(|| actions.first().copied())
             .map(|node| node.id.clone())
             .unwrap_or_default()
     });
@@ -825,6 +844,8 @@ fn OntologyMindMapPanel(props: &OntologyMindMapPanelProps) -> Html {
                         graph={graph.clone()}
                         node={selected_node.cloned()}
                         connected_edges={connected_edges.into_iter().cloned().collect::<Vec<_>>()}
+                        on_approve={props.on_approve.clone()}
+                        on_reject={props.on_reject.clone()}
                     />
                 </aside>
             </div>
@@ -949,64 +970,80 @@ fn positioned_ontology_nodes(graph: &OntologyReviewGraph) -> Vec<PositionedOntol
     let datasets = graph_nodes_of_type(graph, &["dataset"], 8);
     let metrics = graph_nodes_of_type(graph, &["metric"], 5);
     let actions = graph_nodes_of_type(graph, &["action"], 4);
+    let focus_id = graph_focus_node(graph).map(|node| node.id.clone());
 
-    push_positioned_column(&mut positioned, datasets, 11.0, 13.0, 87.0);
-    push_positioned_grid(&mut positioned, objects, 35.0, 59.0, 18.0, 82.0, 2);
-    push_positioned_column(&mut positioned, metrics, 78.0, 13.0, 52.0);
-    push_positioned_column(&mut positioned, actions, 78.0, 66.0, 88.0);
+    if let Some(focus_node) = graph_focus_node(graph) {
+        positioned.push(PositionedOntologyNode {
+            node: focus_node.clone(),
+            x: 50.0,
+            y: 50.0,
+        });
+    }
+
+    push_positioned_orbit(
+        &mut positioned,
+        objects
+            .into_iter()
+            .filter(|node| Some(&node.id) != focus_id.as_ref())
+            .collect(),
+        50.0,
+        50.0,
+        23.0,
+        28.0,
+        -135.0,
+        190.0,
+    );
+    push_positioned_orbit(&mut positioned, datasets, 50.0, 50.0, 41.0, 37.0, 132.0, 228.0);
+    push_positioned_orbit(&mut positioned, metrics, 50.0, 50.0, 39.0, 35.0, -48.0, 42.0);
+    push_positioned_orbit(&mut positioned, actions, 50.0, 50.0, 39.0, 35.0, 52.0, 82.0);
     positioned
 }
 
-fn push_positioned_column(
-    positioned: &mut Vec<PositionedOntologyNode>,
-    nodes: Vec<&OntologyReviewGraphNode>,
-    x: f64,
-    y_min: f64,
-    y_max: f64,
-) {
-    let count = nodes.len().max(1);
-    for (index, node) in nodes.into_iter().enumerate() {
-        let y = if count == 1 {
-            (y_min + y_max) / 2.0
-        } else {
-            y_min + ((y_max - y_min) * index as f64 / (count - 1) as f64)
-        };
-        positioned.push(PositionedOntologyNode {
-            node: node.clone(),
-            x,
-            y,
-        });
-    }
+fn graph_focus_node(graph: &OntologyReviewGraph) -> Option<&OntologyReviewGraphNode> {
+    graph
+        .nodes
+        .iter()
+        .filter(|node| node.node_type == "object")
+        .max_by_key(|node| {
+            let preferred = match node.label.as_str() {
+                "Order" | "Customer" | "Product" => 10_000,
+                _ => 0,
+            };
+            preferred + graph_node_degree(graph, &node.id)
+        })
 }
 
-fn push_positioned_grid(
+fn graph_node_degree(graph: &OntologyReviewGraph, node_id: &str) -> usize {
+    graph
+        .edges
+        .iter()
+        .filter(|edge| edge.from == node_id || edge.to == node_id)
+        .count()
+}
+
+fn push_positioned_orbit(
     positioned: &mut Vec<PositionedOntologyNode>,
     nodes: Vec<&OntologyReviewGraphNode>,
-    x_min: f64,
-    x_max: f64,
-    y_min: f64,
-    y_max: f64,
-    columns: usize,
+    cx: f64,
+    cy: f64,
+    rx: f64,
+    ry: f64,
+    start_degrees: f64,
+    end_degrees: f64,
 ) {
     let count = nodes.len();
     if count == 0 {
         return;
     }
-    let columns = columns.max(1);
-    let rows = count.div_ceil(columns).max(1);
     for (index, node) in nodes.into_iter().enumerate() {
-        let column = index % columns;
-        let row = index / columns;
-        let x = if columns == 1 {
-            (x_min + x_max) / 2.0
+        let angle = if count == 1 {
+            (start_degrees + end_degrees) / 2.0
         } else {
-            x_min + ((x_max - x_min) * column as f64 / (columns - 1) as f64)
+            start_degrees + ((end_degrees - start_degrees) * index as f64 / (count - 1) as f64)
         };
-        let y = if rows == 1 {
-            (y_min + y_max) / 2.0
-        } else {
-            y_min + ((y_max - y_min) * row as f64 / (rows - 1) as f64)
-        };
+        let radians = angle.to_radians();
+        let x = cx + rx * radians.cos();
+        let y = cy + ry * radians.sin();
         positioned.push(PositionedOntologyNode {
             node: node.clone(),
             x,
@@ -1021,6 +1058,8 @@ struct OntologyNodeInspectorProps {
     graph: OntologyReviewGraph,
     node: Option<OntologyReviewGraphNode>,
     connected_edges: Vec<OntologyReviewGraphEdge>,
+    on_approve: Callback<String>,
+    on_reject: Callback<String>,
 }
 
 #[component]
@@ -1032,12 +1071,50 @@ fn OntologyNodeInspector(props: &OntologyNodeInspectorProps) -> Html {
         .iter()
         .filter_map(|key| evidence_string(&node.evidence, key).map(|value| ((*key).to_string(), value)))
         .collect::<Vec<_>>();
+    let source_proposal_id = node.source_proposal_id.clone();
+    let approve = {
+        let source_proposal_id = source_proposal_id.clone();
+        let on_approve = props.on_approve.clone();
+        Callback::from(move |_| {
+            if let Some(id) = source_proposal_id.clone() {
+                on_approve.emit(id);
+            }
+        })
+    };
+    let reject = {
+        let source_proposal_id = source_proposal_id.clone();
+        let on_reject = props.on_reject.clone();
+        Callback::from(move |_| {
+            if let Some(id) = source_proposal_id.clone() {
+                on_reject.emit(id);
+            }
+        })
+    };
+    let review_done = node.status == "approved" || node.status == "rejected";
+    let can_review = source_proposal_id.is_some() && !review_done;
     html! {
         <div class="ontology-node-detail">
             <div class="ontology-node-detail-head">
                 <span>{ localized_node_type(props.lang, &node.node_type) }</span>
                 <strong>{ node.label.clone() }</strong>
                 <small>{ format!("{}% / {}", (node.confidence * 100.0).round(), localized_status(props.lang, label_or(&node.status, "pending"))) }</small>
+            </div>
+            <div class="ontology-node-review-actions">
+                <button onclick={approve} disabled={!can_review}>
+                    { props.lang.text("Approve proposal", "批准此提案") }
+                </button>
+                <button class="secondary" onclick={reject} disabled={!can_review}>
+                    { props.lang.text("Reject", "拒绝") }
+                </button>
+                <small>{ if source_proposal_id.is_some() {
+                    if review_done {
+                        props.lang.text("This graph proposal has already been reviewed.", "这个图谱提案已经审核过。")
+                    } else {
+                        props.lang.text("Approve from the graph when the selected business meaning is correct.", "当选中节点的业务含义正确时，可直接在图谱上批准。")
+                    }
+                } else {
+                    props.lang.text("This node is context only and has no direct proposal to approve.", "此节点只是上下文，没有可直接批准的提案。")
+                } }</small>
             </div>
             <div class="ontology-node-evidence">
                 { for evidence_rows.iter().map(|(key, value)| html! {
