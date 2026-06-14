@@ -607,6 +607,8 @@ fn App() -> Html {
                     <span>{ "Bearer token is used with x-mandoforge identity headers for live gates and production consoles." }</span>
                 </div>
                 <input
+                    id="mandoforge-admin-token"
+                    name="mandoforge-admin-token"
                     value={(*token_input).clone()}
                     placeholder="MANDOFORGE_DEV_ADMIN_TOKEN"
                     type="password"

@@ -49,7 +49,12 @@ pub(crate) fn SemanticView(props: &SemanticProps) -> Html {
             </Panel>
             <Panel title="Ontology builder">
                 <div class="form-stack">
-                    <textarea value={props.source_text.clone()} oninput={props.on_source.clone()} />
+                    <textarea
+                        id="ontology-builder-source"
+                        name="ontology-builder-source"
+                        value={props.source_text.clone()}
+                        oninput={props.on_source.clone()}
+                    />
                     <button onclick={props.on_build.clone()}>{ "Preview ontology proposal" }</button>
                 </div>
             </Panel>
@@ -59,6 +64,8 @@ pub(crate) fn SemanticView(props: &SemanticProps) -> Html {
             <Panel title="Context compiler">
                 <div class="form-stack">
                     <input
+                        id="context-packet-id"
+                        name="context-packet-id"
                         value={props.context_packet_id.clone()}
                         placeholder="Context packet ID"
                         oninput={props.on_context_packet_id.clone()}

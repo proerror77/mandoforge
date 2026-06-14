@@ -2,6 +2,7 @@
 target = "index.html"
 dist = "../web"
 public_url = "/"
+no_sri = true
 
 [watch]
 ignore = ["../target", "../web", "../.git"]
