@@ -235,15 +235,25 @@ approval-gated and non-live unless an approved connector execution path exists.
 
 ## API Shape
 
-The first implementation should add a compact API surface:
+The implemented API surface is:
 
 ```text
 POST /api/ontology/onboarding/demo-runs
+GET  /api/ontology/onboarding/seed-packs
 GET  /api/ontology/onboarding/runs
+POST /api/ontology/onboarding/runs
 GET  /api/ontology/onboarding/runs/{id}
+GET  /api/ontology/onboarding/runs/{id}/dag
+GET  /api/ontology/onboarding/runs/{id}/prompt-packet
+GET  /api/ontology/onboarding/runs/{id}/review-graph
+POST /api/ontology/onboarding/curated-datasets/{id}/review
 POST /api/ontology/onboarding/proposals/{id}/review
 POST /api/ontology/onboarding/runs/{id}/materialize
 GET  /api/ontology/onboarding/runs/{id}/tool-specs
+POST /api/ontology/intelligence/schema-understanding
+POST /api/ontology/intelligence/subgraph-proposals
+POST /api/ontology/intelligence/entity-resolution
+GET  /api/ontology/intelligence/runs/{id}/calibration
 ```
 
 The API should require admin or agents-write authorization consistent with the
@@ -260,6 +270,8 @@ Minimum UI:
 - show discovered datasets
 - show profile summary
 - show proposal counts by type and status
+- show run-scoped Ontology Review Graph
+- show low-confidence review queue and calibration evidence
 - review proposal list
 - approve/reject/request changes
 - materialize approved proposals
@@ -397,10 +409,16 @@ contract, and Alibaba TOP native adapter boundary.
 The first ecommerce demo slice is implemented by the API routes under
 `/api/ontology/onboarding/*`, the Semantic console fast-onboarding panel, and
 `scripts/verify-enterprise-ontology-fast-onboarding.sh`. The first slice remains
-demo-source only; Tmall connector input is the next compatible adapter.
+proposal-first and materializes only reviewed ontology artifacts. Tmall
+connector input is the next compatible adapter.
 
 The builder kernel now separates `OntologySeedPack` from `OntologySourceBundle`.
 Ecommerce and insurance demo seeds both run through the same profiler,
 proposal engine, review flow, materializer, and tool compiler. This keeps the
 current UI compatible while making additional industries a seed/source-adapter
 addition instead of a new ontology-building workflow.
+
+The current implementation also exposes the run DAG, prompt packet, review
+graph, curated dataset review, schema understanding, subgraph proposals, entity
+resolution, confidence calibration, and compiled tool specs. See
+`docs/ontology-builder-usage.md` for the operator runbook.

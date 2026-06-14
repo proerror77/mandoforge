@@ -358,18 +358,19 @@ sync can be added later as a projection from the governed semantic store.
 
 ## API Surface
 
-Proposed future endpoints:
+Implemented intelligence endpoints:
 
 ```text
 POST /api/ontology/intelligence/schema-understanding
 POST /api/ontology/intelligence/subgraph-proposals
 POST /api/ontology/intelligence/entity-resolution
 GET  /api/ontology/intelligence/runs/{id}/calibration
-POST /api/ontology/intelligence/action-transaction-profiles
 ```
 
-These endpoints should return proposal artifacts and review graph updates, not
-publish ontology state.
+These endpoints return proposal artifacts, merge candidates, calibration
+records, and review graph inputs. They do not publish ontology state. Action
+transaction behavior is currently surfaced through compiled tool specs and
+review graph risk labels, not through a separate action-transaction endpoint.
 
 ## UI Requirements
 

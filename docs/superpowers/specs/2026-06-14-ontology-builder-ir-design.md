@@ -406,7 +406,12 @@ Minimum additions:
 
 ## Known Current Architecture Gaps
 
-The implementation should address these while extracting the IR:
+The implementation has addressed several gaps from the first IR pass: curated
+dataset review, logic proposal drafts, run-scoped review graph projection,
+read/write risk on compiled tool specs, and ecommerce plus insurance source
+modes are now covered by the fast-onboarding gate.
+
+Remaining extraction gaps:
 
 - `ontology_onboarding_run_from_objects()` reconstructs runs from
   `ontology_demo_source_bundle()`, which loses the original industry/source
@@ -414,14 +419,10 @@ The implementation should address these while extracting the IR:
   run envelope object and rehydrate from that metadata.
 - The current seed and source structs live inline in `main.rs`. This is enough
   for the demo but too coupled for an industry-generic builder.
-- Current proposals cover object, relation, metric, and action, but not logic
-  rule drafts.
-- Current profiling is useful but skips the curated review boundary from the
-  product model.
-- Tool specs are generated only for materialized action proposals. This should
-  remain, but the spec should also expose read/write risk and approval policy.
-- The current Semantic graph is a general semantic map. It does not yet provide
-  a run-scoped ontology review graph with proposal evidence and review actions.
+- Real external connector ingestion is still represented by demo source bundles.
+  Tmall dry-run input is the next adapter boundary.
+- The Semantic view has the review graph and proposal actions, but it is still
+  a compact operator panel rather than a dedicated graph-canvas workbench.
 
 ## Testing
 

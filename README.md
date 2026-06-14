@@ -201,6 +201,7 @@ Current managed-agent baseline:
 - The UI run view is organized around the managed-session objects first: Agent, Environment, Event Stream, Blocking Actions, Artifacts, and Threads. Raw worker, Remote Computer, provider, secret, MCP, and tenant infrastructure remain in system and advanced panels.
 - Dynamic Workflow Plans are now first-class review envelopes: `POST /api/dynamic-workflow-plans` validates phases, agent fleet limits, governance, validation, and materialization policy; review approval gates execution; materialization creates a normal `WorkflowDefinition`, `WorkflowRun`, primary session, root `TaskGrant`, and start steps. Delegated plans target adapters such as Claude Code or Codex App Server without letting the external runtime bypass MandoForge policy and audit.
 - Semantic Ontology Builder is proposal-only: `POST /api/semantic-ontology/builder` accepts operator/AI first-draft context, normalizes object and relation candidates, records source refs and review gates, and creates an `ontology_expansion` semantic object for review. It does not directly mutate the ontology registry or durable organizational memory.
+- Enterprise Ontology Fast-Onboarding is now exposed through the Semantic console and `/api/ontology/onboarding/*`: seed packs, demo runs, schema understanding, review graph, proposal review, materialization, calibration, and compiled tool specs. The operator workflow is documented in [Ontology Builder Usage](docs/ontology-builder-usage.md).
 
 Runtime alignment is tracked in
 [Claude Managed Agents Alignment](docs/claude-managed-agents-alignment.md) and
@@ -277,6 +278,17 @@ Static UI smoke:
 ```bash
 ./scripts/verify-static-ui-actionbook.sh
 ```
+
+Ontology Builder fast-onboarding gate:
+
+```bash
+BASE_URL=http://127.0.0.1:8787 \
+./scripts/verify-enterprise-ontology-fast-onboarding.sh
+```
+
+See [Ontology Builder Usage](docs/ontology-builder-usage.md) for the Semantic
+console flow, API examples, proposal review boundary, and extension pattern for
+new industries.
 
 ## Optional Runtime Modes
 

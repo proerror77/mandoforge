@@ -383,6 +383,23 @@ The semantic layer gives agents stable business context:
 - Context packets.
 - Memory writeback candidates.
 
+Ontology Builder is the operator path for turning enterprise data evidence into
+reviewed semantic artifacts. The current path is proposal-first:
+
+```text
+seed pack + source bundle/profile
+  -> onboarding run
+  -> schema understanding and subgraph proposals
+  -> prompt packet and review graph
+  -> human proposal review
+  -> materialized semantic objects and links
+  -> compiled agent tool specs
+```
+
+The Semantic console exposes this through the fast-onboarding panel and the
+run-scoped Ontology Review Graph. The detailed operator flow and API examples
+are in [Ontology Builder Usage](ontology-builder-usage.md).
+
 The current ontology contract is `/api/ontology/registry` version `core-v0.1`.
 It exposes the canonical object catalog and the allowed semantic relation
 triples. New semantic links must match a declared

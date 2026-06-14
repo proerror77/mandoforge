@@ -194,6 +194,7 @@ Agent / Semantic Layer 都依赖一个可靠的 event-driven runtime：
 - `Environment(type=remote_computer)` 现在负责自动 Remote Computer 分配：approved execution jobs 只会自动 claim 与 session environment contract 匹配的 lease 或 warm-pool resource；绑定 remote environment 但未启用 Remote Computer execution transport 时会 fail closed，不会静默退回本地执行。
 - UI 的开始任务表单会加载 environments，并把新 session 绑定到选择的环境。
 - UI 的运行路径先围绕 managed-session 对象组织：Agent、Environment、Event Stream、Blocking Actions、Artifacts 和 Threads；worker、Remote Computer、provider、secret、MCP、tenant 等底层设施保留在系统状态和高级面板里。
+- Enterprise Ontology Fast-Onboarding 已通过 Semantic console 和 `/api/ontology/onboarding/*` 暴露：seed packs、demo runs、schema understanding、review graph、proposal review、materialization、calibration 和 compiled tool specs。用法见 [Ontology Builder Usage](docs/ontology-builder-usage.md)。
 
 Runtime 对齐状态记录在 [Claude Managed Agents Alignment](docs/claude-managed-agents-alignment.md)
 和 [Agent OS Product Roadmap](docs/stage2-stage3-roadmap.md)。核心 runtime contract
@@ -242,6 +243,13 @@ Docker Desktop 可用时：
 
 ```bash
 RUN_LIVE=1 START_LIVE_STACK=1 ./scripts/stage1-final-gate.sh
+```
+
+Ontology Builder fast-onboarding gate：
+
+```bash
+BASE_URL=http://127.0.0.1:8787 \
+./scripts/verify-enterprise-ontology-fast-onboarding.sh
 ```
 
 Postgres-backed restart/resume core evidence：
