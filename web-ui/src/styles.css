@@ -1196,7 +1196,7 @@ h2 {
 
 .semantic-main-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1.45fr) minmax(300px, 0.72fr);
+  grid-template-columns: 1fr;
   gap: 14px;
   align-items: start;
 }
@@ -1218,6 +1218,7 @@ h2 {
 
 .semantic-side-rail {
   display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
   min-width: 0;
 }
@@ -1365,6 +1366,157 @@ h2 {
 .ontology-map-note {
   color: var(--muted);
   font-size: 12px;
+}
+
+.ontology-graph-mode-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ontology-graph-mode {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel);
+  color: var(--muted);
+  padding: 0 12px;
+  font-weight: 900;
+}
+
+.ontology-graph-mode.active {
+  border-color: var(--black);
+  background: var(--black);
+  color: #ffffff;
+}
+
+.ontology-graph-workbench {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.26fr);
+  gap: 14px;
+}
+
+.ontology-network-canvas {
+  position: relative;
+  min-height: 680px;
+  overflow: hidden;
+  border: 1px solid rgba(36, 48, 44, 0.12);
+  border-radius: 7px;
+  background:
+    radial-gradient(circle at 48% 50%, rgba(36, 48, 44, 0.08), transparent 27%),
+    radial-gradient(circle at 12% 50%, rgba(46, 111, 189, 0.08), transparent 22%),
+    radial-gradient(circle at 82% 55%, rgba(17, 120, 95, 0.08), transparent 24%),
+    repeating-linear-gradient(0deg, rgba(36, 48, 44, 0.035) 0 1px, transparent 1px 30px),
+    repeating-linear-gradient(90deg, rgba(36, 48, 44, 0.035) 0 1px, transparent 1px 30px),
+    #ffffff;
+}
+
+.ontology-network-lines {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.ontology-network-lines marker path {
+  fill: rgba(36, 48, 44, 0.5);
+}
+
+.ontology-network-edge {
+  stroke: rgba(36, 48, 44, 0.16);
+  stroke-width: 0.32;
+  marker-end: url("#ontology-network-arrow");
+}
+
+.ontology-network-edge.maps_to {
+  stroke: rgba(46, 111, 189, 0.34);
+}
+
+.ontology-network-edge.relates_to,
+.ontology-network-edge.groups {
+  stroke: rgba(36, 48, 44, 0.38);
+}
+
+.ontology-network-edge.acts_on,
+.ontology-network-edge.compiles_to {
+  stroke: rgba(17, 120, 95, 0.42);
+}
+
+.ontology-network-edge.uses_metric,
+.ontology-network-edge.validates {
+  stroke: rgba(178, 116, 22, 0.38);
+}
+
+.ontology-network-edge.selected {
+  stroke-width: 0.58;
+  stroke: var(--black);
+}
+
+.ontology-network-node {
+  position: absolute;
+  z-index: 1;
+  display: grid;
+  gap: 2px;
+  width: clamp(112px, 10vw, 142px);
+  min-height: 54px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.95);
+  color: var(--ink);
+  padding: 8px;
+  text-align: left;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 8px 20px rgba(36, 48, 44, 0.1);
+}
+
+.ontology-network-node:hover,
+.ontology-network-node.selected {
+  z-index: 3;
+  border-color: var(--black);
+  box-shadow: 0 16px 32px rgba(36, 48, 44, 0.18);
+}
+
+.ontology-network-node.selected {
+  outline: 2px solid rgba(36, 48, 44, 0.18);
+  outline-offset: 2px;
+}
+
+.ontology-network-node span,
+.ontology-network-node small {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.25;
+}
+
+.ontology-network-node strong {
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.18;
+}
+
+.ontology-network-node.dataset {
+  border-left: 4px solid var(--blue);
+  width: clamp(112px, 9vw, 132px);
+}
+
+.ontology-network-node.object,
+.ontology-network-node.subgraph,
+.ontology-network-node.merge_candidate {
+  border-left: 4px solid var(--black);
+  min-height: 62px;
+}
+
+.ontology-network-node.metric,
+.ontology-network-node.logic {
+  border-left: 4px solid var(--amber);
+}
+
+.ontology-network-node.action,
+.ontology-network-node.tool {
+  border-left: 4px solid var(--green);
+  width: clamp(120px, 10vw, 148px);
 }
 
 .ontology-mindmap-canvas {
@@ -2787,6 +2939,7 @@ h2 {
   .wizard-hero,
   .semantic-hero,
   .semantic-main-layout,
+  .ontology-graph-workbench,
   .ontology-mindmap-canvas,
   .overview-grid,
   .wizard-actions,
@@ -2802,6 +2955,14 @@ h2 {
 
   .semantic-journey {
     grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .semantic-side-rail {
+    grid-template-columns: 1fr;
+  }
+
+  .ontology-network-canvas {
+    min-height: 560px;
   }
 
   .semantic-debug-grid {
@@ -2955,6 +3116,15 @@ h2 {
   .ontology-map-spine {
     grid-template-columns: repeat(3, minmax(0, 1fr));
     min-height: 0;
+  }
+
+  .ontology-network-canvas {
+    min-height: 720px;
+    overflow-x: auto;
+  }
+
+  .ontology-network-node {
+    width: 104px;
   }
 
   .ontology-map-spine::before {

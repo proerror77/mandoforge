@@ -629,6 +629,29 @@ struct OntologyMindMapPanelProps {
     graph: Option<OntologyReviewGraph>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OntologyGraphMode {
+    Knowledge,
+    Mapping,
+    Tools,
+}
+
+impl OntologyGraphMode {
+    const ALL: [OntologyGraphMode; 3] = [
+        OntologyGraphMode::Knowledge,
+        OntologyGraphMode::Mapping,
+        OntologyGraphMode::Tools,
+    ];
+
+    fn label(self, lang: SemanticLang) -> &'static str {
+        match self {
+            OntologyGraphMode::Knowledge => lang.text("Knowledge Graph", "知识图谱"),
+            OntologyGraphMode::Mapping => lang.text("Mapping View", "映射视图"),
+            OntologyGraphMode::Tools => lang.text("Tool Graph", "工具视图"),
+        }
+    }
+}
+
 #[component]
 fn OntologyMindMapPanel(props: &OntologyMindMapPanelProps) -> Html {
     let Some(graph) = props.graph.as_ref() else {
@@ -648,6 +671,7 @@ fn OntologyMindMapPanel(props: &OntologyMindMapPanelProps) -> Html {
     let datasets = graph_nodes_of_type(graph, &["dataset"], 8);
     let objects = graph_nodes_of_type(graph, &["object", "subgraph", "merge_candidate"], 10);
     let actions = graph_nodes_of_type(graph, &["metric", "logic", "action", "tool"], 10);
+    let graph_mode = use_state(|| OntologyGraphMode::Knowledge);
     let selected_node_id = use_state(|| {
         objects
             .first()
@@ -694,78 +718,73 @@ fn OntologyMindMapPanel(props: &OntologyMindMapPanelProps) -> Html {
         .take(14)
         .map(|edge| relation_detail(props.lang, graph, edge))
         .collect::<Vec<_>>();
+    let graph_mode_value = *graph_mode;
 
     html! {
         <section class="ontology-mindmap">
             <header class="ontology-mindmap-head">
                 <div>
-                    <span>{ props.lang.text("Business logic graph", "业务逻辑关系图") }</span>
-                    <strong>{ props.lang.text("Tables -> Objects -> Links / Actions / Tools", "资料表 -> 业务对象 -> 关系 / 动作 / 工具") }</strong>
+                    <span>{ props.lang.text("Ontology graph", "本体图谱") }</span>
+                    <strong>{ props.lang.text("Business objects, links, metrics, actions, and tools", "业务对象、关系、指标、动作和工具") }</strong>
                 </div>
                 <small>{ format!("{} {} / {} {}", graph.nodes.len(), props.lang.text("nodes", "节点"), graph.edges.len(), props.lang.text("edges", "关系")) }</small>
             </header>
-            <div class="ontology-mindmap-canvas" aria-label={props.lang.text("Ontology relationship mind map", "本体关系脑图")}>
-                <svg class="ontology-graph-lines" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-                    <defs>
-                        <marker id="ontology-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
-                            <path d="M0,0 L8,4 L0,8 Z"></path>
-                        </marker>
-                    </defs>
-                    <path class="source-flow" d="M18,18 C32,18 36,28 48,38"></path>
-                    <path class="source-flow" d="M18,50 C32,50 36,50 48,50"></path>
-                    <path class="source-flow" d="M18,82 C32,82 36,72 48,62"></path>
-                    <path class="action-flow" d="M52,38 C64,28 68,18 82,18"></path>
-                    <path class="action-flow" d="M52,50 C64,50 68,50 82,50"></path>
-                    <path class="action-flow" d="M52,62 C64,72 68,82 82,82"></path>
-                </svg>
-                <section class="ontology-map-lane source">
-                    <h4>{ props.lang.text("Source tables", "资料表") }</h4>
-                    { for datasets.iter().map(|node| html! {
-                        <OntologyMindMapNode
-                            key={node.id.clone()}
-                            lang={props.lang}
-                            node={(*node).clone()}
-                            selected={selected_node.map(|selected| selected.id == node.id).unwrap_or(false)}
-                            on_select={Callback::from({
-                                let selected_node_id = selected_node_id.clone();
-                                let id = node.id.clone();
-                                move |_| selected_node_id.set(id.clone())
-                            })}
-                        />
-                    }) }
-                </section>
-                <section class="ontology-map-lane object">
-                    <h4>{ props.lang.text("Business objects", "业务对象") }</h4>
-                    { for objects.iter().map(|node| html! {
-                        <OntologyMindMapNode
-                            key={node.id.clone()}
-                            lang={props.lang}
-                            node={(*node).clone()}
-                            selected={selected_node.map(|selected| selected.id == node.id).unwrap_or(false)}
-                            on_select={Callback::from({
-                                let selected_node_id = selected_node_id.clone();
-                                let id = node.id.clone();
-                                move |_| selected_node_id.set(id.clone())
-                            })}
-                        />
-                    }) }
-                </section>
-                <section class="ontology-map-lane action">
-                    <h4>{ props.lang.text("Actions and tools", "动作与工具") }</h4>
-                    { for actions.iter().map(|node| html! {
-                        <OntologyMindMapNode
-                            key={node.id.clone()}
-                            lang={props.lang}
-                            node={(*node).clone()}
-                            selected={selected_node.map(|selected| selected.id == node.id).unwrap_or(false)}
-                            on_select={Callback::from({
-                                let selected_node_id = selected_node_id.clone();
-                                let id = node.id.clone();
-                                move |_| selected_node_id.set(id.clone())
-                            })}
-                        />
-                    }) }
-                </section>
+            <nav class="ontology-graph-mode-tabs" aria-label={props.lang.text("Ontology graph modes", "本体图谱模式")}>
+                { for OntologyGraphMode::ALL.into_iter().map(|mode| {
+                    let graph_mode = graph_mode.clone();
+                    let active = graph_mode_value == mode;
+                    html! {
+                        <button
+                            class={classes!("ontology-graph-mode", active.then_some("active"))}
+                            onclick={Callback::from(move |_| graph_mode.set(mode))}
+                        >
+                            { mode.label(props.lang) }
+                        </button>
+                    }
+                }) }
+            </nav>
+            <div class="ontology-graph-workbench">
+                {
+                    match graph_mode_value {
+                        OntologyGraphMode::Knowledge => html! {
+                            <OntologyNetworkGraph
+                                lang={props.lang}
+                                graph={graph.clone()}
+                                selected_node_id={(*selected_node_id).clone()}
+                                on_select={Callback::from({
+                                    let selected_node_id = selected_node_id.clone();
+                                    move |id: String| selected_node_id.set(id)
+                                })}
+                                tool_only={false}
+                            />
+                        },
+                        OntologyGraphMode::Mapping => html! {
+                            <OntologyMappingCanvas
+                                lang={props.lang}
+                                datasets={datasets.into_iter().cloned().collect::<Vec<_>>()}
+                                objects={objects.into_iter().cloned().collect::<Vec<_>>()}
+                                actions={actions.into_iter().cloned().collect::<Vec<_>>()}
+                                selected_node_id={(*selected_node_id).clone()}
+                                on_select={Callback::from({
+                                    let selected_node_id = selected_node_id.clone();
+                                    move |id: String| selected_node_id.set(id)
+                                })}
+                            />
+                        },
+                        OntologyGraphMode::Tools => html! {
+                            <OntologyNetworkGraph
+                                lang={props.lang}
+                                graph={graph.clone()}
+                                selected_node_id={(*selected_node_id).clone()}
+                                on_select={Callback::from({
+                                    let selected_node_id = selected_node_id.clone();
+                                    move |id: String| selected_node_id.set(id)
+                                })}
+                                tool_only={true}
+                            />
+                        },
+                    }
+                }
                 <aside class="ontology-node-inspector">
                     <h4>{ props.lang.text("Selected node evidence", "选中节点证据") }</h4>
                     <OntologyNodeInspector
@@ -792,6 +811,265 @@ fn OntologyMindMapPanel(props: &OntologyMindMapPanelProps) -> Html {
                 }
             }
         </section>
+    }
+}
+
+#[derive(Clone)]
+struct PositionedOntologyNode {
+    node: OntologyReviewGraphNode,
+    x: f64,
+    y: f64,
+}
+
+#[derive(Properties, Clone, PartialEq)]
+struct OntologyNetworkGraphProps {
+    lang: SemanticLang,
+    graph: OntologyReviewGraph,
+    selected_node_id: String,
+    on_select: Callback<String>,
+    #[prop_or(false)]
+    tool_only: bool,
+}
+
+#[component]
+fn OntologyNetworkGraph(props: &OntologyNetworkGraphProps) -> Html {
+    let nodes = positioned_ontology_nodes(&props.graph, props.tool_only);
+    let selected_node_id = props.selected_node_id.clone();
+    html! {
+        <section class="ontology-network-canvas" aria-label={props.lang.text("Ontology knowledge graph", "本体知识图谱")}>
+            <svg class="ontology-network-lines" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+                <defs>
+                    <marker id="ontology-network-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+                        <path d="M0,0 L7,3.5 L0,7 Z"></path>
+                    </marker>
+                </defs>
+                { for props.graph.edges.iter().filter_map(|edge| {
+                    let from = nodes.iter().find(|node| node.node.id == edge.from)?;
+                    let to = nodes.iter().find(|node| node.node.id == edge.to)?;
+                    let selected = selected_node_id == edge.from || selected_node_id == edge.to;
+                    Some(html! {
+                        <line
+                            class={classes!("ontology-network-edge", edge.edge_type.clone(), selected.then_some("selected"))}
+                            x1={format!("{:.2}", from.x)}
+                            y1={format!("{:.2}", from.y)}
+                            x2={format!("{:.2}", to.x)}
+                            y2={format!("{:.2}", to.y)}
+                        />
+                    })
+                }) }
+            </svg>
+            { for nodes.iter().map(|positioned| {
+                let node = positioned.node.clone();
+                let selected = props.selected_node_id == node.id;
+                html! {
+                    <OntologyNetworkNode
+                        key={node.id.clone()}
+                        lang={props.lang}
+                        node={node.clone()}
+                        x={positioned.x}
+                        y={positioned.y}
+                        selected={selected}
+                        on_select={props.on_select.clone()}
+                    />
+                }
+            }) }
+        </section>
+    }
+}
+
+#[derive(Properties, Clone, PartialEq)]
+struct OntologyNetworkNodeProps {
+    lang: SemanticLang,
+    node: OntologyReviewGraphNode,
+    x: f64,
+    y: f64,
+    selected: bool,
+    on_select: Callback<String>,
+}
+
+#[component]
+fn OntologyNetworkNode(props: &OntologyNetworkNodeProps) -> Html {
+    let node_id = props.node.id.clone();
+    let on_select = props.on_select.clone();
+    html! {
+        <button
+            class={classes!(
+                "ontology-network-node",
+                props.node.node_type.clone(),
+                status_tone(&props.node.status),
+                props.selected.then_some("selected")
+            )}
+            style={format!("left: {:.2}%; top: {:.2}%;", props.x, props.y)}
+            onclick={Callback::from(move |_| on_select.emit(node_id.clone()))}
+        >
+            <span>{ localized_node_type(props.lang, &props.node.node_type) }</span>
+            <strong>{ props.node.label.clone() }</strong>
+            <small>{ format!("{:.0}% / {}", props.node.confidence * 100.0, localized_risk(props.lang, label_or(&props.node.risk, "low"))) }</small>
+        </button>
+    }
+}
+
+#[derive(Properties, Clone, PartialEq)]
+struct OntologyMappingCanvasProps {
+    lang: SemanticLang,
+    datasets: Vec<OntologyReviewGraphNode>,
+    objects: Vec<OntologyReviewGraphNode>,
+    actions: Vec<OntologyReviewGraphNode>,
+    selected_node_id: String,
+    on_select: Callback<String>,
+}
+
+#[component]
+fn OntologyMappingCanvas(props: &OntologyMappingCanvasProps) -> Html {
+    html! {
+        <div class="ontology-mindmap-canvas" aria-label={props.lang.text("Ontology mapping view", "本体映射视图")}>
+            <svg class="ontology-graph-lines" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+                <defs>
+                    <marker id="ontology-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+                        <path d="M0,0 L8,4 L0,8 Z"></path>
+                    </marker>
+                </defs>
+                <path class="source-flow" d="M18,18 C32,18 36,28 48,38"></path>
+                <path class="source-flow" d="M18,50 C32,50 36,50 48,50"></path>
+                <path class="source-flow" d="M18,82 C32,82 36,72 48,62"></path>
+                <path class="action-flow" d="M52,38 C64,28 68,18 82,18"></path>
+                <path class="action-flow" d="M52,50 C64,50 68,50 82,50"></path>
+                <path class="action-flow" d="M52,62 C64,72 68,82 82,82"></path>
+            </svg>
+            <section class="ontology-map-lane source">
+                <h4>{ props.lang.text("Source tables", "资料表") }</h4>
+                { for props.datasets.iter().map(|node| html! {
+                    <OntologyMindMapNode
+                        key={node.id.clone()}
+                        lang={props.lang}
+                        node={node.clone()}
+                        selected={props.selected_node_id == node.id}
+                        on_select={Callback::from({
+                            let on_select = props.on_select.clone();
+                            let id = node.id.clone();
+                            move |_| on_select.emit(id.clone())
+                        })}
+                    />
+                }) }
+            </section>
+            <section class="ontology-map-lane object">
+                <h4>{ props.lang.text("Business objects", "业务对象") }</h4>
+                { for props.objects.iter().map(|node| html! {
+                    <OntologyMindMapNode
+                        key={node.id.clone()}
+                        lang={props.lang}
+                        node={node.clone()}
+                        selected={props.selected_node_id == node.id}
+                        on_select={Callback::from({
+                            let on_select = props.on_select.clone();
+                            let id = node.id.clone();
+                            move |_| on_select.emit(id.clone())
+                        })}
+                    />
+                }) }
+            </section>
+            <section class="ontology-map-lane action">
+                <h4>{ props.lang.text("Actions and tools", "动作与工具") }</h4>
+                { for props.actions.iter().map(|node| html! {
+                    <OntologyMindMapNode
+                        key={node.id.clone()}
+                        lang={props.lang}
+                        node={node.clone()}
+                        selected={props.selected_node_id == node.id}
+                        on_select={Callback::from({
+                            let on_select = props.on_select.clone();
+                            let id = node.id.clone();
+                            move |_| on_select.emit(id.clone())
+                        })}
+                    />
+                }) }
+            </section>
+        </div>
+    }
+}
+
+fn positioned_ontology_nodes(
+    graph: &OntologyReviewGraph,
+    tool_only: bool,
+) -> Vec<PositionedOntologyNode> {
+    let mut positioned = Vec::new();
+    let objects = graph_nodes_of_type(graph, &["object"], 8);
+
+    if tool_only {
+        let actions = graph_nodes_of_type(graph, &["action"], 8);
+        let tools = graph_nodes_of_type(graph, &["tool"], 8);
+        push_positioned_column(&mut positioned, objects, 18.0, 18.0, 82.0);
+        push_positioned_column(&mut positioned, actions, 52.0, 18.0, 82.0);
+        push_positioned_column(&mut positioned, tools, 84.0, 18.0, 82.0);
+        return positioned;
+    }
+
+    let datasets = graph_nodes_of_type(graph, &["dataset"], 8);
+    let metrics = graph_nodes_of_type(graph, &["metric"], 5);
+    let actions = graph_nodes_of_type(graph, &["action"], 4);
+
+    push_positioned_column(&mut positioned, datasets, 11.0, 13.0, 87.0);
+    push_positioned_grid(&mut positioned, objects, 35.0, 59.0, 18.0, 82.0, 2);
+    push_positioned_column(&mut positioned, metrics, 78.0, 13.0, 52.0);
+    push_positioned_column(&mut positioned, actions, 78.0, 66.0, 88.0);
+    positioned
+}
+
+fn push_positioned_column(
+    positioned: &mut Vec<PositionedOntologyNode>,
+    nodes: Vec<&OntologyReviewGraphNode>,
+    x: f64,
+    y_min: f64,
+    y_max: f64,
+) {
+    let count = nodes.len().max(1);
+    for (index, node) in nodes.into_iter().enumerate() {
+        let y = if count == 1 {
+            (y_min + y_max) / 2.0
+        } else {
+            y_min + ((y_max - y_min) * index as f64 / (count - 1) as f64)
+        };
+        positioned.push(PositionedOntologyNode {
+            node: node.clone(),
+            x,
+            y,
+        });
+    }
+}
+
+fn push_positioned_grid(
+    positioned: &mut Vec<PositionedOntologyNode>,
+    nodes: Vec<&OntologyReviewGraphNode>,
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+    columns: usize,
+) {
+    let count = nodes.len();
+    if count == 0 {
+        return;
+    }
+    let columns = columns.max(1);
+    let rows = count.div_ceil(columns).max(1);
+    for (index, node) in nodes.into_iter().enumerate() {
+        let column = index % columns;
+        let row = index / columns;
+        let x = if columns == 1 {
+            (x_min + x_max) / 2.0
+        } else {
+            x_min + ((x_max - x_min) * column as f64 / (columns - 1) as f64)
+        };
+        let y = if rows == 1 {
+            (y_min + y_max) / 2.0
+        } else {
+            y_min + ((y_max - y_min) * row as f64 / (rows - 1) as f64)
+        };
+        positioned.push(PositionedOntologyNode {
+            node: node.clone(),
+            x,
+            y,
+        });
     }
 }
 
