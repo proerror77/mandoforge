@@ -448,6 +448,7 @@ fn OnboardingPanel(props: &OnboardingPanelProps) -> Html {
     };
     html! {
         <div class="ontology-onboarding">
+            <OntologyMindMapPanel lang={props.lang} graph={props.review_graph.clone()} />
             <KeyMetrics values={vec![
                 (props.lang.text("Run", "运行").to_string(), short_id(&run.id)),
                 (props.lang.text("Status", "状态").to_string(), localized_status(props.lang, label_or(&run.status, "pending"))),
@@ -458,7 +459,6 @@ fn OnboardingPanel(props: &OnboardingPanelProps) -> Html {
                 (props.lang.text("Approved", "已批准").to_string(), run.approved_count.to_string()),
                 (props.lang.text("Materialized", "已发布").to_string(), run.materialized_count.to_string()),
             ]} />
-            <OntologyMindMapPanel lang={props.lang} graph={props.review_graph.clone()} />
             <OntologyIntelligenceReviewPanel
                 lang={props.lang}
                 graph={props.review_graph.clone()}
@@ -648,6 +648,40 @@ fn OntologyMindMapPanel(props: &OntologyMindMapPanelProps) -> Html {
     let datasets = graph_nodes_of_type(graph, &["dataset"], 8);
     let objects = graph_nodes_of_type(graph, &["object", "subgraph", "merge_candidate"], 10);
     let actions = graph_nodes_of_type(graph, &["metric", "logic", "action", "tool"], 10);
+    let selected_node_id = use_state(|| {
+        objects
+            .first()
+            .or_else(|| datasets.first())
+            .or_else(|| actions.first())
+            .map(|node| node.id.clone())
+            .unwrap_or_default()
+    });
+    if !graph.nodes.iter().any(|node| node.id == *selected_node_id) {
+        if let Some(node) = objects
+            .first()
+            .or_else(|| datasets.first())
+            .or_else(|| actions.first())
+        {
+            selected_node_id.set(node.id.clone());
+        }
+    }
+    let selected_node = graph
+        .nodes
+        .iter()
+        .find(|node| node.id == *selected_node_id)
+        .or_else(|| objects.first().copied())
+        .or_else(|| datasets.first().copied())
+        .or_else(|| actions.first().copied());
+    let connected_edges = selected_node
+        .map(|node| {
+            graph
+                .edges
+                .iter()
+                .filter(|edge| edge.from == node.id || edge.to == node.id)
+                .take(8)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let relation_rows = graph
         .edges
         .iter()
@@ -671,34 +705,76 @@ fn OntologyMindMapPanel(props: &OntologyMindMapPanelProps) -> Html {
                 <small>{ format!("{} {} / {} {}", graph.nodes.len(), props.lang.text("nodes", "节点"), graph.edges.len(), props.lang.text("edges", "关系")) }</small>
             </header>
             <div class="ontology-mindmap-canvas" aria-label={props.lang.text("Ontology relationship mind map", "本体关系脑图")}>
+                <svg class="ontology-graph-lines" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+                    <defs>
+                        <marker id="ontology-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+                            <path d="M0,0 L8,4 L0,8 Z"></path>
+                        </marker>
+                    </defs>
+                    <path class="source-flow" d="M18,18 C32,18 36,28 48,38"></path>
+                    <path class="source-flow" d="M18,50 C32,50 36,50 48,50"></path>
+                    <path class="source-flow" d="M18,82 C32,82 36,72 48,62"></path>
+                    <path class="action-flow" d="M52,38 C64,28 68,18 82,18"></path>
+                    <path class="action-flow" d="M52,50 C64,50 68,50 82,50"></path>
+                    <path class="action-flow" d="M52,62 C64,72 68,82 82,82"></path>
+                </svg>
                 <section class="ontology-map-lane source">
                     <h4>{ props.lang.text("Source tables", "资料表") }</h4>
                     { for datasets.iter().map(|node| html! {
-                        <OntologyMindMapNode key={node.id.clone()} lang={props.lang} node={(*node).clone()} />
+                        <OntologyMindMapNode
+                            key={node.id.clone()}
+                            lang={props.lang}
+                            node={(*node).clone()}
+                            selected={selected_node.map(|selected| selected.id == node.id).unwrap_or(false)}
+                            on_select={Callback::from({
+                                let selected_node_id = selected_node_id.clone();
+                                let id = node.id.clone();
+                                move |_| selected_node_id.set(id.clone())
+                            })}
+                        />
                     }) }
-                </section>
-                <section class="ontology-map-spine">
-                    <span>{ props.lang.text("profile", "画像") }</span>
-                    <span>{ props.lang.text("map", "映射") }</span>
-                    <span>{ props.lang.text("review", "审核") }</span>
                 </section>
                 <section class="ontology-map-lane object">
                     <h4>{ props.lang.text("Business objects", "业务对象") }</h4>
                     { for objects.iter().map(|node| html! {
-                        <OntologyMindMapNode key={node.id.clone()} lang={props.lang} node={(*node).clone()} />
+                        <OntologyMindMapNode
+                            key={node.id.clone()}
+                            lang={props.lang}
+                            node={(*node).clone()}
+                            selected={selected_node.map(|selected| selected.id == node.id).unwrap_or(false)}
+                            on_select={Callback::from({
+                                let selected_node_id = selected_node_id.clone();
+                                let id = node.id.clone();
+                                move |_| selected_node_id.set(id.clone())
+                            })}
+                        />
                     }) }
-                </section>
-                <section class="ontology-map-spine action">
-                    <span>{ props.lang.text("link", "关系") }</span>
-                    <span>{ props.lang.text("metric", "指标") }</span>
-                    <span>{ props.lang.text("tool", "工具") }</span>
                 </section>
                 <section class="ontology-map-lane action">
                     <h4>{ props.lang.text("Actions and tools", "动作与工具") }</h4>
                     { for actions.iter().map(|node| html! {
-                        <OntologyMindMapNode key={node.id.clone()} lang={props.lang} node={(*node).clone()} />
+                        <OntologyMindMapNode
+                            key={node.id.clone()}
+                            lang={props.lang}
+                            node={(*node).clone()}
+                            selected={selected_node.map(|selected| selected.id == node.id).unwrap_or(false)}
+                            on_select={Callback::from({
+                                let selected_node_id = selected_node_id.clone();
+                                let id = node.id.clone();
+                                move |_| selected_node_id.set(id.clone())
+                            })}
+                        />
                     }) }
                 </section>
+                <aside class="ontology-node-inspector">
+                    <h4>{ props.lang.text("Selected node evidence", "选中节点证据") }</h4>
+                    <OntologyNodeInspector
+                        lang={props.lang}
+                        graph={graph.clone()}
+                        node={selected_node.cloned()}
+                        connected_edges={connected_edges.into_iter().cloned().collect::<Vec<_>>()}
+                    />
+                </aside>
             </div>
             <div class="ontology-field-map">
                 <h4>{ props.lang.text("Field and relationship evidence", "字段与关系证据") }</h4>
@@ -723,6 +799,8 @@ fn OntologyMindMapPanel(props: &OntologyMindMapPanelProps) -> Html {
 struct OntologyMindMapNodeProps {
     lang: SemanticLang,
     node: OntologyReviewGraphNode,
+    selected: bool,
+    on_select: Callback<MouseEvent>,
 }
 
 #[component]
@@ -738,11 +816,66 @@ fn OntologyMindMapNode(props: &OntologyMindMapNodeProps) -> Html {
             )
         });
     html! {
-        <article class={classes!("ontology-map-node", props.node.node_type.clone(), status_tone(&props.node.status))}>
+        <button
+            class={classes!(
+                "ontology-map-node",
+                props.node.node_type.clone(),
+                status_tone(&props.node.status),
+                props.selected.then_some("selected")
+            )}
+            onclick={props.on_select.clone()}
+        >
             <span>{ localized_node_type(props.lang, &props.node.node_type) }</span>
             <strong>{ props.node.label.clone() }</strong>
             <small>{ format!("{} / {}", localized_status(props.lang, label_or(&props.node.status, "pending")), evidence_hint) }</small>
-        </article>
+        </button>
+    }
+}
+
+#[derive(Properties, Clone, PartialEq)]
+struct OntologyNodeInspectorProps {
+    lang: SemanticLang,
+    graph: OntologyReviewGraph,
+    node: Option<OntologyReviewGraphNode>,
+    connected_edges: Vec<OntologyReviewGraphEdge>,
+}
+
+#[component]
+fn OntologyNodeInspector(props: &OntologyNodeInspectorProps) -> Html {
+    let Some(node) = props.node.as_ref() else {
+        return html! { <p class="empty">{ props.lang.text("Select a node to inspect evidence.", "选择一个节点查看证据。") }</p> };
+    };
+    let evidence_rows = ["source_system", "source_object", "source_mapping", "target_object", "primary_key", "expression", "executor"]
+        .iter()
+        .filter_map(|key| evidence_string(&node.evidence, key).map(|value| ((*key).to_string(), value)))
+        .collect::<Vec<_>>();
+    html! {
+        <div class="ontology-node-detail">
+            <div class="ontology-node-detail-head">
+                <span>{ localized_node_type(props.lang, &node.node_type) }</span>
+                <strong>{ node.label.clone() }</strong>
+                <small>{ format!("{}% / {}", (node.confidence * 100.0).round(), localized_status(props.lang, label_or(&node.status, "pending"))) }</small>
+            </div>
+            <div class="ontology-node-evidence">
+                { for evidence_rows.iter().map(|(key, value)| html! {
+                    <div class="ontology-evidence-row" key={key.clone()}>
+                        <span>{ key }</span>
+                        <strong>{ value }</strong>
+                    </div>
+                }) }
+                { if evidence_rows.is_empty() {
+                    html! { <p class="empty">{ props.lang.text("No compact evidence fields; raw proposal evidence remains in review details.", "没有可摘要证据；原始提案证据保留在审核明细中。") }</p> }
+                } else {
+                    html! {}
+                }}
+            </div>
+            <div class="ontology-connected-edges">
+                <h5>{ props.lang.text("Connected links", "相连关系") }</h5>
+                <Rows empty={props.lang.text("No connected links.", "没有相连关系。")} rows={props.connected_edges.iter().map(|edge| {
+                    relation_detail(props.lang, &props.graph, edge)
+                }).collect::<Vec<_>>()} />
+            </div>
+        </div>
     }
 }
 
