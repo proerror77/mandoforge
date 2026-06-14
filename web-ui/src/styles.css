@@ -1368,28 +1368,6 @@ h2 {
   font-size: 12px;
 }
 
-.ontology-graph-mode-tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.ontology-graph-mode {
-  min-height: 34px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--panel);
-  color: var(--muted);
-  padding: 0 12px;
-  font-weight: 900;
-}
-
-.ontology-graph-mode.active {
-  border-color: var(--black);
-  background: var(--black);
-  color: #ffffff;
-}
-
 .ontology-graph-workbench {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(280px, 0.26fr);
@@ -1519,195 +1497,11 @@ h2 {
   width: clamp(120px, 10vw, 148px);
 }
 
-.ontology-mindmap-canvas {
-  position: relative;
-  display: grid;
-  grid-template-columns: minmax(170px, 0.95fr) minmax(220px, 1.12fr) minmax(170px, 0.95fr) minmax(220px, 0.86fr);
-  gap: 14px;
-  align-items: stretch;
-  min-height: 430px;
-  overflow: hidden;
-  border: 1px solid rgba(36, 48, 44, 0.1);
-  border-radius: 7px;
-  background:
-    linear-gradient(90deg, rgba(46, 111, 189, 0.04), transparent 33%, rgba(17, 120, 95, 0.04)),
-    repeating-linear-gradient(0deg, rgba(36, 48, 44, 0.035) 0 1px, transparent 1px 28px),
-    repeating-linear-gradient(90deg, rgba(36, 48, 44, 0.035) 0 1px, transparent 1px 28px),
-    #ffffff;
-  padding: 14px;
-}
-
-.ontology-graph-lines {
-  position: absolute;
-  inset: 14px;
-  width: calc(100% - 28px);
-  height: calc(100% - 28px);
-  pointer-events: none;
-  z-index: 0;
-}
-
-.ontology-graph-lines path {
-  fill: none;
-  stroke-width: 0.7;
-  stroke-dasharray: 3 2;
-  marker-end: url("#ontology-arrow");
-}
-
-.ontology-graph-lines marker path {
-  fill: rgba(36, 48, 44, 0.5);
-}
-
-.ontology-graph-lines .source-flow {
-  stroke: rgba(46, 111, 189, 0.42);
-}
-
-.ontology-graph-lines .action-flow {
-  stroke: rgba(17, 120, 95, 0.42);
-}
-
-.ontology-map-lane {
-  position: relative;
-  z-index: 1;
-  display: grid;
-  align-content: start;
-  gap: 8px;
-  min-width: 0;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: rgba(255, 255, 255, 0.86);
-  padding: 10px;
-}
-
-.ontology-map-lane h4,
 .ontology-field-map h4 {
   margin: 0;
   color: var(--muted);
   font-size: 12px;
   letter-spacing: 0;
-}
-
-.ontology-map-lane.source {
-  border-color: rgba(46, 111, 189, 0.22);
-}
-
-.ontology-map-lane.object {
-  border-color: rgba(36, 48, 44, 0.24);
-  background: #fbfcfb;
-}
-
-.ontology-map-lane.action {
-  border-color: rgba(17, 120, 95, 0.24);
-}
-
-.ontology-map-spine {
-  display: grid;
-  align-content: center;
-  justify-items: center;
-  gap: 24px;
-  position: relative;
-  min-width: 0;
-}
-
-.ontology-map-spine::before {
-  content: "";
-  position: absolute;
-  top: 18px;
-  bottom: 18px;
-  left: 50%;
-  border-left: 1px solid rgba(36, 48, 44, 0.24);
-}
-
-.ontology-map-spine span {
-  position: relative;
-  z-index: 1;
-  min-width: 46px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--panel);
-  color: var(--graphite);
-  padding: 4px 7px;
-  font-size: 11px;
-  font-weight: 900;
-  text-align: center;
-}
-
-.ontology-map-spine.action span {
-  border-color: rgba(17, 120, 95, 0.25);
-  color: var(--green);
-}
-
-.ontology-map-node {
-  display: grid;
-  width: 100%;
-  min-height: 88px;
-  gap: 4px;
-  min-width: 0;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: #ffffff;
-  padding: 9px;
-  color: var(--ink);
-  text-align: left;
-  box-shadow: 0 6px 16px rgba(36, 48, 44, 0.07);
-  cursor: pointer;
-}
-
-.ontology-map-node:hover,
-.ontology-map-node.selected {
-  border-color: var(--black);
-  box-shadow: 0 12px 26px rgba(36, 48, 44, 0.14);
-  transform: translateY(-1px);
-}
-
-.ontology-map-node.selected {
-  outline: 2px solid rgba(36, 48, 44, 0.18);
-  outline-offset: 2px;
-}
-
-.ontology-map-node.dataset {
-  border-left: 4px solid var(--blue);
-}
-
-.ontology-map-node.object,
-.ontology-map-node.subgraph,
-.ontology-map-node.merge_candidate {
-  border-left: 4px solid var(--black);
-}
-
-.ontology-map-node.metric,
-.ontology-map-node.logic {
-  border-left: 4px solid var(--amber);
-}
-
-.ontology-map-node.action,
-.ontology-map-node.tool {
-  border-left: 4px solid var(--green);
-}
-
-.ontology-map-node.good {
-  background: linear-gradient(180deg, #ffffff, var(--green-soft));
-}
-
-.ontology-map-node.warn {
-  background: linear-gradient(180deg, #ffffff, var(--amber-soft));
-}
-
-.ontology-map-node.bad {
-  background: linear-gradient(180deg, #ffffff, var(--red-soft));
-}
-
-.ontology-map-node span,
-.ontology-map-node small {
-  overflow-wrap: anywhere;
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.35;
-}
-
-.ontology-map-node strong {
-  overflow-wrap: anywhere;
-  font-size: 14px;
-  line-height: 1.25;
 }
 
 .ontology-field-map {
@@ -2940,7 +2734,6 @@ h2 {
   .semantic-hero,
   .semantic-main-layout,
   .ontology-graph-workbench,
-  .ontology-mindmap-canvas,
   .overview-grid,
   .wizard-actions,
   .pack-product-grid {
@@ -3113,11 +2906,6 @@ h2 {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .ontology-map-spine {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    min-height: 0;
-  }
-
   .ontology-network-canvas {
     min-height: 720px;
     overflow-x: auto;
@@ -3125,15 +2913,6 @@ h2 {
 
   .ontology-network-node {
     width: 104px;
-  }
-
-  .ontology-map-spine::before {
-    top: 50%;
-    right: 18px;
-    bottom: auto;
-    left: 18px;
-    border-top: 1px solid rgba(36, 48, 44, 0.24);
-    border-left: 0;
   }
 
   .pack-product-header,
