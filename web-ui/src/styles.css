@@ -1394,7 +1394,7 @@ h2 {
 
 .ontology-run-summary {
   display: grid;
-  grid-template-columns: minmax(260px, 1fr) minmax(360px, 0.95fr) minmax(190px, auto);
+  grid-template-columns: minmax(260px, 1fr) minmax(360px, 0.9fr) minmax(230px, auto);
   gap: 12px;
   align-items: center;
   border: 1px solid rgba(36, 48, 44, 0.14);
@@ -1531,8 +1531,8 @@ h2 {
 }
 
 .ontology-network-edge {
-  stroke: rgba(36, 48, 44, 0.22);
-  stroke-width: 0.32;
+  stroke: rgba(36, 48, 44, 0.16);
+  stroke-width: 0.22;
   marker-end: url("#ontology-network-arrow");
 }
 
@@ -1556,8 +1556,8 @@ h2 {
 }
 
 .ontology-network-edge.selected {
-  stroke-width: 0.58;
-  stroke: var(--black);
+  stroke-width: 0.36;
+  stroke: rgba(14, 22, 20, 0.58);
 }
 
 .ontology-network-node {
@@ -1565,7 +1565,7 @@ h2 {
   z-index: 1;
   display: grid;
   gap: 2px;
-  width: clamp(112px, 10vw, 142px);
+  width: clamp(108px, 9vw, 136px);
   min-height: 54px;
   border: 1px solid var(--line);
   border-radius: 7px;
@@ -1605,7 +1605,7 @@ h2 {
 
 .ontology-network-node.dataset {
   border-left: 4px solid var(--blue);
-  width: clamp(112px, 9vw, 132px);
+  width: clamp(106px, 8vw, 126px);
 }
 
 .ontology-network-node.object,
@@ -1623,7 +1623,7 @@ h2 {
 .ontology-network-node.action,
 .ontology-network-node.tool {
   border-left: 4px solid var(--green);
-  width: clamp(120px, 10vw, 148px);
+  width: clamp(100px, 7.4vw, 112px);
 }
 
 .ontology-field-map {

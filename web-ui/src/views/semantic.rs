@@ -28,6 +28,7 @@ pub(crate) struct SemanticProps {
     pub(crate) on_render_context: Callback<MouseEvent>,
     pub(crate) on_start_onboarding: Callback<MouseEvent>,
     pub(crate) on_approve_onboarding_proposal: Callback<String>,
+    pub(crate) on_approve_onboarding_proposals: Callback<Vec<String>>,
     pub(crate) on_reject_onboarding_proposal: Callback<String>,
     pub(crate) on_materialize_onboarding: Callback<MouseEvent>,
 }
@@ -180,6 +181,7 @@ pub(crate) fn SemanticView(props: &SemanticProps) -> Html {
                     calibration={props.onboarding_calibration.clone()}
                     on_start={props.on_start_onboarding.clone()}
                     on_approve={props.on_approve_onboarding_proposal.clone()}
+                    on_approve_many={props.on_approve_onboarding_proposals.clone()}
                     on_reject={props.on_reject_onboarding_proposal.clone()}
                     on_materialize={props.on_materialize_onboarding.clone()}
                 />
@@ -442,6 +444,7 @@ struct OnboardingPanelProps {
     calibration: Option<ConfidenceCalibrationResponse>,
     on_start: Callback<MouseEvent>,
     on_approve: Callback<String>,
+    on_approve_many: Callback<Vec<String>>,
     on_reject: Callback<String>,
     on_materialize: Callback<MouseEvent>,
 }
@@ -475,6 +478,7 @@ fn OnboardingPanel(props: &OnboardingPanelProps) -> Html {
                 run={run.clone()}
                 graph={props.review_graph.clone()}
                 tool_count={props.tool_specs.len()}
+                on_approve_many={props.on_approve_many.clone()}
                 on_materialize={props.on_materialize.clone()}
             />
             <details class="ontology-advanced-review">
@@ -544,6 +548,7 @@ struct OntologyRunSummaryProps {
     run: OntologyOnboardingRun,
     graph: Option<OntologyReviewGraph>,
     tool_count: usize,
+    on_approve_many: Callback<Vec<String>>,
     on_materialize: Callback<MouseEvent>,
 }
 
@@ -565,6 +570,34 @@ fn OntologyRunSummary(props: &OntologyRunSummaryProps) -> Html {
         .iter()
         .filter(|proposal| proposal.review_status != "approved" && proposal.review_status != "rejected")
         .count();
+    let high_confidence_ids = props
+        .run
+        .proposals
+        .iter()
+        .filter(|proposal| {
+            proposal.review_status != "approved"
+                && proposal.review_status != "rejected"
+                && proposal.confidence >= 0.85
+        })
+        .map(|proposal| proposal.id.clone())
+        .collect::<Vec<_>>();
+    let pending_ids = props
+        .run
+        .proposals
+        .iter()
+        .filter(|proposal| proposal.review_status != "approved" && proposal.review_status != "rejected")
+        .map(|proposal| proposal.id.clone())
+        .collect::<Vec<_>>();
+    let approve_high_confidence = {
+        let ids = high_confidence_ids.clone();
+        let on_approve_many = props.on_approve_many.clone();
+        Callback::from(move |_| on_approve_many.emit(ids.clone()))
+    };
+    let approve_pending = {
+        let ids = pending_ids.clone();
+        let on_approve_many = props.on_approve_many.clone();
+        Callback::from(move |_| on_approve_many.emit(ids.clone()))
+    };
     let can_materialize = props.run.approved_count > props.run.materialized_count;
     let next_step = if props.run.proposal_count == 0 {
         props.lang.text(
@@ -614,6 +647,20 @@ fn OntologyRunSummary(props: &OntologyRunSummaryProps) -> Html {
                 </span>
             </div>
             <div class="ontology-run-summary-action">
+                <button class="secondary" onclick={approve_high_confidence} disabled={high_confidence_ids.is_empty()}>
+                    { format!(
+                        "{} ({})",
+                        props.lang.text("Approve high-confidence", "批准高置信度"),
+                        high_confidence_ids.len()
+                    ) }
+                </button>
+                <button class="secondary" onclick={approve_pending} disabled={pending_ids.is_empty()}>
+                    { format!(
+                        "{} ({})",
+                        props.lang.text("Approve all pending", "批准全部待审核"),
+                        pending_ids.len()
+                    ) }
+                </button>
                 <button onclick={props.on_materialize.clone()} disabled={!can_materialize}>
                     { props.lang.text("Publish approved changes", "发布已批准变更") }
                 </button>
@@ -980,22 +1027,57 @@ fn positioned_ontology_nodes(graph: &OntologyReviewGraph) -> Vec<PositionedOntol
         });
     }
 
-    push_positioned_orbit(
+    push_positioned_slots(
         &mut positioned,
         objects
             .into_iter()
             .filter(|node| Some(&node.id) != focus_id.as_ref())
             .collect(),
-        50.0,
-        50.0,
-        23.0,
-        28.0,
-        -135.0,
-        190.0,
+        &[
+            (36.0, 30.0),
+            (64.0, 30.0),
+            (36.0, 70.0),
+            (64.0, 70.0),
+            (50.0, 22.0),
+            (50.0, 78.0),
+            (28.0, 50.0),
+        ],
     );
-    push_positioned_orbit(&mut positioned, datasets, 50.0, 50.0, 41.0, 37.0, 132.0, 228.0);
-    push_positioned_orbit(&mut positioned, metrics, 50.0, 50.0, 39.0, 35.0, -48.0, 42.0);
-    push_positioned_orbit(&mut positioned, actions, 50.0, 50.0, 39.0, 35.0, 52.0, 82.0);
+    push_positioned_slots(
+        &mut positioned,
+        datasets,
+        &[
+            (11.0, 14.0),
+            (11.0, 25.0),
+            (11.0, 36.0),
+            (11.0, 47.0),
+            (11.0, 58.0),
+            (11.0, 69.0),
+            (11.0, 80.0),
+            (24.0, 88.0),
+        ],
+    );
+    push_positioned_slots(
+        &mut positioned,
+        metrics,
+        &[
+            (83.0, 15.0),
+            (88.0, 30.0),
+            (88.0, 48.0),
+            (88.0, 66.0),
+            (88.0, 78.0),
+        ],
+    );
+    push_positioned_slots(
+        &mut positioned,
+        actions,
+        &[
+            (55.0, 91.0),
+            (69.0, 91.0),
+            (83.0, 91.0),
+            (97.0, 91.0),
+        ],
+    );
     positioned
 }
 
@@ -1021,29 +1103,16 @@ fn graph_node_degree(graph: &OntologyReviewGraph, node_id: &str) -> usize {
         .count()
 }
 
-fn push_positioned_orbit(
+fn push_positioned_slots(
     positioned: &mut Vec<PositionedOntologyNode>,
     nodes: Vec<&OntologyReviewGraphNode>,
-    cx: f64,
-    cy: f64,
-    rx: f64,
-    ry: f64,
-    start_degrees: f64,
-    end_degrees: f64,
+    slots: &[(f64, f64)],
 ) {
-    let count = nodes.len();
-    if count == 0 {
+    if slots.is_empty() {
         return;
     }
     for (index, node) in nodes.into_iter().enumerate() {
-        let angle = if count == 1 {
-            (start_degrees + end_degrees) / 2.0
-        } else {
-            start_degrees + ((end_degrees - start_degrees) * index as f64 / (count - 1) as f64)
-        };
-        let radians = angle.to_radians();
-        let x = cx + rx * radians.cos();
-        let y = cy + ry * radians.sin();
+        let (x, y) = slots[index.min(slots.len() - 1)];
         positioned.push(PositionedOntologyNode {
             node: node.clone(),
             x,

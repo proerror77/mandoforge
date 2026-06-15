@@ -365,6 +365,70 @@ fn App() -> Html {
         })
     };
 
+    let approve_ontology_proposals = {
+        let onboarding_run = onboarding_run.clone();
+        let onboarding_review_graph = onboarding_review_graph.clone();
+        let onboarding_calibration = onboarding_calibration.clone();
+        let mutation_status = mutation_status.clone();
+        Callback::from(move |proposal_ids: Vec<String>| {
+            let Some(current_run) = (*onboarding_run).clone() else {
+                mutation_status.set("Batch approve failed: no onboarding run is active.".to_string());
+                return;
+            };
+            if proposal_ids.is_empty() {
+                mutation_status.set("没有可批量批准的本体提案。".to_string());
+                return;
+            }
+            let onboarding_run = onboarding_run.clone();
+            let onboarding_review_graph = onboarding_review_graph.clone();
+            let onboarding_calibration = onboarding_calibration.clone();
+            let mutation_status = mutation_status.clone();
+            spawn_local(async move {
+                let total = proposal_ids.len();
+                mutation_status.set(format!("正在批量批准 {total} 个本体提案..."));
+                let body = json!({
+                    "decision": "approve",
+                    "reason": "operator batch-approved from semantic console",
+                });
+                let mut approved = 0usize;
+                for proposal_id in proposal_ids {
+                    let path = format!("/api/ontology/onboarding/proposals/{proposal_id}/review");
+                    if api_post::<OntologyOnboardingProposal, _>(&path, &body)
+                        .await
+                        .is_ok()
+                    {
+                        approved += 1;
+                    }
+                }
+                let run_path = format!("/api/ontology/onboarding/runs/{}", current_run.id);
+                match api_get::<OntologyOnboardingRun>(&run_path).await {
+                    Ok(run) => {
+                        let graph_path =
+                            format!("/api/ontology/onboarding/runs/{}/review-graph", run.id);
+                        if let Ok(graph) = api_get::<OntologyReviewGraph>(&graph_path).await {
+                            onboarding_review_graph.set(Some(graph));
+                        }
+                        let calibration_path =
+                            format!("/api/ontology/intelligence/runs/{}/calibration", run.id);
+                        if let Ok(calibration) =
+                            api_get::<ConfidenceCalibrationResponse>(&calibration_path).await
+                        {
+                            onboarding_calibration.set(Some(calibration));
+                        }
+                        mutation_status.set(format!(
+                            "Batch approved {approved}/{total} proposals: {}/{} approved.",
+                            run.approved_count, run.proposal_count
+                        ));
+                        onboarding_run.set(Some(run));
+                    }
+                    Err(error) => mutation_status.set(format!(
+                        "Batch approved {approved}/{total}; refresh failed: {error}"
+                    )),
+                }
+            });
+        })
+    };
+
     let materialize_ontology_onboarding = {
         let onboarding_run = onboarding_run.clone();
         let onboarding_tool_specs = onboarding_tool_specs.clone();
@@ -742,6 +806,7 @@ fn App() -> Html {
                                 on_render_context={render_context.clone()}
                                 on_start_onboarding={start_ontology_onboarding.clone()}
                                 on_approve_onboarding_proposal={approve_ontology_proposal.clone()}
+                                on_approve_onboarding_proposals={approve_ontology_proposals.clone()}
                                 on_reject_onboarding_proposal={reject_ontology_proposal.clone()}
                                 on_materialize_onboarding={materialize_ontology_onboarding.clone()}
                             />
