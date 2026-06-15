@@ -2,6 +2,28 @@ use crate::api::*;
 use serde_json::Value;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UiLang {
+    En,
+    Zh,
+}
+
+impl UiLang {
+    pub(crate) fn text(self, en: &'static str, zh: &'static str) -> &'static str {
+        match self {
+            UiLang::En => en,
+            UiLang::Zh => zh,
+        }
+    }
+
+    pub(crate) fn id(self) -> &'static str {
+        match self {
+            UiLang::En => "en",
+            UiLang::Zh => "zh",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum View {
     Overview,
     Wizard,
@@ -53,33 +75,61 @@ impl View {
         }
     }
 
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            View::Overview => "总览",
-            View::Wizard => "系统设置",
-            View::Agents => "托管智能体",
-            View::Board => "任务板",
-            View::Workflows => "运行与任务",
-            View::Dynamic => "动态计划",
-            View::Semantic => "本体与工具",
-            View::Packs => "能力包",
-            View::Deploy => "系统运维",
-            View::Settings => "系统设置",
+    pub(crate) fn label(self, lang: UiLang) -> &'static str {
+        match lang {
+            UiLang::En => match self {
+                View::Overview => "Overview",
+                View::Wizard => "Setup",
+                View::Agents => "Managed Agents",
+                View::Board => "Task Board",
+                View::Workflows => "Runs & Tasks",
+                View::Dynamic => "Dynamic Plans",
+                View::Semantic => "Ontology",
+                View::Packs => "Capabilities",
+                View::Deploy => "System Ops",
+                View::Settings => "Settings",
+            },
+            UiLang::Zh => match self {
+                View::Overview => "总览",
+                View::Wizard => "系统设置",
+                View::Agents => "托管智能体",
+                View::Board => "任务板",
+                View::Workflows => "运行与任务",
+                View::Dynamic => "动态计划",
+                View::Semantic => "本体与工具",
+                View::Packs => "能力包",
+                View::Deploy => "系统运维",
+                View::Settings => "系统设置",
+            },
         }
     }
 
-    pub(crate) fn title(self) -> &'static str {
-        match self {
-            View::Overview => "总览 / Overview",
-            View::Wizard => "系统设置 / System setup",
-            View::Agents => "托管智能体 / Managed Agents",
-            View::Board => "任务板 / Task Board",
-            View::Workflows => "运行与任务 / Runs & Tasks",
-            View::Dynamic => "动态计划 / Dynamic Plans",
-            View::Semantic => "本体与工具 / Ontology",
-            View::Packs => "能力包 / Capabilities",
-            View::Deploy => "系统运维 / System Ops",
-            View::Settings => "系统设置 / Settings",
+    pub(crate) fn title(self, lang: UiLang) -> &'static str {
+        match lang {
+            UiLang::En => match self {
+                View::Overview => "Overview / 总览",
+                View::Wizard => "Setup / 系统设置",
+                View::Agents => "Managed Agents / 托管智能体",
+                View::Board => "Task Board / 任务板",
+                View::Workflows => "Runs & Tasks / 运行与任务",
+                View::Dynamic => "Dynamic Plans / 动态计划",
+                View::Semantic => "Ontology / 本体与工具",
+                View::Packs => "Capabilities / 能力包",
+                View::Deploy => "System Ops / 系统运维",
+                View::Settings => "Settings / 系统设置",
+            },
+            UiLang::Zh => match self {
+                View::Overview => "总览 / Overview",
+                View::Wizard => "系统设置 / Setup",
+                View::Agents => "托管智能体 / Managed Agents",
+                View::Board => "任务板 / Task Board",
+                View::Workflows => "运行与任务 / Runs & Tasks",
+                View::Dynamic => "动态计划 / Dynamic Plans",
+                View::Semantic => "本体与工具 / Ontology",
+                View::Packs => "能力包 / Capabilities",
+                View::Deploy => "系统运维 / System Ops",
+                View::Settings => "系统设置 / Settings",
+            },
         }
     }
 
@@ -185,6 +235,13 @@ pub(crate) fn initial_critical_notifications_muted() -> bool {
         storage_get("mandoforge.criticalNotificationsMuted").as_deref(),
         Some("1" | "true" | "muted")
     )
+}
+
+pub(crate) fn initial_ui_lang() -> UiLang {
+    match storage_get("mandoforge.uiLang").as_deref() {
+        Some("zh" | "zh-CN" | "中文") => UiLang::Zh,
+        _ => UiLang::En,
+    }
 }
 
 pub(crate) fn storage_set(key: &str, value: &str) {

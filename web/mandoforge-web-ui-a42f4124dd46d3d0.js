@@ -136,12 +136,19 @@ function __wbg_get_imports() {
             const ret = arg0.createTextNode(getStringFromWasm0(arg1, arg2));
             return ret;
         },
+        __wbg_destroy_76d1daa584f6f3ad: function(arg0) {
+            window.MandoForgeOntologyGraph.destroy(arg0);
+        },
         __wbg_document_aceb08cd6489baf5: function(arg0) {
             const ret = arg0.document;
             return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
         },
         __wbg_done_60cf307fcc680536: function(arg0) {
             const ret = arg0.done;
+            return ret;
+        },
+        __wbg_encodeURIComponent_9ff907ad9d03c7bb: function(arg0, arg1) {
+            const ret = encodeURIComponent(getStringFromWasm0(arg0, arg1));
             return ret;
         },
         __wbg_error_4c20fd6d19d38f03: function(arg0, arg1) {
@@ -163,6 +170,9 @@ function __wbg_get_imports() {
         __wbg_fetch_9b478faef8cda538: function(arg0) {
             const ret = fetch(arg0);
             return ret;
+        },
+        __wbg_fit_92656f3d4b7b4744: function(arg0) {
+            window.MandoForgeOntologyGraph.fit(arg0);
         },
         __wbg_from_d300fe49deab18f5: function(arg0) {
             const ret = Array.from(arg0);
@@ -330,6 +340,10 @@ function __wbg_get_imports() {
             const ret = arg0.message;
             return ret;
         },
+        __wbg_mount_2788cdac40dae59e: function(arg0, arg1, arg2) {
+            const ret = window.MandoForgeOntologyGraph.mount(arg0, arg1, arg2);
+            return ret;
+        },
         __wbg_name_2e3d97e5d7abee6d: function(arg0) {
             const ret = arg0.name;
             return ret;
@@ -353,12 +367,20 @@ function __wbg_get_imports() {
             const ret = new Uint8Array(arg0);
             return ret;
         },
+        __wbg_new_622fc80556be2e26: function() {
+            const ret = new Map();
+            return ret;
+        },
         __wbg_new_b733f187b7a8b317: function() { return handleError(function (arg0, arg1) {
             const ret = new URL(getStringFromWasm0(arg0, arg1));
             return ret;
         }, arguments); },
         __wbg_new_ce1ab61c1c2b300d: function() {
             const ret = new Object();
+            return ret;
+        },
+        __wbg_new_d90091b82fdf5b91: function() {
+            const ret = new Array();
             return ret;
         },
         __wbg_new_e436d06bc8e77460: function() { return handleError(function () {
@@ -408,6 +430,9 @@ function __wbg_get_imports() {
             const ret = arg0.parentNode;
             return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
         },
+        __wbg_preventDefault_4902f41a1b31bedd: function(arg0) {
+            arg0.preventDefault();
+        },
         __wbg_prototypesetcall_3249fc62a0fafa30: function(arg0, arg1, arg2) {
             Uint8Array.prototype.set.call(getArrayU8FromWasm0(arg0, arg1), arg2);
         },
@@ -428,6 +453,9 @@ function __wbg_get_imports() {
         __wbg_removeItem_ebb663d82d1e290a: function() { return handleError(function (arg0, arg1, arg2) {
             arg0.removeItem(getStringFromWasm0(arg1, arg2));
         }, arguments); },
+        __wbg_resetLayout_d04fcefe1179e16f: function(arg0, arg1) {
+            window.MandoForgeOntologyGraph.resetLayout(arg0, arg1);
+        },
         __wbg_resolve_25a7e548d5881dca: function(arg0) {
             const ret = Promise.resolve(arg0);
             return ret;
@@ -438,6 +466,9 @@ function __wbg_get_imports() {
             const len1 = WASM_VECTOR_LEN;
             getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
             getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
+        },
+        __wbg_selectNodes_1e247031c5d5cc6a: function(arg0, arg1, arg2, arg3) {
+            window.MandoForgeOntologyGraph.selectNodes(arg0, getStringFromWasm0(arg1, arg2), arg3);
         },
         __wbg_sessionStorage_0a8b0f4b6c397d58: function() { return handleError(function (arg0) {
             const ret = arg0.sessionStorage;
@@ -460,6 +491,13 @@ function __wbg_get_imports() {
         __wbg_set_25ef40a9aeff260d: function() { return handleError(function (arg0, arg1, arg2, arg3, arg4) {
             arg0.set(getStringFromWasm0(arg1, arg2), getStringFromWasm0(arg3, arg4));
         }, arguments); },
+        __wbg_set_52b1e1eb5bed906a: function(arg0, arg1, arg2) {
+            const ret = arg0.set(arg1, arg2);
+            return ret;
+        },
+        __wbg_set_6be42768c690e380: function(arg0, arg1, arg2) {
+            arg0[arg1] = arg2;
+        },
         __wbg_set_6e30c9374c26414c: function() { return handleError(function (arg0, arg1, arg2) {
             const ret = Reflect.set(arg0, arg1, arg2);
             return ret;
@@ -475,6 +513,9 @@ function __wbg_get_imports() {
         },
         __wbg_set_checked_5b19bac8e2a3d914: function(arg0, arg1) {
             arg0.checked = arg1 !== 0;
+        },
+        __wbg_set_dca99999bba88a9a: function(arg0, arg1, arg2) {
+            arg0[arg1 >>> 0] = arg2;
         },
         __wbg_set_defaultValue_ba756b8c3c80e673: function() { return handleError(function (arg0, arg1, arg2) {
             arg0.defaultValue = getStringFromWasm0(arg1, arg2);
@@ -584,6 +625,10 @@ function __wbg_get_imports() {
             const ret = arg0.toString();
             return ret;
         },
+        __wbg_update_9e6877dc8433cead: function(arg0, arg1) {
+            const ret = window.MandoForgeOntologyGraph.update(arg0, arg1);
+            return ret;
+        },
         __wbg_url_1b5edc4adbba9990: function(arg0, arg1) {
             const ret = arg1.url;
             const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -617,23 +662,43 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 1995, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__ha8c3aa135aa19ad4);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 1175, ret: Unit, inner_ret: Some(Unit) }, mutable: false }) -> Externref`.
+            const ret = makeClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__hf9195f12c7235f91);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Ref(NamedExternref("Event"))], shim_idx: 1823, ret: Unit, inner_ret: Some(Unit) }, mutable: false }) -> Externref`.
-            const ret = makeClosure(arg0, arg1, wasm_bindgen__convert__closures________invoke__hcdc9c0de7ea08e66);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 2121, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__ha8c3aa135aa19ad4);
             return ret;
         },
         __wbindgen_cast_0000000000000003: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 1937, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h6cc0fdecae85f13c);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Ref(NamedExternref("Event"))], shim_idx: 1944, ret: Unit, inner_ret: Some(Unit) }, mutable: false }) -> Externref`.
+            const ret = makeClosure(arg0, arg1, wasm_bindgen__convert__closures________invoke__hcdc9c0de7ea08e66);
             return ret;
         },
         __wbindgen_cast_0000000000000004: function(arg0, arg1) {
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 2063, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h6cc0fdecae85f13c);
+            return ret;
+        },
+        __wbindgen_cast_0000000000000005: function(arg0) {
+            // Cast intrinsic for `F64 -> Externref`.
+            const ret = arg0;
+            return ret;
+        },
+        __wbindgen_cast_0000000000000006: function(arg0) {
+            // Cast intrinsic for `I64 -> Externref`.
+            const ret = arg0;
+            return ret;
+        },
+        __wbindgen_cast_0000000000000007: function(arg0, arg1) {
             // Cast intrinsic for `Ref(String) -> Externref`.
             const ret = getStringFromWasm0(arg0, arg1);
+            return ret;
+        },
+        __wbindgen_cast_0000000000000008: function(arg0) {
+            // Cast intrinsic for `U64 -> Externref`.
+            const ret = BigInt.asUintN(64, arg0);
             return ret;
         },
         __wbindgen_init_externref_table: function() {
@@ -654,6 +719,10 @@ function __wbg_get_imports() {
 
 function wasm_bindgen__convert__closures_____invoke__h6cc0fdecae85f13c(arg0, arg1) {
     wasm.wasm_bindgen__convert__closures_____invoke__h6cc0fdecae85f13c(arg0, arg1);
+}
+
+function wasm_bindgen__convert__closures_____invoke__hf9195f12c7235f91(arg0, arg1, arg2) {
+    wasm.wasm_bindgen__convert__closures_____invoke__hf9195f12c7235f91(arg0, arg1, arg2);
 }
 
 function wasm_bindgen__convert__closures________invoke__hcdc9c0de7ea08e66(arg0, arg1, arg2) {

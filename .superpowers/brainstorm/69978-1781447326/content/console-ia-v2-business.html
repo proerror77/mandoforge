@@ -1,0 +1,86 @@
+<h2>MandoForge 控制台信息架构 v2：业务语言优先</h2>
+<p class="subtitle">保留工程能力，但第一层让业务负责人看得懂：不是 Agents / Workflow，而是“数据、流程、执行、确认、能力、上线”。</p>
+
+<div class="mockup">
+  <div class="mockup-header">Business-first Navigation</div>
+  <div class="mockup-body">
+    <div style="display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px;margin-bottom:18px">
+      <div style="border:2px solid #111827;border-radius:8px;padding:12px;background:#fff">
+        <strong>经营总览</strong><br><small>今天哪里卡住，下一步做什么</small>
+      </div>
+      <div style="border:2px solid #2563eb;border-radius:8px;padding:12px;background:#eff6ff">
+        <strong>数据资产</strong><br><small>接入数据，确认业务关系图</small>
+      </div>
+      <div style="border:2px solid #d97706;border-radius:8px;padding:12px;background:#fffbeb">
+        <strong>业务流程</strong><br><small>订单、退款、客服、库存等流程</small>
+      </div>
+      <div style="border:2px solid #059669;border-radius:8px;padding:12px;background:#ecfdf5">
+        <strong>执行队伍</strong><br><small>数字员工运行状态与工具调用</small>
+      </div>
+      <div style="border:2px solid #7c3aed;border-radius:8px;padding:12px;background:#f5f3ff">
+        <strong>能力市场</strong><br><small>行业包、连接器、模板</small>
+      </div>
+      <div style="border:2px solid #dc2626;border-radius:8px;padding:12px;background:#fef2f2">
+        <strong>上线健康</strong><br><small>权限、安全、审计、证据</small>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1.1fr 1.1fr 0.8fr;gap:14px">
+      <section style="border:1px solid #d1d5db;border-radius:8px;padding:14px;background:#fff">
+        <h3 style="margin-top:0">业务流程</h3>
+        <p>这里吸收原来的 Workflow + Dynamic Workflow + Board。</p>
+        <div style="display:grid;gap:8px">
+          <div style="border:1px solid #e5e7eb;border-radius:8px;padding:10px"><strong>流程总览</strong><br><small>哪些流程正在跑、失败、等待确认</small></div>
+          <div style="border:1px solid #e5e7eb;border-radius:8px;padding:10px"><strong>流程模板</strong><br><small>稳定可复用的标准流程</small></div>
+          <div style="border:1px solid #e5e7eb;border-radius:8px;padding:10px"><strong>临时计划</strong><br><small>AI/Manager 为一次性目标生成的 DAG</small></div>
+          <div style="border:1px solid #e5e7eb;border-radius:8px;padding:10px"><strong>任务队列</strong><br><small>原 Board：执行中、待审核、阻塞、完成</small></div>
+        </div>
+      </section>
+
+      <section style="border:1px solid #d1d5db;border-radius:8px;padding:14px;background:#fff">
+        <h3 style="margin-top:0">执行队伍</h3>
+        <p>这里吸收原来的 Agents，但不用用户先理解 agent runtime。</p>
+        <div style="display:grid;gap:8px">
+          <div style="border:1px solid #e5e7eb;border-radius:8px;padding:10px"><strong>谁在工作</strong><br><small>数字员工、session、当前目标</small></div>
+          <div style="border:1px solid #e5e7eb;border-radius:8px;padding:10px"><strong>用了什么工具</strong><br><small>查询、写入、审批、外部系统调用</small></div>
+          <div style="border:1px solid #e5e7eb;border-radius:8px;padding:10px"><strong>哪里需要人</strong><br><small>高风险动作、低置信度、权限不足</small></div>
+        </div>
+      </section>
+
+      <section style="border:1px solid #d1d5db;border-radius:8px;padding:14px;background:#f9fafb">
+        <h3 style="margin-top:0">Manager 观察</h3>
+        <p>不是一个复杂系统，而是横跨所有页面的观察者。</p>
+        <ul>
+          <li>发现卡住/失败/重复</li>
+          <li>解释为什么卡住</li>
+          <li>建议下一步动作</li>
+          <li>写操作默认仍要审批</li>
+        </ul>
+      </section>
+    </div>
+  </div>
+</div>
+
+<div class="options">
+  <div class="option" data-choice="business-v2-approve" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>v2 更接近</h3>
+      <p>用“经营总览 / 数据资产 / 业务流程 / 执行队伍 / 能力市场 / 上线健康”。</p>
+    </div>
+  </div>
+  <div class="option" data-choice="business-v2-too-soft" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>太业务，工程入口不够快</h3>
+      <p>需要在顶层保留一个明确的“开发/高级”入口。</p>
+    </div>
+  </div>
+  <div class="option" data-choice="business-v2-rename" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>结构对，但命名要再改</h3>
+      <p>六个入口可以，但名称还要更像你的产品语言。</p>
+    </div>
+  </div>
+</div>

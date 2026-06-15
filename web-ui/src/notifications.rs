@@ -1,4 +1,4 @@
-use crate::state::{ConsoleData, View};
+use crate::state::{ConsoleData, UiLang, View};
 use crate::{json_status, label_or, short_id, status_tone};
 use js_sys::{Function, Object, Promise, Reflect};
 use serde_json::Value;
@@ -19,6 +19,7 @@ pub(crate) struct ConsoleNotification {
 #[derive(Properties, Clone, PartialEq)]
 pub(crate) struct NotificationCenterProps {
     pub(crate) notifications: Vec<ConsoleNotification>,
+    pub(crate) lang: UiLang,
     pub(crate) critical_muted: bool,
     pub(crate) on_toggle_critical: Callback<MouseEvent>,
     pub(crate) on_view: Callback<View>,
@@ -48,29 +49,39 @@ pub(crate) fn NotificationCenter(props: &NotificationCenterProps) -> Html {
     };
 
     html! {
-        <details class={classes!("notification-center", (!has_notifications).then_some("quiet"))} aria-label="操作员通知中心">
+        <details
+            class={classes!("notification-center", (!has_notifications).then_some("quiet"))}
+            aria-label={props.lang.text("Operator notification center", "操作员通知中心")}
+            open={critical_count > 0}
+        >
             <summary class="notification-summary">
                 <div>
-                    <span>{ "操作员通知" }</span>
+                    <span>{ props.lang.text("Operator Notifications", "操作员通知") }</span>
                     <strong>{ if has_notifications {
-                        format!("{} 条待处理 / {} 条严重", props.notifications.len(), critical_count)
+                        if props.lang == UiLang::En {
+                            format!("{} actionable / {} critical", props.notifications.len(), critical_count)
+                        } else {
+                            format!("{} 条待处理 / {} 条严重", props.notifications.len(), critical_count)
+                        }
                     } else {
-                        "没有待处理通知".to_string()
+                        props.lang.text("No actionable notifications", "没有待处理通知").to_string()
                     } }</strong>
                 </div>
-                <button class="secondary" onclick={on_toggle_critical}>
-                    { if props.critical_muted { "恢复严重通知" } else { "静音严重通知" } }
-                </button>
             </summary>
+            <div class="notification-actions">
+                <button class="secondary" onclick={on_toggle_critical}>
+                    { if props.critical_muted { props.lang.text("Resume critical", "恢复严重通知") } else { props.lang.text("Mute critical", "静音严重通知") } }
+                </button>
+            </div>
             <div class="notification-list">
                 {
                     if props.critical_muted && critical_count > 0 {
                         html! {
                             <article class="notification-item muted">
                                 <div>
-                                    <span>{ "已静音" }</span>
-                                    <strong>{ format!("{critical_count} 条严重通知已隐藏") }</strong>
-                                    <p>{ "重新开启前，浏览器和桌面都不会转发严重通知。" }</p>
+                                    <span>{ props.lang.text("Muted", "已静音") }</span>
+                                    <strong>{ if props.lang == UiLang::En { format!("{critical_count} critical notifications hidden") } else { format!("{critical_count} 条严重通知已隐藏") } }</strong>
+                                    <p>{ props.lang.text("Browser and desktop forwarding stay disabled until resumed.", "重新开启前，浏览器和桌面都不会转发严重通知。") }</p>
                                 </div>
                             </article>
                         }
@@ -78,9 +89,9 @@ pub(crate) fn NotificationCenter(props: &NotificationCenterProps) -> Html {
                         html! {
                             <article class="notification-item neutral">
                                 <div>
-                                    <span>{ "正常" }</span>
-                                    <strong>{ "队列为空" }</strong>
-                                    <p>{ "审批、失败任务、连接器、本体闸门和企业上线面目前都没有需要立即处理的通知。" }</p>
+                                    <span>{ props.lang.text("Normal", "正常") }</span>
+                                    <strong>{ props.lang.text("Queue empty", "队列为空") }</strong>
+                                    <p>{ props.lang.text("Approvals, failed jobs, connectors, ontology gates, and enterprise readiness have no immediate action.", "审批、失败任务、连接器、本体闸门和企业上线面目前都没有需要立即处理的通知。") }</p>
                                 </div>
                             </article>
                         }
@@ -92,7 +103,7 @@ pub(crate) fn NotificationCenter(props: &NotificationCenterProps) -> Html {
                                 html! {
                                     <article class={classes!("notification-item", notification.severity)} key={notification.key.clone()}>
                                         <div>
-                                            <span>{ severity_label(notification.severity) }</span>
+                                            <span>{ severity_label(props.lang, notification.severity) }</span>
                                             <strong>{ notification.title }</strong>
                                             <p>{ notification.detail }</p>
                                         </div>
@@ -110,16 +121,24 @@ pub(crate) fn NotificationCenter(props: &NotificationCenterProps) -> Html {
     }
 }
 
-fn severity_label(severity: &str) -> &'static str {
-    match severity {
-        "critical" => "严重",
-        "warning" => "警告",
-        "neutral" => "正常",
-        _ => "通知",
+fn severity_label(lang: UiLang, severity: &str) -> &'static str {
+    match lang {
+        UiLang::En => match severity {
+            "critical" => "Critical",
+            "warning" => "Warning",
+            "neutral" => "Normal",
+            _ => "Notice",
+        },
+        UiLang::Zh => match severity {
+            "critical" => "严重",
+            "warning" => "警告",
+            "neutral" => "正常",
+            _ => "通知",
+        },
     }
 }
 
-pub(crate) fn console_notifications(data: &ConsoleData) -> Vec<ConsoleNotification> {
+pub(crate) fn console_notifications(data: &ConsoleData, lang: UiLang) -> Vec<ConsoleNotification> {
     let mut notifications = Vec::new();
 
     notifications.extend(data.approvals.data.iter().filter_map(|approval| {
@@ -127,10 +146,14 @@ pub(crate) fn console_notifications(data: &ConsoleData) -> Vec<ConsoleNotificati
             Some(ConsoleNotification {
                 key: format!("approval:{}", approval.id),
                 severity: "warning",
-                title: format!("需要审批：{}", label_or(&approval.kind, "运行时动作")),
+                title: if lang == UiLang::En {
+                    format!("Approval required: {}", label_or(&approval.kind, "runtime action"))
+                } else {
+                    format!("需要审批：{}", label_or(&approval.kind, "运行时动作"))
+                },
                 detail: label_or(&approval.reason, &approval.id).to_string(),
                 target: View::Agents,
-                target_label: "查看审批",
+                target_label: lang.text("Open approvals", "查看审批"),
             })
         } else {
             None
@@ -142,13 +165,17 @@ pub(crate) fn console_notifications(data: &ConsoleData) -> Vec<ConsoleNotificati
             Some(ConsoleNotification {
                 key: format!("execution-job:{}", job.id),
                 severity: "critical",
-                title: format!("执行任务失败：{}", short_id(&job.id)),
+                title: if lang == UiLang::En {
+                    format!("Execution job failed: {}", short_id(&job.id))
+                } else {
+                    format!("执行任务失败：{}", short_id(&job.id))
+                },
                 detail: job
                     .last_error
                     .clone()
                     .unwrap_or_else(|| format!("status {}", label_or(&job.status, "failed"))),
                 target: View::Workflows,
-                target_label: "查看运行",
+                target_label: lang.text("Open runs", "查看运行"),
             })
         } else {
             None
@@ -161,13 +188,17 @@ pub(crate) fn console_notifications(data: &ConsoleData) -> Vec<ConsoleNotificati
             Some(ConsoleNotification {
                 key: format!("session-loop-job:{}", job.id),
                 severity: "critical",
-                title: format!("Session 循环需要处理：{}", short_id(&job.id)),
+                title: if lang == UiLang::En {
+                    format!("Session loop needs attention: {}", short_id(&job.id))
+                } else {
+                    format!("Session 循环需要处理：{}", short_id(&job.id))
+                },
                 detail: job
                     .last_error
                     .clone()
                     .unwrap_or_else(|| format!("status {}", label_or(&job.status, "stuck"))),
                 target: View::Workflows,
-                target_label: "查看运行",
+                target_label: lang.text("Open runs", "查看运行"),
             })
         } else {
             None
@@ -176,20 +207,20 @@ pub(crate) fn console_notifications(data: &ConsoleData) -> Vec<ConsoleNotificati
 
     if let Some(notification) = json_gate_notification(
         "connector:production-readiness",
-        "连接器生产就绪被阻塞",
+        lang.text("Connector production readiness is blocked", "连接器生产就绪被阻塞"),
         &data.native_connector_production_readiness.data,
         View::Deploy,
-        "查看上线",
+        lang.text("Open System Ops", "查看上线"),
     ) {
         notifications.push(notification);
     }
 
     if let Some(notification) = json_gate_notification(
         "ontology:engine-readiness",
-        "本体引擎就绪被阻塞",
+        lang.text("Ontology engine readiness is blocked", "本体引擎就绪被阻塞"),
         &data.ontology_engine_readiness.data,
         View::Semantic,
-        "查看本体",
+        lang.text("Open Ontology", "查看本体"),
     ) {
         notifications.push(notification);
     }
@@ -206,7 +237,11 @@ pub(crate) fn console_notifications(data: &ConsoleData) -> Vec<ConsoleNotificati
                     Some(ConsoleNotification {
                         key: format!("enterprise:{}", label_or(&lane.id, &lane.title)),
                         severity: if tone == "bad" { "critical" } else { "warning" },
-                        title: format!("企业上线面回退：{}", label_or(&lane.title, &lane.id)),
+                        title: if lang == UiLang::En {
+                            format!("Enterprise lane regressed: {}", label_or(&lane.title, &lane.id))
+                        } else {
+                            format!("企业上线面回退：{}", label_or(&lane.title, &lane.id))
+                        },
                         detail: blocker.cloned().unwrap_or_else(|| {
                             format!(
                                 "{} -> {}",
@@ -215,7 +250,7 @@ pub(crate) fn console_notifications(data: &ConsoleData) -> Vec<ConsoleNotificati
                             )
                         }),
                         target: View::Deploy,
-                        target_label: "查看就绪",
+                        target_label: lang.text("Open readiness", "查看就绪"),
                     })
                 } else {
                     None
@@ -229,7 +264,7 @@ pub(crate) fn console_notifications(data: &ConsoleData) -> Vec<ConsoleNotificati
         notifications.push(ConsoleNotification {
             key: "enterprise:completion-blocked".to_string(),
             severity: "critical",
-            title: "企业级完成状态被阻塞".to_string(),
+            title: lang.text("Enterprise completion is blocked", "企业级完成状态被阻塞").to_string(),
             detail: data
                 .enterprise_product_readiness
                 .data
@@ -244,7 +279,7 @@ pub(crate) fn console_notifications(data: &ConsoleData) -> Vec<ConsoleNotificati
                     .to_string()
             }),
             target: View::Deploy,
-            target_label: "查看就绪",
+            target_label: lang.text("Open readiness", "查看就绪"),
         });
     }
 

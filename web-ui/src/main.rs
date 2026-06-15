@@ -1,6 +1,7 @@
 mod api;
 mod components;
 mod desktop_bridge;
+mod graph_island;
 mod notifications;
 mod state;
 mod views;
@@ -22,7 +23,7 @@ use yew::prelude::*;
 #[component]
 fn App() -> Html {
     let active_view = use_state(initial_active_view);
-    let token_input = use_state(get_admin_token);
+    let ui_lang = use_state(initial_ui_lang);
     let mutation_status = use_state(String::new);
     let task_title = use_state(|| "Smoke run: fetch a public webpage title".to_string());
     let task_message = use_state(|| {
@@ -44,87 +45,178 @@ fn App() -> Html {
     let onboarding_review_graph = use_state(|| None::<OntologyReviewGraph>);
     let onboarding_calibration = use_state(|| None::<ConfidenceCalibrationResponse>);
     let critical_notifications_muted = use_state(initial_critical_notifications_muted);
+    let current_view = *active_view;
+    let poll_agent_detail = matches!(current_view, View::Wizard | View::Agents);
+    let poll_agent_activity = matches!(current_view, View::Overview | View::Agents);
+    let poll_runs_tasks = matches!(
+        current_view,
+        View::Overview | View::Agents | View::Board | View::Workflows | View::Dynamic
+    );
+    let poll_runs_detail = matches!(current_view, View::Board | View::Workflows | View::Dynamic);
+    let poll_capabilities = matches!(current_view, View::Overview | View::Packs);
+    let poll_capability_detail = matches!(current_view, View::Packs);
+    let poll_ontology_summary = matches!(current_view, View::Overview | View::Semantic);
+    let poll_ontology_detail = matches!(current_view, View::Semantic);
+    let poll_system_ops_detail = matches!(current_view, View::Deploy);
 
     let data = ConsoleData {
-        agents: use_polling::<Vec<Agent>>("/api/agents", 5_000),
-        environments: use_polling::<Vec<Environment>>("/api/environments", 6_000),
-        sessions: use_polling::<Vec<Session>>("/api/sessions", 1_800),
-        approvals: use_polling::<Vec<Approval>>("/api/approvals", 1_800),
-        execution_jobs: use_polling::<Vec<WorkerJob>>("/api/execution-jobs", 1_500),
-        session_loop_jobs: use_polling::<Vec<WorkerJob>>("/api/session-loop-jobs", 1_500),
-        tool_calls: use_polling::<Vec<ToolCall>>("/api/tool-calls", 1_800),
-        workflow_runs: use_polling::<Vec<WorkflowRun>>("/api/workflow-runs", 1_600),
+        agents: use_polling::<Vec<Agent>>("/api/agents", 5_000, true),
+        environments: use_polling::<Vec<Environment>>(
+            "/api/environments",
+            6_000,
+            poll_agent_detail,
+        ),
+        sessions: use_polling::<Vec<Session>>("/api/sessions", 1_800, true),
+        approvals: use_polling::<Vec<Approval>>("/api/approvals", 1_800, true),
+        execution_jobs: use_polling::<Vec<WorkerJob>>("/api/execution-jobs", 1_500, true),
+        session_loop_jobs: use_polling::<Vec<WorkerJob>>(
+            "/api/session-loop-jobs",
+            1_500,
+            true,
+        ),
+        tool_calls: use_polling::<Vec<ToolCall>>("/api/tool-calls", 1_800, poll_agent_activity),
+        workflow_runs: use_polling::<Vec<WorkflowRun>>(
+            "/api/workflow-runs",
+            1_600,
+            poll_runs_tasks,
+        ),
         workflow_definitions: use_polling::<Vec<WorkflowDefinition>>(
             "/api/workflow-definitions",
             3_000,
+            poll_runs_detail,
         ),
         dynamic_workflow_plans: use_polling::<Vec<DynamicWorkflowPlan>>(
             "/api/dynamic-workflow-plans",
             2_500,
+            poll_runs_tasks,
         ),
-        task_board: use_polling::<TaskBoardSnapshot>("/api/task-board", 1_500),
-        work_items: use_polling::<Vec<WorkItem>>("/api/work-items", 3_000),
-        manager_plans: use_polling::<Vec<Value>>("/api/manager-plans", 3_000),
-        agent_handoffs: use_polling::<Vec<Value>>("/api/agent-handoffs", 3_000),
+        task_board: use_polling::<TaskBoardSnapshot>("/api/task-board", 1_500, poll_runs_tasks),
+        work_items: use_polling::<Vec<WorkItem>>("/api/work-items", 3_000, poll_runs_detail),
+        manager_plans: use_polling::<Vec<Value>>(
+            "/api/manager-plans",
+            3_000,
+            matches!(current_view, View::Agents | View::Workflows | View::Board | View::Dynamic),
+        ),
+        agent_handoffs: use_polling::<Vec<Value>>(
+            "/api/agent-handoffs",
+            3_000,
+            matches!(current_view, View::Agents | View::Workflows | View::Board | View::Dynamic),
+        ),
         agent_handoff_assignments: use_polling::<Vec<Value>>(
             "/api/agent-handoff-assignments",
             3_000,
+            matches!(current_view, View::Agents | View::Workflows | View::Board | View::Dynamic),
         ),
         workflow_pack_installations: use_polling::<Vec<WorkflowPackInstallation>>(
             "/api/workflow-packs/installations",
             4_000,
+            poll_capabilities,
         ),
-        stage2_readiness: use_polling::<Stage2Readiness>("/api/stage2/readiness", 4_000),
+        stage2_readiness: use_polling::<Stage2Readiness>(
+            "/api/stage2/readiness",
+            4_000,
+            matches!(current_view, View::Workflows | View::Deploy),
+        ),
         enterprise_product_readiness: use_polling::<EnterpriseProductReadiness>(
             "/api/enterprise-product/readiness",
             4_000,
+            true,
         ),
         native_connector_production_readiness: use_polling::<Value>(
             "/api/native-connectors/production-readiness",
             5_000,
+            true,
         ),
-        observability: use_polling::<ObservabilitySummary>("/api/observability", 3_000),
+        observability: use_polling::<ObservabilitySummary>(
+            "/api/observability",
+            3_000,
+            poll_system_ops_detail,
+        ),
         capability_discovery: use_polling::<CapabilityDiscovery>(
             "/api/capability-discovery",
             4_000,
+            poll_capability_detail,
         ),
-        usage: use_polling::<Value>("/api/usage", 5_000),
-        memory_governance: use_polling::<Value>("/api/memory-governance/summary", 5_000),
+        usage: use_polling::<Value>("/api/usage", 5_000, poll_system_ops_detail),
+        memory_governance: use_polling::<Value>(
+            "/api/memory-governance/summary",
+            5_000,
+            poll_ontology_detail,
+        ),
         memory_writebacks: use_polling::<Value>(
             "/api/memory-governance/writebacks?limit=50&status=pending",
             5_000,
+            poll_ontology_detail,
         ),
         memory_writeback_candidates: use_polling::<Value>(
             "/api/memory-writeback-candidates",
             5_000,
+            poll_ontology_detail,
         ),
-        scheduler_summary: use_polling::<Value>("/api/scheduler/summary", 4_000),
-        deployment_version: use_polling::<DeploymentVersion>("/api/deployment/version", 4_000),
+        scheduler_summary: use_polling::<Value>(
+            "/api/scheduler/summary",
+            4_000,
+            poll_runs_detail,
+        ),
+        deployment_version: use_polling::<DeploymentVersion>(
+            "/api/deployment/version",
+            4_000,
+            matches!(current_view, View::Agents | View::Deploy),
+        ),
         remote_computer_production_path: use_polling::<Value>(
             "/api/remote-computers/production-path",
             5_000,
+            poll_system_ops_detail,
         ),
         workflow_pack_marketplace: use_polling::<WorkflowPackMarketplace>(
             "/api/workflow-packs/marketplace",
             6_000,
+            poll_capabilities,
         ),
-        semantic_objects: use_polling::<Vec<SemanticObject>>("/api/semantic-objects", 5_000),
-        semantic_links: use_polling::<Vec<Value>>("/api/semantic-links", 5_000),
-        semantic_search: use_polling::<Value>("/api/semantic-search", 5_000),
-        semantic_graph: use_polling::<SemanticGraphSnapshot>("/api/semantic-graph", 5_000),
-        semantic_workbench: use_polling::<Value>(
-            "/api/semantic-workbench?domain_scope=ecommerce&workflow_scope=tmall",
+        semantic_objects: use_polling::<Vec<SemanticObject>>(
+            "/api/semantic-objects",
             5_000,
+            poll_ontology_summary,
+        ),
+        semantic_links: use_polling::<Vec<Value>>(
+            "/api/semantic-links",
+            5_000,
+            poll_ontology_detail,
+        ),
+        semantic_search: use_polling::<Value>(
+            "/api/semantic-search",
+            5_000,
+            poll_ontology_detail,
+        ),
+        semantic_graph: use_polling::<SemanticGraphSnapshot>(
+            "/api/semantic-graph",
+            5_000,
+            poll_ontology_summary,
+        ),
+        semantic_workbench: use_polling_dynamic::<Value>(
+            semantic_workbench_path_from_storage(),
+            5_000,
+            poll_ontology_detail,
         ),
         semantic_reflection_queue: use_polling::<SemanticReflectionQueue>(
             "/api/semantic-reflection/queue",
             5_000,
+            poll_ontology_summary,
         ),
-        ontology_registry: use_polling::<OntologyRegistry>("/api/ontology/registry", 6_000),
-        ontology_engine_readiness: use_polling::<Value>("/api/ontology/engine-readiness", 6_000),
+        ontology_registry: use_polling::<OntologyRegistry>(
+            "/api/ontology/registry",
+            6_000,
+            poll_ontology_detail,
+        ),
+        ontology_engine_readiness: use_polling::<Value>(
+            "/api/ontology/engine-readiness",
+            6_000,
+            true,
+        ),
         semantic_retrieval_backends: use_polling::<Value>(
             "/api/semantic-retrieval/backends",
             6_000,
+            poll_ontology_detail,
         ),
     };
 
@@ -142,25 +234,6 @@ fn App() -> Html {
         .iter()
         .filter(|approval| approval.status == "pending" || approval.status == "requires_action")
         .count();
-
-    let save_token = {
-        let token_input = token_input.clone();
-        let mutation_status = mutation_status.clone();
-        Callback::from(move |_| {
-            set_admin_token(&token_input);
-            mutation_status.set("Admin token saved in localStorage.".to_string());
-        })
-    };
-
-    let clear_token = {
-        let token_input = token_input.clone();
-        let mutation_status = mutation_status.clone();
-        Callback::from(move |_| {
-            token_input.set(String::new());
-            set_admin_token("");
-            mutation_status.set("Admin token cleared.".to_string());
-        })
-    };
 
     let compile_dynamic = {
         let dynamic_objective = dynamic_objective.clone();
@@ -188,7 +261,7 @@ fn App() -> Html {
             let mutation_status = mutation_status.clone();
             spawn_local(async move {
                 mutation_status.set("正在生成本体提案预览...".to_string());
-                let body = ontology_builder_body(&source_text);
+                let body = ontology_builder_body(&source_text, &ontology_builder_config_from_storage());
                 match api_post::<Value, _>("/api/semantic-ontology/builder", &body).await {
                     Ok(payload) => mutation_status.set(format!(
                         "本体预览已生成：{}",
@@ -556,10 +629,11 @@ fn App() -> Html {
             let mutation_status = mutation_status.clone();
             spawn_local(async move {
                 mutation_status.set("Verifying deployed version...".to_string());
+                let target = deployment_target_from_storage();
                 let body = json!({
                     "expected_git_sha": version.git_sha,
                     "expected_image_tag": version.image_tag,
-                    "target": "whiskey",
+                    "target": target,
                     "require_match": true
                 });
                 match api_post::<Value, _>("/api/deployment/production/verify", &body).await {
@@ -580,6 +654,21 @@ fn App() -> Html {
                 if next_value { "1" } else { "0" },
             );
             critical_notifications_muted.set(next_value);
+        })
+    };
+
+    let set_lang_en = {
+        let ui_lang = ui_lang.clone();
+        Callback::from(move |_| {
+            storage_set("mandoforge.uiLang", UiLang::En.id());
+            ui_lang.set(UiLang::En);
+        })
+    };
+    let set_lang_zh = {
+        let ui_lang = ui_lang.clone();
+        Callback::from(move |_| {
+            storage_set("mandoforge.uiLang", UiLang::Zh.id());
+            ui_lang.set(UiLang::Zh);
         })
     };
 
@@ -629,7 +718,9 @@ fn App() -> Html {
         })
     };
 
-    let notifications = use_memo(data.clone(), |data| console_notifications(data));
+    let notifications = use_memo((data.clone(), *ui_lang), |(data, lang)| {
+        console_notifications(data, *lang)
+    });
     let notification_count = notifications.len();
     let critical_notification_count = notifications
         .iter()
@@ -654,40 +745,33 @@ fn App() -> Html {
         <main class="console-shell">
             <header class="topbar">
                 <div>
-                    <p class="eyebrow">{ "MandoForge 协同控制台 / Co-Work Console" }</p>
-                    <h1>{ (*active_view).title() }</h1>
+                    <p class="eyebrow">{ (*ui_lang).text("MandoForge Co-Work Console / 协同控制台", "MandoForge 协同控制台 / Co-Work Console") }</p>
+                    <h1>{ (*active_view).title(*ui_lang) }</h1>
                 </div>
                 <div class="status-strip">
-                    <Metric label="运行智能体" value={running_agents.to_string()} tone="good" />
-                    <Metric label="执行队列" value={active_job_count(&data.execution_jobs.data).to_string()} tone="good" />
-                    <Metric label="待审批" value={pending_approvals.to_string()} tone={if pending_approvals > 0 { "warn" } else { "good" }} />
-                    <Metric label="刷新中" value={fetching_count.to_string()} tone="neutral" />
-                    <Metric label="错误" value={error_count.to_string()} tone={if error_count > 0 { "bad" } else { "good" }} />
+                    <Metric label={(*ui_lang).text("Running agents", "运行智能体")} value={running_agents.to_string()} tone="good" />
+                    <Metric label={(*ui_lang).text("Queue", "执行队列")} value={active_job_count(&data.execution_jobs.data).to_string()} tone="good" />
+                    <Metric label={(*ui_lang).text("Approvals", "待审批")} value={pending_approvals.to_string()} tone={if pending_approvals > 0 { "warn" } else { "good" }} />
+                    <Metric label={(*ui_lang).text("Refreshing", "刷新中")} value={fetching_count.to_string()} tone="neutral" />
+                    <Metric label={(*ui_lang).text("Errors", "错误")} value={error_count.to_string()} tone={if error_count > 0 { "bad" } else { "good" }} />
+                    <div class="language-toggle" aria-label="Console language">
+                        <button class={classes!((*ui_lang == UiLang::En).then_some("active"))} onclick={set_lang_en.clone()}>{ "EN" }</button>
+                        <button class={classes!((*ui_lang == UiLang::Zh).then_some("active"))} onclick={set_lang_zh.clone()}>{ "中文" }</button>
+                    </div>
+                    <button
+                        class={classes!("utility-nav-button", (*active_view == View::Settings).then_some("active"))}
+                        onclick={{
+                            let active_view = active_view.clone();
+                            Callback::from(move |_| {
+                                persist_active_view(View::Settings);
+                                active_view.set(View::Settings);
+                            })
+                        }}
+                    >
+                        { (*ui_lang).text("Settings", "设置") }
+                    </button>
                 </div>
             </header>
-
-            <section class="auth-strip">
-                <div>
-                    <strong>{ "API 认证" }</strong>
-                    <span>{ "用于访问实时闸门、生产证据和控制台 API 的 Bearer token。" }</span>
-                </div>
-                <input
-                    id="mandoforge-admin-token"
-                    name="mandoforge-admin-token"
-                    value={(*token_input).clone()}
-                    placeholder="MANDOFORGE_DEV_ADMIN_TOKEN"
-                    type="password"
-                    oninput={{
-                        let token_input = token_input.clone();
-                        Callback::from(move |event: InputEvent| {
-                            let input: HtmlInputElement = event.target_unchecked_into();
-                            token_input.set(input.value());
-                        })
-                    }}
-                />
-                <button onclick={save_token}>{ "保存" }</button>
-                <button class="secondary" onclick={clear_token}>{ "清除" }</button>
-            </section>
 
             <nav class="tabs">
                 { for View::PRIMARY_NAV.into_iter().map(|view| {
@@ -701,7 +785,7 @@ fn App() -> Html {
                                 active_view.set(view);
                             })}
                         >
-                            <span>{ view.label() }</span>
+                            <span>{ view.label(*ui_lang) }</span>
                         </button>
                     }
                 })}
@@ -709,6 +793,7 @@ fn App() -> Html {
 
             <NotificationCenter
                 notifications={notifications}
+                lang={*ui_lang}
                 critical_muted={*critical_notifications_muted}
                 on_toggle_critical={toggle_critical_notifications.clone()}
                 on_view={{
@@ -721,19 +806,10 @@ fn App() -> Html {
             />
 
             {
-                if matches!(
-                    *active_view,
-                    View::Overview
-                        | View::Wizard
-                        | View::Agents
-                        | View::Semantic
-                        | View::Packs
-                        | View::Deploy
-                        | View::Settings
-                ) {
-                    html! {}
+                if matches!(*active_view, View::Workflows) {
+                    html! { <VisualCommandDeck data={data.clone()} view={*active_view} lang={*ui_lang} /> }
                 } else {
-                    html! { <VisualCommandDeck data={data.clone()} view={*active_view} /> }
+                    html! {}
                 }
             }
 
@@ -743,6 +819,7 @@ fn App() -> Html {
                         View::Overview => html! {
                             <OverviewView
                                 data={data.clone()}
+                                lang={*ui_lang}
                                 on_view={{
                                     let active_view = active_view.clone();
                                     Callback::from(move |view: View| {
@@ -771,6 +848,7 @@ fn App() -> Html {
                         View::Agents => html! {
                             <AgentsView
                                 data={data.clone()}
+                                lang={*ui_lang}
                                 task_title={(*task_title).clone()}
                                 task_message={(*task_message).clone()}
                                 selected_agent_id={(*task_agent_id).clone()}
@@ -785,6 +863,7 @@ fn App() -> Html {
                         View::Board | View::Workflows | View::Dynamic => html! {
                             <WorkflowsView
                                 data={data.clone()}
+                                lang={*ui_lang}
                                 objective={(*dynamic_objective).clone()}
                                 on_objective={state_input(dynamic_objective.clone())}
                                 on_compile={compile_dynamic.clone()}
@@ -793,6 +872,7 @@ fn App() -> Html {
                         View::Semantic => html! {
                             <SemanticView
                                 data={data.clone()}
+                                lang={*ui_lang}
                                 source_text={(*semantic_source).clone()}
                                 context_packet_id={(*context_packet_id).clone()}
                                 rendered_context={(*rendered_context).clone()}
@@ -811,11 +891,12 @@ fn App() -> Html {
                                 on_materialize_onboarding={materialize_ontology_onboarding.clone()}
                             />
                         },
-                        View::Packs => html! { <PacksView data={data.clone()} /> },
-                        View::Deploy => html! { <DeployView data={data.clone()} on_verify={verify_deploy.clone()} /> },
+                        View::Packs => html! { <PacksView data={data.clone()} lang={*ui_lang} /> },
+                        View::Deploy => html! { <DeployView data={data.clone()} lang={*ui_lang} on_verify={verify_deploy.clone()} /> },
                         View::Settings => html! {
                             <SettingsView
                                 data={data.clone()}
+                                lang={*ui_lang}
                                 critical_muted={*critical_notifications_muted}
                                 notification_count={notification_count}
                                 critical_notification_count={critical_notification_count}
@@ -827,8 +908,8 @@ fn App() -> Html {
             </section>
 
             <footer class="live-log">
-                <strong>{ "实时操作日志" }</strong>
-                <span>{ if mutation_status.is_empty() { "本轮浏览器操作还没有触发后台动作。" } else { mutation_status.as_str() } }</span>
+                <strong>{ (*ui_lang).text("Live operation log", "实时操作日志") }</strong>
+                <span>{ if mutation_status.is_empty() { (*ui_lang).text("No backend action has been triggered in this browser session.", "本轮浏览器操作还没有触发后台动作。") } else { mutation_status.as_str() } }</span>
             </footer>
         </main>
     }
@@ -838,6 +919,7 @@ fn App() -> Html {
 struct VisualCommandDeckProps {
     data: ConsoleData,
     view: View,
+    lang: UiLang,
 }
 
 #[component]
@@ -863,9 +945,12 @@ fn VisualCommandDeck(props: &VisualCommandDeckProps) -> Html {
     html! {
         <section class="visual-command-deck">
             <div class="deck-copy">
-                <span>{ props.view.label() }</span>
-                <strong>{ "Dynamic workflow map" }</strong>
-                <small>{ "Live plan state, materialization strategy, active work, and gate pressure from the MandoForge control plane." }</small>
+                <span>{ props.view.label(props.lang) }</span>
+                <strong>{ props.lang.text("Dynamic workflow map", "动态工作流地图") }</strong>
+                <small>{ props.lang.text(
+                    "Live plan state, materialization strategy, active work, and gate pressure from the MandoForge control plane.",
+                    "展示实时计划状态、发布策略、活跃任务和控制平面的闸门压力。"
+                ) }</small>
             </div>
             <DynamicWorkflowCanvas
                 plans={data.dynamic_workflow_plans.data.clone()}
@@ -874,9 +959,9 @@ fn VisualCommandDeck(props: &VisualCommandDeckProps) -> Html {
                 session_loop_jobs={data.session_loop_jobs.data.clone()}
             />
             <div class="deck-bars">
-                <FlowMeter label="Active work" value={active_jobs} max={active_jobs.max(data.sessions.data.len()).max(1)} tone="info" />
-                <FlowMeter label="Approvals" value={pending_approvals} max={pending_approvals.max(data.approvals.data.len()).max(1)} tone={if pending_approvals > 0 { "warn" } else { "good" }} />
-                <FlowMeter label="Workflow graph" value={workflow_activity} max={workflow_activity.max(1)} tone="neutral" />
+                <FlowMeter label={props.lang.text("Active work", "活跃任务")} value={active_jobs} max={active_jobs.max(data.sessions.data.len()).max(1)} tone="info" />
+                <FlowMeter label={props.lang.text("Approvals", "审批")} value={pending_approvals} max={pending_approvals.max(data.approvals.data.len()).max(1)} tone={if pending_approvals > 0 { "warn" } else { "good" }} />
+                <FlowMeter label={props.lang.text("Workflow graph", "运行图")} value={workflow_activity} max={workflow_activity.max(1)} tone="neutral" />
             </div>
             <div class="deck-gauge">
                 <div class="radial-gauge" style={gauge_style(readiness)}>
@@ -1031,47 +1116,126 @@ fn label_or_strategy(value: &str) -> String {
     label_or(value, "unknown").replace('_', " ")
 }
 
+fn storage_value_or(key: &str, default: &str) -> String {
+    storage_get(key)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| default.to_string())
+}
+
+fn ontology_builder_config_from_storage() -> OntologyBuilderConfig {
+    OntologyBuilderConfig {
+        domain_scope: storage_value_or(
+            ONTOLOGY_DOMAIN_SCOPE_KEY,
+            DEFAULT_ONTOLOGY_DOMAIN_SCOPE,
+        ),
+        workflow_scope: storage_value_or(
+            ONTOLOGY_WORKFLOW_SCOPE_KEY,
+            DEFAULT_ONTOLOGY_WORKFLOW_SCOPE,
+        ),
+        memory_scope: storage_value_or(
+            ONTOLOGY_MEMORY_SCOPE_KEY,
+            DEFAULT_ONTOLOGY_MEMORY_SCOPE,
+        ),
+        objective: storage_value_or(ONTOLOGY_OBJECTIVE_KEY, DEFAULT_ONTOLOGY_OBJECTIVE),
+    }
+}
+
+fn deployment_target_from_storage() -> String {
+    storage_value_or(DEPLOYMENT_TARGET_KEY, DEFAULT_DEPLOYMENT_TARGET)
+}
+
+fn semantic_workbench_path_from_storage() -> String {
+    let config = ontology_builder_config_from_storage();
+    format!(
+        "/api/semantic-workbench?domain_scope={}&workflow_scope={}",
+        url_component(&config.domain_scope),
+        url_component(&config.workflow_scope)
+    )
+}
+
+fn url_component(value: &str) -> String {
+    js_sys::encode_uri_component(value)
+        .as_string()
+        .unwrap_or_default()
+}
+
 #[hook]
-fn use_polling<T>(path: &'static str, interval_ms: u32) -> ApiState<T>
+fn use_polling<T>(path: &'static str, interval_ms: u32, enabled: bool) -> ApiState<T>
 where
     T: Clone + Default + PartialEq + for<'de> serde::Deserialize<'de> + 'static,
 {
     let state = use_state(ApiState::<T>::default);
     {
         let state = state.clone();
-        use_effect_with((), move |_| {
-            fetch_into_state(path, state.clone());
-            let interval =
-                Interval::new(interval_ms, move || fetch_into_state(path, state.clone()));
+        use_effect_with(enabled, move |enabled| {
+            let interval = if *enabled {
+                fetch_into_state(path.to_string(), state.clone());
+                Some(Interval::new(interval_ms, move || {
+                    fetch_into_state(path.to_string(), state.clone())
+                }))
+            } else {
+                None
+            };
             move || drop(interval)
         });
     }
     (*state).clone()
 }
 
-fn fetch_into_state<T>(path: &'static str, state: UseStateHandle<ApiState<T>>)
+#[hook]
+fn use_polling_dynamic<T>(path: String, interval_ms: u32, enabled: bool) -> ApiState<T>
 where
     T: Clone + Default + PartialEq + for<'de> serde::Deserialize<'de> + 'static,
 {
+    let state = use_state(ApiState::<T>::default);
+    {
+        let state = state.clone();
+        use_effect_with((path, enabled), move |(path, enabled)| {
+            let interval = if *enabled {
+                fetch_into_state(path.clone(), state.clone());
+                let path = path.clone();
+                Some(Interval::new(interval_ms, move || {
+                    fetch_into_state(path.clone(), state.clone())
+                }))
+            } else {
+                None
+            };
+            move || drop(interval)
+        });
+    }
+    (*state).clone()
+}
+
+fn fetch_into_state<T>(path: String, state: UseStateHandle<ApiState<T>>)
+where
+    T: Clone + Default + PartialEq + for<'de> serde::Deserialize<'de> + 'static,
+{
+    if (*state).in_flight {
+        return;
+    }
     state.set(ApiState {
         data: (*state).data.clone(),
         status: LoadStatus::Loading,
         error: None,
         updated_at_ms: (*state).updated_at_ms,
+        in_flight: true,
     });
     spawn_local(async move {
-        match api_get::<T>(path).await {
+        match api_get::<T>(&path).await {
             Ok(data) => state.set(ApiState {
                 data,
                 status: LoadStatus::Ready,
                 error: None,
                 updated_at_ms: now_ms(),
+                in_flight: false,
             }),
             Err(error) => state.set(ApiState {
                 data: (*state).data.clone(),
                 status: LoadStatus::Error,
                 error: Some(error),
                 updated_at_ms: now_ms(),
+                in_flight: false,
             }),
         }
     });

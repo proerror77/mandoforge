@@ -4,7 +4,8 @@ use crate::api::{
     OntologyReviewGraphNode, RenderedExecutionContext, SemanticGraphSnapshot, SemanticObject,
 };
 use crate::components::{FlowMeter, JsonPreview, KeyMetrics, Panel, Rows};
-use crate::state::ConsoleData;
+use crate::graph_island::OntologyGraphIsland;
+use crate::state::{ConsoleData, UiLang};
 use crate::{
     compact_json, label_or, orbit_point, position_style, semantic_scope_summary, short_id,
     status_tone,
@@ -15,6 +16,7 @@ use yew::prelude::*;
 #[derive(Properties, Clone, PartialEq)]
 pub(crate) struct SemanticProps {
     pub(crate) data: ConsoleData,
+    pub(crate) lang: UiLang,
     pub(crate) source_text: String,
     pub(crate) context_packet_id: String,
     pub(crate) rendered_context: Option<RenderedExecutionContext>,
@@ -33,20 +35,7 @@ pub(crate) struct SemanticProps {
     pub(crate) on_materialize_onboarding: Callback<MouseEvent>,
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum SemanticLang {
-    Zh,
-    En,
-}
-
-impl SemanticLang {
-    fn text(self, en: &'static str, zh: &'static str) -> &'static str {
-        match self {
-            Self::En => en,
-            Self::Zh => zh,
-        }
-    }
-}
+type SemanticLang = UiLang;
 
 fn localized_status(lang: SemanticLang, status: &str) -> String {
     if lang == SemanticLang::En {
@@ -116,16 +105,7 @@ fn localized_risk(lang: SemanticLang, risk: &str) -> String {
 
 #[component]
 pub(crate) fn SemanticView(props: &SemanticProps) -> Html {
-    let lang = use_state(|| SemanticLang::Zh);
-    let current_lang = *lang;
-    let set_zh = {
-        let lang = lang.clone();
-        Callback::from(move |_| lang.set(SemanticLang::Zh))
-    };
-    let set_en = {
-        let lang = lang.clone();
-        Callback::from(move |_| lang.set(SemanticLang::En))
-    };
+    let current_lang = props.lang;
     let run = props.onboarding_run.as_ref();
     html! {
         <div class="semantic-workbench">
@@ -140,8 +120,7 @@ pub(crate) fn SemanticView(props: &SemanticProps) -> Html {
                 </div>
                 <div class="semantic-hero-controls">
                     <div class="semantic-language-toggle" aria-label="Language">
-                        <button class={classes!((*lang == SemanticLang::Zh).then_some("active"))} onclick={set_zh}>{ "中文" }</button>
-                        <button class={classes!((*lang == SemanticLang::En).then_some("active"))} onclick={set_en}>{ "EN" }</button>
+                        <span>{ current_lang.text("Language: English / 中文可切换", "语言：中文 / English available") }</span>
                     </div>
                     <div class="semantic-hero-actions">
                         <button onclick={props.on_start_onboarding.clone()}>{ current_lang.text("Start ecommerce sample", "开始电商示例") }</button>
@@ -248,11 +227,11 @@ pub(crate) fn SemanticView(props: &SemanticProps) -> Html {
             <details class="semantic-advanced">
                 <summary>{ current_lang.text("Advanced semantic state, graph, and governance", "高级：语义图、对象和治理状态") }</summary>
                 <div class="page-grid semantic-debug-grid">
-                    <Panel title="语义图快照">
+                    <Panel title={current_lang.text("Semantic Graph Snapshot", "语义图快照")}>
                         <SemanticMap snapshot={props.data.semantic_graph.data.clone()} objects={props.data.semantic_objects.data.clone()} />
                     </Panel>
-                    <Panel title="语义对象">
-                        <Rows empty="还没有语义对象。" rows={props.data.semantic_objects.data.iter().take(10).map(|object| {
+                    <Panel title={current_lang.text("Semantic Objects", "语义对象")}>
+                        <Rows empty={current_lang.text("No semantic objects yet.", "还没有语义对象。")} rows={props.data.semantic_objects.data.iter().take(10).map(|object| {
                             (
                                 object.status.clone(),
                                 label_or(&object.title, &object.object_key).to_string(),
@@ -260,12 +239,12 @@ pub(crate) fn SemanticView(props: &SemanticProps) -> Html {
                             )
                         }).collect::<Vec<_>>()} />
                     </Panel>
-                    <Panel title="治理状态">
+                    <Panel title={current_lang.text("Governance State", "治理状态")}>
                         <KeyMetrics values={vec![
-                            ("写回".to_string(), compact_json(&props.data.memory_writebacks.data)),
-                            ("候选写回".to_string(), compact_json(&props.data.memory_writeback_candidates.data)),
-                            ("本体版本".to_string(), props.data.ontology_registry.data.version.clone()),
-                            ("反思队列".to_string(), props.data.semantic_reflection_queue.data.status.clone()),
+                            (current_lang.text("Writebacks", "写回").to_string(), compact_json(&props.data.memory_writebacks.data)),
+                            (current_lang.text("Candidate writebacks", "候选写回").to_string(), compact_json(&props.data.memory_writeback_candidates.data)),
+                            (current_lang.text("Ontology version", "本体版本").to_string(), props.data.ontology_registry.data.version.clone()),
+                            (current_lang.text("Reflection queue", "反思队列").to_string(), props.data.semantic_reflection_queue.data.status.clone()),
                         ]} />
                     </Panel>
                 </div>
@@ -391,9 +370,10 @@ fn SemanticJourney(props: &SemanticJourneyProps) -> Html {
         (
             "03",
             props.lang.text("LLM mining loop", "LLM 循环挖掘"),
-            props
-                .lang
-                .text("Objects, links, metrics, actions", "挖掘对象、关系、指标、动作"),
+            props.lang.text(
+                "Objects, links, metrics, actions",
+                "挖掘对象、关系、指标、动作",
+            ),
             proposed,
         ),
         (
@@ -471,6 +451,7 @@ fn OnboardingPanel(props: &OnboardingPanelProps) -> Html {
                 lang={props.lang}
                 graph={props.review_graph.clone()}
                 on_approve={props.on_approve.clone()}
+                on_approve_many={props.on_approve_many.clone()}
                 on_reject={props.on_reject.clone()}
             />
             <OntologyRunSummary
@@ -568,7 +549,9 @@ fn OntologyRunSummary(props: &OntologyRunSummaryProps) -> Html {
         .run
         .proposals
         .iter()
-        .filter(|proposal| proposal.review_status != "approved" && proposal.review_status != "rejected")
+        .filter(|proposal| {
+            proposal.review_status != "approved" && proposal.review_status != "rejected"
+        })
         .count();
     let high_confidence_ids = props
         .run
@@ -585,7 +568,9 @@ fn OntologyRunSummary(props: &OntologyRunSummaryProps) -> Html {
         .run
         .proposals
         .iter()
-        .filter(|proposal| proposal.review_status != "approved" && proposal.review_status != "rejected")
+        .filter(|proposal| {
+            proposal.review_status != "approved" && proposal.review_status != "rejected"
+        })
         .map(|proposal| proposal.id.clone())
         .collect::<Vec<_>>();
     let approve_high_confidence = {
@@ -797,6 +782,7 @@ struct OntologyMindMapPanelProps {
     lang: SemanticLang,
     graph: Option<OntologyReviewGraph>,
     on_approve: Callback<String>,
+    on_approve_many: Callback<Vec<String>>,
     on_reject: Callback<String>,
 }
 
@@ -826,6 +812,7 @@ fn OntologyMindMapPanel(props: &OntologyMindMapPanelProps) -> Html {
             .map(|node| node.id.clone())
             .unwrap_or_default()
     });
+    let selected_node_ids = use_state(Vec::<String>::new);
     if !graph.nodes.iter().any(|node| node.id == *selected_node_id) {
         if let Some(node) = objects
             .first()
@@ -833,6 +820,7 @@ fn OntologyMindMapPanel(props: &OntologyMindMapPanelProps) -> Html {
             .or_else(|| actions.first())
         {
             selected_node_id.set(node.id.clone());
+            selected_node_ids.set(vec![node.id.clone()]);
         }
     }
     let selected_node = graph
@@ -864,6 +852,17 @@ fn OntologyMindMapPanel(props: &OntologyMindMapPanelProps) -> Html {
         .take(14)
         .map(|edge| relation_detail(props.lang, graph, edge))
         .collect::<Vec<_>>();
+    let selected_proposal_ids = selected_node_ids
+        .iter()
+        .filter_map(|id| graph.nodes.iter().find(|node| node.id == *id))
+        .filter(|node| node.status != "approved" && node.status != "rejected")
+        .filter_map(|node| node.source_proposal_id.clone())
+        .collect::<Vec<_>>();
+    let approve_selected = {
+        let selected_proposal_ids = selected_proposal_ids.clone();
+        let on_approve_many = props.on_approve_many.clone();
+        Callback::from(move |_| on_approve_many.emit(selected_proposal_ids.clone()))
+    };
 
     html! {
         <section class="ontology-mindmap">
@@ -872,20 +871,72 @@ fn OntologyMindMapPanel(props: &OntologyMindMapPanelProps) -> Html {
                     <span>{ props.lang.text("Ontology graph", "本体图谱") }</span>
                     <strong>{ props.lang.text("Business objects, links, metrics, actions, and tools", "业务对象、关系、指标、动作和工具") }</strong>
                 </div>
-                <small>{ format!("{} {} / {} {}", graph.nodes.len(), props.lang.text("nodes", "节点"), graph.edges.len(), props.lang.text("edges", "关系")) }</small>
+                <div class="ontology-mindmap-actions">
+                    <small>{ format!("{} {} / {} {}", graph.nodes.len(), props.lang.text("nodes", "节点"), graph.edges.len(), props.lang.text("edges", "关系")) }</small>
+                    <button class="secondary" onclick={approve_selected.clone()} disabled={selected_proposal_ids.is_empty()}>
+                        { format!(
+                            "{} ({})",
+                            props.lang.text("Approve selected", "批准选中"),
+                            selected_proposal_ids.len()
+                        ) }
+                    </button>
+                </div>
             </header>
             <div class="ontology-graph-workbench">
-                <OntologyNetworkGraph
-                    lang={props.lang}
+                <aside class="ontology-source-rail">
+                    <OntologySourceRail
+                        lang={props.lang}
+                        graph={graph.clone()}
+                        selected_node_id={(*selected_node_id).clone()}
+                        on_select={Callback::from({
+                            let selected_node_id = selected_node_id.clone();
+                            let selected_node_ids = selected_node_ids.clone();
+                            move |id: String| {
+                                selected_node_id.set(id.clone());
+                                selected_node_ids.set(vec![id]);
+                            }
+                        })}
+                    />
+                </aside>
+                <OntologyGraphIsland
                     graph={graph.clone()}
                     selected_node_id={(*selected_node_id).clone()}
+                    selected_node_ids={(*selected_node_ids).clone()}
                     on_select={Callback::from({
                         let selected_node_id = selected_node_id.clone();
-                        move |id: String| selected_node_id.set(id)
+                        let selected_node_ids = selected_node_ids.clone();
+                        move |id: String| {
+                            selected_node_id.set(id.clone());
+                            selected_node_ids.set(vec![id]);
+                        }
                     })}
+                    on_selection_change={Callback::from({
+                        let selected_node_id = selected_node_id.clone();
+                        let selected_node_ids = selected_node_ids.clone();
+                        move |ids: Vec<String>| {
+                            if let Some(id) = ids.last() {
+                                selected_node_id.set(id.clone());
+                            }
+                            selected_node_ids.set(ids);
+                        }
+                    })}
+                    fit_label={props.lang.text("Fit", "适配视图").to_string()}
+                    reset_label={props.lang.text("Reset layout", "重排图谱").to_string()}
                 />
-                <aside class="ontology-node-inspector">
-                    <h4>{ props.lang.text("Selected node evidence", "选中节点证据") }</h4>
+                <aside class="ontology-node-inspector ontology-review-rail">
+                    <div class="ontology-review-head">
+                        <div>
+                            <span>{ props.lang.text("Review", "审核") }</span>
+                            <h4>{ props.lang.text("Selected proposal", "选中提案") }</h4>
+                        </div>
+                        <button class="secondary" onclick={approve_selected.clone()} disabled={selected_proposal_ids.is_empty()}>
+                            { format!(
+                                "{} ({})",
+                                props.lang.text("Approve selected", "批准选中"),
+                                selected_proposal_ids.len()
+                            ) }
+                        </button>
+                    </div>
                     <OntologyNodeInspector
                         lang={props.lang}
                         graph={graph.clone()}
@@ -898,8 +949,8 @@ fn OntologyMindMapPanel(props: &OntologyMindMapPanelProps) -> Html {
             </div>
             <details class="ontology-field-map">
                 <summary>
-                    <span>{ props.lang.text("Relationship evidence", "关系证据") }</span>
-                    <small>{ props.lang.text("Open only when you need to inspect the exact source fields behind the graph.", "需要核对图谱背后的来源字段时再展开。") }</small>
+                    <span>{ props.lang.text("Advanced relationship evidence", "高级关系证据") }</span>
+                    <small>{ props.lang.text("LLM already proposes most links. Open this only for low-confidence joins or disputed mappings.", "大部分关系由 LLM 先推断；只有低置信度或有争议时才展开核对。") }</small>
                 </summary>
                 <Rows empty={props.lang.text("No relationship evidence yet.", "还没有关系证据。")} rows={relation_rows} />
             </details>
@@ -918,15 +969,8 @@ fn OntologyMindMapPanel(props: &OntologyMindMapPanelProps) -> Html {
     }
 }
 
-#[derive(Clone)]
-struct PositionedOntologyNode {
-    node: OntologyReviewGraphNode,
-    x: f64,
-    y: f64,
-}
-
 #[derive(Properties, Clone, PartialEq)]
-struct OntologyNetworkGraphProps {
+struct OntologySourceRailProps {
     lang: SemanticLang,
     graph: OntologyReviewGraph,
     selected_node_id: String,
@@ -934,151 +978,65 @@ struct OntologyNetworkGraphProps {
 }
 
 #[component]
-fn OntologyNetworkGraph(props: &OntologyNetworkGraphProps) -> Html {
-    let nodes = positioned_ontology_nodes(&props.graph);
-    let selected_node_id = props.selected_node_id.clone();
+fn OntologySourceRail(props: &OntologySourceRailProps) -> Html {
+    let datasets = graph_nodes_of_type(&props.graph, &["dataset"], 12);
+    let object_count = props
+        .graph
+        .nodes
+        .iter()
+        .filter(|node| node.node_type == "object")
+        .count();
+    let proposal_nodes = props
+        .graph
+        .nodes
+        .iter()
+        .filter(|node| node.source_proposal_id.is_some())
+        .count();
+
     html! {
-        <section class="ontology-network-canvas" aria-label={props.lang.text("Ontology knowledge graph", "本体知识图谱")}>
-            <svg class="ontology-network-lines" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-                <defs>
-                    <marker id="ontology-network-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
-                        <path d="M0,0 L7,3.5 L0,7 Z"></path>
-                    </marker>
-                </defs>
-                { for props.graph.edges.iter().filter_map(|edge| {
-                    let from = nodes.iter().find(|node| node.node.id == edge.from)?;
-                    let to = nodes.iter().find(|node| node.node.id == edge.to)?;
-                    let selected = selected_node_id == edge.from || selected_node_id == edge.to;
-                    Some(html! {
-                        <line
-                            class={classes!("ontology-network-edge", edge.edge_type.clone(), selected.then_some("selected"))}
-                            x1={format!("{:.2}", from.x)}
-                            y1={format!("{:.2}", from.y)}
-                            x2={format!("{:.2}", to.x)}
-                            y2={format!("{:.2}", to.y)}
-                        />
-                    })
+        <div class="ontology-source-rail-inner">
+            <div class="ontology-source-card">
+                <span>{ props.lang.text("Import", "导入") }</span>
+                <strong>{ props.lang.text("Data sources", "数据来源") }</strong>
+                <p>{ props.lang.text(
+                    "Connectors, warehouse tables, CSV, and API exports enter here before profiling and LLM mapping.",
+                    "连接器、数据仓库表、CSV 和 API 导出都从这里进入，再做画像和 LLM 映射。"
+                ) }</p>
+                <small>{ props.lang.text("Import controls will attach connector, warehouse, CSV, and API source setup here. Demo mode uses the ecommerce seed bundle.", "导入控件会在这里接入连接器、数仓、CSV 和 API 来源设置；当前示例使用电商种子数据包。") }</small>
+            </div>
+            <div class="ontology-source-metrics">
+                <span>
+                    <strong>{ datasets.len() }</strong>
+                    <small>{ props.lang.text("datasets", "数据表") }</small>
+                </span>
+                <span>
+                    <strong>{ object_count }</strong>
+                    <small>{ props.lang.text("objects", "对象") }</small>
+                </span>
+                <span>
+                    <strong>{ proposal_nodes }</strong>
+                    <small>{ props.lang.text("review nodes", "审核节点") }</small>
+                </span>
+            </div>
+            <div class="ontology-dataset-list">
+                <h4>{ props.lang.text("Detected datasets", "已发现数据表") }</h4>
+                { for datasets.iter().map(|node| {
+                    let node_id = node.id.clone();
+                    let on_select = props.on_select.clone();
+                    html! {
+                        <button
+                            key={node.id.clone()}
+                            class={classes!("ontology-dataset-item", (props.selected_node_id == node.id).then_some("selected"))}
+                            onclick={Callback::from(move |_| on_select.emit(node_id.clone()))}
+                        >
+                            <span>{ node.label.clone() }</span>
+                            <small>{ format!("{:.0}% / {}", node.confidence * 100.0, localized_status(props.lang, label_or(&node.status, "pending"))) }</small>
+                        </button>
+                    }
                 }) }
-            </svg>
-            { for nodes.iter().map(|positioned| {
-                let node = positioned.node.clone();
-                let selected = props.selected_node_id == node.id;
-                html! {
-                    <OntologyNetworkNode
-                        key={node.id.clone()}
-                        lang={props.lang}
-                        node={node.clone()}
-                        x={positioned.x}
-                        y={positioned.y}
-                        selected={selected}
-                        on_select={props.on_select.clone()}
-                    />
-                }
-            }) }
-        </section>
+            </div>
+        </div>
     }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct OntologyNetworkNodeProps {
-    lang: SemanticLang,
-    node: OntologyReviewGraphNode,
-    x: f64,
-    y: f64,
-    selected: bool,
-    on_select: Callback<String>,
-}
-
-#[component]
-fn OntologyNetworkNode(props: &OntologyNetworkNodeProps) -> Html {
-    let node_id = props.node.id.clone();
-    let on_select = props.on_select.clone();
-    html! {
-        <button
-            class={classes!(
-                "ontology-network-node",
-                props.node.node_type.clone(),
-                status_tone(&props.node.status),
-                props.selected.then_some("selected")
-            )}
-            style={format!("left: {:.2}%; top: {:.2}%;", props.x, props.y)}
-            onclick={Callback::from(move |_| on_select.emit(node_id.clone()))}
-        >
-            <span>{ localized_node_type(props.lang, &props.node.node_type) }</span>
-            <strong>{ props.node.label.clone() }</strong>
-            <small>{ format!("{:.0}% / {}", props.node.confidence * 100.0, localized_risk(props.lang, label_or(&props.node.risk, "low"))) }</small>
-        </button>
-    }
-}
-
-fn positioned_ontology_nodes(graph: &OntologyReviewGraph) -> Vec<PositionedOntologyNode> {
-    let mut positioned = Vec::new();
-    let objects = graph_nodes_of_type(graph, &["object"], 8);
-    let datasets = graph_nodes_of_type(graph, &["dataset"], 8);
-    let metrics = graph_nodes_of_type(graph, &["metric"], 5);
-    let actions = graph_nodes_of_type(graph, &["action"], 4);
-    let focus_id = graph_focus_node(graph).map(|node| node.id.clone());
-
-    if let Some(focus_node) = graph_focus_node(graph) {
-        positioned.push(PositionedOntologyNode {
-            node: focus_node.clone(),
-            x: 50.0,
-            y: 50.0,
-        });
-    }
-
-    push_positioned_slots(
-        &mut positioned,
-        objects
-            .into_iter()
-            .filter(|node| Some(&node.id) != focus_id.as_ref())
-            .collect(),
-        &[
-            (36.0, 30.0),
-            (64.0, 30.0),
-            (36.0, 70.0),
-            (64.0, 70.0),
-            (50.0, 22.0),
-            (50.0, 78.0),
-            (28.0, 50.0),
-        ],
-    );
-    push_positioned_slots(
-        &mut positioned,
-        datasets,
-        &[
-            (11.0, 14.0),
-            (11.0, 25.0),
-            (11.0, 36.0),
-            (11.0, 47.0),
-            (11.0, 58.0),
-            (11.0, 69.0),
-            (11.0, 80.0),
-            (24.0, 88.0),
-        ],
-    );
-    push_positioned_slots(
-        &mut positioned,
-        metrics,
-        &[
-            (83.0, 15.0),
-            (88.0, 30.0),
-            (88.0, 48.0),
-            (88.0, 66.0),
-            (88.0, 78.0),
-        ],
-    );
-    push_positioned_slots(
-        &mut positioned,
-        actions,
-        &[
-            (55.0, 91.0),
-            (69.0, 91.0),
-            (83.0, 91.0),
-            (97.0, 91.0),
-        ],
-    );
-    positioned
 }
 
 fn graph_focus_node(graph: &OntologyReviewGraph) -> Option<&OntologyReviewGraphNode> {
@@ -1103,24 +1061,6 @@ fn graph_node_degree(graph: &OntologyReviewGraph, node_id: &str) -> usize {
         .count()
 }
 
-fn push_positioned_slots(
-    positioned: &mut Vec<PositionedOntologyNode>,
-    nodes: Vec<&OntologyReviewGraphNode>,
-    slots: &[(f64, f64)],
-) {
-    if slots.is_empty() {
-        return;
-    }
-    for (index, node) in nodes.into_iter().enumerate() {
-        let (x, y) = slots[index.min(slots.len() - 1)];
-        positioned.push(PositionedOntologyNode {
-            node: node.clone(),
-            x,
-            y,
-        });
-    }
-}
-
 #[derive(Properties, Clone, PartialEq)]
 struct OntologyNodeInspectorProps {
     lang: SemanticLang,
@@ -1136,10 +1076,18 @@ fn OntologyNodeInspector(props: &OntologyNodeInspectorProps) -> Html {
     let Some(node) = props.node.as_ref() else {
         return html! { <p class="empty">{ props.lang.text("Select a node to inspect evidence.", "选择一个节点查看证据。") }</p> };
     };
-    let evidence_rows = ["source_system", "source_object", "source_mapping", "target_object", "primary_key", "expression", "executor"]
-        .iter()
-        .filter_map(|key| evidence_string(&node.evidence, key).map(|value| ((*key).to_string(), value)))
-        .collect::<Vec<_>>();
+    let evidence_rows = [
+        "source_system",
+        "source_object",
+        "source_mapping",
+        "target_object",
+        "primary_key",
+        "expression",
+        "executor",
+    ]
+    .iter()
+    .filter_map(|key| evidence_string(&node.evidence, key).map(|value| ((*key).to_string(), value)))
+    .collect::<Vec<_>>();
     let source_proposal_id = node.source_proposal_id.clone();
     let approve = {
         let source_proposal_id = source_proposal_id.clone();
@@ -1425,7 +1373,11 @@ fn ontology_calibration_rows(
         .map(|bucket| {
             (
                 localized_status(lang, &bucket.reviewer_status),
-                format!("{} ({})", localized_proposal_type(lang, &bucket.proposal_type), bucket.count),
+                format!(
+                    "{} ({})",
+                    localized_proposal_type(lang, &bucket.proposal_type),
+                    bucket.count
+                ),
                 format!(
                     "{} {:.0}% / {} {:.0}% / {} {:.0}%",
                     lang.text("model", "模型"),

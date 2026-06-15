@@ -1,0 +1,97 @@
+<h2>MandoForge 控制台信息架构 v3：Managed Agents 中心</h2>
+<p class="subtitle">这版不把产品做成业务流程后台，而是回到核心抽象：企业托管智能体。Workflow / Dynamic / Board 都是 Managed Agent 的运行与编排视图。</p>
+
+<div class="mockup">
+  <div class="mockup-header">Agent OS Navigation</div>
+  <div class="mockup-body">
+    <div style="display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px;margin-bottom:18px">
+      <div style="border:2px solid #111827;border-radius:8px;padding:12px;background:#fff">
+        <strong>总览</strong><br><small>Agent OS 健康与待处理事项</small>
+      </div>
+      <div style="border:2px solid #059669;border-radius:8px;padding:12px;background:#ecfdf5">
+        <strong>Managed Agents</strong><br><small>托管智能体、会话、工具调用</small>
+      </div>
+      <div style="border:2px solid #d97706;border-radius:8px;padding:12px;background:#fffbeb">
+        <strong>Runs & Tasks</strong><br><small>运行、任务板、审批、失败恢复</small>
+      </div>
+      <div style="border:2px solid #2563eb;border-radius:8px;padding:12px;background:#eff6ff">
+        <strong>Ontology</strong><br><small>数据语义、关系图、Agent 工具</small>
+      </div>
+      <div style="border:2px solid #7c3aed;border-radius:8px;padding:12px;background:#f5f3ff">
+        <strong>Capabilities</strong><br><small>应用包、连接器、行业能力</small>
+      </div>
+      <div style="border:2px solid #dc2626;border-radius:8px;padding:12px;background:#fef2f2">
+        <strong>Operations</strong><br><small>上线、桌面端、安全、审计</small>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1.2fr 1fr;gap:14px">
+      <section style="border:1px solid #d1d5db;border-radius:8px;padding:14px;background:#fff">
+        <h3 style="margin-top:0">Managed Agents 是主对象</h3>
+        <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px">
+          <div style="border:1px solid #e5e7eb;border-radius:8px;padding:10px">
+            <strong>Agent Registry</strong>
+            <p>有哪些托管智能体，负责什么能力，当前是否在线。</p>
+          </div>
+          <div style="border:1px solid #e5e7eb;border-radius:8px;padding:10px">
+            <strong>Sessions</strong>
+            <p>每个 agent 正在处理什么目标，输入输出和上下文是什么。</p>
+          </div>
+          <div style="border:1px solid #e5e7eb;border-radius:8px;padding:10px">
+            <strong>Tool Calls</strong>
+            <p>调用了哪些 Ontology tools / connectors / desktop tools。</p>
+          </div>
+          <div style="border:1px solid #e5e7eb;border-radius:8px;padding:10px">
+            <strong>Approvals</strong>
+            <p>哪些写操作、高风险动作、低置信度判断需要人确认。</p>
+          </div>
+        </div>
+      </section>
+
+      <section style="border:1px solid #d1d5db;border-radius:8px;padding:14px;background:#f9fafb">
+        <h3 style="margin-top:0">Manager Agent = 观察者</h3>
+        <p>Manager 不成为一个新系统，而是在 Managed Agents 页面右侧观察所有 agent。</p>
+        <ul>
+          <li>谁 idle / stuck / failed</li>
+          <li>哪个 run 等审批</li>
+          <li>哪个 tool 调用反复失败</li>
+          <li>建议下一步，但默认不越权执行</li>
+        </ul>
+      </section>
+    </div>
+
+    <div style="margin-top:14px;border:1px solid #d1d5db;border-radius:8px;padding:14px;background:#fff">
+      <h3 style="margin-top:0">Runs & Tasks 吸收原来的 Workflow / Dynamic / Board</h3>
+      <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px">
+        <div style="border:1px solid #e5e7eb;border-radius:8px;padding:10px"><strong>Runs</strong><br><small>所有 agent/workflow run 的时间线</small></div>
+        <div style="border:1px solid #e5e7eb;border-radius:8px;padding:10px"><strong>Task Board</strong><br><small>ready/running/review/blocked/done</small></div>
+        <div style="border:1px solid #e5e7eb;border-radius:8px;padding:10px"><strong>Workflow Templates</strong><br><small>稳定可复用流程</small></div>
+        <div style="border:1px solid #e5e7eb;border-radius:8px;padding:10px"><strong>Dynamic Plans</strong><br><small>一次性目标编译成 DAG</small></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="options">
+  <div class="option" data-choice="v3-approve" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>v3 方向正确</h3>
+      <p>产品核心是 Managed Agents；Runs & Tasks 收纳 Workflow/Dynamic/Board。</p>
+    </div>
+  </div>
+  <div class="option" data-choice="v3-more-productized" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>再产品化一点</h3>
+      <p>保留 Managed Agents，但命名要更像面向客户的企业软件。</p>
+    </div>
+  </div>
+  <div class="option" data-choice="v3-more-technical" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>再技术一点</h3>
+      <p>顶层直接叫 Agents / Runs / Ontology / Capabilities / Ops。</p>
+    </div>
+  </div>
+</div>

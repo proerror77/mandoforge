@@ -33,7 +33,8 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 const DEFAULT_TENANT_ID: &str = "00000000-0000-4000-8000-000000000001";
-const CONSOLE_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-WudNYLfrgSOy3WSTwspSGlkhEOiBh7ThLhIOCiPLuqI='; connect-src 'self' http://127.0.0.1:* http://localhost:*; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+const CONSOLE_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-ugHQW48bCNXeDAes8UkVgnO1cXMGDEPmiqnn7XQbkJc='; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+const CONSOLE_DEV_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-ugHQW48bCNXeDAes8UkVgnO1cXMGDEPmiqnn7XQbkJc='; connect-src 'self' http://127.0.0.1:* http://localhost:*; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
 
 mod authorization;
 mod codex_app_server;
@@ -8135,11 +8136,22 @@ fn build_router(state: AppState) -> Router {
 
 async fn security_headers_middleware(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
+    let csp = if console_loopback_connect_allowed() {
+        CONSOLE_DEV_CONTENT_SECURITY_POLICY
+    } else {
+        CONSOLE_CONTENT_SECURITY_POLICY
+    };
     response.headers_mut().insert(
         HeaderName::from_static("content-security-policy"),
-        HeaderValue::from_static(CONSOLE_CONTENT_SECURITY_POLICY),
+        HeaderValue::from_static(csp),
     );
     response
+}
+
+fn console_loopback_connect_allowed() -> bool {
+    insecure_dev_auth_enabled()
+        || env_bool("MANDOFORGE_CONSOLE_ALLOW_LOOPBACK_CONNECT")
+        || env_bool("MANDOFORGE_ALLOW_INSECURE_CONSOLE_LOOPBACK")
 }
 
 fn api_cors_layer() -> CorsLayer {
@@ -60206,6 +60218,43 @@ async fn execute_remote_computer_stale_reclaim(
                 },
             )
             .await?;
+        // If this was an on-demand Pod, delete it from Kubernetes now that the lease expired.
+        let is_on_demand = lease
+            .metadata
+            .get("on_demand")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if is_on_demand {
+            if let Some(pod_name) = state
+                .list_remote_computers()
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .find(|c| c.id == lease.remote_computer_id)
+                .and_then(|c| c.pod_name)
+            {
+                let config = RemoteComputerRunnerConfig::from_env();
+                let runner = remote_computer_runner_for_config(&config);
+                runner
+                    .mutate(
+                        &config,
+                        RemoteComputerRunnerDryRunRequest {
+                            operation: Some("live_delete".to_string()),
+                            remote_computer_id: Some(lease.remote_computer_id),
+                            session_id: lease.session_id,
+                            pod_name: Some(pod_name),
+                            metadata: Some(json!({
+                                "reclaim_reason": "expired_on_demand_lease",
+                                "lease_id": lease.id
+                            })),
+                        },
+                    )
+                    .await;
+                // Deletion errors are fire-and-forget: the Pod will be garbage-collected
+                // by Kubernetes TTL or a future sweep. We do not propagate the error here
+                // so that the lease reclaim itself always succeeds.
+            }
+        }
         record_remote_computer_lease_event(&state, &reclaimed, "remote_computer.lease_reclaimed")
             .await?;
         reclaimed_leases.push(reclaimed);
@@ -64312,6 +64361,15 @@ impl AppError {
         Self {
             status: StatusCode::FORBIDDEN,
             message: message.into(),
+        }
+    }
+
+    fn internal(message: impl Into<String>) -> Self {
+        let detail: String = message.into();
+        tracing::error!(detail, "internal server error");
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: "internal server error".to_string(),
         }
     }
 }
