@@ -6864,6 +6864,9 @@ struct ShellExecTool;
 struct ArtifactCreateTool;
 struct ApprovalRequestTool;
 struct McpCallTool;
+struct SemanticObjectFetchTool;
+struct SemanticLinkExpandTool;
+struct OntologyTypeLookupTool;
 
 #[derive(Debug, Deserialize)]
 struct ExecuteTool {
@@ -17804,32 +17807,13 @@ async fn fetch_semantic_object(
         Some(packet.session_id),
     )
     .await?;
-    ensure_context_packet_allows_semantic_object(&packet, id)?;
-    let object = state.get_semantic_object(id).await?;
-    let include_content = input.include_content.unwrap_or(false);
-    let response = FetchSemanticObjectResponse {
-        context_packet_id: packet.id,
-        object: FetchableSemanticObject {
-            id: object.id,
-            object_type: object.object_type,
-            object_key: object.object_key,
-            title: object.title,
-            summary: object.summary,
-            content: include_content.then_some(object.content),
-            semantic_scopes: object.semantic_scopes,
-            source_uri: object.source_uri,
-            trust_level: object.trust_level,
-            freshness: object.freshness,
-        },
-        content_included: include_content,
-        fetch_policy: json!({
-            "boundary": "context_packet",
-            "context_packet_id": packet.id,
-            "allowed_by_retrieved_objects": true,
-            "full_content_requires_explicit_request": true,
-        }),
-    };
-    record_semantic_object_fetch(&state, &packet, &response).await?;
+    let response = fetch_semantic_object_for_context(
+        &state,
+        &packet,
+        id,
+        input.include_content.unwrap_or(false),
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -18762,58 +18746,7 @@ async fn expand_semantic_links(
         Some(packet.session_id),
     )
     .await?;
-    ensure_context_packet_allows_semantic_object(&packet, input.object_id)?;
-    let max_links = input.max_links.unwrap_or(10).clamp(1, 50);
-    let allowed_object_ids = context_packet_semantic_object_ids(&packet);
-    let object_id = input.object_id.to_string();
-    let relation_type = input
-        .relation_type
-        .as_deref()
-        .map(normalized_ontology_token)
-        .filter(|value| !value.is_empty());
-    let mut outside_packet_count = 0usize;
-    let mut relation_filtered_count = 0usize;
-    let mut links = Vec::new();
-    for link in state
-        .list_semantic_links()
-        .await?
-        .into_iter()
-        .filter(|link| link.status == "active")
-        .filter(|link| {
-            (link.from_entity_type == "semantic_object" && link.from_entity_id == object_id)
-                || (link.to_entity_type == "semantic_object" && link.to_entity_id == object_id)
-        })
-    {
-        if relation_type
-            .as_ref()
-            .is_some_and(|expected| normalized_ontology_token(&link.relation_type) != *expected)
-        {
-            relation_filtered_count += 1;
-            continue;
-        }
-        let endpoints_allowed = [link.from_entity_id.as_str(), link.to_entity_id.as_str()]
-            .into_iter()
-            .filter_map(|value| Uuid::parse_str(value).ok())
-            .all(|id| allowed_object_ids.contains(&id));
-        if !endpoints_allowed {
-            outside_packet_count += 1;
-            continue;
-        }
-        if links.len() < max_links {
-            links.push(link);
-        }
-    }
-    let response = ExpandSemanticLinksResponse {
-        context_packet_id: packet.id,
-        object_id: input.object_id,
-        links,
-        omitted: json!({
-            "outside_context_packet": outside_packet_count,
-            "relation_type_filtered": relation_filtered_count,
-            "max_links": max_links,
-        }),
-    };
-    record_semantic_links_expanded(&state, &packet, &response).await?;
+    let response = expand_semantic_links_for_context(&state, &packet, input).await?;
     Ok(Json(response))
 }
 
@@ -35082,8 +35015,13 @@ async fn build_harness_context(
         })
         .collect::<Vec<_>>();
     let latest_goal_event = recent_goal_events.first().cloned();
+    let (task_grant_id, context_packet_id, rendered_context_packet) =
+        build_provider_context_packet(state, session_id).await?;
     Ok(HarnessContext {
         session_id,
+        task_grant_id,
+        context_packet_id,
+        rendered_context_packet,
         event_count: events.len(),
         pending_event_seq_start,
         pending_event_seq_end,
@@ -35099,6 +35037,76 @@ async fn build_harness_context(
         recent_execution_completed: execution_completed_events,
         recent_goal_events,
     })
+}
+
+async fn build_provider_context_packet(
+    state: &AppState,
+    session_id: Uuid,
+) -> Result<(Option<Uuid>, Option<Uuid>, Option<Value>), AppError> {
+    let active_task_grant = active_task_grant_for_session(state, session_id).await?;
+    let task_grant_id = active_task_grant.as_ref().map(|(_, grant)| grant.id);
+    let mut context_task_grant = active_task_grant.as_ref().map(|(_, grant)| grant.clone());
+    let mut packet = if let Some((_, grant)) = active_task_grant.as_ref() {
+        if let Some(context_packet_id) = grant.context_packet_id {
+            Some(state.get_context_packet(context_packet_id).await?)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if packet.is_none() {
+        packet = state
+            .list_context_packets(session_id)
+            .await?
+            .into_iter()
+            .max_by_key(|packet| packet.version);
+    }
+    if packet.is_none() && active_task_grant.is_some() {
+        let generated_packet = generate_and_persist_context_packet(state, session_id).await?;
+        if let Some((_, grant)) = active_task_grant.as_ref() {
+            let grant = state
+                .update_task_grant_context_packet(grant.id, generated_packet.id)
+                .await?;
+            record_task_grant_checked(state, &grant, session_id, "session_loop.context_packet")
+                .await?;
+            context_task_grant = Some(grant);
+        }
+        packet = Some(generated_packet);
+    }
+    let Some(packet) = packet else {
+        return Ok((task_grant_id, None, None));
+    };
+    let context_packet_id = packet.id;
+    let mut rendered = render_execution_context(
+        &packet,
+        RenderContextPacketRequest {
+            max_prompt_tokens: Some(1_500),
+            max_objects: Some(5),
+            max_summary_chars: Some(280),
+            max_policy_reminders: Some(3),
+            allow_full_content: Some(false),
+            allow_on_demand_fetch: Some(true),
+        },
+    );
+    if let Some(grant) = context_task_grant.as_ref() {
+        rendered
+            .available_tools
+            .retain(|tool| task_grant_allows_tool(grant, tool));
+        if !rendered
+            .available_tools
+            .iter()
+            .any(|tool| tool == "semantic_object.fetch")
+        {
+            rendered.fetchable_object_ids.clear();
+        }
+    }
+    let rendered = serde_json::to_value(rendered).map_err(|error| {
+        AppError::bad_request(format!(
+            "failed to serialize rendered context packet: {error}"
+        ))
+    })?;
+    Ok((task_grant_id, Some(context_packet_id), Some(rendered)))
 }
 
 async fn run_provider_harness(
@@ -37783,6 +37791,100 @@ fn context_packet_semantic_object_ids(packet: &ContextPacket) -> HashSet<Uuid> {
         .collect()
 }
 
+async fn fetch_semantic_object_for_context(
+    state: &AppState,
+    packet: &ContextPacket,
+    object_id: Uuid,
+    include_content: bool,
+) -> Result<FetchSemanticObjectResponse, AppError> {
+    ensure_context_packet_allows_semantic_object(packet, object_id)?;
+    let object = state.get_semantic_object(object_id).await?;
+    let response = FetchSemanticObjectResponse {
+        context_packet_id: packet.id,
+        object: FetchableSemanticObject {
+            id: object.id,
+            object_type: object.object_type,
+            object_key: object.object_key,
+            title: object.title,
+            summary: object.summary,
+            content: include_content.then_some(object.content),
+            semantic_scopes: object.semantic_scopes,
+            source_uri: object.source_uri,
+            trust_level: object.trust_level,
+            freshness: object.freshness,
+        },
+        content_included: include_content,
+        fetch_policy: json!({
+            "boundary": "context_packet",
+            "context_packet_id": packet.id,
+            "allowed_by_retrieved_objects": true,
+            "full_content_requires_explicit_request": true,
+        }),
+    };
+    record_semantic_object_fetch(state, packet, &response).await?;
+    Ok(response)
+}
+
+async fn expand_semantic_links_for_context(
+    state: &AppState,
+    packet: &ContextPacket,
+    input: ExpandSemanticLinksRequest,
+) -> Result<ExpandSemanticLinksResponse, AppError> {
+    ensure_context_packet_allows_semantic_object(packet, input.object_id)?;
+    let max_links = input.max_links.unwrap_or(10).clamp(1, 50);
+    let allowed_object_ids = context_packet_semantic_object_ids(packet);
+    let object_id = input.object_id.to_string();
+    let relation_type = input
+        .relation_type
+        .as_deref()
+        .map(normalized_ontology_token)
+        .filter(|value| !value.is_empty());
+    let mut outside_packet_count = 0usize;
+    let mut relation_filtered_count = 0usize;
+    let mut links = Vec::new();
+    for link in state
+        .list_semantic_links()
+        .await?
+        .into_iter()
+        .filter(|link| link.status == "active")
+        .filter(|link| {
+            (link.from_entity_type == "semantic_object" && link.from_entity_id == object_id)
+                || (link.to_entity_type == "semantic_object" && link.to_entity_id == object_id)
+        })
+    {
+        if relation_type
+            .as_ref()
+            .is_some_and(|expected| normalized_ontology_token(&link.relation_type) != *expected)
+        {
+            relation_filtered_count += 1;
+            continue;
+        }
+        let endpoints_allowed = [link.from_entity_id.as_str(), link.to_entity_id.as_str()]
+            .into_iter()
+            .filter_map(|value| Uuid::parse_str(value).ok())
+            .all(|id| allowed_object_ids.contains(&id));
+        if !endpoints_allowed {
+            outside_packet_count += 1;
+            continue;
+        }
+        if links.len() < max_links {
+            links.push(link);
+        }
+    }
+    let response = ExpandSemanticLinksResponse {
+        context_packet_id: packet.id,
+        object_id: input.object_id,
+        links,
+        omitted: json!({
+            "outside_context_packet": outside_packet_count,
+            "relation_type_filtered": relation_filtered_count,
+            "max_links": max_links,
+        }),
+    };
+    record_semantic_links_expanded(state, packet, &response).await?;
+    Ok(response)
+}
+
 async fn record_semantic_object_fetch(
     state: &AppState,
     packet: &ContextPacket,
@@ -38478,12 +38580,265 @@ impl ToolExecutor for McpCallTool {
     }
 }
 
+#[async_trait]
+impl ToolExecutor for SemanticObjectFetchTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: "semantic_object.fetch",
+            risk: "low",
+            description: "Fetch a context-packet-visible semantic object",
+        }
+    }
+
+    async fn execute(
+        &self,
+        state: &AppState,
+        input: &ExecuteTool,
+        _tool_call: &ToolCall,
+    ) -> Result<Value, AppError> {
+        let packet = context_packet_for_tool_invocation(state, input).await?;
+        let object_id = uuid_tool_arg(
+            &input.args,
+            &["object_id", "semantic_object_id", "id"],
+            "semantic_object.fetch requires object_id",
+        )?;
+        let include_content = input
+            .args
+            .get("include_content")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let response =
+            fetch_semantic_object_for_context(state, &packet, object_id, include_content).await?;
+        serde_json::to_value(response).map_err(|error| {
+            AppError::bad_request(format!(
+                "failed to serialize semantic object fetch: {error}"
+            ))
+        })
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for SemanticLinkExpandTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: "semantic_link.expand",
+            risk: "low",
+            description: "Expand semantic links inside the current context packet",
+        }
+    }
+
+    async fn execute(
+        &self,
+        state: &AppState,
+        input: &ExecuteTool,
+        _tool_call: &ToolCall,
+    ) -> Result<Value, AppError> {
+        let packet = context_packet_for_tool_invocation(state, input).await?;
+        let object_id = uuid_tool_arg(
+            &input.args,
+            &["object_id", "semantic_object_id", "id"],
+            "semantic_link.expand requires object_id",
+        )?;
+        let request = ExpandSemanticLinksRequest {
+            context_packet_id: packet.id,
+            object_id,
+            relation_type: input
+                .args
+                .get("relation_type")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            max_links: input
+                .args
+                .get("max_links")
+                .and_then(Value::as_u64)
+                .map(|value| value as usize),
+        };
+        let response = expand_semantic_links_for_context(state, &packet, request).await?;
+        serde_json::to_value(response).map_err(|error| {
+            AppError::bad_request(format!(
+                "failed to serialize semantic link expansion: {error}"
+            ))
+        })
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for OntologyTypeLookupTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: "ontology_type.lookup",
+            risk: "low",
+            description: "Look up ontology object and relation type definitions",
+        }
+    }
+
+    async fn execute(
+        &self,
+        state: &AppState,
+        input: &ExecuteTool,
+        _tool_call: &ToolCall,
+    ) -> Result<Value, AppError> {
+        let packet = context_packet_for_tool_invocation(state, input).await?;
+        let requested_name = input
+            .args
+            .get("type_name")
+            .or_else(|| input.args.get("name"))
+            .and_then(Value::as_str)
+            .map(normalized_ontology_token)
+            .filter(|value| !value.is_empty());
+        let kind = input
+            .args
+            .get("kind")
+            .and_then(Value::as_str)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .unwrap_or("all");
+        let registry = ontology_registry();
+        let include_object_types = matches!(kind, "all" | "object_type" | "object_types");
+        let include_relation_types = matches!(kind, "all" | "relation_type" | "relation_types");
+        if !include_object_types && !include_relation_types {
+            return Err(AppError::bad_request(
+                "ontology_type.lookup kind must be all, object_type, or relation_type",
+            ));
+        }
+        let object_types = if include_object_types {
+            registry
+                .object_types
+                .into_iter()
+                .filter(|object_type| {
+                    requested_name
+                        .as_ref()
+                        .is_none_or(|name| normalized_ontology_token(&object_type.name) == *name)
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let relation_types = if include_relation_types {
+            registry
+                .relation_types
+                .into_iter()
+                .filter(|relation_type| {
+                    requested_name
+                        .as_ref()
+                        .is_none_or(|name| normalized_ontology_token(&relation_type.name) == *name)
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let result = json!({
+            "status": "ok",
+            "context_packet_id": packet.id,
+            "context_packet_version": packet.version,
+            "ontology_scope": render_ontology_scope(&packet.semantic_scopes),
+            "requested_name": requested_name,
+            "kind": kind,
+            "object_types": object_types,
+            "relation_types": relation_types,
+        });
+        record_ontology_type_lookup(state, &packet, &result).await?;
+        Ok(result)
+    }
+}
+
+async fn context_packet_for_tool_invocation(
+    state: &AppState,
+    input: &ExecuteTool,
+) -> Result<ContextPacket, AppError> {
+    let context_packet_id = uuid_tool_arg(
+        &input.args,
+        &["context_packet_id"],
+        "ontology tools require context_packet_id",
+    )?;
+    let packet = state.get_context_packet(context_packet_id).await?;
+    if packet.session_id != input.session_id {
+        return Err(AppError::forbidden(
+            "context_packet_id does not belong to this session",
+        ));
+    }
+    if let Some(task_grant_id) = input.task_grant_id {
+        let grant = state.get_task_grant(task_grant_id).await?;
+        match grant.context_packet_id {
+            Some(bound_packet_id) if bound_packet_id == packet.id => {}
+            Some(_) => {
+                return Err(AppError::forbidden(
+                    "context_packet_id is outside the active TaskGrant boundary",
+                ));
+            }
+            None => {
+                return Err(AppError::forbidden(
+                    "ontology tools require a TaskGrant-bound context_packet_id",
+                ));
+            }
+        }
+    }
+    Ok(packet)
+}
+
+fn uuid_tool_arg(args: &Value, keys: &[&str], missing_message: &str) -> Result<Uuid, AppError> {
+    for key in keys {
+        if let Some(value) = args.get(*key).and_then(Value::as_str) {
+            return Uuid::parse_str(value)
+                .map_err(|_| AppError::bad_request(format!("{key} must be a UUID")));
+        }
+    }
+    Err(AppError::bad_request(missing_message))
+}
+
+async fn record_ontology_type_lookup(
+    state: &AppState,
+    packet: &ContextPacket,
+    result: &Value,
+) -> Result<(), AppError> {
+    let details = json!({
+        "context_packet_id": packet.id,
+        "context_packet_version": packet.version,
+        "requested_name": result.get("requested_name").cloned().unwrap_or(Value::Null),
+        "kind": result.get("kind").cloned().unwrap_or(Value::Null),
+        "object_type_count": result
+            .get("object_types")
+            .and_then(Value::as_array)
+            .map(|values| values.len())
+            .unwrap_or(0),
+        "relation_type_count": result
+            .get("relation_types")
+            .and_then(Value::as_array)
+            .map(|values| values.len())
+            .unwrap_or(0),
+    });
+    state
+        .append_event(
+            "tool",
+            Some(packet.id),
+            packet.session_id,
+            "ontology_type.looked_up",
+            details.clone(),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(packet.session_id),
+            "tool",
+            Some(packet.id),
+            "ontology_type.looked_up",
+            "context_packet",
+            Some(packet.id),
+            details,
+        ))
+        .await?;
+    Ok(())
+}
+
 fn tool_registry() -> HashMap<&'static str, Box<dyn ToolExecutor>> {
     let tools: Vec<Box<dyn ToolExecutor>> = vec![
         Box::new(ArtifactCreateTool),
         Box::new(ApprovalRequestTool),
         Box::new(FileReadTool),
         Box::new(McpCallTool),
+        Box::new(OntologyTypeLookupTool),
+        Box::new(SemanticLinkExpandTool),
+        Box::new(SemanticObjectFetchTool),
         Box::new(ShellExecTool),
         Box::new(SqlSchemaTool),
         Box::new(SqlQueryTool),
@@ -66229,6 +66584,9 @@ Stage 2 is not complete.
             "artifact.create",
             "approval.request",
             "file.read",
+            "ontology_type.lookup",
+            "semantic_link.expand",
+            "semantic_object.fetch",
             "sql.get_schema",
             "sql.query",
         ] {
@@ -79363,7 +79721,12 @@ not json
                     "agent_role": "manager",
                     "provider": "openai-compatible",
                     "model": "gpt-5.4-mini",
-                    "tools": ["file.read"],
+                    "tools": [
+                        "file.read",
+                        "semantic_object.fetch",
+                        "semantic_link.expand",
+                        "ontology_type.lookup"
+                    ],
                     "semantic_scopes": semantic_scopes,
                     "release_state": "active"
                 }),
@@ -91919,7 +92282,14 @@ not json
                     "provider": "openai-compatible",
                     "model": "gpt-5.4-mini",
                     "system_prompt": "Implement backend work with governed context.",
-                    "tools": ["agent_cli.exec", "file.read", "secret.read"],
+                    "tools": [
+                        "agent_cli.exec",
+                        "file.read",
+                        "secret.read",
+                        "semantic_object.fetch",
+                        "semantic_link.expand",
+                        "ontology_type.lookup"
+                    ],
                     "tool_policy": {"risk": "approval_required", "write_gate": "human_review"},
                     "skill_ids": ["backend-coding"],
                     "workflow_pack_ids": ["coding-pack"],
@@ -92147,7 +92517,12 @@ not json
                     "provider": "openai-compatible",
                     "model": "gpt-5.4-mini",
                     "system_prompt": "Use durable Context OS packets.",
-                    "tools": ["file.read"],
+                    "tools": [
+                        "file.read",
+                        "semantic_object.fetch",
+                        "semantic_link.expand",
+                        "ontology_type.lookup"
+                    ],
                     "tool_policy": {"read_only": true},
                     "workflow_pack_ids": ["coding-pack"],
                     "semantic_scopes": {
@@ -92305,6 +92680,103 @@ not json
         assert_eq!(expanded_links.context_packet_id, packet_v1.id);
         assert_eq!(expanded_links.links.len(), 1);
         assert_eq!(expanded_links.links[0].id, semantic_link.id);
+
+        let (tool_fetch_status, tool_fetched_object) = request_value(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/tools/semantic_object.fetch/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {
+                        "context_packet_id": packet_v1.id,
+                        "object_id": semantic_object.id,
+                        "include_content": false
+                    }
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(tool_fetch_status, StatusCode::OK, "{tool_fetched_object:?}");
+        assert_eq!(
+            tool_fetched_object["context_packet_id"],
+            json!(packet_v1.id)
+        );
+        assert_eq!(
+            tool_fetched_object["object"]["id"],
+            json!(semantic_object.id)
+        );
+        assert_eq!(tool_fetched_object["content_included"], json!(false));
+
+        let (tool_expand_status, tool_expanded_links) = request_value(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/tools/semantic_link.expand/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {
+                        "context_packet_id": packet_v1.id,
+                        "object_id": semantic_object.id,
+                        "relation_type": "supports",
+                        "max_links": 5
+                    }
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(
+            tool_expand_status,
+            StatusCode::OK,
+            "{tool_expanded_links:?}"
+        );
+        assert_eq!(
+            tool_expanded_links["context_packet_id"],
+            json!(packet_v1.id)
+        );
+        assert_eq!(
+            tool_expanded_links["links"][0]["id"],
+            json!(semantic_link.id)
+        );
+
+        let (ontology_lookup_status, ontology_lookup) = request_value(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/tools/ontology_type.lookup/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {
+                        "context_packet_id": packet_v1.id,
+                        "type_name": "semantic_object",
+                        "kind": "object_type"
+                    }
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(
+            ontology_lookup_status,
+            StatusCode::OK,
+            "{ontology_lookup:?}"
+        );
+        assert_eq!(ontology_lookup["context_packet_id"], json!(packet_v1.id));
+        assert_eq!(
+            ontology_lookup["object_types"][0]["name"],
+            "semantic_object"
+        );
 
         let packet_v2: ContextPacket = request_json(
             app.clone(),
@@ -101171,7 +101643,16 @@ not json
                     "agent_role": "specialist",
                     "provider": "openai-compatible",
                     "model": "gpt-5.4-mini",
-                    "tools": ["file.read", "sql.get_schema", "sql.query", "shell.exec", "artifact.create"],
+                    "tools": [
+                        "file.read",
+                        "sql.get_schema",
+                        "sql.query",
+                        "shell.exec",
+                        "artifact.create",
+                        "semantic_object.fetch",
+                        "semantic_link.expand",
+                        "ontology_type.lookup"
+                    ],
                     "semantic_scopes": semantic_scopes,
                     "release_state": "active"
                 }),
@@ -101232,7 +101713,14 @@ not json
                                 "writeback_allowed": true
                             },
                             "tool_scope": {
-                                "read": ["file.read", "sql.get_schema", "sql.query"],
+                                "read": [
+                                    "file.read",
+                                    "sql.get_schema",
+                                    "sql.query",
+                                    "semantic_object.fetch",
+                                    "semantic_link.expand",
+                                    "ontology_type.lookup"
+                                ],
                                 "write": ["artifact.create", "shell.exec"],
                                 "external_write": []
                             },
@@ -101346,6 +101834,29 @@ not json
             event.event_type == "agent_inbox.claimed"
                 && event.payload["context_packet_id"] == executed["context_packet"]["id"]
         }));
+        let provider_request = events
+            .iter()
+            .find(|event| {
+                event.event_type == "llm.request"
+                    && event.payload["context"]["context_packet_id"]
+                        == executed["context_packet"]["id"]
+            })
+            .expect("provider request includes claimed context packet");
+        assert_eq!(
+            provider_request.payload["context"]["task_grant_id"],
+            json!(root_task_grant_id)
+        );
+        assert_eq!(
+            provider_request.payload["context"]["rendered_context_packet"]["context_packet_id"],
+            executed["context_packet"]["id"]
+        );
+        assert!(
+            provider_request.payload["context"]["rendered_context_packet"]["available_tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool.as_str() == Some("semantic_object.fetch"))
+        );
 
         let _: Value = request_json(
             app.clone(),

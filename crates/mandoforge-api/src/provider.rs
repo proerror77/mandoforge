@@ -14,6 +14,9 @@ use crate::{
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct HarnessContext {
     pub(crate) session_id: Uuid,
+    pub(crate) task_grant_id: Option<Uuid>,
+    pub(crate) context_packet_id: Option<Uuid>,
+    pub(crate) rendered_context_packet: Option<Value>,
     pub(crate) event_count: usize,
     pub(crate) pending_event_seq_start: Option<i64>,
     pub(crate) pending_event_seq_end: Option<i64>,
@@ -344,7 +347,7 @@ impl ProviderClient for OpenAiCompatibleProviderClient {
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are MandoForge's Stage 1 provider harness. Return tool calls only for the supplied generic runtime session. Use available tools through the runtime policy path."
+                    "content": "You are MandoForge's managed-agent provider harness. First read rendered_context_packet when it is present: it is the bounded ontology, memory, tool, and policy context for this task. Do not invent domain definitions outside that packet. If the packet is missing needed ontology detail, use only the listed ontology tools and include the current context_packet_id in the tool arguments. Runtime actions must go through the supplied tools, TaskGrant, and policy path."
                 },
                 {
                     "role": "user",
@@ -438,6 +441,55 @@ fn provider_tool_schemas() -> Value {
                         "poll_interval_ms": {"type": "integer"}
                     },
                     "required": ["task"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "semantic_object.fetch",
+                "description": "Fetch a semantic object that is already visible in the current context packet.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "context_packet_id": {"type": "string", "description": "The current rendered_context_packet.context_packet_id."},
+                        "object_id": {"type": "string", "description": "A UUID from rendered_context_packet.fetchable_object_ids or relevant_objects[].id."},
+                        "include_content": {"type": "boolean"}
+                    },
+                    "required": ["context_packet_id", "object_id"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "semantic_link.expand",
+                "description": "Expand semantic links for an object inside the current context packet boundary.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "context_packet_id": {"type": "string", "description": "The current rendered_context_packet.context_packet_id."},
+                        "object_id": {"type": "string"},
+                        "relation_type": {"type": "string"},
+                        "max_links": {"type": "integer", "minimum": 1, "maximum": 50}
+                    },
+                    "required": ["context_packet_id", "object_id"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "ontology_type.lookup",
+                "description": "Look up ontology object or relation type definitions scoped to the current context packet.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "context_packet_id": {"type": "string", "description": "The current rendered_context_packet.context_packet_id."},
+                        "type_name": {"type": "string", "description": "Object or relation type name to look up. Omit or use an empty string to return the scoped registry summary."},
+                        "kind": {"type": "string", "enum": ["object_type", "relation_type", "all"]}
+                    },
+                    "required": ["context_packet_id"]
                 }
             }
         }
