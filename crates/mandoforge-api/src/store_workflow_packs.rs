@@ -384,9 +384,11 @@ impl AppState {
             StoreBackend::Memory(inner) => {
                 let mut store = inner.write().await;
                 for binding in store.workflow_pack_bindings.values_mut() {
-                    if bindings.first().is_some_and(|new_binding| {
-                        binding.installation_id == new_binding.installation_id
-                    }) {
+                    if binding.status != "superseded"
+                        && bindings.first().is_some_and(|new_binding| {
+                            binding.installation_id == new_binding.installation_id
+                        })
+                    {
                         binding.status = "superseded".to_string();
                         binding.updated_at = Utc::now();
                     }
@@ -404,7 +406,7 @@ impl AppState {
                     sqlx::query(
                         "UPDATE workflow_pack_bindings
                          SET status = 'superseded', updated_at = now()
-                         WHERE tenant_id = $1 AND installation_id = $2",
+                         WHERE tenant_id = $1 AND installation_id = $2 AND status <> 'superseded'",
                     )
                     .bind(self.current_tenant_id())
                     .bind(first.installation_id)
@@ -537,9 +539,11 @@ impl AppState {
             StoreBackend::Memory(inner) => {
                 let mut store = inner.write().await;
                 for object in store.workflow_pack_runtime_objects.values_mut() {
-                    if objects.first().is_some_and(|new_object| {
-                        object.installation_id == new_object.installation_id
-                    }) {
+                    if object.status != "superseded"
+                        && objects.first().is_some_and(|new_object| {
+                            object.installation_id == new_object.installation_id
+                        })
+                    {
                         object.status = "superseded".to_string();
                         object.updated_at = Utc::now();
                     }
@@ -557,7 +561,7 @@ impl AppState {
                     sqlx::query(
                         "UPDATE workflow_pack_runtime_objects
                          SET status = 'superseded', updated_at = now()
-                         WHERE tenant_id = $1 AND installation_id = $2",
+                         WHERE tenant_id = $1 AND installation_id = $2 AND status <> 'superseded'",
                     )
                     .bind(self.current_tenant_id())
                     .bind(first.installation_id)
