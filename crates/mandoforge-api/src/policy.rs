@@ -88,6 +88,9 @@ impl Default for PolicyConfig {
                     "artifact.create".to_string(),
                     "mcp.call".to_string(),
                     "native.connector.call".to_string(),
+                    "semantic_object.fetch".to_string(),
+                    "semantic_link.expand".to_string(),
+                    "ontology_type.lookup".to_string(),
                 ],
             )]),
             sql_policy: SqlPolicy {
@@ -300,7 +303,13 @@ pub(crate) fn ensure_read_only_sql(sql: &str) -> Result<(), AppError> {
 
 fn tool_risk_level(name: &str) -> &'static str {
     match name {
-        "file.read" | "sql.get_schema" | "approval.request" | "artifact.create" => "low",
+        "file.read"
+        | "sql.get_schema"
+        | "approval.request"
+        | "artifact.create"
+        | "semantic_object.fetch"
+        | "semantic_link.expand"
+        | "ontology_type.lookup" => "low",
         "file.write" | "sql.query" => "medium",
         "shell.exec"
         | "codex.exec"

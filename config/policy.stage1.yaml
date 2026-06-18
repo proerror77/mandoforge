@@ -34,6 +34,9 @@ allowed_tools:
     - approval.request
     - artifact.create
     - mcp.call
+    - semantic_object.fetch
+    - semantic_link.expand
+    - ontology_type.lookup
 sql_policy:
   default_mode: read_only
   max_rows: 500
