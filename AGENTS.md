@@ -13,6 +13,13 @@
 - Before committing, verify the commit diff matches the stated intent and does not include unrelated local artifacts.
 - Commit messages should state the concrete behavior or artifact changed, not vague progress.
 
+## Review and Merge Discipline
+
+- Before modifying implementation files, perform a scope review: identify the intended files, existing dirty changes, unrelated local artifacts, and verification plan.
+- For substantial runtime, policy, security, or orchestration changes, perform a deep review before committing. The review should check correctness, authorization boundaries, failure modes, test coverage, and whether unrelated changes are being mixed in.
+- Pull requests must be reviewed before merge. Do not merge a PR until the review result is `APPROVE` or all blocking findings have been fixed and re-reviewed.
+- Merge only the reviewed PR contents. Do not include unrelated local worktree changes, generated artifacts, or cleanup unless they are explicitly part of the reviewed PR scope.
+
 ## Project Notes
 
 - This repo is the Rust-native Managed Agents / Enterprise Agent OS runtime described in the Stage 1 PRD.
