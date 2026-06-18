@@ -89,6 +89,7 @@ impl Default for PolicyConfig {
                     "mcp.call".to_string(),
                     "native.connector.call".to_string(),
                     "semantic_object.fetch".to_string(),
+                    "semantic_object.search".to_string(),
                     "semantic_link.expand".to_string(),
                     "ontology_type.lookup".to_string(),
                 ],
@@ -308,6 +309,7 @@ fn tool_risk_level(name: &str) -> &'static str {
         | "approval.request"
         | "artifact.create"
         | "semantic_object.fetch"
+        | "semantic_object.search"
         | "semantic_link.expand"
         | "ontology_type.lookup" => "low",
         "file.write" | "sql.query" => "medium",

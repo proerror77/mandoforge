@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -17,6 +17,7 @@ pub(crate) struct HarnessContext {
     pub(crate) task_grant_id: Option<Uuid>,
     pub(crate) context_packet_id: Option<Uuid>,
     pub(crate) rendered_context_packet: Option<Value>,
+    pub(crate) provider_tool_names: Vec<String>,
     pub(crate) event_count: usize,
     pub(crate) pending_event_seq_start: Option<i64>,
     pub(crate) pending_event_seq_end: Option<i64>,
@@ -342,7 +343,8 @@ impl ProviderClient for OpenAiCompatibleProviderClient {
 
     async fn complete(&self, context: HarnessContext) -> Result<ProviderResponse, AppError> {
         let endpoint = format!("{}/v1/chat/completions", self.base_url);
-        let body = json!({
+        let tools = provider_tool_schemas(&context.provider_tool_names);
+        let mut body = json!({
             "model": self.model,
             "messages": [
                 {
@@ -353,10 +355,14 @@ impl ProviderClient for OpenAiCompatibleProviderClient {
                     "role": "user",
                     "content": serde_json::to_string(&context)?
                 }
-            ],
-            "tools": provider_tool_schemas(),
-            "tool_choice": "auto"
+            ]
         });
+        if tools.as_array().is_some_and(|values| !values.is_empty()) {
+            body["tools"] = tools;
+            body["tool_choice"] = json!("auto");
+        } else {
+            body["tool_choice"] = json!("none");
+        }
         let response = self
             .client
             .post(endpoint)
@@ -376,9 +382,30 @@ impl ProviderClient for OpenAiCompatibleProviderClient {
     }
 }
 
-fn provider_tool_schemas() -> Value {
-    json!([
-        {
+pub(crate) fn default_provider_tool_names() -> Vec<String> {
+    [
+        "file.read",
+        "sql.get_schema",
+        "sql.query",
+        "shell.exec",
+        "codex.exec",
+        "semantic_object.fetch",
+        "semantic_object.search",
+        "semantic_link.expand",
+        "ontology_type.lookup",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn provider_tool_schemas(allowed_tool_names: &[String]) -> Value {
+    let allowed = allowed_tool_names
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let schemas = vec![
+        json!({
             "type": "function",
             "function": {
                 "name": "file.read",
@@ -389,8 +416,8 @@ fn provider_tool_schemas() -> Value {
                     "required": ["paths"]
                 }
             }
-        },
-        {
+        }),
+        json!({
             "type": "function",
             "function": {
                 "name": "sql.get_schema",
@@ -401,8 +428,8 @@ fn provider_tool_schemas() -> Value {
                     "required": ["schema"]
                 }
             }
-        },
-        {
+        }),
+        json!({
             "type": "function",
             "function": {
                 "name": "sql.query",
@@ -413,8 +440,8 @@ fn provider_tool_schemas() -> Value {
                     "required": ["sql"]
                 }
             }
-        },
-        {
+        }),
+        json!({
             "type": "function",
             "function": {
                 "name": "shell.exec",
@@ -425,8 +452,8 @@ fn provider_tool_schemas() -> Value {
                     "required": ["command"]
                 }
             }
-        },
-        {
+        }),
+        json!({
             "type": "function",
             "function": {
                 "name": "codex.exec",
@@ -443,8 +470,8 @@ fn provider_tool_schemas() -> Value {
                     "required": ["task"]
                 }
             }
-        },
-        {
+        }),
+        json!({
             "type": "function",
             "function": {
                 "name": "semantic_object.fetch",
@@ -459,8 +486,25 @@ fn provider_tool_schemas() -> Value {
                     "required": ["context_packet_id", "object_id"]
                 }
             }
-        },
-        {
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "semantic_object.search",
+                "description": "Search semantic objects inside the current context packet, or inside TaskGrant memory_scope when scoped_lookup is explicitly allowed.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "context_packet_id": {"type": "string", "description": "The current rendered_context_packet.context_packet_id."},
+                        "query": {"type": "string", "description": "Optional text to match against title, key, type, or summary."},
+                        "object_type": {"type": "string"},
+                        "max_results": {"type": "integer", "minimum": 1, "maximum": 25}
+                    },
+                    "required": ["context_packet_id"]
+                }
+            }
+        }),
+        json!({
             "type": "function",
             "function": {
                 "name": "semantic_link.expand",
@@ -476,8 +520,8 @@ fn provider_tool_schemas() -> Value {
                     "required": ["context_packet_id", "object_id"]
                 }
             }
-        },
-        {
+        }),
+        json!({
             "type": "function",
             "function": {
                 "name": "ontology_type.lookup",
@@ -492,8 +536,20 @@ fn provider_tool_schemas() -> Value {
                     "required": ["context_packet_id"]
                 }
             }
-        }
-    ])
+        }),
+    ];
+    Value::Array(
+        schemas
+            .into_iter()
+            .filter(|schema| {
+                schema
+                    .get("function")
+                    .and_then(|function| function.get("name"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| allowed.contains(name))
+            })
+            .collect(),
+    )
 }
 
 pub(crate) fn parse_openai_compatible_provider_response(

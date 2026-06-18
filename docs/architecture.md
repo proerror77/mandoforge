@@ -416,7 +416,14 @@ been validated. This gives ingestion, reflection, and future dreaming workflows
 one audited write path instead of a collection of ad hoc object/link writes.
 
 Context packets should be replayable so operators can inspect what an agent saw
-before it acted. Memory writeback remains approval-gated.
+before it acted. The provider harness renders the active packet into the model
+context and exposes only the tool schemas allowed by both the current
+AgentVersion and active TaskGrant, so bounded ontology context and callable
+tools stay aligned. Ontology lookup tools are read-only: `semantic_object.fetch`
+can only fetch packet-visible objects, `semantic_object.search` is packet-only
+unless the grant explicitly enables `memory_scope.mode: scoped_lookup`, and
+`ontology_type.lookup` returns the core registry version plus the packet scope
+used for the lookup. Memory writeback remains approval-gated.
 
 Reflection and dreaming use the same governed writeback path. Workers submit
 structured synthesis results to
