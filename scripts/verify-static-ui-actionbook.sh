@@ -111,17 +111,17 @@ wait_for_static_ui() {
 (() => {
   const text = document.body?.innerText || '';
   const normalizedText = text.toLowerCase();
-  const selectors = ['.console-shell', '.tabs', '.workspace', '.panel', '.taskbar', '.visual-command-deck', '.agent-topology', '.runtime-pipeline', '.live-log'];
+  const selectors = ['.console-shell', '.topbar', '.language-toggle', '.notification-center', '.agent-os-cockpit', '.overview-signals', '.live-log'];
   const result = {
     title: document.title,
     hasMountedShell: selectors.every((selector) => Boolean(document.querySelector(selector))),
-    hasHeader: normalizedText.includes('mandoforge co-work') && normalizedText.includes('managed agent observability'),
-    hasMetrics: normalizedText.includes('agents running') && normalizedText.includes('workers active') && normalizedText.includes('approvals') && normalizedText.includes('errors'),
-    hasLiveLog: normalizedText.includes('live log stream') && normalizedText.includes('operator action'),
-    hasWorkflowNavigation: normalizedText.includes('workflows') && normalizedText.includes('dynamic') && normalizedText.includes('semantic') && normalizedText.includes('packs') && normalizedText.includes('deploy'),
-    hasExecutionPanels: normalizedText.includes('worker') && normalizedText.includes('runtime') && normalizedText.includes('approvals') && normalizedText.includes('tool calls') && normalizedText.includes('artifacts'),
-    hasVisualizations: Boolean(document.querySelector('.dynamic-workflow-canvas')) && Boolean(document.querySelector('.topology-canvas')) && Boolean(document.querySelector('.runtime-pipeline')),
-    hasTaskLauncher: normalizedText.includes('start task') && Boolean(document.querySelector('.taskbar textarea')) && Boolean(document.querySelector('.taskbar select')),
+    hasHeader: normalizedText.includes('mandoforge co-work') && normalizedText.includes('managed agents'),
+    hasMetrics: normalizedText.includes('running agents') && normalizedText.includes('queue') && normalizedText.includes('approvals') && normalizedText.includes('errors'),
+    hasLiveLog: normalizedText.includes('live operation log'),
+    hasWorkflowNavigation: normalizedText.includes('managed agents') && normalizedText.includes('runs & tasks') && normalizedText.includes('ontology') && normalizedText.includes('capabilities') && normalizedText.includes('system ops'),
+    hasExecutionPanels: normalizedText.includes('runtime pressure') && normalizedText.includes('enterprise readiness') && normalizedText.includes('connector and ontology gates') && normalizedText.includes('evidence endpoints'),
+    hasVisualizations: Boolean(document.querySelector('.agent-os-cockpit')),
+    hasTaskLauncher: normalizedText.includes('managed agents') && normalizedText.includes('runs & tasks') && normalizedText.includes('ontology') && normalizedText.includes('system ops'),
     metricCards: document.querySelectorAll('.metric').length,
   };
   result.ok = result.title === 'MandoForge Agent OS Console'
@@ -195,17 +195,21 @@ fi
 
 asset_patterns=(
   "MandoForge Co-Work"
-  "Managed agent observability"
-  "Live log stream"
+  "Managed Agents"
+  "Live operation log"
+  "Runs & Tasks"
+  "Ontology Builder"
+  "Ontology onboarding journey"
+  "Preview proposal"
   "Workflow"
-  "Enterprise product readiness"
+  "System Ops"
+  "Enterprise completion"
   "/api/enterprise-product/readiness"
-  "Live connector production"
+  "Connector production readiness"
   "/api/native-connectors/production-readiness"
   "Ontology engine readiness"
   "/api/ontology/engine-readiness"
   "Transitions"
-  "Grants"
   "Start task"
   "/api/workflow-runs"
   "/transitions"

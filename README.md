@@ -156,7 +156,7 @@ Stage 2 adds the governed middleware pilot layer:
 - Eval, release gates, rollback, and drift checks.
 - Observability, usage, and cost tracking.
 - Scheduler due-runs.
-- Remote Computer readiness skeleton.
+- Remote Computer control-plane skeleton with on-demand Kubernetes Pod provisioning when the warm pool is empty.
 
 Stage 2 is complete for the repo-controlled pilot. The core completion evidence is the runtime action record: session events, tool calls, approvals, artifacts, and audit logs.
 

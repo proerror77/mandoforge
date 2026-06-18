@@ -1,0 +1,80 @@
+<h2>MandoForge 控制台信息架构 v1</h2>
+<p class="subtitle">默认给业务用户看，工程细节收进高级区。重点是去掉 Workflow / Dynamic / Board 的顶级重复。</p>
+
+<div class="mockup">
+  <div class="mockup-header">Top Navigation</div>
+  <div class="mockup-body">
+    <div style="display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px;margin-bottom:18px">
+      <div style="border:2px solid #111827;border-radius:8px;padding:12px;background:#fff">
+        <strong>总览</strong><br><small>健康、待处理、下一步</small>
+      </div>
+      <div style="border:2px solid #2563eb;border-radius:8px;padding:12px;background:#eff6ff">
+        <strong>数据与本体</strong><br><small>表、字段、关系、工具</small>
+      </div>
+      <div style="border:2px solid #059669;border-radius:8px;padding:12px;background:#ecfdf5">
+        <strong>智能体</strong><br><small>运行、状态、工具调用</small>
+      </div>
+      <div style="border:2px solid #d97706;border-radius:8px;padding:12px;background:#fffbeb">
+        <strong>工作流</strong><br><small>模板、动态计划、运行记录</small>
+      </div>
+      <div style="border:2px solid #7c3aed;border-radius:8px;padding:12px;background:#f5f3ff">
+        <strong>应用包</strong><br><small>行业包、连接器能力</small>
+      </div>
+      <div style="border:2px solid #dc2626;border-radius:8px;padding:12px;background:#fef2f2">
+        <strong>上线运维</strong><br><small>证据、安全、审计、告警</small>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1.3fr 0.8fr;gap:14px">
+      <section style="border:1px solid #d1d5db;border-radius:8px;padding:14px;background:#fff">
+        <h3 style="margin-top:0">工作流 Workbench</h3>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+          <span style="padding:6px 10px;border-radius:999px;background:#111827;color:white">流程总览</span>
+          <span style="padding:6px 10px;border-radius:999px;background:#f3f4f6">模板</span>
+          <span style="padding:6px 10px;border-radius:999px;background:#f3f4f6">动态计划</span>
+          <span style="padding:6px 10px;border-radius:999px;background:#f3f4f6">运行记录</span>
+          <span style="padding:6px 10px;border-radius:999px;background:#f3f4f6">审批</span>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px">
+          <div style="border:1px solid #e5e7eb;border-radius:8px;padding:10px"><strong>固定模板</strong><p>可复用的 workflow definitions</p></div>
+          <div style="border:1px solid #e5e7eb;border-radius:8px;padding:10px"><strong>动态计划</strong><p>Manager/AI 编译的临时 DAG</p></div>
+          <div style="border:1px solid #e5e7eb;border-radius:8px;padding:10px"><strong>任务队列</strong><p>Board 变成队列视图，不做顶级页</p></div>
+        </div>
+      </section>
+
+      <section style="border:1px solid #d1d5db;border-radius:8px;padding:14px;background:#f9fafb">
+        <h3 style="margin-top:0">Manager 观察栏</h3>
+        <ul>
+          <li>观察所有 agents / jobs / workflows</li>
+          <li>识别卡住、失败、重复失败、等待审批</li>
+          <li>建议重试、暂停、升级、转人工</li>
+          <li>默认不执行高风险动作</li>
+        </ul>
+      </section>
+    </div>
+  </div>
+</div>
+
+<div class="options">
+  <div class="option" data-choice="approve-v1" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>这个 IA 方向正确</h3>
+      <p>继续把它写成正式 spec，再规划实现。</p>
+    </div>
+  </div>
+  <div class="option" data-choice="needs-more-business" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>还要更业务化</h3>
+      <p>减少 Agents / Workflow 这种技术词，改成运营动作语言。</p>
+    </div>
+  </div>
+  <div class="option" data-choice="needs-more-engineering" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>还要保留更多工程入口</h3>
+      <p>业务默认，但工程师仍要能快速进 Dynamic / Board。</p>
+    </div>
+  </div>
+</div>

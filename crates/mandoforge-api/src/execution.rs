@@ -16,15 +16,15 @@ use crate::codex_app_server::{CodexThreadRequest, CodexTurnRequest, CodexTurnRes
 use crate::execution_queue::{ExecutionJob, ExecutionJobRequest, ExecutionJobStatus};
 use crate::mcp_gateway::McpCallRequest;
 use crate::remote_computer_runner::{
-    RemoteComputerRunnerConfig, RemoteComputerRunnerDryRunRequest,
+    RemoteComputerRunnerConfig, RemoteComputerRunnerDryRunRequest, poll_kubernetes_pod_running,
     remote_computer_runner_for_config,
 };
 use crate::shell_runner::{shell_command, shell_runner};
 use crate::{
-    AppError, AppState, Approval, Artifact, CreateRemoteComputerJobAssignment,
-    CreateRemoteComputerLease, Environment, RemoteComputer, RemoteComputerJobAssignment,
-    RemoteComputerLease, ToolCall, new_audit_log, record_remote_computer_job_assignment_event,
-    resolve_mcp_runtime_secret_refs,
+    AppError, AppState, Approval, Artifact, CreateRemoteComputer,
+    CreateRemoteComputerJobAssignment, CreateRemoteComputerLease, Environment, RemoteComputer,
+    RemoteComputerJobAssignment, RemoteComputerLease, ToolCall, new_audit_log,
+    record_remote_computer_job_assignment_event, resolve_mcp_runtime_secret_refs,
 };
 
 const DEFAULT_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
@@ -33,6 +33,7 @@ const DEFAULT_RUNTIME_ADAPTER_EVENT_LIMIT: usize = 200;
 const MAX_RUNTIME_ADAPTER_EVENT_LIMIT: usize = 2_000;
 const REMOTE_CODEX_FINAL_BEGIN: &str = "__MANDOFORGE_CODEX_FINAL_BEGIN__";
 const REMOTE_CODEX_FINAL_END: &str = "__MANDOFORGE_CODEX_FINAL_END__";
+const REMOTE_COMPUTER_DEFAULT_LEASE_SECONDS: i64 = 900;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
@@ -1020,7 +1021,12 @@ async fn auto_assign_remote_computer_for_job(
         match claim_remote_computer_warm_pool_lease_for_job(state, job, worker_id, contract).await?
         {
             Some(lease) => lease,
-            None => return Ok(None),
+            None => match provision_remote_computer_pod_for_job(state, job, worker_id, contract)
+                .await?
+            {
+                Some(lease) => lease,
+                None => return Ok(None),
+            },
         }
     };
     let assignment = state
@@ -1085,7 +1091,7 @@ async fn claim_remote_computer_warm_pool_lease_for_job(
             CreateRemoteComputerLease {
                 session_id: Some(job.session_id),
                 worker_id: Some(worker_id.to_string()),
-                lease_seconds: Some(900),
+                lease_seconds: Some(REMOTE_COMPUTER_DEFAULT_LEASE_SECONDS),
                 metadata: Some(json!({
                     "handoff_mode": "environment-warm-pool-lease",
                     "source": "run_execution_job",
@@ -1123,6 +1129,165 @@ async fn claim_remote_computer_warm_pool_lease_for_job(
             "worker",
             Some(job.id),
             "remote_computer.warm_pool_claimed",
+            "remote_computer_lease",
+            Some(lease.id),
+            details,
+        ))
+        .await?;
+    Ok(Some(lease))
+}
+
+/// Creates a Pod on-demand for jobs that find no available warm-pool Remote Computer.
+/// Requires the full triple-gate (`mutation_enabled`, `live_mutation_enabled`, `execution_enabled`)
+/// plus `MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT=kubernetes` to be active; otherwise returns `Ok(None)`
+/// so the caller can fall through to local execution.
+async fn provision_remote_computer_pod_for_job(
+    state: &AppState,
+    job: &ExecutionJob,
+    worker_id: &str,
+    contract: &RemoteComputerEnvironmentContract,
+) -> Result<Option<RemoteComputerLease>, AppError> {
+    if !remote_computer_pod_execution_requested() {
+        return Ok(None);
+    }
+    let config = RemoteComputerRunnerConfig::from_env();
+    let runner = remote_computer_runner_for_config(&config);
+    // Deterministic pod name: lowercase hex, max 63 chars, dashes allowed
+    let pod_name = format!("agent-rc-{}", &job.session_id.simple().to_string()[..20]);
+    // Check if a remote_computer record already exists for this pod (race guard)
+    let existing = state
+        .list_remote_computers()
+        .await?
+        .into_iter()
+        .find(|c| c.pod_name.as_deref() == Some(&pod_name));
+    let computer = if let Some(existing_computer) = existing {
+        existing_computer
+    } else {
+        // Attempt to create the Pod via the runner
+        let create_response = runner
+            .mutate(
+                &config,
+                RemoteComputerRunnerDryRunRequest {
+                    operation: Some("live_create".to_string()),
+                    remote_computer_id: None,
+                    session_id: Some(job.session_id),
+                    pod_name: Some(pod_name.clone()),
+                    metadata: Some(json!({
+                        "assignment_id": "",
+                        "artifact_discovery_enabled": false
+                    })),
+                },
+            )
+            .await;
+        // Gates not open or runner blocked — fall through to local execution
+        if create_response.status == "blocked" {
+            return Ok(None);
+        }
+        if create_response.status != "mutation_ok" {
+            return Err(AppError::internal(format!(
+                "Remote Computer Pod creation failed: {}",
+                create_response.message
+            )));
+        }
+        // Wait for Pod to reach Running phase
+        let ready_timeout = Duration::from_secs(
+            std::env::var("MANDOFORGE_REMOTE_COMPUTER_POD_READY_TIMEOUT_SECONDS")
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .filter(|v| *v > 0)
+                .unwrap_or(60),
+        );
+        let ready_interval = Duration::from_millis(
+            std::env::var("MANDOFORGE_REMOTE_COMPUTER_POD_READY_POLL_INTERVAL_MS")
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .filter(|v| *v > 0)
+                .unwrap_or(2000),
+        );
+        poll_kubernetes_pod_running(&config, &pod_name, ready_timeout, ready_interval)
+            .await
+            .map_err(|err| AppError::internal(format!("Remote Computer Pod not ready: {err}")))?;
+        // Persist the remote_computer record so the assignment chain can find pod_name.
+        // On concurrent provisioning, a unique-constraint violation can occur — in that
+        // case the winner's record is already in the DB; re-read it.
+        match state
+            .create_remote_computer(CreateRemoteComputer {
+                name: pod_name.clone(),
+                profile: Some("workspace-write".to_string()),
+                namespace: Some(config.namespace.clone()),
+                pod_name: Some(pod_name.clone()),
+                workspace_path: Some("/workspace".to_string()),
+                state_mount_path: Some("/agent-state".to_string()),
+                metadata: Some(json!({
+                    "on_demand": true,
+                    "session_id": job.session_id,
+                    "provisioned_by_worker": worker_id,
+                    "environment_contract": contract.evidence()
+                })),
+            })
+            .await
+        {
+            Ok(computer) => computer,
+            Err(_) => {
+                // Duplicate insert — another worker won the race; use the existing record
+                state
+                    .list_remote_computers()
+                    .await?
+                    .into_iter()
+                    .find(|c| c.pod_name.as_deref() == Some(&pod_name))
+                    .ok_or_else(|| {
+                        AppError::internal("Pod created but record not found after conflict")
+                    })?
+            }
+        }
+    };
+    // Create the lease tied to this session
+    let lease = state
+        .create_remote_computer_lease(
+            computer.id,
+            CreateRemoteComputerLease {
+                session_id: Some(job.session_id),
+                worker_id: Some(worker_id.to_string()),
+                lease_seconds: Some(REMOTE_COMPUTER_DEFAULT_LEASE_SECONDS),
+                metadata: Some(json!({
+                    "handoff_mode": "environment-on-demand-pod",
+                    "source": "provision_remote_computer_pod_for_job",
+                    "on_demand": true,
+                    "execution_job_id": job.id,
+                    "tool_call_id": job.tool_call_id,
+                    "environment_contract": contract.evidence()
+                })),
+            },
+        )
+        .await?;
+    let details = json!({
+        "lease_id": lease.id,
+        "remote_computer_id": lease.remote_computer_id,
+        "pod_name": pod_name,
+        "session_id": lease.session_id,
+        "worker_id": lease.worker_id,
+        "status": lease.status,
+        "lease_expires_at": lease.lease_expires_at,
+        "source": "auto-on-demand-pod",
+        "environment_contract": contract.evidence(),
+        "execution_job_id": job.id,
+        "tool_call_id": job.tool_call_id,
+    });
+    state
+        .append_event(
+            "worker",
+            Some(job.id),
+            job.session_id,
+            "remote_computer.on_demand_pod_provisioned",
+            details.clone(),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(job.session_id),
+            "worker",
+            Some(job.id),
+            "remote_computer.on_demand_pod_provisioned",
             "remote_computer_lease",
             Some(lease.id),
             details,
@@ -4617,6 +4782,8 @@ pub(crate) fn truncate_output(value: &str, max_bytes: usize) -> TruncatedOutput 
 mod tests {
     use super::*;
 
+    static ENV_VAR_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn remote_codex_command_quotes_task_and_emits_final_markers() {
         let request = CodexRequest {
@@ -4717,5 +4884,77 @@ mod tests {
         assert!(!kubernetes_exec_status_succeeded(
             &json!({"status": "Failure", "exitCode": 2})
         ));
+    }
+
+    #[test]
+    fn provision_remote_computer_pod_for_job_returns_none_when_k8s_transport_disabled() {
+        // remote_computer_pod_execution_requested() reads env vars.
+        // When MANDOFORGE_REMOTE_COMPUTER_EXECUTION_ENABLED is unset,
+        // the gate is closed and provision_... must return Ok(None) immediately.
+        // We can't call the async fn directly without an AppState, so we test
+        // the gate function directly — same branch covered.
+        let _guard = ENV_VAR_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_ENABLED");
+            std::env::remove_var("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT");
+        }
+        assert!(
+            !remote_computer_pod_execution_requested(),
+            "gate should be closed when execution env var is absent"
+        );
+    }
+
+    #[test]
+    fn provision_remote_computer_pod_for_job_returns_none_when_transport_is_not_kubernetes() {
+        let _guard = ENV_VAR_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_ENABLED", "true");
+            std::env::set_var("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT", "reserved");
+        }
+        assert!(
+            !remote_computer_pod_execution_requested(),
+            "gate should be closed when transport is not kubernetes"
+        );
+        unsafe {
+            std::env::remove_var("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_ENABLED");
+            std::env::remove_var("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT");
+        }
+    }
+
+    #[test]
+    fn provision_remote_computer_pod_for_job_gate_opens_for_kubernetes_transport() {
+        let _guard = ENV_VAR_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_ENABLED", "true");
+            std::env::set_var(
+                "MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT",
+                "kubernetes",
+            );
+        }
+        assert!(
+            remote_computer_pod_execution_requested(),
+            "gate should open for kubernetes transport"
+        );
+        unsafe {
+            std::env::remove_var("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_ENABLED");
+            std::env::remove_var("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT");
+        }
+    }
+
+    #[test]
+    fn provision_remote_computer_pod_for_job_gate_opens_for_k8s_alias() {
+        let _guard = ENV_VAR_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_ENABLED", "true");
+            std::env::set_var("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT", "k8s");
+        }
+        assert!(
+            remote_computer_pod_execution_requested(),
+            "gate should open for k8s alias"
+        );
+        unsafe {
+            std::env::remove_var("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_ENABLED");
+            std::env::remove_var("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT");
+        }
     }
 }

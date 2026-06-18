@@ -4,6 +4,18 @@ use serde_json::{Value, json};
 
 const ADMIN_TOKEN_KEY: &str = "mandoforge.adminToken";
 
+pub const DEFAULT_ONTOLOGY_DOMAIN_SCOPE: &str = "commerce";
+pub const DEFAULT_ONTOLOGY_WORKFLOW_SCOPE: &str = "fast-onboarding";
+pub const DEFAULT_ONTOLOGY_MEMORY_SCOPE: &str = "enterprise-ontology";
+pub const DEFAULT_ONTOLOGY_OBJECTIVE: &str =
+    "Preview an agent-ready ontology proposal from enterprise source context.";
+pub const DEFAULT_DEPLOYMENT_TARGET: &str = "production";
+pub const ONTOLOGY_DOMAIN_SCOPE_KEY: &str = "mandoforge.ontology.domainScope";
+pub const ONTOLOGY_WORKFLOW_SCOPE_KEY: &str = "mandoforge.ontology.workflowScope";
+pub const ONTOLOGY_MEMORY_SCOPE_KEY: &str = "mandoforge.ontology.memoryScope";
+pub const ONTOLOGY_OBJECTIVE_KEY: &str = "mandoforge.ontology.objective";
+pub const DEPLOYMENT_TARGET_KEY: &str = "mandoforge.deployment.target";
+
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 pub struct Agent {
     pub id: String,
@@ -372,7 +384,7 @@ pub struct OntologyOnboardingToolSpecResponse {
     pub tool_specs: Vec<OntologyOnboardingToolSpec>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 pub struct OntologyReviewGraph {
     #[serde(default)]
     pub run_id: String,
@@ -388,7 +400,7 @@ pub struct OntologyReviewGraph {
     pub omitted_edge_count: usize,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 pub struct OntologyReviewGraphNode {
     #[serde(default)]
     pub id: String,
@@ -408,7 +420,7 @@ pub struct OntologyReviewGraphNode {
     pub source_proposal_id: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 pub struct OntologyReviewGraphEdge {
     #[serde(default)]
     pub id: String,
@@ -642,6 +654,7 @@ pub struct ApiState<T> {
     pub status: LoadStatus,
     pub error: Option<String>,
     pub updated_at_ms: f64,
+    pub in_flight: bool,
 }
 
 impl<T: Default> Default for ApiState<T> {
@@ -651,6 +664,7 @@ impl<T: Default> Default for ApiState<T> {
             status: LoadStatus::Idle,
             error: None,
             updated_at_ms: 0.0,
+            in_flight: false,
         }
     }
 }
@@ -691,10 +705,7 @@ pub async fn api_get<T>(path: &str) -> Result<T, String>
 where
     T: for<'de> Deserialize<'de>,
 {
-    let mut request = Request::get(path)
-        .header("content-type", "application/json")
-        .header("x-mandoforge-subject", "ui-yew-console")
-        .header("x-mandoforge-roles", "admin");
+    let mut request = Request::get(path).header("content-type", "application/json");
     let token = get_admin_token();
     if !token.is_empty() {
         request = request.header("authorization", &format!("Bearer {token}"));
@@ -719,10 +730,7 @@ where
     T: for<'de> Deserialize<'de>,
     B: Serialize,
 {
-    let mut request = Request::post(path)
-        .header("content-type", "application/json")
-        .header("x-mandoforge-subject", "ui-yew-console")
-        .header("x-mandoforge-roles", "admin");
+    let mut request = Request::post(path).header("content-type", "application/json");
     let token = get_admin_token();
     if !token.is_empty() {
         request = request.header("authorization", &format!("Bearer {token}"));
@@ -756,12 +764,31 @@ pub fn compile_dynamic_body(objective: &str, total_agents: u32, parallel_agents:
     })
 }
 
-pub fn ontology_builder_body(source_text: &str) -> Value {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OntologyBuilderConfig {
+    pub domain_scope: String,
+    pub workflow_scope: String,
+    pub memory_scope: String,
+    pub objective: String,
+}
+
+impl Default for OntologyBuilderConfig {
+    fn default() -> Self {
+        Self {
+            domain_scope: DEFAULT_ONTOLOGY_DOMAIN_SCOPE.to_string(),
+            workflow_scope: DEFAULT_ONTOLOGY_WORKFLOW_SCOPE.to_string(),
+            memory_scope: DEFAULT_ONTOLOGY_MEMORY_SCOPE.to_string(),
+            objective: DEFAULT_ONTOLOGY_OBJECTIVE.to_string(),
+        }
+    }
+}
+
+pub fn ontology_builder_body(source_text: &str, config: &OntologyBuilderConfig) -> Value {
     json!({
-        "domain_scope": "legal",
-        "workflow_scope": "contract-review",
-        "memory_scope": "legal-policy",
-        "objective": "Build a first-draft ontology proposal for legal contract review.",
+        "domain_scope": config.domain_scope,
+        "workflow_scope": config.workflow_scope,
+        "memory_scope": config.memory_scope,
+        "objective": config.objective,
         "source_text": source_text,
         "source_refs": ["gate://semantic-ontology-builder"],
         "max_object_types": 8,

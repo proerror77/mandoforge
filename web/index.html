@@ -6,15 +6,19 @@
     <meta name="color-scheme" content="light" />
     <title>MandoForge Agent OS Console</title>
     <link rel="icon" href="/favicon.ico" />
-    
-    <link rel="stylesheet" href="/styles-9ed57c76ab6e9dcd.css"/>
-  <link rel="modulepreload" href="/mandoforge-web-ui-c512084055cf6af7.js" crossorigin="anonymous"><link rel="preload" href="/mandoforge-web-ui-c512084055cf6af7_bg.wasm" crossorigin="anonymous" as="fetch" type="application/wasm"></head>
+
+
+
+    <link rel="stylesheet" href="/styles-e8661f06edd6a07f.css"/>
+    <script src="/vendor/cytoscape.min.js"></script>
+    <script src="/ontology-graph.js"></script>
+  <link rel="modulepreload" href="/mandoforge-web-ui-a42f4124dd46d3d0.js" crossorigin="anonymous"><link rel="preload" href="/mandoforge-web-ui-a42f4124dd46d3d0_bg.wasm" crossorigin="anonymous" as="fetch" type="application/wasm"></head>
   <body>
     <div id="root"></div>
   
 <script type="module">
-import init, * as bindings from '/mandoforge-web-ui-c512084055cf6af7.js';
-const wasm = await init({ module_or_path: '/mandoforge-web-ui-c512084055cf6af7_bg.wasm' });
+import init, * as bindings from '/mandoforge-web-ui-a42f4124dd46d3d0.js';
+const wasm = await init({ module_or_path: '/mandoforge-web-ui-a42f4124dd46d3d0_bg.wasm' });
 
 
 window.wasmBindings = bindings;

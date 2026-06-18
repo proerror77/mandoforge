@@ -754,6 +754,76 @@ fn append_bounded_exec_output(target: &mut Vec<u8>, payload: &[u8], truncated: &
     }
 }
 
+/// Polls the Kubernetes Pod status endpoint until the Pod reaches `Running` phase,
+/// a terminal phase (`Failed`, `Succeeded`, `Unknown`), or the timeout elapses.
+pub(crate) async fn poll_kubernetes_pod_running(
+    config: &RemoteComputerRunnerConfig,
+    pod_name: &str,
+    timeout: Duration,
+    interval: Duration,
+) -> Result<(), String> {
+    let api_url = config
+        .kube_api_url
+        .as_deref()
+        .ok_or_else(|| "kube API URL is not configured".to_string())?;
+    let token_path = config
+        .bearer_token_path
+        .as_deref()
+        .ok_or_else(|| "bearer token path is not configured".to_string())?;
+    let poll_interval = interval.max(Duration::from_millis(100));
+    let deadline = Instant::now() + timeout;
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(config.in_cluster)
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|err| format!("failed to build HTTP client: {err}"))?;
+    loop {
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "Pod did not reach Running within {:.0}s",
+                timeout.as_secs_f64()
+            ));
+        }
+        let token = tokio::fs::read_to_string(token_path)
+            .await
+            .map_err(|err| format!("failed to read bearer token: {err}"))?;
+        let url = format!(
+            "{api_url}/api/v1/namespaces/{}/pods/{}",
+            percent_encode(&config.namespace),
+            percent_encode(pod_name)
+        );
+        let response = client
+            .get(&url)
+            .bearer_auth(token.trim())
+            .send()
+            .await
+            .map_err(|err| format!("failed to GET Pod status: {err}"))?;
+        let status_code = response.status().as_u16();
+        if status_code == 404 {
+            // Pod not yet visible — may happen in the first few hundred ms
+        } else if !(200..300).contains(&status_code) {
+            return Err(format!("Pod status GET returned HTTP {status_code}"));
+        } else {
+            let body: Value = response
+                .json()
+                .await
+                .map_err(|err| format!("failed to parse Pod status: {err}"))?;
+            let phase = body
+                .pointer("/status/phase")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown");
+            match phase {
+                "Running" => return Ok(()),
+                "Failed" | "Succeeded" | "Unknown" => {
+                    return Err(format!("Pod entered terminal phase: {phase}"));
+                }
+                _ => {} // Pending or ContainerCreating — keep polling
+            }
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
+}
+
 fn kubernetes_exec_timeout_seconds() -> u64 {
     std::env::var("MANDOFORGE_REMOTE_COMPUTER_EXEC_TIMEOUT_SECONDS")
         .ok()
@@ -1543,6 +1613,419 @@ mod tests {
         assert_eq!(delete.live_mutation_status_code, Some(200));
         assert!(delete.would_delete_pod);
         assert!(!delete.execution_enabled);
+
+        server.abort();
+        let _ = tokio::fs::remove_file(token_path).await;
+    }
+
+    #[tokio::test]
+    async fn poll_kubernetes_pod_running_returns_err_when_api_url_missing() {
+        let config = RemoteComputerRunnerConfig {
+            mode: "kubernetes".to_string(),
+            namespace: "agent-os".to_string(),
+            pod_template_path: test_pod_template_path(),
+            service_account: "mandoforge-remote-computer".to_string(),
+            kubeconfig_path: None,
+            kube_api_url: None,
+            bearer_token_path: Some("/tmp/token".to_string()),
+            in_cluster: false,
+            mutation_enabled: true,
+            live_mutation_enabled: true,
+            execution_enabled: true,
+        };
+        let result = poll_kubernetes_pod_running(
+            &config,
+            "agent-rc-test",
+            Duration::from_millis(100),
+            Duration::from_millis(50),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("kube API URL"),
+            "error should mention kube API URL"
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_kubernetes_pod_running_returns_err_when_token_path_missing() {
+        let config = RemoteComputerRunnerConfig {
+            mode: "kubernetes".to_string(),
+            namespace: "agent-os".to_string(),
+            pod_template_path: test_pod_template_path(),
+            service_account: "mandoforge-remote-computer".to_string(),
+            kubeconfig_path: None,
+            kube_api_url: Some("http://127.0.0.1:19999".to_string()),
+            bearer_token_path: None,
+            in_cluster: false,
+            mutation_enabled: true,
+            live_mutation_enabled: true,
+            execution_enabled: true,
+        };
+        let result = poll_kubernetes_pod_running(
+            &config,
+            "agent-rc-test",
+            Duration::from_millis(100),
+            Duration::from_millis(50),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("bearer token"),
+            "error should mention bearer token"
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_kubernetes_pod_running_succeeds_on_running_phase() {
+        use axum::{Router, extract::Path as AxumPath, routing::get};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        async fn pod_running(_path: AxumPath<String>) -> axum::response::Json<serde_json::Value> {
+            axum::response::Json(serde_json::json!({
+                "status": { "phase": "Running" }
+            }))
+        }
+
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/api/v1/namespaces/agent-os/pods/{pod}", get(pod_running)),
+            )
+            .await
+            .unwrap()
+        });
+
+        let token_path = std::env::temp_dir().join("poll_test_token_running");
+        tokio::fs::write(&token_path, "test-token").await.unwrap();
+
+        let config = RemoteComputerRunnerConfig {
+            mode: "kubernetes".to_string(),
+            namespace: "agent-os".to_string(),
+            pod_template_path: test_pod_template_path(),
+            service_account: "mandoforge-remote-computer".to_string(),
+            kubeconfig_path: None,
+            kube_api_url: Some(format!("http://{addr}")),
+            bearer_token_path: Some(token_path.to_string_lossy().to_string()),
+            in_cluster: false,
+            mutation_enabled: true,
+            live_mutation_enabled: true,
+            execution_enabled: true,
+        };
+
+        let result = poll_kubernetes_pod_running(
+            &config,
+            "agent-rc-test",
+            Duration::from_secs(5),
+            Duration::from_millis(100),
+        )
+        .await;
+        assert!(result.is_ok(), "should succeed when Pod phase is Running");
+
+        server.abort();
+        let _ = tokio::fs::remove_file(token_path).await;
+    }
+
+    #[tokio::test]
+    async fn poll_kubernetes_pod_running_errors_on_terminal_phase() {
+        use axum::{Router, extract::Path as AxumPath, routing::get};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        async fn pod_failed(_path: AxumPath<String>) -> axum::response::Json<serde_json::Value> {
+            axum::response::Json(serde_json::json!({
+                "status": { "phase": "Failed" }
+            }))
+        }
+
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/api/v1/namespaces/agent-os/pods/{pod}", get(pod_failed)),
+            )
+            .await
+            .unwrap()
+        });
+
+        let token_path = std::env::temp_dir().join("poll_test_token_failed");
+        tokio::fs::write(&token_path, "test-token").await.unwrap();
+
+        let config = RemoteComputerRunnerConfig {
+            mode: "kubernetes".to_string(),
+            namespace: "agent-os".to_string(),
+            pod_template_path: test_pod_template_path(),
+            service_account: "mandoforge-remote-computer".to_string(),
+            kubeconfig_path: None,
+            kube_api_url: Some(format!("http://{addr}")),
+            bearer_token_path: Some(token_path.to_string_lossy().to_string()),
+            in_cluster: false,
+            mutation_enabled: true,
+            live_mutation_enabled: true,
+            execution_enabled: true,
+        };
+
+        let result = poll_kubernetes_pod_running(
+            &config,
+            "agent-rc-test",
+            Duration::from_secs(5),
+            Duration::from_millis(100),
+        )
+        .await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("terminal phase") && msg.contains("Failed"),
+            "error should mention terminal phase: {msg}"
+        );
+
+        server.abort();
+        let _ = tokio::fs::remove_file(token_path).await;
+    }
+
+    #[tokio::test]
+    async fn poll_kubernetes_pod_running_times_out_when_still_pending() {
+        use axum::{Router, extract::Path as AxumPath, routing::get};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        async fn pod_pending(_path: AxumPath<String>) -> axum::response::Json<serde_json::Value> {
+            axum::response::Json(serde_json::json!({
+                "status": { "phase": "Pending" }
+            }))
+        }
+
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/api/v1/namespaces/agent-os/pods/{pod}", get(pod_pending)),
+            )
+            .await
+            .unwrap()
+        });
+
+        let token_path = std::env::temp_dir().join("poll_test_token_pending");
+        tokio::fs::write(&token_path, "test-token").await.unwrap();
+
+        let config = RemoteComputerRunnerConfig {
+            mode: "kubernetes".to_string(),
+            namespace: "agent-os".to_string(),
+            pod_template_path: test_pod_template_path(),
+            service_account: "mandoforge-remote-computer".to_string(),
+            kubeconfig_path: None,
+            kube_api_url: Some(format!("http://{addr}")),
+            bearer_token_path: Some(token_path.to_string_lossy().to_string()),
+            in_cluster: false,
+            mutation_enabled: true,
+            live_mutation_enabled: true,
+            execution_enabled: true,
+        };
+
+        let result = poll_kubernetes_pod_running(
+            &config,
+            "agent-rc-test",
+            Duration::from_millis(200),
+            Duration::from_millis(50),
+        )
+        .await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("did not reach Running"),
+            "error should mention timeout: {msg}"
+        );
+
+        server.abort();
+        let _ = tokio::fs::remove_file(token_path).await;
+    }
+
+    #[tokio::test]
+    async fn poll_kubernetes_pod_running_retries_past_404_then_succeeds() {
+        use axum::{Router, extract::Path as AxumPath, routing::get};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = call_count.clone();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let handler = move |_path: AxumPath<String>| {
+            let count = call_count_clone.clone();
+            async move {
+                let n = count.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    axum::response::Response::builder()
+                        .status(404)
+                        .body(axum::body::Body::empty())
+                        .unwrap()
+                } else {
+                    axum::response::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(r#"{"status":{"phase":"Running"}}"#))
+                        .unwrap()
+                }
+            }
+        };
+
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/api/v1/namespaces/agent-os/pods/{pod}", get(handler)),
+            )
+            .await
+            .unwrap()
+        });
+
+        let token_path = std::env::temp_dir().join("poll_test_token_404_then_running");
+        tokio::fs::write(&token_path, "test-token").await.unwrap();
+
+        let config = RemoteComputerRunnerConfig {
+            mode: "kubernetes".to_string(),
+            namespace: "agent-os".to_string(),
+            pod_template_path: test_pod_template_path(),
+            service_account: "mandoforge-remote-computer".to_string(),
+            kubeconfig_path: None,
+            kube_api_url: Some(format!("http://{addr}")),
+            bearer_token_path: Some(token_path.to_string_lossy().to_string()),
+            in_cluster: false,
+            mutation_enabled: true,
+            live_mutation_enabled: true,
+            execution_enabled: true,
+        };
+
+        let result = poll_kubernetes_pod_running(
+            &config,
+            "agent-rc-test",
+            Duration::from_secs(5),
+            Duration::from_millis(50),
+        )
+        .await;
+        assert!(result.is_ok(), "should succeed after retrying past 404");
+        assert!(
+            call_count.load(Ordering::SeqCst) >= 2,
+            "should have retried at least once"
+        );
+
+        server.abort();
+        let _ = tokio::fs::remove_file(token_path).await;
+    }
+
+    #[tokio::test]
+    async fn poll_kubernetes_pod_running_errors_on_non_2xx_status() {
+        use axum::{Router, extract::Path as AxumPath, routing::get};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/api/v1/namespaces/agent-os/pods/{pod}",
+                    get(|_: AxumPath<String>| async {
+                        axum::response::Response::builder()
+                            .status(500)
+                            .body(axum::body::Body::empty())
+                            .unwrap()
+                    }),
+                ),
+            )
+            .await
+            .unwrap()
+        });
+
+        let token_path = std::env::temp_dir().join("poll_test_token_500");
+        tokio::fs::write(&token_path, "test-token").await.unwrap();
+
+        let config = RemoteComputerRunnerConfig {
+            mode: "kubernetes".to_string(),
+            namespace: "agent-os".to_string(),
+            pod_template_path: test_pod_template_path(),
+            service_account: "mandoforge-remote-computer".to_string(),
+            kubeconfig_path: None,
+            kube_api_url: Some(format!("http://{addr}")),
+            bearer_token_path: Some(token_path.to_string_lossy().to_string()),
+            in_cluster: false,
+            mutation_enabled: true,
+            live_mutation_enabled: true,
+            execution_enabled: true,
+        };
+
+        let result = poll_kubernetes_pod_running(
+            &config,
+            "agent-rc-test",
+            Duration::from_secs(5),
+            Duration::from_millis(50),
+        )
+        .await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("HTTP 500"),
+            "error should mention HTTP 500: {msg}"
+        );
+
+        server.abort();
+        let _ = tokio::fs::remove_file(token_path).await;
+    }
+
+    #[tokio::test]
+    async fn poll_kubernetes_pod_running_errors_on_succeeded_phase() {
+        use axum::{Router, extract::Path as AxumPath, routing::get};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/api/v1/namespaces/agent-os/pods/{pod}",
+                    get(|_: AxumPath<String>| async {
+                        axum::response::Json(serde_json::json!({"status": {"phase": "Succeeded"}}))
+                    }),
+                ),
+            )
+            .await
+            .unwrap()
+        });
+
+        let token_path = std::env::temp_dir().join("poll_test_token_succeeded");
+        tokio::fs::write(&token_path, "test-token").await.unwrap();
+
+        let config = RemoteComputerRunnerConfig {
+            mode: "kubernetes".to_string(),
+            namespace: "agent-os".to_string(),
+            pod_template_path: test_pod_template_path(),
+            service_account: "mandoforge-remote-computer".to_string(),
+            kubeconfig_path: None,
+            kube_api_url: Some(format!("http://{addr}")),
+            bearer_token_path: Some(token_path.to_string_lossy().to_string()),
+            in_cluster: false,
+            mutation_enabled: true,
+            live_mutation_enabled: true,
+            execution_enabled: true,
+        };
+
+        let result = poll_kubernetes_pod_running(
+            &config,
+            "agent-rc-test",
+            Duration::from_secs(5),
+            Duration::from_millis(50),
+        )
+        .await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("Succeeded"),
+            "error should mention Succeeded phase: {msg}"
+        );
 
         server.abort();
         let _ = tokio::fs::remove_file(token_path).await;

@@ -29,33 +29,6 @@ pub(crate) fn OverviewButton(props: &OverviewButtonProps) -> Html {
 }
 
 #[derive(Properties, Clone, PartialEq)]
-pub(crate) struct OverviewSignalProps {
-    pub(crate) label: &'static str,
-    pub(crate) value: String,
-    pub(crate) detail: String,
-    #[prop_or("neutral")]
-    pub(crate) tone: &'static str,
-    pub(crate) target: View,
-    pub(crate) on_view: Callback<View>,
-}
-
-#[component]
-pub(crate) fn OverviewSignal(props: &OverviewSignalProps) -> Html {
-    let target = props.target;
-    let on_view = props.on_view.clone();
-    html! {
-        <button
-            class={classes!("overview-signal", props.tone)}
-            onclick={Callback::from(move |_| on_view.emit(target))}
-        >
-            <span>{ props.label }</span>
-            <strong>{ &props.value }</strong>
-            <small>{ &props.detail }</small>
-        </button>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
 pub(crate) struct PanelProps {
     pub(crate) title: &'static str,
     pub(crate) children: Children,
