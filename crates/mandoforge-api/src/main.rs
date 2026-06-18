@@ -120,7 +120,7 @@ use policy::{PolicyConfig, ensure_read_only_sql_with_policy, load_policy_config}
 use provider::parse_openai_compatible_provider_response;
 use provider::{
     HarnessContext, MockProviderClient, OpenAiCompatibleProviderClient, ProviderClient,
-    ProviderResponse,
+    ProviderResponse, default_provider_tool_names,
 };
 use remote_computer_runner::{
     RemoteComputerRunnerConfig, RemoteComputerRunnerDryRunRequest,
@@ -2897,12 +2897,33 @@ struct FetchSemanticObjectRequest {
     include_content: Option<bool>,
 }
 
+#[derive(Debug, Deserialize)]
+struct SearchSemanticObjectsRequest {
+    context_packet_id: Uuid,
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    object_type: Option<String>,
+    #[serde(default)]
+    max_results: Option<usize>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct FetchSemanticObjectResponse {
     context_packet_id: Uuid,
     object: FetchableSemanticObject,
     content_included: bool,
     fetch_policy: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SearchSemanticObjectsResponse {
+    context_packet_id: Uuid,
+    boundary: String,
+    query: Option<String>,
+    object_type: Option<String>,
+    results: Vec<RenderedSemanticObject>,
+    omitted: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -6865,6 +6886,7 @@ struct ArtifactCreateTool;
 struct ApprovalRequestTool;
 struct McpCallTool;
 struct SemanticObjectFetchTool;
+struct SemanticObjectSearchTool;
 struct SemanticLinkExpandTool;
 struct OntologyTypeLookupTool;
 
@@ -35015,13 +35037,14 @@ async fn build_harness_context(
         })
         .collect::<Vec<_>>();
     let latest_goal_event = recent_goal_events.first().cloned();
-    let (task_grant_id, context_packet_id, rendered_context_packet) =
+    let (task_grant_id, context_packet_id, rendered_context_packet, provider_tool_names) =
         build_provider_context_packet(state, session_id).await?;
     Ok(HarnessContext {
         session_id,
         task_grant_id,
         context_packet_id,
         rendered_context_packet,
+        provider_tool_names,
         event_count: events.len(),
         pending_event_seq_start,
         pending_event_seq_end,
@@ -35042,10 +35065,15 @@ async fn build_harness_context(
 async fn build_provider_context_packet(
     state: &AppState,
     session_id: Uuid,
-) -> Result<(Option<Uuid>, Option<Uuid>, Option<Value>), AppError> {
+) -> Result<(Option<Uuid>, Option<Uuid>, Option<Value>, Vec<String>), AppError> {
     let active_task_grant = active_task_grant_for_session(state, session_id).await?;
     let task_grant_id = active_task_grant.as_ref().map(|(_, grant)| grant.id);
     let mut context_task_grant = active_task_grant.as_ref().map(|(_, grant)| grant.clone());
+    let agent_version = state.agent_version_for_session(session_id).await?;
+    let mut provider_tool_names = provider_tool_names_for_grant_and_agent_version(
+        context_task_grant.as_ref(),
+        &agent_version,
+    );
     let mut packet = if let Some((_, grant)) = active_task_grant.as_ref() {
         if let Some(context_packet_id) = grant.context_packet_id {
             Some(state.get_context_packet(context_packet_id).await?)
@@ -35071,11 +35099,15 @@ async fn build_provider_context_packet(
             record_task_grant_checked(state, &grant, session_id, "session_loop.context_packet")
                 .await?;
             context_task_grant = Some(grant);
+            provider_tool_names = provider_tool_names_for_grant_and_agent_version(
+                context_task_grant.as_ref(),
+                &agent_version,
+            );
         }
         packet = Some(generated_packet);
     }
     let Some(packet) = packet else {
-        return Ok((task_grant_id, None, None));
+        return Ok((task_grant_id, None, None, provider_tool_names));
     };
     let context_packet_id = packet.id;
     let mut rendered = render_execution_context(
@@ -35106,7 +35138,37 @@ async fn build_provider_context_packet(
             "failed to serialize rendered context packet: {error}"
         ))
     })?;
-    Ok((task_grant_id, Some(context_packet_id), Some(rendered)))
+    Ok((
+        task_grant_id,
+        Some(context_packet_id),
+        Some(rendered),
+        provider_tool_names,
+    ))
+}
+
+fn provider_tool_names_for_grant_and_agent_version(
+    grant: Option<&TaskGrant>,
+    agent_version: &AgentVersion,
+) -> Vec<String> {
+    let names = default_provider_tool_names();
+    let agent_allowed = agent_version
+        .tools
+        .iter()
+        .chain(agent_version.tool_names.iter())
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let names = names
+        .into_iter()
+        .filter(|tool| agent_allowed.contains(tool.as_str()))
+        .collect::<Vec<_>>();
+    if let Some(grant) = grant {
+        names
+            .into_iter()
+            .filter(|tool| task_grant_allows_tool(grant, tool))
+            .collect()
+    } else {
+        names
+    }
 }
 
 async fn run_provider_harness(
@@ -37171,6 +37233,51 @@ fn apply_task_grant_memory_scope_to_context_objects(
     filtered
 }
 
+fn task_grant_memory_scope_mode(memory_scope: &Value) -> &str {
+    memory_scope
+        .get("mode")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("snapshot_only")
+}
+
+fn context_semantic_object_satisfies_memory_scope(
+    object: &ContextPacketSemanticObject,
+    memory_scope: &Value,
+) -> bool {
+    let allowed_object_types = memory_scope
+        .get("allowed_object_types")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+    let allowed_object_ids = memory_scope
+        .get("allowed_object_ids")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+    let minimum_trust_level = memory_scope
+        .get("minimum_trust_level")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    (allowed_object_types.is_empty() || allowed_object_types.contains(object.object_type.as_str()))
+        && (allowed_object_ids.is_empty()
+            || allowed_object_ids.contains(object.id.to_string().as_str()))
+        && minimum_trust_level
+            .is_none_or(|minimum| memory_trust_level_satisfies(&object.trust_level, minimum))
+}
+
 fn memory_trust_level_satisfies(actual: &str, minimum: &str) -> bool {
     match (memory_trust_rank(actual), memory_trust_rank(minimum)) {
         (Some(actual), Some(minimum)) => actual >= minimum,
@@ -37383,19 +37490,7 @@ async fn retrieve_context_packet_semantic_objects(
         .into_iter()
         .filter(|object| object.status == "active")
         .filter(|object| semantic_object_matches_scope(object, semantic_scopes))
-        .map(|object| ContextPacketSemanticObject {
-            id: object.id,
-            object_type: object.object_type,
-            object_key: object.object_key,
-            title: object.title,
-            summary: object.summary,
-            source_id: object.source_id,
-            source_uri: object.source_uri,
-            trust_level: object.trust_level,
-            freshness: object.freshness,
-            semantic_scopes: object.semantic_scopes,
-            provenance: object.provenance,
-        })
+        .map(context_packet_semantic_object_from_store_object)
         .collect::<Vec<_>>();
     objects.sort_by(|left, right| {
         semantic_object_rank(right)
@@ -37408,6 +37503,24 @@ async fn retrieve_context_packet_semantic_objects(
     });
     objects.truncate(12);
     Ok(objects)
+}
+
+fn context_packet_semantic_object_from_store_object(
+    object: SemanticObject,
+) -> ContextPacketSemanticObject {
+    ContextPacketSemanticObject {
+        id: object.id,
+        object_type: object.object_type,
+        object_key: object.object_key,
+        title: object.title,
+        summary: object.summary,
+        source_id: object.source_id,
+        source_uri: object.source_uri,
+        trust_level: object.trust_level,
+        freshness: object.freshness,
+        semantic_scopes: object.semantic_scopes,
+        provenance: object.provenance,
+    }
 }
 
 fn semantic_retrieval_backend_registry_from_env() -> SemanticRetrievalBackendRegistry {
@@ -37681,6 +37794,7 @@ fn render_execution_context(
     let available_tools = if allow_on_demand_fetch {
         vec![
             "semantic_object.fetch".to_string(),
+            "semantic_object.search".to_string(),
             "semantic_link.expand".to_string(),
             "ontology_type.lookup".to_string(),
         ]
@@ -37825,6 +37939,118 @@ async fn fetch_semantic_object_for_context(
     Ok(response)
 }
 
+async fn search_semantic_objects_for_context(
+    state: &AppState,
+    packet: &ContextPacket,
+    grant: Option<&TaskGrant>,
+    input: SearchSemanticObjectsRequest,
+) -> Result<SearchSemanticObjectsResponse, AppError> {
+    if input.context_packet_id != packet.id {
+        return Err(AppError::forbidden(
+            "semantic search context_packet_id does not match the verified context packet",
+        ));
+    }
+    let max_results = input.max_results.unwrap_or(10).clamp(1, 25);
+    let query = input
+        .query
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let object_type = input
+        .object_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let scoped_lookup_allowed = grant
+        .map(|grant| task_grant_memory_scope_mode(&grant.memory_scope) == "scoped_lookup")
+        .unwrap_or(false);
+    let boundary = if scoped_lookup_allowed {
+        "task_grant_memory_scope"
+    } else {
+        "context_packet"
+    };
+    let mut candidates = if scoped_lookup_allowed {
+        let Some(grant) = grant else {
+            return Err(AppError::forbidden(
+                "semantic scoped lookup requires an active TaskGrant",
+            ));
+        };
+        let mut objects = state
+            .list_semantic_objects()
+            .await?
+            .into_iter()
+            .filter(|object| object.status == "active")
+            .filter(|object| semantic_object_matches_scope(object, &packet.semantic_scopes))
+            .map(context_packet_semantic_object_from_store_object)
+            .filter(|object| {
+                context_semantic_object_satisfies_memory_scope(object, &grant.memory_scope)
+            })
+            .collect::<Vec<_>>();
+        objects.sort_by(|left, right| {
+            semantic_object_rank(right)
+                .cmp(&semantic_object_rank(left))
+                .then_with(|| {
+                    semantic_object_scope_specificity(right, &packet.semantic_scopes).cmp(
+                        &semantic_object_scope_specificity(left, &packet.semantic_scopes),
+                    )
+                })
+                .then_with(|| left.object_key.cmp(&right.object_key))
+        });
+        objects
+    } else {
+        packet.retrieved_objects.clone()
+    };
+    let before_filter_count = candidates.len();
+    if let Some(object_type) = object_type.as_deref() {
+        candidates.retain(|object| object.object_type == object_type);
+    }
+    if let Some(query) = query.as_deref() {
+        let query = query.to_ascii_lowercase();
+        candidates.retain(|object| {
+            [
+                object.object_type.as_str(),
+                object.object_key.as_str(),
+                object.title.as_str(),
+                object.summary.as_str(),
+            ]
+            .into_iter()
+            .any(|value| value.to_ascii_lowercase().contains(&query))
+        });
+    }
+    let matched_before_limit = candidates.len();
+    let results = candidates
+        .into_iter()
+        .take(max_results)
+        .map(|object| RenderedSemanticObject {
+            id: object.id,
+            object_type: object.object_type,
+            object_key: object.object_key,
+            title: object.title,
+            summary: truncate_for_execution_context(&object.summary, 280),
+            trust_level: object.trust_level,
+            freshness: object.freshness,
+            source_uri: object.source_uri,
+        })
+        .collect::<Vec<_>>();
+    let response = SearchSemanticObjectsResponse {
+        context_packet_id: packet.id,
+        boundary: boundary.to_string(),
+        query,
+        object_type,
+        results,
+        omitted: json!({
+            "before_filter_count": before_filter_count,
+            "matched_before_limit": matched_before_limit,
+            "max_results": max_results,
+            "scoped_lookup_allowed": scoped_lookup_allowed,
+        }),
+    };
+    record_semantic_objects_searched(state, packet, &response).await?;
+    Ok(response)
+}
+
 async fn expand_semantic_links_for_context(
     state: &AppState,
     packet: &ContextPacket,
@@ -37920,6 +38146,44 @@ async fn record_semantic_object_fetch(
     Ok(())
 }
 
+async fn record_semantic_objects_searched(
+    state: &AppState,
+    packet: &ContextPacket,
+    response: &SearchSemanticObjectsResponse,
+) -> Result<(), AppError> {
+    let details = json!({
+        "context_packet_id": packet.id,
+        "context_packet_version": packet.version,
+        "boundary": response.boundary,
+        "query": response.query,
+        "object_type": response.object_type,
+        "result_count": response.results.len(),
+        "result_ids": response.results.iter().map(|object| object.id).collect::<Vec<_>>(),
+        "omitted": response.omitted,
+    });
+    state
+        .append_event(
+            "tool",
+            Some(packet.id),
+            packet.session_id,
+            "semantic_objects.searched",
+            details.clone(),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(packet.session_id),
+            "tool",
+            Some(packet.id),
+            "semantic_objects.searched",
+            "context_packet",
+            Some(packet.id),
+            details,
+        ))
+        .await?;
+    Ok(())
+}
+
 async fn record_semantic_links_expanded(
     state: &AppState,
     packet: &ContextPacket,
@@ -37959,6 +38223,8 @@ async fn record_semantic_links_expanded(
 async fn evaluate_semantic_context_gate(
     state: &AppState,
     agent: &Agent,
+    task_grant: Option<&TaskGrant>,
+    input: &ExecuteTool,
     risk_level: &str,
     decision: &str,
 ) -> Result<Option<Value>, AppError> {
@@ -37968,6 +38234,67 @@ async fn evaluate_semantic_context_gate(
 
     let mut evaluated_object_count = 0usize;
     let mut blockers = Vec::new();
+    let referenced_object_ids = semantic_object_ref_ids_from_tool_args(&input.args);
+    if let Some(grant) = task_grant {
+        let Some(context_packet_id) = grant.context_packet_id else {
+            return Ok(Some(json!({
+                "status": "blocked",
+                "risk_level": risk_level,
+                "boundary": "task_grant_context_packet",
+                "task_grant_id": grant.id,
+                "context_packet_id": Value::Null,
+                "referenced_object_count": referenced_object_ids.len(),
+                "evaluated_object_count": 0,
+                "blocked_object_count": 1,
+                "required_freshness": "current",
+                "blocked_trust_levels": ["unverified"],
+                "blockers": [{
+                    "id": grant.id,
+                    "reasons": ["missing_context_packet"],
+                }],
+            })));
+        };
+        let packet = state.get_context_packet(context_packet_id).await?;
+        let packet_objects = packet
+            .retrieved_objects
+            .iter()
+            .map(|object| (object.id, object))
+            .collect::<HashMap<_, _>>();
+        let evaluated_objects = if referenced_object_ids.is_empty() {
+            packet.retrieved_objects.iter().collect::<Vec<_>>()
+        } else {
+            let mut objects = Vec::new();
+            for object_id in &referenced_object_ids {
+                if let Some(object) = packet_objects.get(object_id) {
+                    objects.push(*object);
+                } else {
+                    blockers.push(json!({
+                        "id": object_id,
+                        "reasons": ["outside_context_packet"],
+                    }));
+                }
+            }
+            objects
+        };
+        for object in evaluated_objects {
+            evaluated_object_count += 1;
+            append_semantic_context_gate_blocker(&mut blockers, object);
+        }
+        return Ok(Some(json!({
+            "status": if blockers.is_empty() { "passed" } else { "blocked" },
+            "risk_level": risk_level,
+            "boundary": "task_grant_context_packet",
+            "context_packet_id": packet.id,
+            "context_packet_version": packet.version,
+            "referenced_object_count": referenced_object_ids.len(),
+            "evaluated_object_count": evaluated_object_count,
+            "blocked_object_count": blockers.len(),
+            "required_freshness": "current",
+            "blocked_trust_levels": ["unverified"],
+            "blockers": blockers,
+        })));
+    }
+
     for object in state
         .list_semantic_objects()
         .await?
@@ -37976,37 +38303,150 @@ async fn evaluate_semantic_context_gate(
         .filter(|object| semantic_object_matches_agent_scope(object, agent))
     {
         evaluated_object_count += 1;
-        let stale = object.freshness != "current";
-        let untrusted = object.trust_level == "unverified";
-        if stale || untrusted {
-            let mut reasons = Vec::new();
-            if stale {
-                reasons.push("freshness_not_current");
-            }
-            if untrusted {
-                reasons.push("trust_unverified");
-            }
-            blockers.push(json!({
-                "id": object.id,
-                "object_type": object.object_type,
-                "object_key": object.object_key,
-                "title": object.title,
-                "trust_level": object.trust_level,
-                "freshness": object.freshness,
-                "reasons": reasons,
-            }));
-        }
+        append_semantic_context_gate_blocker(&mut blockers, &object);
     }
 
     Ok(Some(json!({
         "status": if blockers.is_empty() { "passed" } else { "blocked" },
         "risk_level": risk_level,
+        "boundary": "agent_semantic_scope",
+        "referenced_object_count": referenced_object_ids.len(),
         "evaluated_object_count": evaluated_object_count,
         "blocked_object_count": blockers.len(),
         "required_freshness": "current",
         "blocked_trust_levels": ["unverified"],
         "blockers": blockers,
     })))
+}
+
+trait SemanticContextGateObject {
+    fn semantic_id(&self) -> Uuid;
+    fn semantic_object_type(&self) -> &str;
+    fn semantic_object_key(&self) -> &str;
+    fn semantic_title(&self) -> &str;
+    fn semantic_trust_level(&self) -> &str;
+    fn semantic_freshness(&self) -> &str;
+}
+
+impl SemanticContextGateObject for SemanticObject {
+    fn semantic_id(&self) -> Uuid {
+        self.id
+    }
+
+    fn semantic_object_type(&self) -> &str {
+        &self.object_type
+    }
+
+    fn semantic_object_key(&self) -> &str {
+        &self.object_key
+    }
+
+    fn semantic_title(&self) -> &str {
+        &self.title
+    }
+
+    fn semantic_trust_level(&self) -> &str {
+        &self.trust_level
+    }
+
+    fn semantic_freshness(&self) -> &str {
+        &self.freshness
+    }
+}
+
+impl SemanticContextGateObject for ContextPacketSemanticObject {
+    fn semantic_id(&self) -> Uuid {
+        self.id
+    }
+
+    fn semantic_object_type(&self) -> &str {
+        &self.object_type
+    }
+
+    fn semantic_object_key(&self) -> &str {
+        &self.object_key
+    }
+
+    fn semantic_title(&self) -> &str {
+        &self.title
+    }
+
+    fn semantic_trust_level(&self) -> &str {
+        &self.trust_level
+    }
+
+    fn semantic_freshness(&self) -> &str {
+        &self.freshness
+    }
+}
+
+fn append_semantic_context_gate_blocker<T: SemanticContextGateObject + ?Sized>(
+    blockers: &mut Vec<Value>,
+    object: &T,
+) {
+    let stale = object.semantic_freshness() != "current";
+    let untrusted = object.semantic_trust_level() == "unverified";
+    if stale || untrusted {
+        let mut reasons = Vec::new();
+        if stale {
+            reasons.push("freshness_not_current");
+        }
+        if untrusted {
+            reasons.push("trust_unverified");
+        }
+        blockers.push(json!({
+            "id": object.semantic_id(),
+            "object_type": object.semantic_object_type(),
+            "object_key": object.semantic_object_key(),
+            "title": object.semantic_title(),
+            "trust_level": object.semantic_trust_level(),
+            "freshness": object.semantic_freshness(),
+            "reasons": reasons,
+        }));
+    }
+}
+
+fn semantic_object_ref_ids_from_tool_args(args: &Value) -> BTreeSet<Uuid> {
+    let mut ids = BTreeSet::new();
+    collect_semantic_object_ref_ids(args, None, &mut ids);
+    ids
+}
+
+fn collect_semantic_object_ref_ids(
+    value: &Value,
+    key_hint: Option<&str>,
+    ids: &mut BTreeSet<Uuid>,
+) {
+    match value {
+        Value::String(raw) if semantic_ref_key_hint(key_hint) => {
+            if let Ok(id) = Uuid::parse_str(raw) {
+                ids.insert(id);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_semantic_object_ref_ids(value, key_hint, ids);
+            }
+        }
+        Value::Object(object) => {
+            for (key, value) in object {
+                collect_semantic_object_ref_ids(value, Some(key), ids);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn semantic_ref_key_hint(key_hint: Option<&str>) -> bool {
+    let Some(key) = key_hint else {
+        return false;
+    };
+    let normalized = key.trim().to_ascii_lowercase();
+    normalized.contains("semantic_object")
+        || normalized == "object_id"
+        || normalized == "object_ids"
+        || normalized == "semantic_ref"
+        || normalized == "semantic_refs"
 }
 
 fn semantic_context_gate_block_reason(gate: &Value) -> String {
@@ -38618,6 +39058,51 @@ impl ToolExecutor for SemanticObjectFetchTool {
 }
 
 #[async_trait]
+impl ToolExecutor for SemanticObjectSearchTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: "semantic_object.search",
+            risk: "low",
+            description: "Search semantic objects inside the current context packet or scoped TaskGrant memory",
+        }
+    }
+
+    async fn execute(
+        &self,
+        state: &AppState,
+        input: &ExecuteTool,
+        _tool_call: &ToolCall,
+    ) -> Result<Value, AppError> {
+        let (packet, grant) = context_packet_and_grant_for_tool_invocation(state, input).await?;
+        let request = SearchSemanticObjectsRequest {
+            context_packet_id: packet.id,
+            query: input
+                .args
+                .get("query")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            object_type: input
+                .args
+                .get("object_type")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            max_results: input
+                .args
+                .get("max_results")
+                .and_then(Value::as_u64)
+                .map(|value| value as usize),
+        };
+        let response =
+            search_semantic_objects_for_context(state, &packet, grant.as_ref(), request).await?;
+        serde_json::to_value(response).map_err(|error| {
+            AppError::bad_request(format!(
+                "failed to serialize semantic object search: {error}"
+            ))
+        })
+    }
+}
+
+#[async_trait]
 impl ToolExecutor for SemanticLinkExpandTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
@@ -38731,6 +39216,14 @@ impl ToolExecutor for OntologyTypeLookupTool {
             "status": "ok",
             "context_packet_id": packet.id,
             "context_packet_version": packet.version,
+            "registry_version": registry.version,
+            "registry_scope": {
+                "type": "core",
+                "domain": packet.semantic_scopes.get("domain_scope").and_then(Value::as_str).unwrap_or("global"),
+                "workflow_scope": packet.semantic_scopes.get("workflow_scope").and_then(Value::as_str),
+                "memory_scope": packet.semantic_scopes.get("memory_scope").and_then(Value::as_str),
+                "release_model": "core registry scoped by ContextPacket; domain ontology releases are not yet materialized"
+            },
             "ontology_scope": render_ontology_scope(&packet.semantic_scopes),
             "requested_name": requested_name,
             "kind": kind,
@@ -38746,6 +39239,15 @@ async fn context_packet_for_tool_invocation(
     state: &AppState,
     input: &ExecuteTool,
 ) -> Result<ContextPacket, AppError> {
+    context_packet_and_grant_for_tool_invocation(state, input)
+        .await
+        .map(|(packet, _)| packet)
+}
+
+async fn context_packet_and_grant_for_tool_invocation(
+    state: &AppState,
+    input: &ExecuteTool,
+) -> Result<(ContextPacket, Option<TaskGrant>), AppError> {
     let context_packet_id = uuid_tool_arg(
         &input.args,
         &["context_packet_id"],
@@ -38772,8 +39274,9 @@ async fn context_packet_for_tool_invocation(
                 ));
             }
         }
+        return Ok((packet, Some(grant)));
     }
-    Ok(packet)
+    Ok((packet, None))
 }
 
 fn uuid_tool_arg(args: &Value, keys: &[&str], missing_message: &str) -> Result<Uuid, AppError> {
@@ -38794,6 +39297,8 @@ async fn record_ontology_type_lookup(
     let details = json!({
         "context_packet_id": packet.id,
         "context_packet_version": packet.version,
+        "registry_version": result.get("registry_version").cloned().unwrap_or(Value::Null),
+        "registry_scope": result.get("registry_scope").cloned().unwrap_or(Value::Null),
         "requested_name": result.get("requested_name").cloned().unwrap_or(Value::Null),
         "kind": result.get("kind").cloned().unwrap_or(Value::Null),
         "object_type_count": result
@@ -38839,6 +39344,7 @@ fn tool_registry() -> HashMap<&'static str, Box<dyn ToolExecutor>> {
         Box::new(OntologyTypeLookupTool),
         Box::new(SemanticLinkExpandTool),
         Box::new(SemanticObjectFetchTool),
+        Box::new(SemanticObjectSearchTool),
         Box::new(ShellExecTool),
         Box::new(SqlSchemaTool),
         Box::new(SqlQueryTool),
@@ -39388,6 +39894,8 @@ async fn execute_tool_invocation(
     let semantic_context_gate = evaluate_semantic_context_gate(
         state,
         &agent,
+        task_grant.as_ref(),
+        &input,
         &policy_decision.risk_level,
         policy_decision.decision,
     )
@@ -79663,6 +80171,120 @@ not json
     }
 
     #[tokio::test]
+    async fn high_risk_workflow_tools_fail_closed_without_bound_context_packet() {
+        let app = test_app().await;
+        let agents: Vec<Agent> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri("/api/agents")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let agent = agents
+            .iter()
+            .find(|agent| agent.name == "Generic Orchestrator Agent")
+            .expect("seeded generic orchestrator agent");
+
+        let definition: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-definitions",
+                json!({
+                    "name": "Ungrounded high-risk grant",
+                    "entrypoint": "ungrounded-high-risk-grant",
+                    "default_agent_id": agent.id,
+                    "handoff_rules": {
+                        "root_task_grant": {
+                            "tool_scope": {
+                                "read": ["file.read"],
+                                "write": ["shell.exec"],
+                                "external_write": []
+                            }
+                        }
+                    },
+                    "release_state": "released"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        let run: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-runs",
+                json!({
+                    "workflow_definition_id": definition["id"],
+                    "title": "ungrounded high-risk tool call"
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        let session_id = run["primary_session_id"].as_str().expect("session id");
+        let root_task_grant_id = run["root_task_grant_id"]
+            .as_str()
+            .expect("root task grant id");
+        let root_grant: TaskGrant = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/task-grants/{root_task_grant_id}"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        assert_eq!(root_grant.context_packet_id, None);
+
+        let (status, error) = request_value(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/tools/shell.exec/execute",
+                json!({
+                    "session_id": session_id,
+                    "task_grant_id": root_task_grant_id,
+                    "args": {"command": "pwd"}
+                }),
+                &[("x-mandoforge-roles", "operator")],
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("semantic context gate")
+        );
+
+        let tool_calls: Vec<ToolCall> = request_json(
+            app,
+            Request::builder()
+                .uri(format!("/api/sessions/{session_id}/tool-calls"))
+                .header("x-mandoforge-roles", "operator")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let shell_call = tool_calls
+            .iter()
+            .find(|call| call.tool_name == "shell.exec")
+            .expect("shell call recorded");
+        assert_eq!(shell_call.status, "denied");
+        assert_eq!(
+            shell_call.policy_decision["semantic_context_gate"]["boundary"],
+            "task_grant_context_packet"
+        );
+        assert_eq!(
+            shell_call.policy_decision["semantic_context_gate"]["blockers"][0]["reasons"],
+            json!(["missing_context_packet"])
+        );
+    }
+
+    #[tokio::test]
     async fn workflow_context_packet_applies_task_grant_memory_scope() {
         let app = test_app().await;
         let semantic_scopes = json!({
@@ -79724,6 +80346,7 @@ not json
                     "tools": [
                         "file.read",
                         "semantic_object.fetch",
+                        "semantic_object.search",
                         "semantic_link.expand",
                         "ontology_type.lookup"
                     ],
@@ -92520,6 +93143,7 @@ not json
                     "tools": [
                         "file.read",
                         "semantic_object.fetch",
+                        "semantic_object.search",
                         "semantic_link.expand",
                         "ontology_type.lookup"
                     ],
@@ -92712,6 +93336,42 @@ not json
         );
         assert_eq!(tool_fetched_object["content_included"], json!(false));
 
+        let (tool_search_status, tool_search_results) = request_value(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/tools/semantic_object.search/execute",
+                json!({
+                    "session_id": session.id,
+                    "args": {
+                        "context_packet_id": packet_v1.id,
+                        "query": "detail fetch",
+                        "object_type": "workflow",
+                        "max_results": 5
+                    }
+                }),
+                &[
+                    ("x-mandoforge-subject", "admin-1"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(
+            tool_search_status,
+            StatusCode::OK,
+            "{tool_search_results:?}"
+        );
+        assert_eq!(
+            tool_search_results["context_packet_id"],
+            json!(packet_v1.id)
+        );
+        assert_eq!(tool_search_results["boundary"], json!("context_packet"));
+        assert_eq!(
+            tool_search_results["results"][0]["id"],
+            json!(semantic_object_detail.id)
+        );
+
         let (tool_expand_status, tool_expanded_links) = request_value(
             app.clone(),
             json_request_with_headers(
@@ -92773,6 +93433,13 @@ not json
             "{ontology_lookup:?}"
         );
         assert_eq!(ontology_lookup["context_packet_id"], json!(packet_v1.id));
+        assert_eq!(ontology_lookup["registry_version"], json!("core-v0.1"));
+        assert_eq!(
+            ontology_lookup["registry_scope"]["release_model"],
+            json!(
+                "core registry scoped by ContextPacket; domain ontology releases are not yet materialized"
+            )
+        );
         assert_eq!(
             ontology_lookup["object_types"][0]["name"],
             "semantic_object"
@@ -98704,6 +99371,10 @@ not json
             "blocked"
         );
         assert_eq!(
+            shell_call.policy_decision["semantic_context_gate"]["boundary"],
+            "agent_semantic_scope"
+        );
+        assert_eq!(
             shell_call.policy_decision["semantic_context_gate"]["blockers"][0]["reasons"],
             json!(["freshness_not_current", "trust_unverified"])
         );
@@ -101650,6 +102321,7 @@ not json
                         "shell.exec",
                         "artifact.create",
                         "semantic_object.fetch",
+                        "semantic_object.search",
                         "semantic_link.expand",
                         "ontology_type.lookup"
                     ],
@@ -101718,6 +102390,7 @@ not json
                                     "sql.get_schema",
                                     "sql.query",
                                     "semantic_object.fetch",
+                                    "semantic_object.search",
                                     "semantic_link.expand",
                                     "ontology_type.lookup"
                                 ],
@@ -101856,6 +102529,51 @@ not json
                 .unwrap()
                 .iter()
                 .any(|tool| tool.as_str() == Some("semantic_object.fetch"))
+        );
+        assert!(
+            provider_request.payload["context"]["rendered_context_packet"]["available_tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool.as_str() == Some("semantic_object.search"))
+        );
+        assert!(
+            provider_request.payload["context"]["provider_tool_names"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool.as_str() == Some("semantic_object.search"))
+        );
+        assert!(
+            !provider_request.payload["context"]["provider_tool_names"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool.as_str() == Some("codex.exec"))
+        );
+
+        let searched: Value = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/tools/semantic_object.search/execute",
+                json!({
+                    "session_id": run["primary_session_id"],
+                    "task_grant_id": root_task_grant_id,
+                    "args": {
+                        "context_packet_id": executed["context_packet"]["id"],
+                        "query": "observable workflow step",
+                        "object_type": "work_item"
+                    }
+                }),
+                &operator_headers,
+            ),
+        )
+        .await;
+        assert_eq!(searched["boundary"], json!("context_packet"));
+        assert_eq!(
+            searched["results"][0]["source_uri"],
+            json!(format!("mandoforge://work-items/{work_item_id}"))
         );
 
         let _: Value = request_json(

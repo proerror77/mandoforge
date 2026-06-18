@@ -389,7 +389,9 @@ template for TaskGrant.
 
 TaskGrant is the non-negotiable security primitive for managed workflows. It is
 issued per workflow run, handoff, step, or execution job. It is immutable except
-for status changes such as revoke, expire, consume.
+for status changes such as revoke, expire, consume, and a single
+`context_packet_id` late binding performed during claim/session-loop context
+materialization before worker execution.
 
 Required fields:
 
@@ -486,7 +488,11 @@ MemoryScope should define:
 - whether memory writeback candidates are allowed
 
 Default should be `snapshot_only`: the worker receives a ContextPacket snapshot
-and cannot query the broader semantic store directly.
+and cannot query the broader semantic store directly. `scoped_lookup` is the
+explicit opt-in mode for controlled semantic search beyond the packet snapshot;
+that lookup still has to carry the current `context_packet_id`, pass TaskGrant
+validation, and apply the grant's object type, object id, trust, and max-object
+constraints.
 
 Memory sharing rule:
 
