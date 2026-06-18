@@ -2,6 +2,7 @@ use crate::api::{
     ConfidenceCalibrationResponse, OntologyOnboardingProposal, OntologyOnboardingRun,
     OntologyOnboardingToolSpec, OntologyReviewGraph, OntologyReviewGraphEdge,
     OntologyReviewGraphNode, RenderedExecutionContext, SemanticGraphSnapshot, SemanticObject,
+    get_admin_token,
 };
 use crate::components::{FlowMeter, JsonPreview, KeyMetrics, Panel, Rows};
 use crate::graph_island::OntologyGraphIsland;
@@ -70,10 +71,15 @@ fn localized_status(lang: SemanticLang, status: &str) -> String {
 
 fn localized_source_mode(lang: SemanticLang, source_mode: &str) -> String {
     if lang == SemanticLang::En {
-        return label_or(source_mode, "demo").to_string();
+        return match source_mode {
+            "demo_ecommerce" | "demo" | "" => "Sample data",
+            "demo_insurance" => "Insurance sample",
+            other => label_or(other, "demo"),
+        }
+        .to_string();
     }
     match source_mode {
-        "demo_ecommerce" | "demo" => "电商示例",
+        "demo_ecommerce" | "demo" => "示例数据",
         "demo_insurance" => "保险示例",
         "" => "示例",
         other => other,
@@ -123,7 +129,7 @@ pub(crate) fn SemanticView(props: &SemanticProps) -> Html {
                         <span>{ current_lang.text("Language: English / 中文可切换", "语言：中文 / English available") }</span>
                     </div>
                     <div class="semantic-hero-actions">
-                        <button onclick={props.on_start_onboarding.clone()}>{ current_lang.text("Start ecommerce sample", "开始电商示例") }</button>
+                        <button onclick={props.on_start_onboarding.clone()}>{ current_lang.text("Start sample onboarding", "启动示例入职") }</button>
                         <button
                             class="secondary"
                             onclick={props.on_materialize_onboarding.clone()}
@@ -432,21 +438,34 @@ struct OnboardingPanelProps {
 #[component]
 fn OnboardingPanel(props: &OnboardingPanelProps) -> Html {
     let Some(run) = props.run.as_ref() else {
+        let has_admin_token = !get_admin_token().trim().is_empty();
         return html! {
             <div class="ontology-onboarding empty-state">
                 <div>
                     <strong>{ props.lang.text("No onboarding run yet.", "还没有本体入职运行。") }</strong>
                     <p>{ props.lang.text(
-                        "Start the ecommerce sample to see how raw tables become reviewable business objects, relations, metrics, and actions.",
-                        "启动电商示例，查看原始数据表如何变成可审核的业务对象、关系、指标和动作。"
+                        "Start a sample onboarding run to see how raw tables become reviewable business objects, relations, metrics, and actions.",
+                        "启动一组示例数据入职，查看原始数据表如何变成可审核的业务对象、关系、指标和动作。"
                     ) }</p>
+                    if !has_admin_token {
+                        <small class="ontology-auth-hint">{ props.lang.text(
+                            "Write actions need a dev admin token. Open Settings and set MANDOFORGE_DEV_ADMIN_TOKEN before starting the sample.",
+                            "写入动作需要开发管理员 token。请先到 Settings 设置 MANDOFORGE_DEV_ADMIN_TOKEN，再启动示例。"
+                        ) }</small>
+                    }
                 </div>
-                <button onclick={props.on_start.clone()}>{ props.lang.text("Start ecommerce sample", "开始电商示例") }</button>
+                <button onclick={props.on_start.clone()}>{ props.lang.text("Start sample onboarding", "启动示例入职") }</button>
             </div>
         };
     };
     html! {
         <div class="ontology-onboarding">
+            <OntologySampleStory
+                lang={props.lang}
+                run={run.clone()}
+                graph={props.review_graph.clone()}
+                tool_count={props.tool_specs.len()}
+            />
             <OntologyMindMapPanel
                 lang={props.lang}
                 graph={props.review_graph.clone()}
@@ -521,6 +540,188 @@ fn OnboardingPanel(props: &OnboardingPanelProps) -> Html {
             </details>
         </div>
     }
+}
+
+#[derive(Properties, Clone, PartialEq)]
+struct OntologySampleStoryProps {
+    lang: SemanticLang,
+    run: OntologyOnboardingRun,
+    graph: Option<OntologyReviewGraph>,
+    tool_count: usize,
+}
+
+#[component]
+fn OntologySampleStory(props: &OntologySampleStoryProps) -> Html {
+    let table_names = props
+        .graph
+        .as_ref()
+        .map(|graph| {
+            graph
+                .nodes
+                .iter()
+                .filter(|node| node.node_type == "dataset")
+                .map(|node| node.label.clone())
+                .take(8)
+                .collect::<Vec<_>>()
+        })
+        .filter(|tables| !tables.is_empty())
+        .unwrap_or_else(|| proposal_source_tables(&props.run, 8));
+    let table_total = props.run.dataset_count.max(table_names.len());
+    let object_names = proposal_names(&props.run, "object", 8);
+    let object_total = proposal_count(&props.run, "object");
+    let relation_names = proposal_names(&props.run, "relation", 8);
+    let relation_total = proposal_count(&props.run, "relation");
+    let action_names = proposal_names(&props.run, "action", 6);
+    let action_total = proposal_count(&props.run, "action");
+    let metric_count = props
+        .run
+        .proposals
+        .iter()
+        .filter(|proposal| proposal.proposal_type == "metric")
+        .count();
+    let published = props.run.materialized_count > 0;
+
+    html! {
+        <section class="ontology-sample-story" aria-label={props.lang.text("Sample data flow", "示例数据链路")}>
+            <div class="ontology-sample-story-head">
+                <div>
+                    <span>{ props.lang.text("Ontology onboarding flow", "本体入职链路") }</span>
+                    <strong>{ props.lang.text(
+                        "Raw tables become reviewed ontology, then agent tools.",
+                        "原始数据表先变成可审核本体，再编译成智能体工具。"
+                    ) }</strong>
+                </div>
+                <small>{ if published {
+                    props.lang.text("Published: approved proposals are now semantic objects, links, metrics, actions, and tool specs.", "已发布：批准项已经写入语义对象、关系、指标、动作和工具规格。")
+                } else {
+                    props.lang.text("Draft: inspect the graph, batch approve trusted proposals, then publish.", "草稿：先看图谱，批量批准可信提案，再发布。")
+                } }</small>
+            </div>
+            <div class="ontology-sample-flow">
+                <OntologySampleFlowColumn
+                    lang={props.lang}
+                    eyebrow={props.lang.text("1. Imported data", "1. 导入数据")}
+                    title={format!("{} {}", table_total, props.lang.text("tables", "张表"))}
+                    items={table_names}
+                    total_count={table_total}
+                />
+                <OntologySampleFlowColumn
+                    lang={props.lang}
+                    eyebrow={props.lang.text("2. Inferred objects", "2. 推断对象")}
+                    title={format!("{} {}", object_total, props.lang.text("business objects", "个业务对象"))}
+                    items={object_names}
+                    total_count={object_total}
+                />
+                <OntologySampleFlowColumn
+                    lang={props.lang}
+                    eyebrow={props.lang.text("3. Business links", "3. 业务关系")}
+                    title={format!("{} {}", relation_total, props.lang.text("links", "条关系"))}
+                    items={relation_names}
+                    total_count={relation_total}
+                />
+                <OntologySampleFlowColumn
+                    lang={props.lang}
+                    eyebrow={props.lang.text("4. Agent actions", "4. 智能体动作")}
+                    title={format!(
+                        "{} {} / {} {}",
+                        action_total,
+                        props.lang.text("actions", "个动作"),
+                        props.tool_count,
+                        props.lang.text("tools", "个工具")
+                    )}
+                    items={action_names}
+                    total_count={action_total}
+                />
+            </div>
+            <div class="ontology-sample-footer">
+                <span>{ format!(
+                    "{}: {} / {}",
+                    props.lang.text("Review progress", "审核进度"),
+                    props.run.approved_count,
+                    props.run.proposal_count
+                ) }</span>
+                <span>{ format!(
+                    "{}: {}",
+                    props.lang.text("Canonical metrics", "标准指标"),
+                    metric_count
+                ) }</span>
+                <span>{ localized_status(props.lang, label_or(&props.run.status, "pending_review")) }</span>
+            </div>
+        </section>
+    }
+}
+
+#[derive(Properties, Clone, PartialEq)]
+struct OntologySampleFlowColumnProps {
+    lang: SemanticLang,
+    eyebrow: AttrValue,
+    title: String,
+    items: Vec<String>,
+    total_count: usize,
+}
+
+#[component]
+fn OntologySampleFlowColumn(props: &OntologySampleFlowColumnProps) -> Html {
+    let hidden_count = props.total_count.saturating_sub(props.items.len());
+    html! {
+        <article class="ontology-sample-column">
+            <span>{ props.eyebrow.clone() }</span>
+            <strong>{ props.title.clone() }</strong>
+            <div class="ontology-sample-chips">
+                { for props.items.iter().take(8).map(|item| html! {
+                    <small key={item.clone()}>{ item }</small>
+                }) }
+                if props.items.is_empty() {
+                    <small>{ props.lang.text("Pending", "待生成") }</small>
+                }
+                if hidden_count > 0 {
+                    <small>{ format!("+{} {}", hidden_count, props.lang.text("more", "更多")) }</small>
+                }
+            </div>
+        </article>
+    }
+}
+
+fn proposal_names(run: &OntologyOnboardingRun, proposal_type: &str, limit: usize) -> Vec<String> {
+    run.proposals
+        .iter()
+        .filter(|proposal| proposal.proposal_type == proposal_type)
+        .map(|proposal| proposal.name.clone())
+        .take(limit)
+        .collect()
+}
+
+fn proposal_count(run: &OntologyOnboardingRun, proposal_type: &str) -> usize {
+    run.proposals
+        .iter()
+        .filter(|proposal| proposal.proposal_type == proposal_type)
+        .count()
+}
+
+fn proposal_source_tables(run: &OntologyOnboardingRun, limit: usize) -> Vec<String> {
+    let mut tables = Vec::<String>::new();
+    for proposal in &run.proposals {
+        let table = evidence_string(&proposal.evidence, "source_table")
+            .or_else(|| evidence_string(&proposal.evidence, "table"))
+            .or_else(|| evidence_string(&proposal.content, "source_table"))
+            .map(|value| {
+                value
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or(value.as_str())
+                    .to_string()
+            })
+            .filter(|value| !value.is_empty());
+        if let Some(table) = table {
+            if !tables.iter().any(|existing| existing == &table) {
+                tables.push(table);
+            }
+        }
+        if tables.len() >= limit {
+            break;
+        }
+    }
+    tables
 }
 
 #[derive(Properties, Clone, PartialEq)]
@@ -1002,7 +1203,7 @@ fn OntologySourceRail(props: &OntologySourceRailProps) -> Html {
                     "Connectors, warehouse tables, CSV, and API exports enter here before profiling and LLM mapping.",
                     "连接器、数据仓库表、CSV 和 API 导出都从这里进入，再做画像和 LLM 映射。"
                 ) }</p>
-                <small>{ props.lang.text("Import controls will attach connector, warehouse, CSV, and API source setup here. Demo mode uses the ecommerce seed bundle.", "导入控件会在这里接入连接器、数仓、CSV 和 API 来源设置；当前示例使用电商种子数据包。") }</small>
+                <small>{ props.lang.text("Import controls will attach connector, warehouse, CSV, and API source setup here. Demo mode uses a seed bundle.", "导入控件会在这里接入连接器、数仓、CSV 和 API 来源设置；当前示例使用种子数据包。") }</small>
             </div>
             <div class="ontology-source-metrics">
                 <span>

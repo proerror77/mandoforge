@@ -62,6 +62,8 @@ asset_patterns=(
   "Ontology Builder"
   "Ontology onboarding journey"
   "Preview proposal"
+  "Ontology onboarding flow"
+  "Start sample onboarding"
   "Workflow"
   "Workflows"
   "Capabilities"

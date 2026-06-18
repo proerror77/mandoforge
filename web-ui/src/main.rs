@@ -280,6 +280,10 @@ fn App() -> Html {
         let onboarding_calibration = onboarding_calibration.clone();
         let mutation_status = mutation_status.clone();
         Callback::from(move |_| {
+            if get_admin_token().trim().is_empty() {
+                mutation_status.set(missing_ontology_admin_token_message("本体入职启动失败"));
+                return;
+            }
             let onboarding_run = onboarding_run.clone();
             let onboarding_tool_specs = onboarding_tool_specs.clone();
             let onboarding_review_graph = onboarding_review_graph.clone();
@@ -314,7 +318,7 @@ fn App() -> Html {
                         onboarding_run.set(Some(run));
                     }
                     Err(error) => {
-                        mutation_status.set(format!("本体入职启动失败：{error}"));
+                        mutation_status.set(ontology_write_error_message("本体入职启动失败", &error));
                     }
                 }
             });
@@ -375,7 +379,10 @@ fn App() -> Html {
                                 .set(format!("Proposal approved; refresh failed: {error}")),
                         }
                     }
-                    Err(error) => mutation_status.set(format!("Proposal approve failed: {error}")),
+                    Err(error) => mutation_status.set(ontology_write_error_message(
+                        "Proposal approve failed",
+                        &error,
+                    )),
                 }
             });
         })
@@ -432,7 +439,10 @@ fn App() -> Html {
                                 .set(format!("Proposal rejected; refresh failed: {error}")),
                         }
                     }
-                    Err(error) => mutation_status.set(format!("Proposal reject failed: {error}")),
+                    Err(error) => mutation_status.set(ontology_write_error_message(
+                        "Proposal reject failed",
+                        &error,
+                    )),
                 }
             });
         })
@@ -464,13 +474,23 @@ fn App() -> Html {
                     "reason": "operator batch-approved from semantic console",
                 });
                 let mut approved = 0usize;
+                let mut first_error = None::<String>;
                 for proposal_id in proposal_ids {
                     let path = format!("/api/ontology/onboarding/proposals/{proposal_id}/review");
-                    if api_post::<OntologyOnboardingProposal, _>(&path, &body)
-                        .await
-                        .is_ok()
-                    {
-                        approved += 1;
+                    match api_post::<OntologyOnboardingProposal, _>(&path, &body).await {
+                        Ok(_) => approved += 1,
+                        Err(error) => {
+                            if first_error.is_none() {
+                                first_error = Some(error);
+                            }
+                        }
+                    }
+                }
+                if approved == 0 {
+                    if let Some(error) = first_error {
+                        mutation_status
+                            .set(ontology_write_error_message("Batch approve failed", &error));
+                        return;
                     }
                 }
                 let run_path = format!("/api/ontology/onboarding/runs/{}", current_run.id);
@@ -488,10 +508,18 @@ fn App() -> Html {
                         {
                             onboarding_calibration.set(Some(calibration));
                         }
-                        mutation_status.set(format!(
-                            "Batch approved {approved}/{total} proposals: {}/{} approved.",
-                            run.approved_count, run.proposal_count
-                        ));
+                        if let Some(error) = first_error {
+                            let failed = total.saturating_sub(approved);
+                            mutation_status.set(format!(
+                                "Batch partially approved {approved}/{total} proposals; {failed} failed. First error: {}",
+                                ontology_write_error_message("Batch approve failed", &error)
+                            ));
+                        } else {
+                            mutation_status.set(format!(
+                                "Batch approved {approved}/{total} proposals: {}/{} approved.",
+                                run.approved_count, run.proposal_count
+                            ));
+                        }
                         onboarding_run.set(Some(run));
                     }
                     Err(error) => mutation_status.set(format!(
@@ -564,7 +592,8 @@ fn App() -> Html {
                         }
                     }
                     Err(error) => {
-                        mutation_status.set(format!("Ontology materialize failed: {error}"))
+                        mutation_status
+                            .set(ontology_write_error_message("Ontology materialize failed", &error))
                     }
                 }
             });
@@ -1121,6 +1150,24 @@ fn storage_value_or(key: &str, default: &str) -> String {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| default.to_string())
+}
+
+fn ontology_write_error_message(action: &str, error: &str) -> String {
+    if error.contains("403") && error.contains("demo-operator") {
+        if get_admin_token().trim().is_empty() {
+            return missing_ontology_admin_token_message(action);
+        }
+        return format!(
+            "{action}: 当前 mandoforge.adminToken 没有通过 API 授权。请确认它与 API 启动参数 MANDOFORGE_DEV_ADMIN_TOKEN 完全一致。"
+        );
+    }
+    format!("{action}: {error}")
+}
+
+fn missing_ontology_admin_token_message(action: &str) -> String {
+    format!(
+        "{action}: 当前浏览器没有 mandoforge.adminToken。请到 Settings 填入与 API 启动参数 MANDOFORGE_DEV_ADMIN_TOKEN 相同的 token。"
+    )
 }
 
 fn ontology_builder_config_from_storage() -> OntologyBuilderConfig {

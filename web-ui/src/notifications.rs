@@ -225,38 +225,62 @@ pub(crate) fn console_notifications(data: &ConsoleData, lang: UiLang) -> Vec<Con
         notifications.push(notification);
     }
 
-    notifications.extend(
-        data.enterprise_product_readiness
-            .data
+    let enterprise_readiness = &data.enterprise_product_readiness.data;
+    let blocked_enterprise_lanes = enterprise_readiness
+        .lanes
+        .iter()
+        .filter(|lane| status_tone(&lane.status) == "bad")
+        .count();
+    let warning_enterprise_lanes = enterprise_readiness
+        .lanes
+        .iter()
+        .filter(|lane| status_tone(&lane.status) == "warn")
+        .count();
+    if blocked_enterprise_lanes > 0 || warning_enterprise_lanes > 0 {
+        let first_lane = enterprise_readiness
             .lanes
             .iter()
-            .filter_map(|lane| {
-                let blocker = lane.blockers.first().or_else(|| lane.next_actions.first());
-                let tone = status_tone(&lane.status);
-                if tone == "bad" || (tone == "warn" && blocker.is_some()) {
-                    Some(ConsoleNotification {
-                        key: format!("enterprise:{}", label_or(&lane.id, &lane.title)),
-                        severity: if tone == "bad" { "critical" } else { "warning" },
-                        title: if lang == UiLang::En {
-                            format!("Enterprise lane regressed: {}", label_or(&lane.title, &lane.id))
-                        } else {
-                            format!("企业上线面回退：{}", label_or(&lane.title, &lane.id))
-                        },
-                        detail: blocker.cloned().unwrap_or_else(|| {
-                            format!(
-                                "{} -> {}",
-                                label_or(&lane.current_evidence_class, "current evidence"),
-                                label_or(&lane.required_evidence_class, "required evidence")
-                            )
-                        }),
-                        target: View::Deploy,
-                        target_label: lang.text("Open readiness", "查看就绪"),
-                    })
-                } else {
-                    None
-                }
-            }),
-    );
+            .find(|lane| status_tone(&lane.status) == "bad")
+            .or_else(|| {
+                enterprise_readiness
+                    .lanes
+                    .iter()
+                    .find(|lane| status_tone(&lane.status) == "warn")
+            });
+        let first_action = first_lane
+            .and_then(|lane| lane.blockers.first().or_else(|| lane.next_actions.first()))
+            .cloned()
+            .or_else(|| enterprise_readiness.next_actions.first().cloned())
+            .unwrap_or_else(|| {
+                label_or(
+                    &enterprise_readiness.message,
+                    "Enterprise readiness has open evidence requirements.",
+                )
+                .to_string()
+            });
+        let detail = if lang == UiLang::En {
+            format!(
+                "{blocked_enterprise_lanes} blocked lanes, {warning_enterprise_lanes} pilot/warning lanes. First action: {first_action}"
+            )
+        } else {
+            format!(
+                "{blocked_enterprise_lanes} 个阻塞面，{warning_enterprise_lanes} 个试点/警告面。第一步：{first_action}"
+            )
+        };
+        notifications.push(ConsoleNotification {
+            key: "enterprise:readiness-summary".to_string(),
+            severity: "warning",
+            title: lang
+                .text(
+                    "Enterprise readiness needs production evidence",
+                    "企业上线仍需要生产证据",
+                )
+                .to_string(),
+            detail,
+            target: View::Deploy,
+            target_label: lang.text("Open readiness", "查看就绪"),
+        });
+    }
 
     if data.enterprise_product_readiness.data.completion_blocked
         && data.enterprise_product_readiness.data.lanes.is_empty()
@@ -356,11 +380,7 @@ fn json_gate_notification(
     }
     Some(ConsoleNotification {
         key: key.to_string(),
-        severity: if tone == "bad" || !blockers.is_empty() {
-            "critical"
-        } else {
-            "warning"
-        },
+        severity: "warning",
         title: title.to_string(),
         detail: blockers
             .first()
