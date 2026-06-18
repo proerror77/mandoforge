@@ -815,7 +815,7 @@ pub(crate) async fn poll_kubernetes_pod_running(
             match phase {
                 "Running" => return Ok(()),
                 "Failed" | "Succeeded" | "Unknown" => {
-                    return Err(format!("Pod entered terminal phase: {phase}"))
+                    return Err(format!("Pod entered terminal phase: {phase}"));
                 }
                 _ => {} // Pending or ContainerCreating — keep polling
             }
@@ -1845,8 +1845,8 @@ mod tests {
     #[tokio::test]
     async fn poll_kubernetes_pod_running_retries_past_404_then_succeeds() {
         use axum::{Router, extract::Path as AxumPath, routing::get};
-        use std::sync::atomic::{AtomicU32, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
 
         let call_count = Arc::new(AtomicU32::new(0));
         let call_count_clone = call_count.clone();
@@ -1907,7 +1907,10 @@ mod tests {
         )
         .await;
         assert!(result.is_ok(), "should succeed after retrying past 404");
-        assert!(call_count.load(Ordering::SeqCst) >= 2, "should have retried at least once");
+        assert!(
+            call_count.load(Ordering::SeqCst) >= 2,
+            "should have retried at least once"
+        );
 
         server.abort();
         let _ = tokio::fs::remove_file(token_path).await;

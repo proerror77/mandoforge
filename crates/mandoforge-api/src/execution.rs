@@ -16,15 +16,15 @@ use crate::codex_app_server::{CodexThreadRequest, CodexTurnRequest, CodexTurnRes
 use crate::execution_queue::{ExecutionJob, ExecutionJobRequest, ExecutionJobStatus};
 use crate::mcp_gateway::McpCallRequest;
 use crate::remote_computer_runner::{
-    RemoteComputerRunnerConfig, RemoteComputerRunnerDryRunRequest,
-    poll_kubernetes_pod_running, remote_computer_runner_for_config,
+    RemoteComputerRunnerConfig, RemoteComputerRunnerDryRunRequest, poll_kubernetes_pod_running,
+    remote_computer_runner_for_config,
 };
 use crate::shell_runner::{shell_command, shell_runner};
 use crate::{
-    AppError, AppState, Approval, Artifact, CreateRemoteComputer, CreateRemoteComputerJobAssignment,
-    CreateRemoteComputerLease, Environment, RemoteComputer, RemoteComputerJobAssignment,
-    RemoteComputerLease, ToolCall, new_audit_log, record_remote_computer_job_assignment_event,
-    resolve_mcp_runtime_secret_refs,
+    AppError, AppState, Approval, Artifact, CreateRemoteComputer,
+    CreateRemoteComputerJobAssignment, CreateRemoteComputerLease, Environment, RemoteComputer,
+    RemoteComputerJobAssignment, RemoteComputerLease, ToolCall, new_audit_log,
+    record_remote_computer_job_assignment_event, resolve_mcp_runtime_secret_refs,
 };
 
 const DEFAULT_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
@@ -1021,7 +1021,9 @@ async fn auto_assign_remote_computer_for_job(
         match claim_remote_computer_warm_pool_lease_for_job(state, job, worker_id, contract).await?
         {
             Some(lease) => lease,
-            None => match provision_remote_computer_pod_for_job(state, job, worker_id, contract).await? {
+            None => match provision_remote_computer_pod_for_job(state, job, worker_id, contract)
+                .await?
+            {
                 Some(lease) => lease,
                 None => return Ok(None),
             },
@@ -1151,10 +1153,7 @@ async fn provision_remote_computer_pod_for_job(
     let config = RemoteComputerRunnerConfig::from_env();
     let runner = remote_computer_runner_for_config(&config);
     // Deterministic pod name: lowercase hex, max 63 chars, dashes allowed
-    let pod_name = format!(
-        "agent-rc-{}",
-        &job.session_id.simple().to_string()[..20]
-    );
+    let pod_name = format!("agent-rc-{}", &job.session_id.simple().to_string()[..20]);
     // Check if a remote_computer record already exists for this pod (race guard)
     let existing = state
         .list_remote_computers()
@@ -1236,7 +1235,9 @@ async fn provision_remote_computer_pod_for_job(
                     .await?
                     .into_iter()
                     .find(|c| c.pod_name.as_deref() == Some(&pod_name))
-                    .ok_or_else(|| AppError::internal("Pod created but record not found after conflict"))?
+                    .ok_or_else(|| {
+                        AppError::internal("Pod created but record not found after conflict")
+                    })?
             }
         }
     };
@@ -4925,7 +4926,10 @@ mod tests {
         let _guard = ENV_VAR_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::set_var("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_ENABLED", "true");
-            std::env::set_var("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT", "kubernetes");
+            std::env::set_var(
+                "MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT",
+                "kubernetes",
+            );
         }
         assert!(
             remote_computer_pod_execution_requested(),
