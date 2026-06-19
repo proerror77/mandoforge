@@ -18554,11 +18554,34 @@ async fn get_ontology_engine_readiness(
         None,
     )
     .await?;
-    Ok(Json(build_ontology_engine_readiness()))
+    Ok(Json(build_ontology_engine_readiness(&state).await?))
 }
 
-fn build_ontology_engine_readiness() -> OntologyEngineReadiness {
+async fn build_ontology_engine_readiness(
+    state: &AppState,
+) -> Result<OntologyEngineReadiness, AppError> {
     let registry = ontology_registry();
+    let releases = state.list_ontology_releases().await?;
+    let active_releases = releases
+        .iter()
+        .filter(|release| release.status == "active")
+        .collect::<Vec<_>>();
+    let active_release_evidence_class = ontology_active_release_evidence_class(&active_releases);
+    let active_release_evidence = ontology_active_release_evidence(&active_releases);
+    let has_active_release = !active_releases.is_empty();
+    let active_release_materialized = active_releases.iter().any(|release| {
+        release
+            .materialized_object_ids
+            .as_array()
+            .is_some_and(|ids| !ids.is_empty())
+            || release
+                .materialized_link_ids
+                .as_array()
+                .is_some_and(|ids| !ids.is_empty())
+    });
+    let active_release_migration_ready = active_releases
+        .iter()
+        .any(|release| ontology_release_migration_policy_ready(&release.migration_policy));
     let checks = vec![
         ontology_engine_check(
             "core-registry",
@@ -18632,48 +18655,94 @@ fn build_ontology_engine_readiness() -> OntologyEngineReadiness {
         ontology_engine_check(
             "domain-ontology-lifecycle",
             "Domain ontology lifecycle",
-            "blocked",
-            "repo_controlled",
-            vec![
+            if has_active_release { "ready" } else { "blocked" },
+            &active_release_evidence_class,
+            if has_active_release {
+                active_release_evidence.clone()
+            } else {
+                vec![
                 "workflow packs can declare ontology seeds and ontology action types".to_string(),
                 "ontology_expansion proposals are persisted as semantic objects".to_string(),
-            ],
-            vec![
+                ]
+            },
+            if has_active_release {
+                Vec::new()
+            } else {
+                vec![
                 "domain ontology versions cannot yet be promoted, rolled back, or migrated as first-class registry releases".to_string(),
-            ],
-            vec![
+                ]
+            },
+            if has_active_release {
+                vec![
+                    "bind promoted ontology releases to customer workflow rollout policy".to_string(),
+                ]
+            } else {
+                vec![
                 "add domain ontology release records with promote, rollback, archive, and migration evidence".to_string(),
-            ],
+                ]
+            },
         ),
         ontology_engine_check(
             "approved-release-materialization",
             "Approved ontology release materialization",
-            "blocked",
-            "repo_controlled",
-            vec![
-                "proposal review records durable audit evidence".to_string(),
-            ],
-            vec![
-                "approved ontology proposals do not yet materialize into versioned registry releases".to_string(),
-            ],
-            vec![
-                "add a release workflow that turns approved proposals into immutable ontology versions".to_string(),
-            ],
+            if active_release_materialized {
+                "ready"
+            } else {
+                "blocked"
+            },
+            &active_release_evidence_class,
+            if active_release_materialized {
+                active_release_evidence.clone()
+            } else {
+                vec!["proposal review records durable audit evidence".to_string()]
+            },
+            if active_release_materialized {
+                Vec::new()
+            } else {
+                vec![
+                    "approved ontology proposals do not yet materialize into versioned registry releases".to_string(),
+                ]
+            },
+            if active_release_materialized {
+                vec!["archive materialized object/link evidence per promoted release".to_string()]
+            } else {
+                vec![
+                    "add a release workflow that turns approved proposals into immutable ontology versions".to_string(),
+                ]
+            },
         ),
         ontology_engine_check(
             "migration-policy",
             "Ontology migration policy",
-            "blocked",
-            "repo_controlled",
-            vec![
-                "core semantic storage migrations exist for sources, objects, links, context packets, and writeback candidates".to_string(),
-            ],
-            vec![
-                "domain ontology schema migration compatibility and rollback policy are not represented as customer-grade evidence".to_string(),
-            ],
-            vec![
-                "add compatibility checks for ontology version migrations across WorkflowPack releases".to_string(),
-            ],
+            if active_release_migration_ready {
+                "ready"
+            } else {
+                "blocked"
+            },
+            &active_release_evidence_class,
+            if active_release_migration_ready {
+                active_release_evidence
+            } else {
+                vec![
+                    "core semantic storage migrations exist for sources, objects, links, context packets, and writeback candidates".to_string(),
+                ]
+            },
+            if active_release_migration_ready {
+                Vec::new()
+            } else {
+                vec![
+                    "domain ontology schema migration compatibility and rollback policy are not represented as customer-grade evidence".to_string(),
+                ]
+            },
+            if active_release_migration_ready {
+                vec![
+                    "exercise rollback evidence for each customer domain before production enablement".to_string(),
+                ]
+            } else {
+                vec![
+                    "add compatibility checks for ontology version migrations across WorkflowPack releases".to_string(),
+                ]
+            },
         ),
     ];
     let check_count = checks.len();
@@ -18704,13 +18773,13 @@ fn build_ontology_engine_readiness() -> OntologyEngineReadiness {
     ];
     let message = if completion_blocked {
         format!(
-            "Ontology Engine completion is blocked: {ready_check_count}/{check_count} checks are customer-grade ready, {pilot_ready_check_count} are pilot-ready, and {blocked_check_count} remain blocked"
+            "Ontology Engine completion is blocked: {ready_check_count}/{check_count} checks are ready, {pilot_ready_check_count} are pilot-ready, and {blocked_check_count} remain blocked"
         )
     } else {
         "Ontology Engine has customer-grade evidence for every required check".to_string()
     };
 
-    OntologyEngineReadiness {
+    Ok(OntologyEngineReadiness {
         generated_at: Utc::now(),
         status,
         registry_version: registry.version,
@@ -18725,7 +18794,82 @@ fn build_ontology_engine_readiness() -> OntologyEngineReadiness {
         checks,
         next_actions,
         message,
+    })
+}
+
+fn ontology_active_release_evidence_class(active_releases: &[&OntologyRelease]) -> String {
+    if active_releases
+        .iter()
+        .any(|release| release.release_class == "customer_grade")
+    {
+        "customer_grade".to_string()
+    } else if active_releases
+        .iter()
+        .any(|release| release.release_class == "production_like_pilot")
+    {
+        "production_like_pilot".to_string()
+    } else if active_releases.is_empty() {
+        "repo_controlled".to_string()
+    } else {
+        "repo_controlled".to_string()
     }
+}
+
+fn ontology_active_release_evidence(active_releases: &[&OntologyRelease]) -> Vec<String> {
+    let mut evidence = vec![format!("active_release_count={}", active_releases.len())];
+    for release in active_releases {
+        evidence.push(format!(
+            "active_release id={} version={} domain_scope={} release_class={} object_count={} relation_count={} action_count={}",
+            release.id,
+            release.version,
+            release.domain_scope,
+            release.release_class,
+            release.object_count,
+            release.relation_count,
+            release.action_count
+        ));
+        evidence.push(format!(
+            "active_release_gate_status={}",
+            release
+                .gate_result
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+        ));
+        evidence.push(format!(
+            "materialized_object_id_count={}",
+            release
+                .materialized_object_ids
+                .as_array()
+                .map(Vec::len)
+                .unwrap_or_default()
+        ));
+        evidence.push(format!(
+            "materialized_link_id_count={}",
+            release
+                .materialized_link_ids
+                .as_array()
+                .map(Vec::len)
+                .unwrap_or_default()
+        ));
+        evidence.push(format!(
+            "migration_policy_compatibility={}",
+            release
+                .migration_policy
+                .get("compatibility")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+        ));
+        evidence.push(format!(
+            "migration_policy_rollback={}",
+            release
+                .migration_policy
+                .get("rollback")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+        ));
+    }
+    evidence
 }
 
 fn ontology_engine_check(
@@ -73445,9 +73589,12 @@ not json
         );
     }
 
-    #[test]
-    fn ontology_engine_readiness_reports_release_lifecycle_blockers() {
-        let readiness = build_ontology_engine_readiness();
+    #[tokio::test]
+    async fn ontology_engine_readiness_reports_release_lifecycle_blockers() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        let readiness = build_ontology_engine_readiness(&state)
+            .await
+            .expect("readiness");
 
         assert_eq!(readiness.status, "blocked");
         assert!(readiness.completion_blocked);
@@ -73500,6 +73647,71 @@ not json
                 .iter()
                 .any(|action| action.contains("immutable ontology versions"))
         );
+    }
+
+    #[tokio::test]
+    async fn ontology_engine_readiness_uses_promoted_release_evidence() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        let release = ontology_release_candidate_for_test(&state, "commerce-vtest-readiness").await;
+        gate_ontology_release_with_actor(&state, release.id, "test")
+            .await
+            .expect("gate release");
+        promote_ontology_release_with_actor(&state, release.id, "test")
+            .await
+            .expect("promote release");
+
+        let readiness = build_ontology_engine_readiness(&state)
+            .await
+            .expect("readiness");
+
+        assert_eq!(readiness.status, "blocked");
+        assert!(readiness.completion_blocked);
+        assert_eq!(readiness.check_count, 8);
+        assert_eq!(readiness.ready_check_count, 7);
+        assert_eq!(readiness.pilot_ready_check_count, 1);
+        assert_eq!(readiness.blocked_check_count, 0);
+        assert_eq!(
+            ontology_readiness_check_status(&readiness, "domain-ontology-lifecycle"),
+            "ready"
+        );
+        assert_eq!(
+            ontology_readiness_check_status(&readiness, "approved-release-materialization"),
+            "ready"
+        );
+        assert_eq!(
+            ontology_readiness_check_status(&readiness, "migration-policy"),
+            "ready"
+        );
+        assert_eq!(
+            ontology_readiness_check_status(&readiness, "conflict-trust-runtime-gates"),
+            "pilot_ready"
+        );
+        let migration = readiness
+            .checks
+            .iter()
+            .find(|check| check.id == "migration-policy")
+            .expect("migration check");
+        assert!(migration.blockers.is_empty());
+        assert!(migration.evidence.iter().any(|evidence| {
+            evidence.contains("active_release")
+                && evidence.contains("version=commerce-vtest-readiness")
+        }));
+        assert!(migration.evidence.iter().any(|evidence| {
+            evidence.contains("migration_policy_rollback=previous_active_release")
+        }));
+    }
+
+    fn ontology_readiness_check_status<'a>(
+        readiness: &'a OntologyEngineReadiness,
+        id: &str,
+    ) -> &'a str {
+        readiness
+            .checks
+            .iter()
+            .find(|check| check.id == id)
+            .unwrap_or_else(|| panic!("missing {id} ontology readiness check"))
+            .status
+            .as_str()
     }
 
     #[tokio::test]
