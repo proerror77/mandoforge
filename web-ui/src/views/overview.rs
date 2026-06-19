@@ -48,7 +48,24 @@ pub(crate) fn OverviewView(props: &OverviewProps) -> Html {
         .first()
         .cloned()
         .or_else(|| first_lane_blocker(enterprise))
-        .unwrap_or_else(|| "No enterprise readiness next action reported.".to_string());
+        .unwrap_or_else(|| {
+            lang.text(
+                "No enterprise readiness next action reported.",
+                "企业上线状态暂未上报下一步动作。",
+            )
+            .to_string()
+        });
+    let enterprise_lane_total = enterprise.lane_count.max(enterprise.lanes.len());
+    let enterprise_lane_value = if enterprise_lane_total == 0 {
+        lang.text("not reported", "未上报").to_string()
+    } else {
+        format!("{}/{}", enterprise.ready_lane_count, enterprise_lane_total)
+    };
+    let enterprise_status_label = if label_or(&enterprise.status, "unknown") == "unknown" {
+        lang.text("unknown", "未上报").to_string()
+    } else {
+        label_or(&enterprise.status, "unknown").to_string()
+    };
     let readiness_tone = if enterprise.completion_blocked || enterprise.blocked_lane_count > 0 {
         "bad"
     } else {
@@ -60,7 +77,7 @@ pub(crate) fn OverviewView(props: &OverviewProps) -> Html {
             <section class="agent-os-cockpit" aria-label={lang.text("Agent OS cockpit", "Agent OS 驾驶舱")}>
                 <div class="cockpit-cycle">
                     <header class="cockpit-section-title">
-                        <span>{ "CYCLE" }</span>
+                        <span>{ lang.text("CYCLE", "闭环") }</span>
                         <strong>{ lang.text("Agent OS improvement loop", "Agent OS 改进循环") }</strong>
                     </header>
                     <div class="cockpit-cycle-list">
@@ -111,8 +128,8 @@ pub(crate) fn OverviewView(props: &OverviewProps) -> Html {
                             icon="△"
                             title={lang.text("System Ops", "系统运维")}
                             detail={lang.text("Validate deployment, security boundary, audit, usage, and release evidence.", "验证部署、安全边界、审计、用量和发布证据。")}
-                            value={format!("{}/{}", enterprise.ready_lane_count, enterprise.lane_count.max(enterprise.lanes.len()))}
-                            status={label_or(&enterprise.status, "unknown").to_string()}
+                            value={enterprise_lane_value.clone()}
+                            status={enterprise_status_label.clone()}
                             tone={readiness_tone}
                             target={View::Deploy}
                             on_view={props.on_view.clone()}
@@ -122,7 +139,7 @@ pub(crate) fn OverviewView(props: &OverviewProps) -> Html {
 
                 <aside class="cockpit-diagnosis">
                     <header class="cockpit-section-title">
-                        <span>{ "DIAGNOSIS" }</span>
+                        <span>{ lang.text("DIAGNOSIS", "诊断") }</span>
                         <strong>{ lang.text("What needs operator attention", "需要操作员注意什么") }</strong>
                     </header>
                     <CockpitDiagnosisItem
@@ -267,7 +284,7 @@ pub(crate) fn OverviewView(props: &OverviewProps) -> Html {
                     title={lang.text("System Ops", "系统运维")}
                     subtitle={lang.text("系统运维", "System Ops")}
                     description={lang.text("Check deployment, desktop shell, security boundary, audit, usage, cost, alerts, and release evidence.", "检查部署、桌面端、安全边界、审计、成本、告警和企业级上线证据。")}
-                    status={label_or(&enterprise.status, "unknown").to_string()}
+                    status={enterprise_status_label.clone()}
                     tone={readiness_tone}
                     target={View::Deploy}
                     on_view={props.on_view.clone()}

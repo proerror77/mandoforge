@@ -118,7 +118,7 @@ async fn get_workflow_pack_marketplace(
     let mut packs = Vec::new();
     for manifest_path in workflow_pack_marketplace_manifest_paths() {
         match load_and_validate_workflow_pack(&manifest_path) {
-            Ok((resolved_path, manifest, report)) => {
+            Ok((_resolved_path, manifest, report)) => {
                 packs.push(json!({
                     "id": manifest.id,
                     "name": manifest.name,
@@ -126,7 +126,6 @@ async fn get_workflow_pack_marketplace(
                     "kind": workflow_pack_kind_label(&manifest.kind),
                     "description": manifest.description,
                     "manifest_path": manifest_path,
-                    "resolved_manifest_path": resolved_path,
                     "status": "ready",
                     "validation": report,
                     "manifest_summary": workflow_pack_manifest_summary(&manifest, &report),
@@ -180,7 +179,7 @@ async fn plan_workflow_pack_config_wizard(
                 .get("status")
                 .and_then(Value::as_str)
                 .unwrap_or("ready"),
-            "artifact": manifest_path.clone(),
+            "artifact": input.manifest_path.clone(),
         }),
         json!({
             "key": "install_pack",
@@ -238,7 +237,7 @@ async fn plan_workflow_pack_config_wizard(
     Ok(Json(json!({
         "status": "ready",
         "generated_at": Utc::now(),
-        "manifest_path": manifest_path,
+        "manifest_path": input.manifest_path,
         "pack": {
             "id": manifest.id,
             "name": manifest.name,
@@ -425,6 +424,7 @@ async fn stage_workflow_pack_installation_route(
             current.gate_evidence.clone(),
             Some(staged_at),
             current.released_at,
+            Some("installed"),
         )
         .await?;
     let bindings = state.create_workflow_pack_bindings(bindings).await?;
@@ -752,6 +752,7 @@ async fn release_workflow_pack_installation_route(
             gate_evidence,
             current.staged_at,
             Some(released_at),
+            Some("staged"),
         )
         .await?;
     let released_definitions = state
@@ -824,15 +825,16 @@ async fn rollback_workflow_pack_installation_route(
             gate_evidence,
             current.staged_at,
             current.released_at,
+            Some("released"),
         )
         .await?;
-    state
+    let rolled_back_definitions = state
         .update_workflow_definition_release_states_for_pack_installation(id, "rolled_back")
         .await?;
-    state
+    let rolled_back_bindings = state
         .update_workflow_pack_binding_statuses(id, "rolled_back")
         .await?;
-    state
+    let rolled_back_runtime_objects = state
         .update_workflow_pack_runtime_object_statuses(id, "rolled_back")
         .await?;
     record_workflow_pack_installation_audit(
@@ -843,6 +845,9 @@ async fn rollback_workflow_pack_installation_route(
             "reason": input.reason,
             "rolled_back_at": rolled_back_at,
             "gate_evidence": installation.gate_evidence,
+            "workflow_definition_count": rolled_back_definitions.len(),
+            "binding_count": rolled_back_bindings.len(),
+            "runtime_object_count": rolled_back_runtime_objects.len(),
         }),
     )
     .await?;
@@ -873,13 +878,13 @@ async fn archive_workflow_pack_installation_route(
         ));
     }
     let installation = state.archive_workflow_pack_installation(id).await?;
-    state
+    let archived_definitions = state
         .update_workflow_definition_release_states_for_pack_installation(id, "archived")
         .await?;
-    state
+    let archived_bindings = state
         .update_workflow_pack_binding_statuses(id, "archived")
         .await?;
-    state
+    let archived_runtime_objects = state
         .update_workflow_pack_runtime_object_statuses(id, "archived")
         .await?;
     record_workflow_pack_installation_audit(
@@ -890,6 +895,9 @@ async fn archive_workflow_pack_installation_route(
             "reason": input.reason,
             "archived_at": installation.archived_at,
             "previous_status": current.status,
+            "workflow_definition_count": archived_definitions.len(),
+            "binding_count": archived_bindings.len(),
+            "runtime_object_count": archived_runtime_objects.len(),
         }),
     )
     .await?;

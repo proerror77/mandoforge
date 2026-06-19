@@ -92,7 +92,8 @@ Suggested table:
 ```text
 ontology_releases
   id uuid primary key
-  version text unique not null
+  tenant_id uuid not null
+  version text not null
   domain_scope text not null
   source_run_id uuid null
   parent_release_id uuid null
@@ -115,6 +116,8 @@ ontology_releases
   created_at timestamptz not null
   updated_at timestamptz not null
 ```
+
+The unique constraint on version must be scoped to the owning tenant and domain: `UNIQUE (tenant_id, domain_scope, version)`. A bare `UNIQUE` on `version` alone would cause cross-tenant collisions.
 
 Allowed statuses:
 

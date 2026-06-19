@@ -33,8 +33,8 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 const DEFAULT_TENANT_ID: &str = "00000000-0000-4000-8000-000000000001";
-const CONSOLE_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-gd+96G09dy3gkgvvgRgp925F0BxKLTYHZMkfmvg3OBc='; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
-const CONSOLE_DEV_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-gd+96G09dy3gkgvvgRgp925F0BxKLTYHZMkfmvg3OBc='; connect-src 'self' http://127.0.0.1:* http://localhost:*; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+const CONSOLE_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-RAxKLeowITk09FFbod+Fr8BwgzLMNxScEVG1XbqOgyY='; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+const CONSOLE_DEV_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-RAxKLeowITk09FFbod+Fr8BwgzLMNxScEVG1XbqOgyY='; connect-src 'self' http://127.0.0.1:* http://localhost:*; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
 
 mod authorization;
 mod codex_app_server;
@@ -33924,7 +33924,25 @@ fn resolve_workflow_pack_manifest_path(input: &str) -> Result<PathBuf, AppError>
             path.display()
         )));
     }
-    Ok(path)
+    // Verify the resolved path is inside the project tree to prevent path traversal
+    // via symlinks or absolute paths pointing outside the repo.
+    let canonical = std::fs::canonicalize(&path).map_err(|_| {
+        AppError::bad_request(format!(
+            "workflow pack manifest {} cannot be resolved",
+            path.display()
+        ))
+    })?;
+    let project_root = std::fs::canonicalize(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+    )
+    .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    if !canonical.starts_with(&project_root) {
+        return Err(AppError::bad_request(
+            "manifest_path must point to a file within the project directory",
+        ));
+    }
+    Ok(canonical)
 }
 
 fn workflow_pack_kind_label(kind: &workflow_pack::PackKind) -> &'static str {

@@ -170,6 +170,7 @@ impl AppState {
         gate_evidence: Value,
         staged_at: Option<chrono::DateTime<Utc>>,
         released_at: Option<chrono::DateTime<Utc>>,
+        expected_status: Option<&str>,
     ) -> Result<WorkflowPackInstallation, AppError> {
         let updated_at = Utc::now();
         match &self.store {
@@ -179,6 +180,13 @@ impl AppState {
                     .workflow_pack_installations
                     .get_mut(&id)
                     .ok_or_else(|| AppError::not_found("workflow pack installation not found"))?;
+                if let Some(expected) = expected_status {
+                    if installation.status != expected {
+                        return Err(AppError::bad_request(
+                            "workflow pack installation status conflict: concurrent update detected",
+                        ));
+                    }
+                }
                 installation.status = status.to_string();
                 installation.eval_gate_status = eval_gate_status.to_string();
                 installation.release_gate_status = release_gate_status.to_string();
@@ -193,6 +201,7 @@ impl AppState {
                     "UPDATE workflow_pack_installations
                      SET status = $3, eval_gate_status = $4, release_gate_status = $5, gate_evidence = $6, staged_at = $7, released_at = $8, updated_at = $9
                      WHERE tenant_id = $1 AND id = $2 AND archived_at IS NULL
+                       AND ($10 IS NULL OR status = $10)
                      RETURNING id, pack_id, kind, version, manifest_path, manifest, validation_report, status, eval_gate_status, release_gate_status, gate_evidence, staged_at, released_at, archived_at, created_at, updated_at",
                 )
                 .bind(self.current_tenant_id())
@@ -204,9 +213,16 @@ impl AppState {
                 .bind(staged_at)
                 .bind(released_at)
                 .bind(updated_at)
+                .bind(expected_status)
                 .fetch_optional(pool)
                 .await?
-                .ok_or_else(|| AppError::not_found("workflow pack installation not found"))?;
+                .ok_or_else(|| {
+                    if expected_status.is_some() {
+                        AppError::bad_request("workflow pack installation status conflict: concurrent update detected")
+                    } else {
+                        AppError::not_found("workflow pack installation not found")
+                    }
+                })?;
                 workflow_pack_installation_from_row(row)
             }
         }

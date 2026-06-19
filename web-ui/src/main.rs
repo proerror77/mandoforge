@@ -772,21 +772,48 @@ fn App() -> Html {
 
     html! {
         <main class="console-shell">
-            <header class="topbar">
-                <div>
-                    <p class="eyebrow">{ (*ui_lang).text("MandoForge Co-Work Console / 协同控制台", "MandoForge 协同控制台 / Co-Work Console") }</p>
-                    <h1>{ (*active_view).title(*ui_lang) }</h1>
-                </div>
-                <div class="status-strip">
-                    <Metric label={(*ui_lang).text("Running agents", "运行智能体")} value={running_agents.to_string()} tone="good" />
-                    <Metric label={(*ui_lang).text("Queue", "执行队列")} value={active_job_count(&data.execution_jobs.data).to_string()} tone="good" />
-                    <Metric label={(*ui_lang).text("Approvals", "待审批")} value={pending_approvals.to_string()} tone={if pending_approvals > 0 { "warn" } else { "good" }} />
-                    <Metric label={(*ui_lang).text("Refreshing", "刷新中")} value={fetching_count.to_string()} tone="neutral" />
-                    <Metric label={(*ui_lang).text("Errors", "错误")} value={error_count.to_string()} tone={if error_count > 0 { "bad" } else { "good" }} />
-                    <div class="language-toggle" aria-label="Console language">
-                        <button class={classes!((*ui_lang == UiLang::En).then_some("active"))} onclick={set_lang_en.clone()}>{ "EN" }</button>
-                        <button class={classes!((*ui_lang == UiLang::Zh).then_some("active"))} onclick={set_lang_zh.clone()}>{ "中文" }</button>
+            <aside class="command-rail" aria-label={(*ui_lang).text("Control plane navigation", "控制平面导航")}>
+                <div class="rail-brand">
+                    <span>{ "MF" }</span>
+                    <div>
+                        <strong>{ "MandoForge" }</strong>
+                        <small>{ (*ui_lang).text("Agent OS Kernel", "Agent OS Kernel") }</small>
                     </div>
+                </div>
+
+                <nav class="tabs">
+                    { for View::PRIMARY_NAV.into_iter().map(|view| {
+                        let active_view = active_view.clone();
+                        let is_active = *active_view == view;
+                        html! {
+                            <button
+                                class={classes!("tab", is_active.then_some("active"))}
+                                onclick={Callback::from(move |_| {
+                                    persist_active_view(view);
+                                    active_view.set(view);
+                                })}
+                            >
+                                <span class="tab-glyph">{ view_nav_glyph(view) }</span>
+                                <span>{ view.label(*ui_lang) }</span>
+                                <small>{ view_nav_hint(view, *ui_lang) }</small>
+                            </button>
+                        }
+                    })}
+                </nav>
+
+                <div class="rail-tools">
+                    <button
+                        class={classes!("utility-nav-button", (*active_view == View::Wizard).then_some("active"))}
+                        onclick={{
+                            let active_view = active_view.clone();
+                            Callback::from(move |_| {
+                                persist_active_view(View::Wizard);
+                                active_view.set(View::Wizard);
+                            })
+                        }}
+                    >
+                        { (*ui_lang).text("Setup", "设置向导") }
+                    </button>
                     <button
                         class={classes!("utility-nav-button", (*active_view == View::Settings).then_some("active"))}
                         onclick={{
@@ -797,52 +824,59 @@ fn App() -> Html {
                             })
                         }}
                     >
-                        { (*ui_lang).text("Settings", "设置") }
+                        { (*ui_lang).text("Settings", "系统设置") }
                     </button>
                 </div>
-            </header>
 
-            <nav class="tabs">
-                { for View::PRIMARY_NAV.into_iter().map(|view| {
-                    let active_view = active_view.clone();
-                    let is_active = *active_view == view;
-                    html! {
-                        <button
-                            class={classes!("tab", is_active.then_some("active"))}
-                            onclick={Callback::from(move |_| {
-                                persist_active_view(view);
-                                active_view.set(view);
-                            })}
-                        >
-                            <span>{ view.label(*ui_lang) }</span>
-                        </button>
+                <div class="rail-status">
+                    <Metric label={(*ui_lang).text("Agents", "智能体")} value={running_agents.to_string()} tone="good" />
+                    <Metric label={(*ui_lang).text("Queue", "队列")} value={active_job_count(&data.execution_jobs.data).to_string()} tone="good" />
+                    <Metric label={(*ui_lang).text("Approvals", "审批")} value={pending_approvals.to_string()} tone={if pending_approvals > 0 { "warn" } else { "good" }} />
+                    <Metric label={(*ui_lang).text("Errors", "错误")} value={error_count.to_string()} tone={if error_count > 0 { "bad" } else { "good" }} />
+                </div>
+
+                <div class="language-toggle" aria-label="Console language">
+                    <button class={classes!((*ui_lang == UiLang::En).then_some("active"))} onclick={set_lang_en.clone()}>{ "EN" }</button>
+                    <button class={classes!((*ui_lang == UiLang::Zh).then_some("active"))} onclick={set_lang_zh.clone()}>{ "中文" }</button>
+                </div>
+            </aside>
+
+            <section class="control-plane">
+                <header class="topbar">
+                    <div>
+                        <p class="eyebrow">{ (*ui_lang).text("Managed agent command surface", "托管智能体指挥面") }</p>
+                        <h1>{ (*active_view).title(*ui_lang) }</h1>
+                    </div>
+                    <div class="status-strip">
+                        <Metric label={(*ui_lang).text("Refreshing", "刷新中")} value={fetching_count.to_string()} tone="neutral" />
+                        <Metric label={(*ui_lang).text("Active runs", "活跃运行")} value={running_agents.to_string()} tone="good" />
+                        <Metric label={(*ui_lang).text("Human gates", "人工闸门")} value={pending_approvals.to_string()} tone={if pending_approvals > 0 { "warn" } else { "good" }} />
+                    </div>
+                </header>
+
+                <NotificationCenter
+                    notifications={notifications}
+                    lang={*ui_lang}
+                    critical_muted={*critical_notifications_muted}
+                    on_toggle_critical={toggle_critical_notifications.clone()}
+                    on_view={{
+                        let active_view = active_view.clone();
+                        Callback::from(move |view: View| {
+                            persist_active_view(view);
+                            active_view.set(view);
+                        })
+                    }}
+                />
+
+                {
+                    if matches!(*active_view, View::Workflows) {
+                        html! { <VisualCommandDeck data={data.clone()} view={*active_view} lang={*ui_lang} /> }
+                    } else {
+                        html! {}
                     }
-                })}
-            </nav>
-
-            <NotificationCenter
-                notifications={notifications}
-                lang={*ui_lang}
-                critical_muted={*critical_notifications_muted}
-                on_toggle_critical={toggle_critical_notifications.clone()}
-                on_view={{
-                    let active_view = active_view.clone();
-                    Callback::from(move |view: View| {
-                        persist_active_view(view);
-                        active_view.set(view);
-                    })
-                }}
-            />
-
-            {
-                if matches!(*active_view, View::Workflows) {
-                    html! { <VisualCommandDeck data={data.clone()} view={*active_view} lang={*ui_lang} /> }
-                } else {
-                    html! {}
                 }
-            }
 
-            <section class="workspace">
+                <section class="workspace">
                 {
                     match *active_view {
                         View::Overview => html! {
@@ -934,13 +968,38 @@ fn App() -> Html {
                         },
                     }
                 }
-            </section>
+                </section>
 
-            <footer class="live-log">
-                <strong>{ (*ui_lang).text("Live operation log", "实时操作日志") }</strong>
-                <span>{ if mutation_status.is_empty() { (*ui_lang).text("No backend action has been triggered in this browser session.", "本轮浏览器操作还没有触发后台动作。") } else { mutation_status.as_str() } }</span>
-            </footer>
+                <footer class="live-log">
+                    <strong>{ (*ui_lang).text("Live operation log", "实时操作日志") }</strong>
+                    <span>{ if mutation_status.is_empty() { (*ui_lang).text("No backend action has been triggered in this browser session.", "本轮浏览器操作还没有触发后台动作。") } else { mutation_status.as_str() } }</span>
+                </footer>
+            </section>
         </main>
+    }
+}
+
+fn view_nav_glyph(view: View) -> &'static str {
+    match view {
+        View::Overview => "⌂",
+        View::Agents => "◎",
+        View::Workflows => "↔",
+        View::Semantic => "◌",
+        View::Packs => "□",
+        View::Deploy => "△",
+        _ => "•",
+    }
+}
+
+fn view_nav_hint(view: View, lang: UiLang) -> &'static str {
+    match view {
+        View::Overview => lang.text("health and attention", "健康与注意项"),
+        View::Agents => lang.text("fleet and approvals", "队列与审批"),
+        View::Workflows => lang.text("runs, plans, board", "运行、计划、任务板"),
+        View::Semantic => lang.text("objects to tools", "对象到工具"),
+        View::Packs => lang.text("packs and connectors", "包与连接器"),
+        View::Deploy => lang.text("evidence gates", "证据闸门"),
+        _ => "",
     }
 }
 
