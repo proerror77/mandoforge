@@ -44,6 +44,7 @@ fn App() -> Html {
     let onboarding_tool_specs = use_state(Vec::<OntologyOnboardingToolSpec>::new);
     let onboarding_review_graph = use_state(|| None::<OntologyReviewGraph>);
     let onboarding_calibration = use_state(|| None::<ConfidenceCalibrationResponse>);
+    let ontology_release_version = use_state(String::new);
     let critical_notifications_muted = use_state(initial_critical_notifications_muted);
     let current_view = *active_view;
     let poll_agent_detail = matches!(current_view, View::Wizard | View::Agents);
@@ -69,11 +70,7 @@ fn App() -> Html {
         sessions: use_polling::<Vec<Session>>("/api/sessions", 1_800, true),
         approvals: use_polling::<Vec<Approval>>("/api/approvals", 1_800, true),
         execution_jobs: use_polling::<Vec<WorkerJob>>("/api/execution-jobs", 1_500, true),
-        session_loop_jobs: use_polling::<Vec<WorkerJob>>(
-            "/api/session-loop-jobs",
-            1_500,
-            true,
-        ),
+        session_loop_jobs: use_polling::<Vec<WorkerJob>>("/api/session-loop-jobs", 1_500, true),
         tool_calls: use_polling::<Vec<ToolCall>>("/api/tool-calls", 1_800, poll_agent_activity),
         workflow_runs: use_polling::<Vec<WorkflowRun>>(
             "/api/workflow-runs",
@@ -95,17 +92,26 @@ fn App() -> Html {
         manager_plans: use_polling::<Vec<Value>>(
             "/api/manager-plans",
             3_000,
-            matches!(current_view, View::Agents | View::Workflows | View::Board | View::Dynamic),
+            matches!(
+                current_view,
+                View::Agents | View::Workflows | View::Board | View::Dynamic
+            ),
         ),
         agent_handoffs: use_polling::<Vec<Value>>(
             "/api/agent-handoffs",
             3_000,
-            matches!(current_view, View::Agents | View::Workflows | View::Board | View::Dynamic),
+            matches!(
+                current_view,
+                View::Agents | View::Workflows | View::Board | View::Dynamic
+            ),
         ),
         agent_handoff_assignments: use_polling::<Vec<Value>>(
             "/api/agent-handoff-assignments",
             3_000,
-            matches!(current_view, View::Agents | View::Workflows | View::Board | View::Dynamic),
+            matches!(
+                current_view,
+                View::Agents | View::Workflows | View::Board | View::Dynamic
+            ),
         ),
         workflow_pack_installations: use_polling::<Vec<WorkflowPackInstallation>>(
             "/api/workflow-packs/installations",
@@ -153,11 +159,7 @@ fn App() -> Html {
             5_000,
             poll_ontology_detail,
         ),
-        scheduler_summary: use_polling::<Value>(
-            "/api/scheduler/summary",
-            4_000,
-            poll_runs_detail,
-        ),
+        scheduler_summary: use_polling::<Value>("/api/scheduler/summary", 4_000, poll_runs_detail),
         deployment_version: use_polling::<DeploymentVersion>(
             "/api/deployment/version",
             4_000,
@@ -183,11 +185,7 @@ fn App() -> Html {
             5_000,
             poll_ontology_detail,
         ),
-        semantic_search: use_polling::<Value>(
-            "/api/semantic-search",
-            5_000,
-            poll_ontology_detail,
-        ),
+        semantic_search: use_polling::<Value>("/api/semantic-search", 5_000, poll_ontology_detail),
         semantic_graph: use_polling::<SemanticGraphSnapshot>(
             "/api/semantic-graph",
             5_000,
@@ -212,6 +210,11 @@ fn App() -> Html {
             "/api/ontology/engine-readiness",
             6_000,
             true,
+        ),
+        ontology_releases: use_polling::<Vec<OntologyRelease>>(
+            "/api/ontology/releases",
+            6_000,
+            poll_ontology_detail,
         ),
         semantic_retrieval_backends: use_polling::<Value>(
             "/api/semantic-retrieval/backends",
@@ -261,12 +264,12 @@ fn App() -> Html {
             let mutation_status = mutation_status.clone();
             spawn_local(async move {
                 mutation_status.set("正在生成本体提案预览...".to_string());
-                let body = ontology_builder_body(&source_text, &ontology_builder_config_from_storage());
+                let body =
+                    ontology_builder_body(&source_text, &ontology_builder_config_from_storage());
                 match api_post::<Value, _>("/api/semantic-ontology/builder", &body).await {
-                    Ok(payload) => mutation_status.set(format!(
-                        "本体预览已生成：{}",
-                        compact_json(&payload)
-                    )),
+                    Ok(payload) => {
+                        mutation_status.set(format!("本体预览已生成：{}", compact_json(&payload)))
+                    }
                     Err(error) => mutation_status.set(format!("本体构建失败：{error}")),
                 }
             });
@@ -318,7 +321,8 @@ fn App() -> Html {
                         onboarding_run.set(Some(run));
                     }
                     Err(error) => {
-                        mutation_status.set(ontology_write_error_message("本体入职启动失败", &error));
+                        mutation_status
+                            .set(ontology_write_error_message("本体入职启动失败", &error));
                     }
                 }
             });
@@ -455,7 +459,8 @@ fn App() -> Html {
         let mutation_status = mutation_status.clone();
         Callback::from(move |proposal_ids: Vec<String>| {
             let Some(current_run) = (*onboarding_run).clone() else {
-                mutation_status.set("Batch approve failed: no onboarding run is active.".to_string());
+                mutation_status
+                    .set("Batch approve failed: no onboarding run is active.".to_string());
                 return;
             };
             if proposal_ids.is_empty() {
@@ -591,10 +596,122 @@ fn App() -> Html {
                             )),
                         }
                     }
-                    Err(error) => {
+                    Err(error) => mutation_status.set(ontology_write_error_message(
+                        "Ontology materialize failed",
+                        &error,
+                    )),
+                }
+            });
+        })
+    };
+
+    let create_ontology_release_candidate = {
+        let onboarding_run = onboarding_run.clone();
+        let ontology_release_version = ontology_release_version.clone();
+        let mutation_status = mutation_status.clone();
+        Callback::from(move |_| {
+            let Some(current_run) = (*onboarding_run).clone() else {
+                mutation_status
+                    .set("Release candidate failed: no onboarding run is active.".to_string());
+                return;
+            };
+            if current_run.materialized_count == 0 {
+                mutation_status.set(
+                    "Release candidate failed: materialize approved ontology proposals first."
+                        .to_string(),
+                );
+                return;
+            }
+            let version = (*ontology_release_version).trim().to_string();
+            let mutation_status = mutation_status.clone();
+            spawn_local(async move {
+                mutation_status.set("Creating ontology release candidate...".to_string());
+                let path = format!(
+                    "/api/ontology/onboarding/runs/{}/release-candidate",
+                    current_run.id
+                );
+                let body = if version.is_empty() {
+                    json!({"release_class": "customer_grade"})
+                } else {
+                    json!({"version": version, "release_class": "customer_grade"})
+                };
+                match api_post::<OntologyRelease, _>(&path, &body).await {
+                    Ok(release) => mutation_status.set(format!(
+                        "Release candidate created: {} ({})",
+                        release.version,
+                        short_id(&release.id)
+                    )),
+                    Err(error) => mutation_status.set(ontology_write_error_message(
+                        "Release candidate failed",
+                        &error,
+                    )),
+                }
+            });
+        })
+    };
+
+    let gate_ontology_release = {
+        let mutation_status = mutation_status.clone();
+        Callback::from(move |release_id: String| {
+            let mutation_status = mutation_status.clone();
+            spawn_local(async move {
+                mutation_status.set("Running ontology release gate...".to_string());
+                let path = format!("/api/ontology/releases/{release_id}/gate");
+                match api_post::<OntologyRelease, _>(&path, &json!({})).await {
+                    Ok(release) => {
+                        let gate_status = release
+                            .gate_result
+                            .get("status")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown");
                         mutation_status
-                            .set(ontology_write_error_message("Ontology materialize failed", &error))
+                            .set(format!("Release gate {gate_status}: {}", release.version));
                     }
+                    Err(error) => mutation_status
+                        .set(ontology_write_error_message("Release gate failed", &error)),
+                }
+            });
+        })
+    };
+
+    let promote_ontology_release = {
+        let mutation_status = mutation_status.clone();
+        Callback::from(move |release_id: String| {
+            let mutation_status = mutation_status.clone();
+            spawn_local(async move {
+                mutation_status.set("Promoting ontology release...".to_string());
+                let path = format!("/api/ontology/releases/{release_id}/promote");
+                match api_post::<OntologyRelease, _>(&path, &json!({})).await {
+                    Ok(release) => mutation_status.set(format!(
+                        "Release promoted: {} is active for {}.",
+                        release.version, release.domain_scope
+                    )),
+                    Err(error) => mutation_status.set(ontology_write_error_message(
+                        "Release promote failed",
+                        &error,
+                    )),
+                }
+            });
+        })
+    };
+
+    let rollback_ontology_release = {
+        let mutation_status = mutation_status.clone();
+        Callback::from(move |release_id: String| {
+            let mutation_status = mutation_status.clone();
+            spawn_local(async move {
+                mutation_status.set("Rolling back ontology release...".to_string());
+                let path = format!("/api/ontology/releases/{release_id}/rollback");
+                match api_post::<OntologyRelease, _>(&path, &json!({})).await {
+                    Ok(release) => mutation_status.set(format!(
+                        "Rollback restored active release: {} ({})",
+                        release.version,
+                        short_id(&release.id)
+                    )),
+                    Err(error) => mutation_status.set(ontology_write_error_message(
+                        "Release rollback failed",
+                        &error,
+                    )),
                 }
             });
         })
@@ -943,6 +1060,7 @@ fn App() -> Html {
                                 onboarding_tool_specs={(*onboarding_tool_specs).clone()}
                                 onboarding_review_graph={(*onboarding_review_graph).clone()}
                                 onboarding_calibration={(*onboarding_calibration).clone()}
+                                ontology_release_version={(*ontology_release_version).clone()}
                                 on_source={state_textarea(semantic_source.clone())}
                                 on_build={build_ontology.clone()}
                                 on_context_packet_id={state_input(context_packet_id.clone())}
@@ -952,6 +1070,11 @@ fn App() -> Html {
                                 on_approve_onboarding_proposals={approve_ontology_proposals.clone()}
                                 on_reject_onboarding_proposal={reject_ontology_proposal.clone()}
                                 on_materialize_onboarding={materialize_ontology_onboarding.clone()}
+                                on_release_version={state_input(ontology_release_version.clone())}
+                                on_create_release_candidate={create_ontology_release_candidate.clone()}
+                                on_gate_release={gate_ontology_release.clone()}
+                                on_promote_release={promote_ontology_release.clone()}
+                                on_rollback_release={rollback_ontology_release.clone()}
                             />
                         },
                         View::Packs => html! { <PacksView data={data.clone()} lang={*ui_lang} /> },
@@ -1231,18 +1354,12 @@ fn missing_ontology_admin_token_message(action: &str) -> String {
 
 fn ontology_builder_config_from_storage() -> OntologyBuilderConfig {
     OntologyBuilderConfig {
-        domain_scope: storage_value_or(
-            ONTOLOGY_DOMAIN_SCOPE_KEY,
-            DEFAULT_ONTOLOGY_DOMAIN_SCOPE,
-        ),
+        domain_scope: storage_value_or(ONTOLOGY_DOMAIN_SCOPE_KEY, DEFAULT_ONTOLOGY_DOMAIN_SCOPE),
         workflow_scope: storage_value_or(
             ONTOLOGY_WORKFLOW_SCOPE_KEY,
             DEFAULT_ONTOLOGY_WORKFLOW_SCOPE,
         ),
-        memory_scope: storage_value_or(
-            ONTOLOGY_MEMORY_SCOPE_KEY,
-            DEFAULT_ONTOLOGY_MEMORY_SCOPE,
-        ),
+        memory_scope: storage_value_or(ONTOLOGY_MEMORY_SCOPE_KEY, DEFAULT_ONTOLOGY_MEMORY_SCOPE),
         objective: storage_value_or(ONTOLOGY_OBJECTIVE_KEY, DEFAULT_ONTOLOGY_OBJECTIVE),
     }
 }

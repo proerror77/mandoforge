@@ -61,6 +61,9 @@ summary_file="$EVIDENCE_DIR/summary.txt"
 
 cat "$summary_file"
 
+echo "readiness_checks:"
+jq -r '.checks[]? | "- \(.id)=\(.status) evidence=\(.current_evidence_class)"' "$readiness_file"
+
 if [[ "$required_evidence_class" != "customer_grade" ]]; then
   echo "ontology engine readiness must require customer_grade evidence" >&2
   exit 1

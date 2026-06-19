@@ -194,7 +194,7 @@ if [[ "$js_asset_count" -lt 1 || "$css_asset_count" -lt 1 || "$wasm_asset_count"
 fi
 
 asset_patterns=(
-  "MandoForge Co-Work"
+  "Agent OS Kernel"
   "Managed Agents"
   "Live operation log"
   "Runs & Tasks"

@@ -7,12 +7,12 @@ use crate::{
     AgentTeammate, AgentVersion, AppError, Approval, ApprovalCommitToken, ApprovalEscalationRule,
     ApprovalGroup, ApprovalNotificationChannelPolicy, Artifact, AuditLog, ContextPacket,
     CostAlertRoute, DynamicWorkflowPlan, Environment, EvalCase, EvalDataset, EvalRun,
-    ManagerAgentPlan, McpServerRecord, Membership, MemoryWritebackCandidate, Organization,
-    PolicyRevision, Project, ProviderAccess, ProviderRecord, SecretRecord, SemanticLink,
-    SemanticObject, SemanticSource, Session, SessionEvent, SessionLoopJob, SessionLoopJobStatus,
-    SessionThread, Squad, SquadMember, TaskGrant, Team, TenantInvitation, ToolCall, UsageRollup,
-    WorkItem, WorkItemActivityEntry, WorkItemAssignment, WorkItemReview, WorkflowDefinition,
-    WorkflowPackBinding, WorkflowPackInstallation, WorkflowPackProfileAsset,
+    ManagerAgentPlan, McpServerRecord, Membership, MemoryWritebackCandidate, OntologyRelease,
+    Organization, PolicyRevision, Project, ProviderAccess, ProviderRecord, SecretRecord,
+    SemanticLink, SemanticObject, SemanticSource, Session, SessionEvent, SessionLoopJob,
+    SessionLoopJobStatus, SessionThread, Squad, SquadMember, TaskGrant, Team, TenantInvitation,
+    ToolCall, UsageRollup, WorkItem, WorkItemActivityEntry, WorkItemAssignment, WorkItemReview,
+    WorkflowDefinition, WorkflowPackBinding, WorkflowPackInstallation, WorkflowPackProfileAsset,
     WorkflowPackRuntimeObject, WorkflowRun, WorkflowStepRun, WorkflowTransition,
 };
 
@@ -227,6 +227,34 @@ pub(crate) fn semantic_link_from_row(row: PgRow) -> Result<SemanticLink, AppErro
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
         archived_at: row.try_get("archived_at")?,
+    })
+}
+
+pub(crate) fn ontology_release_from_row(row: PgRow) -> Result<OntologyRelease, AppError> {
+    Ok(OntologyRelease {
+        id: row.try_get("id")?,
+        version: row.try_get("version")?,
+        domain_scope: row.try_get("domain_scope")?,
+        source_run_id: row.try_get("source_run_id")?,
+        parent_release_id: row.try_get("parent_release_id")?,
+        rollback_target_release_id: row.try_get("rollback_target_release_id")?,
+        status: row.try_get("status")?,
+        release_class: row.try_get("release_class")?,
+        object_count: row.try_get("object_count")?,
+        relation_count: row.try_get("relation_count")?,
+        action_count: row.try_get("action_count")?,
+        migration_policy: row.try_get("migration_policy")?,
+        gate_result: row.try_get("gate_result")?,
+        materialized_object_ids: row.try_get("materialized_object_ids")?,
+        materialized_link_ids: row.try_get("materialized_link_ids")?,
+        evidence_refs: row.try_get("evidence_refs")?,
+        promoted_by: row.try_get("promoted_by")?,
+        promoted_at: row.try_get("promoted_at")?,
+        rolled_back_by: row.try_get("rolled_back_by")?,
+        rolled_back_at: row.try_get("rolled_back_at")?,
+        archived_at: row.try_get("archived_at")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
     })
 }
 
