@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS ontology_releases (
     archived_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL,
-    UNIQUE (tenant_id, version)
+    UNIQUE (tenant_id, domain_scope, version)
 );
 
 CREATE INDEX IF NOT EXISTS idx_ontology_releases_tenant_domain_status

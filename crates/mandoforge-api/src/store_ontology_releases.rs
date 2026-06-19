@@ -103,14 +103,15 @@ impl AppState {
         match &self.store {
             StoreBackend::Memory(inner) => {
                 let mut store = inner.write().await;
-                if store
-                    .ontology_releases
-                    .values()
-                    .any(|existing| existing.version.eq_ignore_ascii_case(&release.version))
-                {
+                if store.ontology_releases.values().any(|existing| {
+                    existing.version.eq_ignore_ascii_case(&release.version)
+                        && existing
+                            .domain_scope
+                            .eq_ignore_ascii_case(&release.domain_scope)
+                }) {
                     return Err(AppError::bad_request(format!(
-                        "ontology release version already exists: {}",
-                        release.version
+                        "ontology release version already exists for domain {}: {}",
+                        release.domain_scope, release.version
                     )));
                 }
                 store.ontology_releases.insert(release.id, release.clone());
