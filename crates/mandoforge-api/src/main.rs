@@ -68,6 +68,7 @@ mod store_events;
 mod store_governance;
 mod store_manager_plans;
 mod store_memory_writeback;
+mod store_ontology_releases;
 mod store_policy_revisions;
 mod store_releases;
 mod store_remote_computers;
@@ -2624,6 +2625,33 @@ struct OntologyOnboardingMaterializationResult {
     tool_spec_count: usize,
     semantic_object_ids: Vec<Uuid>,
     semantic_link_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OntologyRelease {
+    id: Uuid,
+    version: String,
+    domain_scope: String,
+    source_run_id: Option<Uuid>,
+    parent_release_id: Option<Uuid>,
+    rollback_target_release_id: Option<Uuid>,
+    status: String,
+    release_class: String,
+    object_count: i32,
+    relation_count: i32,
+    action_count: i32,
+    migration_policy: Value,
+    gate_result: Value,
+    materialized_object_ids: Value,
+    materialized_link_ids: Value,
+    evidence_refs: Value,
+    promoted_by: Option<String>,
+    promoted_at: Option<DateTime<Utc>>,
+    rolled_back_by: Option<String>,
+    rolled_back_at: Option<DateTime<Utc>>,
+    archived_at: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
