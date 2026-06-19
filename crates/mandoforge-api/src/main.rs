@@ -16366,6 +16366,11 @@ async fn rollback_ontology_release_with_actor(
     actor_subject: &str,
 ) -> Result<OntologyRelease, AppError> {
     let mut release = state.get_ontology_release(release_id).await?;
+    if release.status != "active" {
+        return Err(AppError::bad_request(
+            "only active ontology releases can be rolled back",
+        ));
+    }
     let target_id = release
         .rollback_target_release_id
         .ok_or_else(|| AppError::bad_request("ontology release rollback target is missing"))?;
@@ -67380,6 +67385,49 @@ mod tests {
             .await
             .expect("old release");
         assert_eq!(old.status, "superseded");
+    }
+
+    #[tokio::test]
+    async fn ontology_release_rollback_rejects_non_active_release() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        let first =
+            ontology_release_candidate_for_test(&state, "commerce-vtest-rollback-active-001").await;
+        gate_ontology_release_with_actor(&state, first.id, "test")
+            .await
+            .expect("gate first");
+        let first_active = promote_ontology_release_with_actor(&state, first.id, "test")
+            .await
+            .expect("promote first");
+
+        let second =
+            ontology_release_candidate_for_test(&state, "commerce-vtest-rollback-active-002").await;
+        gate_ontology_release_with_actor(&state, second.id, "test")
+            .await
+            .expect("gate second");
+        let second_active = promote_ontology_release_with_actor(&state, second.id, "test")
+            .await
+            .expect("promote second");
+
+        let old = state
+            .get_ontology_release(first_active.id)
+            .await
+            .expect("old release");
+        assert_eq!(old.status, "superseded");
+        let error = rollback_ontology_release_with_actor(&state, first_active.id, "test")
+            .await
+            .expect_err("superseded releases cannot rollback");
+        assert!(
+            error
+                .message
+                .contains("only active ontology releases can be rolled back"),
+            "{error:?}"
+        );
+        let active = state
+            .active_ontology_release_for_domain("commerce")
+            .await
+            .expect("active lookup")
+            .expect("active release");
+        assert_eq!(active.id, second_active.id);
     }
 
     #[tokio::test]
