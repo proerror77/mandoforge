@@ -35761,7 +35761,8 @@ async fn build_provider_context_packet(
         return Ok((task_grant_id, None, None, provider_tool_names));
     };
     let context_packet_id = packet.id;
-    let mut rendered = render_execution_context(
+    let mut rendered = render_execution_context_for_packet(
+        state,
         &packet,
         RenderContextPacketRequest {
             max_prompt_tokens: Some(1_500),
@@ -35771,7 +35772,8 @@ async fn build_provider_context_packet(
             allow_full_content: Some(false),
             allow_on_demand_fetch: Some(true),
         },
-    );
+    )
+    .await?;
     if let Some(grant) = context_task_grant.as_ref() {
         rendered
             .available_tools
@@ -36609,7 +36611,9 @@ async fn render_context_packet(
         Some(packet.session_id),
     )
     .await?;
-    Ok(Json(render_execution_context(&packet, input)))
+    Ok(Json(
+        render_execution_context_for_packet(&state, &packet, input).await?,
+    ))
 }
 
 async fn get_semantic_retrieval_backends(
@@ -38483,6 +38487,66 @@ fn render_execution_context(
         available_tools,
         full_content_included: false,
     }
+}
+
+async fn render_execution_context_for_packet(
+    state: &AppState,
+    packet: &ContextPacket,
+    input: RenderContextPacketRequest,
+) -> Result<RenderedExecutionContext, AppError> {
+    let mut rendered = render_execution_context(packet, input);
+    if let Some(release_metadata) =
+        active_ontology_release_metadata_for_scopes(state, &packet.semantic_scopes).await?
+    {
+        if !rendered.ontology_scope.is_object() {
+            rendered.ontology_scope = json!({});
+        }
+        if let Some(scope) = rendered.ontology_scope.as_object_mut() {
+            scope.insert("ontology_release".to_string(), release_metadata);
+        }
+    }
+    Ok(rendered)
+}
+
+async fn active_ontology_release_metadata_for_scopes(
+    state: &AppState,
+    semantic_scopes: &Value,
+) -> Result<Option<Value>, AppError> {
+    let Some(scopes) = semantic_scopes.as_object() else {
+        return Ok(None);
+    };
+    let mut seen = HashSet::new();
+    for key in ["domain_scope", "memory_scope", "workflow_scope"] {
+        let Some(scope) = scopes.get(key).and_then(Value::as_str).map(str::trim) else {
+            continue;
+        };
+        if scope.is_empty() || !seen.insert(scope.to_ascii_lowercase()) {
+            continue;
+        }
+        if let Some(release) = state.active_ontology_release_for_domain(scope).await? {
+            return Ok(Some(ontology_release_runtime_metadata(&release)));
+        }
+    }
+    Ok(None)
+}
+
+fn ontology_release_runtime_metadata(release: &OntologyRelease) -> Value {
+    json!({
+        "id": release.id,
+        "version": release.version,
+        "domain_scope": release.domain_scope,
+        "status": release.status,
+        "release_class": release.release_class,
+        "object_count": release.object_count,
+        "relation_count": release.relation_count,
+        "action_count": release.action_count,
+        "source_run_id": release.source_run_id,
+        "parent_release_id": release.parent_release_id,
+        "rollback_target_release_id": release.rollback_target_release_id,
+        "gate_status": release.gate_result.get("status").and_then(Value::as_str),
+        "promoted_at": release.promoted_at,
+        "pinned_by": "active_ontology_release",
+    })
 }
 
 fn bounded_render_budget(
@@ -93969,6 +94033,128 @@ not json
                 && event.payload["context_packet_id"] == json!(packet.id)
                 && event.payload["policy_reminder_count"] == json!(packet.policy_reminders.len())
         }));
+    }
+
+    #[tokio::test]
+    async fn rendered_context_pins_active_ontology_release_by_domain_scope() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        let release =
+            ontology_release_candidate_for_test(&state, "commerce-vtest-runtime-pin").await;
+        gate_ontology_release_with_actor(&state, release.id, "test")
+            .await
+            .expect("gate release");
+        let active = promote_ontology_release_with_actor(&state, release.id, "test")
+            .await
+            .expect("promote release");
+        let app = build_router(state);
+        let admin_headers = [
+            ("x-mandoforge-subject", "admin-1"),
+            ("x-mandoforge-roles", "admin"),
+        ];
+        let semantic_scopes = json!({
+            "project_scope": "mandoforge",
+            "repo_scope": "mandoforge",
+            "service_scope": "mandoforge-api",
+            "domain_scope": "commerce",
+            "workflow_scope": "ontology-release-runtime",
+            "memory_scope": "release-context"
+        });
+
+        let agent: Agent = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/agents",
+                json!({
+                    "name": "Ontology Release Runtime Agent",
+                    "kind": "specialist",
+                    "agent_role": "specialist",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4-mini",
+                    "system_prompt": "Use the pinned ontology release.",
+                    "tools": [
+                        "semantic_object.fetch",
+                        "semantic_object.search",
+                        "semantic_link.expand",
+                        "ontology_type.lookup"
+                    ],
+                    "tool_policy": {"read_only": true},
+                    "semantic_scopes": semantic_scopes,
+                    "release_state": "active"
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        let session: Session = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/sessions",
+                json!({
+                    "agent_id": agent.id,
+                    "title": "render pinned ontology release",
+                    "message": "Render context with the active commerce ontology."
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+
+        let packet: ContextPacket = request_json(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/context-packet", session.id))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await;
+        let rendered: RenderedExecutionContext = request_json(
+            app,
+            json_request_with_headers(
+                "POST",
+                &format!("/api/context-packets/{}/render", packet.id),
+                json!({
+                    "max_prompt_tokens": 512,
+                    "max_objects": 3,
+                    "allow_on_demand_fetch": true
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+
+        assert_eq!(rendered.context_packet_id, packet.id);
+        assert_eq!(rendered.ontology_scope["domain_scope"], "commerce");
+        assert_eq!(
+            rendered.ontology_scope["ontology_release"]["id"],
+            json!(active.id)
+        );
+        assert_eq!(
+            rendered.ontology_scope["ontology_release"]["version"],
+            json!("commerce-vtest-runtime-pin")
+        );
+        assert_eq!(
+            rendered.ontology_scope["ontology_release"]["status"],
+            json!("active")
+        );
+        assert_eq!(
+            rendered.ontology_scope["ontology_release"]["gate_status"],
+            json!("passed")
+        );
+        assert_eq!(
+            rendered.ontology_scope["ontology_release"]["pinned_by"],
+            json!("active_ontology_release")
+        );
+        assert!(
+            !rendered
+                .available_tools
+                .iter()
+                .any(|tool| tool == "codex.exec")
+        );
     }
 
     #[tokio::test]
