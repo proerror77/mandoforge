@@ -29,5 +29,17 @@ CREATE TABLE IF NOT EXISTS ontology_releases (
 CREATE INDEX IF NOT EXISTS idx_ontology_releases_tenant_domain_status
     ON ontology_releases (tenant_id, domain_scope, status);
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ontology_releases_one_active_per_domain
+    ON ontology_releases (tenant_id, lower(domain_scope))
+    WHERE status = 'active';
+
 CREATE INDEX IF NOT EXISTS idx_ontology_releases_source_run
     ON ontology_releases (tenant_id, source_run_id);
+
+ALTER TABLE ontology_releases ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ontology_releases FORCE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS tenant_isolation_ontology_releases ON ontology_releases;
+CREATE POLICY tenant_isolation_ontology_releases ON ontology_releases
+    USING (tenant_id = mandoforge_current_tenant_id())
+    WITH CHECK (tenant_id = mandoforge_current_tenant_id());
