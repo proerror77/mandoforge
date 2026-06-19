@@ -1955,6 +1955,190 @@ h2 {
   line-height: 1.5;
 }
 
+.ontology-release-control {
+  display: grid;
+  gap: 12px;
+  border: 1px solid rgba(36, 48, 44, 0.16);
+  border-radius: 7px;
+  background: #ffffff;
+  padding: 14px;
+}
+
+.ontology-release-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 1.1fr) minmax(260px, 0.9fr);
+  gap: 12px;
+  align-items: stretch;
+}
+
+.ontology-release-current,
+.ontology-release-readiness {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-soft);
+  padding: 12px;
+}
+
+.ontology-release-current-head {
+  display: grid;
+  gap: 3px;
+}
+
+.ontology-release-current-head span,
+.ontology-release-hint,
+.ontology-release-readiness > span,
+.ontology-release-empty small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.ontology-release-current-head strong {
+  overflow-wrap: anywhere;
+  font-size: 16px;
+}
+
+.ontology-release-create {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.ontology-release-create input {
+  min-width: 0;
+}
+
+.ontology-release-readiness-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.ontology-release-readiness-row {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  border: 1px solid rgba(36, 48, 44, 0.11);
+  border-radius: 7px;
+  background: #ffffff;
+  padding: 9px;
+}
+
+.ontology-release-readiness-row strong,
+.ontology-release-readiness-row span,
+.ontology-release-readiness-row small {
+  overflow-wrap: anywhere;
+}
+
+.ontology-release-readiness-row span {
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.ontology-release-readiness-row small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.ontology-release-list {
+  display: grid;
+  gap: 8px;
+}
+
+.ontology-release-empty {
+  display: grid;
+  gap: 3px;
+  border: 1px dashed var(--line);
+  border-radius: 7px;
+  padding: 12px;
+}
+
+.ontology-release-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(320px, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  border: 1px solid rgba(36, 48, 44, 0.13);
+  border-radius: 7px;
+  background: #ffffff;
+  padding: 10px;
+}
+
+.ontology-release-row-main {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.ontology-release-row-main strong,
+.ontology-release-row-main small {
+  overflow-wrap: anywhere;
+}
+
+.ontology-release-row-main small,
+.ontology-release-row-metrics small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.ontology-release-status {
+  width: max-content;
+  max-width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.ontology-release-status.good {
+  border-color: rgba(36, 128, 91, 0.24);
+  color: #1f7a55;
+  background: #ecf7f1;
+}
+
+.ontology-release-status.warn {
+  border-color: rgba(180, 124, 30, 0.26);
+  color: #8a5b16;
+  background: #fff6df;
+}
+
+.ontology-release-status.bad {
+  border-color: rgba(183, 66, 66, 0.24);
+  color: #a33d3d;
+  background: #fff0ee;
+}
+
+.ontology-release-row-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.ontology-release-row-metrics span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  border-left: 1px solid var(--line);
+  padding-left: 8px;
+}
+
+.ontology-release-row-metrics strong {
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+.ontology-release-row-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(78px, 1fr));
+  gap: 6px;
+}
+
 .semantic-inline-details {
   border: 1px solid var(--line);
   border-radius: 7px;
@@ -3877,6 +4061,15 @@ h2 {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
+  .ontology-release-grid,
+  .ontology-release-row {
+    grid-template-columns: 1fr;
+  }
+
+  .ontology-release-row-actions {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
   .ontology-sample-story-head,
   .ontology-sample-flow {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -4134,6 +4327,10 @@ h2 {
   .context-budget,
   .ontology-intelligence-grid,
   .ontology-proposal-evidence-chips,
+  .ontology-release-create,
+  .ontology-release-readiness-list,
+  .ontology-release-row-metrics,
+  .ontology-release-row-actions,
   .pack-card-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -4161,6 +4358,13 @@ h2 {
   }
 
   .semantic-journey {
+    grid-template-columns: 1fr;
+  }
+
+  .ontology-release-create,
+  .ontology-release-readiness-list,
+  .ontology-release-row-metrics,
+  .ontology-release-row-actions {
     grid-template-columns: 1fr;
   }
 

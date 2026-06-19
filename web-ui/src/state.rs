@@ -190,6 +190,7 @@ pub(crate) struct ConsoleData {
     pub(crate) semantic_reflection_queue: ApiState<SemanticReflectionQueue>,
     pub(crate) ontology_registry: ApiState<OntologyRegistry>,
     pub(crate) ontology_engine_readiness: ApiState<Value>,
+    pub(crate) ontology_releases: ApiState<Vec<OntologyRelease>>,
     pub(crate) semantic_retrieval_backends: ApiState<Value>,
 }
 

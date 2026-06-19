@@ -384,6 +384,48 @@ pub struct OntologyOnboardingToolSpecResponse {
     pub tool_specs: Vec<OntologyOnboardingToolSpec>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct OntologyRelease {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub domain_scope: String,
+    #[serde(default)]
+    pub source_run_id: Option<String>,
+    #[serde(default)]
+    pub parent_release_id: Option<String>,
+    #[serde(default)]
+    pub rollback_target_release_id: Option<String>,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub release_class: String,
+    #[serde(default)]
+    pub object_count: i32,
+    #[serde(default)]
+    pub relation_count: i32,
+    #[serde(default)]
+    pub action_count: i32,
+    #[serde(default)]
+    pub migration_policy: Value,
+    #[serde(default)]
+    pub gate_result: Value,
+    #[serde(default)]
+    pub promoted_by: Option<String>,
+    #[serde(default)]
+    pub promoted_at: Option<String>,
+    #[serde(default)]
+    pub rolled_back_by: Option<String>,
+    #[serde(default)]
+    pub rolled_back_at: Option<String>,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 pub struct OntologyReviewGraph {
     #[serde(default)]
