@@ -16500,7 +16500,224 @@ async fn promote_ontology_release_with_actor(
             }),
         ))
         .await?;
+    if let Err(error) =
+        trigger_workflow_run_from_ontology_release(state, &release, actor_subject).await
+    {
+        let error_message = error.message.clone();
+        state
+            .append_audit_log(new_audit_log(
+                None,
+                "system",
+                None,
+                "ontology_release.workflow_trigger_failed",
+                "ontology_release",
+                Some(release.id),
+                json!({
+                    "subject": actor_subject,
+                    "release_id": release.id,
+                    "version": release.version,
+                    "domain_scope": release.domain_scope,
+                    "error": error_message,
+                }),
+            ))
+            .await?;
+    }
     Ok(release)
+}
+
+async fn trigger_workflow_run_from_ontology_release(
+    state: &AppState,
+    release: &OntologyRelease,
+    actor_subject: &str,
+) -> Result<Option<WorkflowRun>, AppError> {
+    if ontology_release_workflow_run_exists(state, release.id).await? {
+        return Ok(None);
+    }
+    let Some(definition) = ontology_release_workflow_definition(state, release).await? else {
+        state
+            .append_audit_log(new_audit_log(
+                None,
+                "system",
+                None,
+                "ontology_release.workflow_trigger_skipped",
+                "ontology_release",
+                Some(release.id),
+                json!({
+                    "subject": actor_subject,
+                    "release_id": release.id,
+                    "version": release.version,
+                    "domain_scope": release.domain_scope,
+                    "reason": "no_matching_workflow_definition",
+                }),
+            ))
+            .await?;
+        return Ok(None);
+    };
+    let tool_specs = match release.source_run_id {
+        Some(run_id) => ontology_onboarding_tool_specs_for_run(state, run_id).await?,
+        None => Vec::new(),
+    };
+    let input_payload = json!({
+        "trigger": "ontology_release.promoted",
+        "ontology_release_id": release.id,
+        "ontology_version": release.version,
+        "domain_scope": release.domain_scope,
+        "release_class": release.release_class,
+        "status": release.status,
+        "ontology_release": {
+            "id": release.id,
+            "version": release.version,
+            "domain_scope": release.domain_scope,
+            "release_class": release.release_class,
+            "status": release.status,
+        },
+        "action_catalog": {
+            "source": "active_ontology_release",
+            "tool_count": tool_specs.len(),
+            "tool_specs": tool_specs,
+        }
+    });
+    let run = create_workflow_run_from_definition(
+        state,
+        &definition,
+        format!(
+            "Ontology promoted: {} {}",
+            release.domain_scope, release.version
+        ),
+        input_payload,
+        json!({
+            "trigger": "ontology_release.promoted",
+            "ontology_release_id": release.id,
+            "ontology_version": release.version,
+            "domain_scope": release.domain_scope,
+        }),
+    )
+    .await?;
+    state
+        .append_event(
+            "system",
+            Some(run.id),
+            run.primary_session_id,
+            "ontology_release.workflow_run_triggered",
+            json!({
+                "workflow_run_id": run.id,
+                "workflow_definition_id": run.workflow_definition_id,
+                "ontology_release_id": release.id,
+                "ontology_version": release.version,
+                "domain_scope": release.domain_scope,
+            }),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(run.primary_session_id),
+            "system",
+            Some(run.id),
+            "ontology_release.workflow_run_triggered",
+            "ontology_release",
+            Some(release.id),
+            json!({
+                "subject": actor_subject,
+                "release_id": release.id,
+                "version": release.version,
+                "domain_scope": release.domain_scope,
+                "workflow_definition_id": run.workflow_definition_id,
+                "workflow_run_id": run.id,
+                "primary_session_id": run.primary_session_id,
+            }),
+        ))
+        .await?;
+    Ok(Some(run))
+}
+
+async fn ontology_release_workflow_run_exists(
+    state: &AppState,
+    release_id: Uuid,
+) -> Result<bool, AppError> {
+    Ok(state.list_workflow_runs().await?.into_iter().any(|run| {
+        run.input_payload["trigger"] == json!("ontology_release.promoted")
+            && run.input_payload["ontology_release_id"] == json!(release_id)
+    }))
+}
+
+async fn ontology_release_workflow_definition(
+    state: &AppState,
+    release: &OntologyRelease,
+) -> Result<Option<WorkflowDefinition>, AppError> {
+    Ok(state
+        .list_workflow_definitions()
+        .await?
+        .into_iter()
+        .find(|definition| {
+            definition.release_state == "released"
+                && ontology_release_trigger_matches_definition(definition, release)
+        }))
+}
+
+fn ontology_release_trigger_matches_definition(
+    definition: &WorkflowDefinition,
+    release: &OntologyRelease,
+) -> bool {
+    ontology_release_trigger_config(definition)
+        .is_some_and(|trigger| ontology_release_trigger_matches_release(trigger, release))
+}
+
+fn ontology_release_trigger_config(definition: &WorkflowDefinition) -> Option<&Value> {
+    [&definition.handoff_rules, &definition.step_graph]
+        .into_iter()
+        .find_map(|source| {
+            source
+                .get("ontology_release_trigger")
+                .or_else(|| source.get("ontology_trigger"))
+                .filter(|trigger| ontology_release_trigger_enabled(trigger))
+        })
+}
+
+fn ontology_release_trigger_enabled(trigger: &Value) -> bool {
+    match trigger {
+        Value::Bool(value) => *value,
+        Value::Object(object) => object
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+fn ontology_release_trigger_matches_release(trigger: &Value, release: &OntologyRelease) -> bool {
+    if trigger == &Value::Bool(true) {
+        return true;
+    }
+    let Some(trigger) = trigger.as_object() else {
+        return false;
+    };
+    let event_matches = trigger
+        .get("event")
+        .and_then(Value::as_str)
+        .map(|event| {
+            matches!(
+                event.trim(),
+                "ontology_release.promoted" | "ontology.promoted" | "promoted"
+            )
+        })
+        .unwrap_or(true);
+    event_matches
+        && json_domain_scope_matches(trigger.get("domain_scope"), release.domain_scope.as_str())
+}
+
+fn json_domain_scope_matches(value: Option<&Value>, domain_scope: &str) -> bool {
+    match value {
+        None => true,
+        Some(Value::String(scope)) => {
+            let scope = scope.trim();
+            scope.is_empty() || scope == "*" || scope.eq_ignore_ascii_case(domain_scope)
+        }
+        Some(Value::Array(scopes)) => scopes.iter().filter_map(Value::as_str).any(|scope| {
+            let scope = scope.trim();
+            scope == "*" || scope.eq_ignore_ascii_case(domain_scope)
+        }),
+        _ => false,
+    }
 }
 
 async fn rollback_ontology_release_with_actor(
@@ -26332,15 +26549,29 @@ fn workflow_run_runtime_envelope(
     Value::Object(envelope)
 }
 
-pub(crate) async fn trigger_workflow_run_from_webhook(
+async fn create_workflow_run_from_definition(
     state: &AppState,
-    workflow_definition_id: Uuid,
+    definition: &WorkflowDefinition,
+    title: String,
     input_payload: Value,
+    runtime_envelope_request: Value,
 ) -> Result<WorkflowRun, AppError> {
-    let definition = state
-        .get_workflow_definition(workflow_definition_id)
-        .await?;
-    let title = format!("Webhook: {}", definition.name);
+    if definition.release_state != "released" {
+        return Err(AppError::bad_request(
+            "workflow run requires a released workflow definition",
+        ));
+    }
+    if let Some(environment_id) = definition.default_environment_id {
+        state.get_environment(environment_id).await?;
+    }
+    let execution_strategy = definition.execution_strategy.clone();
+    let runtime_adapter = definition.runtime_adapter.clone();
+    let runtime_mode = definition.runtime_mode.clone();
+    validate_workflow_execution_binding(
+        &execution_strategy,
+        runtime_adapter.as_deref(),
+        &definition.runtime_capability_contract,
+    )?;
     let session = state
         .create_session(CreateSession {
             agent_id: definition.default_agent_id,
@@ -26352,18 +26583,15 @@ pub(crate) async fn trigger_workflow_run_from_webhook(
     ensure_primary_session_thread(state, session.id).await?;
     let now = Utc::now();
     let input_digest = workflow_input_digest(&input_payload);
-    let execution_strategy = definition.execution_strategy.clone();
-    let runtime_adapter = definition.runtime_adapter.clone();
-    let runtime_mode = definition.runtime_mode.clone();
     let delegation_status =
         (execution_strategy == "delegated_runtime").then_some("submitted".to_string());
     let runtime_envelope = workflow_run_runtime_envelope(
-        &definition,
+        definition,
         &execution_strategy,
         runtime_adapter.as_deref(),
         runtime_mode.as_deref(),
         None,
-        &serde_json::json!({}),
+        &runtime_envelope_request,
     );
     let run = state
         .create_workflow_run(WorkflowRun {
@@ -26393,12 +26621,30 @@ pub(crate) async fn trigger_workflow_run_from_webhook(
         })
         .await?;
     let root_grant =
-        issue_root_task_grant_for_workflow_run(state, &run, &definition, &session).await?;
+        issue_root_task_grant_for_workflow_run(state, &run, definition, &session).await?;
     let run = state
         .update_workflow_run_root_task_grant(run.id, root_grant.id)
         .await?;
-    materialize_workflow_graph_start_steps(state, &definition, &run, &session, &root_grant).await?;
+    materialize_workflow_graph_start_steps(state, definition, &run, &session, &root_grant).await?;
     Ok(run)
+}
+
+pub(crate) async fn trigger_workflow_run_from_webhook(
+    state: &AppState,
+    workflow_definition_id: Uuid,
+    input_payload: Value,
+) -> Result<WorkflowRun, AppError> {
+    let definition = state
+        .get_workflow_definition(workflow_definition_id)
+        .await?;
+    create_workflow_run_from_definition(
+        state,
+        &definition,
+        format!("Webhook: {}", definition.name),
+        input_payload,
+        serde_json::json!({}),
+    )
+    .await
 }
 
 async fn materialize_workflow_graph_step(
@@ -67092,6 +67338,62 @@ mod tests {
         .expect("candidate")
     }
 
+    async fn ontology_release_trigger_workflow_definition_for_test(
+        state: &AppState,
+        domain_scope: &str,
+    ) -> WorkflowDefinition {
+        state.seed_demo_agent().await.expect("seed demo agent");
+        let agent = state
+            .list_agents()
+            .await
+            .expect("agents")
+            .into_iter()
+            .next()
+            .expect("seeded agent");
+        let now = Utc::now();
+        state
+            .create_workflow_definition(WorkflowDefinition {
+                id: Uuid::new_v4(),
+                pack_installation_id: None,
+                pack_id: None,
+                pack_version: None,
+                name: "Ontology release downstream workflow".to_string(),
+                entrypoint: "ontology-release-downstream".to_string(),
+                trigger_type: "ontology_release".to_string(),
+                default_agent_id: agent.id,
+                default_environment_id: None,
+                input_schema_ref: None,
+                output_schema_ref: None,
+                step_graph: empty_json_object(),
+                handoff_rules: json!({
+                    "ontology_release_trigger": {
+                        "enabled": true,
+                        "event": "ontology_release.promoted",
+                        "domain_scope": domain_scope
+                    },
+                    "root_task_grant": {
+                        "semantic_scopes": {
+                            "domain_scope": domain_scope,
+                            "workflow_scope": "ontology-release-downstream"
+                        }
+                    }
+                }),
+                execution_strategy: default_workflow_execution_strategy(),
+                runtime_adapter: None,
+                runtime_mode: None,
+                runtime_capability_contract: empty_json_object(),
+                event_ingestion_policy: default_event_ingestion_policy(),
+                approval_policy_ref: None,
+                eval_gate_refs: Vec::new(),
+                release_state: "released".to_string(),
+                created_at: now,
+                updated_at: now,
+                archived_at: None,
+            })
+            .await
+            .expect("workflow definition")
+    }
+
     #[tokio::test]
     async fn ontology_release_gate_requires_migration_policy() {
         let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
@@ -67146,6 +67448,96 @@ mod tests {
             .await
             .expect("old release");
         assert_eq!(old.status, "superseded");
+    }
+
+    #[tokio::test]
+    async fn ontology_release_promote_triggers_workflow_run_with_action_catalog() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        let definition =
+            ontology_release_trigger_workflow_definition_for_test(&state, "commerce").await;
+        let release =
+            ontology_release_candidate_for_test(&state, "commerce-vtest-trigger-workflow").await;
+        gate_ontology_release_with_actor(&state, release.id, "test")
+            .await
+            .expect("gate");
+
+        let active = promote_ontology_release_with_actor(&state, release.id, "test")
+            .await
+            .expect("promote");
+
+        let runs = state.list_workflow_runs().await.expect("workflow runs");
+        let run = runs
+            .iter()
+            .find(|run| {
+                run.workflow_definition_id == definition.id
+                    && run.input_payload["ontology_release_id"] == json!(active.id)
+            })
+            .expect("workflow run triggered by ontology release");
+        assert_eq!(run.status, "queued");
+        assert_eq!(
+            run.input_payload["trigger"],
+            json!("ontology_release.promoted")
+        );
+        assert_eq!(run.input_payload["ontology_version"], json!(active.version));
+        assert_eq!(run.input_payload["domain_scope"], json!("commerce"));
+        assert_eq!(
+            run.input_payload["ontology_release"]["release_class"],
+            json!("repo_controlled")
+        );
+        assert_eq!(run.input_payload["action_catalog"]["tool_count"], json!(1));
+        let tool_specs = run.input_payload["action_catalog"]["tool_specs"]
+            .as_array()
+            .expect("tool specs");
+        assert!(
+            tool_specs
+                .iter()
+                .any(|spec| spec["name"] == json!("commerce.refund_order"))
+        );
+
+        let events = state
+            .list_events(run.primary_session_id)
+            .await
+            .expect("session events");
+        assert!(events.iter().any(|event| {
+            event.event_type == "ontology_release.workflow_run_triggered"
+                && event.payload["ontology_release_id"] == json!(active.id)
+        }));
+        let audit_logs = state.list_audit_logs(None).await.expect("audit logs");
+        assert!(audit_logs.iter().any(|log| {
+            log.action == "ontology_release.workflow_run_triggered"
+                && log.details["workflow_run_id"] == json!(run.id)
+        }));
+    }
+
+    #[tokio::test]
+    async fn ontology_release_workflow_trigger_is_idempotent_per_release() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        let definition =
+            ontology_release_trigger_workflow_definition_for_test(&state, "commerce").await;
+        let release =
+            ontology_release_candidate_for_test(&state, "commerce-vtest-trigger-idempotent").await;
+        gate_ontology_release_with_actor(&state, release.id, "test")
+            .await
+            .expect("gate");
+        let active = promote_ontology_release_with_actor(&state, release.id, "test")
+            .await
+            .expect("promote");
+
+        trigger_workflow_run_from_ontology_release(&state, &active, "test")
+            .await
+            .expect("repeat trigger");
+
+        let matching_runs = state
+            .list_workflow_runs()
+            .await
+            .expect("workflow runs")
+            .into_iter()
+            .filter(|run| {
+                run.workflow_definition_id == definition.id
+                    && run.input_payload["ontology_release_id"] == json!(active.id)
+            })
+            .count();
+        assert_eq!(matching_runs, 1);
     }
 
     #[tokio::test]
