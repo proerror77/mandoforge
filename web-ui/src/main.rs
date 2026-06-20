@@ -717,6 +717,28 @@ fn App() -> Html {
         })
     };
 
+    let archive_ontology_release = {
+        let mutation_status = mutation_status.clone();
+        Callback::from(move |release_id: String| {
+            let mutation_status = mutation_status.clone();
+            spawn_local(async move {
+                mutation_status.set("Archiving ontology release...".to_string());
+                let path = format!("/api/ontology/releases/{release_id}/archive");
+                match api_post::<OntologyRelease, _>(&path, &json!({})).await {
+                    Ok(release) => mutation_status.set(format!(
+                        "Release archived: {} ({})",
+                        release.version,
+                        short_id(&release.id)
+                    )),
+                    Err(error) => mutation_status.set(ontology_write_error_message(
+                        "Release archive failed",
+                        &error,
+                    )),
+                }
+            });
+        })
+    };
+
     let render_context = {
         let sessions = data.sessions.data.clone();
         let context_packet_id = context_packet_id.clone();
@@ -1075,6 +1097,7 @@ fn App() -> Html {
                                 on_gate_release={gate_ontology_release.clone()}
                                 on_promote_release={promote_ontology_release.clone()}
                                 on_rollback_release={rollback_ontology_release.clone()}
+                                on_archive_release={archive_ontology_release.clone()}
                             />
                         },
                         View::Packs => html! { <PacksView data={data.clone()} lang={*ui_lang} /> },

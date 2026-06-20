@@ -421,6 +421,8 @@ pub struct OntologyRelease {
     #[serde(default)]
     pub rolled_back_at: Option<String>,
     #[serde(default)]
+    pub archived_at: Option<String>,
+    #[serde(default)]
     pub created_at: String,
     #[serde(default)]
     pub updated_at: String,

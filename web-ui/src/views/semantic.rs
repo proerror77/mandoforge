@@ -40,6 +40,7 @@ pub(crate) struct SemanticProps {
     pub(crate) on_gate_release: Callback<String>,
     pub(crate) on_promote_release: Callback<String>,
     pub(crate) on_rollback_release: Callback<String>,
+    pub(crate) on_archive_release: Callback<String>,
 }
 
 type SemanticLang = UiLang;
@@ -173,6 +174,7 @@ pub(crate) fn SemanticView(props: &SemanticProps) -> Html {
                 on_gate={props.on_gate_release.clone()}
                 on_promote={props.on_promote_release.clone()}
                 on_rollback={props.on_rollback_release.clone()}
+                on_archive={props.on_archive_release.clone()}
             />
 
             <div class="semantic-main-layout">
@@ -364,6 +366,7 @@ struct OntologyReleaseControlProps {
     on_gate: Callback<String>,
     on_promote: Callback<String>,
     on_rollback: Callback<String>,
+    on_archive: Callback<String>,
 }
 
 #[component]
@@ -468,6 +471,7 @@ fn OntologyReleaseControl(props: &OntologyReleaseControlProps) -> Html {
                                 on_gate={props.on_gate.clone()}
                                 on_promote={props.on_promote.clone()}
                                 on_rollback={props.on_rollback.clone()}
+                                on_archive={props.on_archive.clone()}
                             />
                         }
                     }) } }
@@ -484,6 +488,7 @@ struct OntologyReleaseRowProps {
     on_gate: Callback<String>,
     on_promote: Callback<String>,
     on_rollback: Callback<String>,
+    on_archive: Callback<String>,
 }
 
 #[component]
@@ -499,6 +504,7 @@ fn OntologyReleaseRow(props: &OntologyReleaseRowProps) -> Html {
     let can_promote = props.release.status == "candidate" && gate_status == "passed";
     let can_rollback =
         props.release.status == "active" && props.release.rollback_target_release_id.is_some();
+    let can_archive = props.release.status != "active" && props.release.status != "archived";
     let gate = {
         let id = props.release.id.clone();
         let on_gate = props.on_gate.clone();
@@ -513,6 +519,11 @@ fn OntologyReleaseRow(props: &OntologyReleaseRowProps) -> Html {
         let id = props.release.id.clone();
         let on_rollback = props.on_rollback.clone();
         Callback::from(move |_| on_rollback.emit(id.clone()))
+    };
+    let archive = {
+        let id = props.release.id.clone();
+        let on_archive = props.on_archive.clone();
+        Callback::from(move |_| on_archive.emit(id.clone()))
     };
 
     html! {
@@ -539,6 +550,7 @@ fn OntologyReleaseRow(props: &OntologyReleaseRowProps) -> Html {
                 <button class="secondary" onclick={gate} disabled={!can_gate}>{ props.lang.text("Gate", "闸门") }</button>
                 <button onclick={promote} disabled={!can_promote}>{ props.lang.text("Promote", "发布") }</button>
                 <button class="secondary" onclick={rollback} disabled={!can_rollback}>{ props.lang.text("Rollback", "回滚") }</button>
+                <button class="secondary" onclick={archive} disabled={!can_archive}>{ props.lang.text("Archive", "归档") }</button>
             </div>
         </article>
     }
