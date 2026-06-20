@@ -16260,6 +16260,7 @@ async fn gate_ontology_release_with_actor(
             "only candidate or failed_gate ontology releases can be gated",
         ));
     }
+    let original_status = release.status.clone();
     let active_release = state
         .active_ontology_release_for_domain(&release.domain_scope)
         .await?;
@@ -16329,7 +16330,7 @@ async fn gate_ontology_release_with_actor(
         "blockers": blockers,
     });
     release.updated_at = Utc::now();
-    let release = state.update_ontology_release(release).await?;
+    let release = state.update_ontology_release(release, Some(original_status.as_str())).await?;
     state
         .append_audit_log(new_audit_log(
             None,
@@ -16418,6 +16419,7 @@ async fn archive_ontology_release_with_actor(
             "active ontology releases cannot be archived",
         ));
     }
+    let original_status = release.status.clone();
     if state
         .list_ontology_releases()
         .await?
@@ -16437,7 +16439,7 @@ async fn archive_ontology_release_with_actor(
     release.status = "archived".to_string();
     release.archived_at = Some(Utc::now());
     release.updated_at = Utc::now();
-    let release = state.update_ontology_release(release).await?;
+    let release = state.update_ontology_release(release, Some(original_status.as_str())).await?;
     state
         .append_audit_log(new_audit_log(
             None,
@@ -66782,7 +66784,7 @@ mod tests {
             ontology_release_candidate_for_test(&state, "commerce-vtest-gate-missing-policy").await;
         release.migration_policy = json!({});
         state
-            .update_ontology_release(release.clone())
+            .update_ontology_release(release.clone(), None)
             .await
             .expect("clear policy");
 

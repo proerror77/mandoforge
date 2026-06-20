@@ -4,8 +4,8 @@ CREATE TABLE IF NOT EXISTS ontology_releases (
     version TEXT NOT NULL,
     domain_scope TEXT NOT NULL,
     source_run_id UUID,
-    parent_release_id UUID REFERENCES ontology_releases(id),
-    rollback_target_release_id UUID REFERENCES ontology_releases(id),
+    parent_release_id UUID REFERENCES ontology_releases(id) ON DELETE SET NULL,
+    rollback_target_release_id UUID REFERENCES ontology_releases(id) ON DELETE SET NULL,
     status TEXT NOT NULL,
     release_class TEXT NOT NULL,
     object_count INTEGER NOT NULL DEFAULT 0,
@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS ontology_releases (
     archived_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL,
-    UNIQUE (tenant_id, version)
+    UNIQUE (tenant_id, domain_scope, version)
 );
 
 CREATE INDEX IF NOT EXISTS idx_ontology_releases_tenant_domain_status

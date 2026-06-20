@@ -121,7 +121,10 @@ impl AppState {
                 if store
                     .ontology_releases
                     .values()
-                    .any(|existing| existing.version.eq_ignore_ascii_case(&release.version))
+                    .any(|existing| {
+                        existing.version.eq_ignore_ascii_case(&release.version)
+                            && existing.domain_scope.eq_ignore_ascii_case(&release.domain_scope)
+                    })
                 {
                     return Err(AppError::bad_request(format!(
                         "ontology release version already exists: {}",
@@ -172,12 +175,21 @@ impl AppState {
     pub(crate) async fn update_ontology_release(
         &self,
         release: OntologyRelease,
+        expected_status: Option<&str>,
     ) -> Result<OntologyRelease, AppError> {
         match &self.store {
             StoreBackend::Memory(inner) => {
                 let mut store = inner.write().await;
-                if !store.ontology_releases.contains_key(&release.id) {
-                    return Err(AppError::not_found("ontology release not found"));
+                let existing = store
+                    .ontology_releases
+                    .get(&release.id)
+                    .ok_or_else(|| AppError::not_found("ontology release not found"))?;
+                if let Some(expected) = expected_status {
+                    if existing.status != expected {
+                        return Err(AppError::bad_request(
+                            "ontology release status conflict: concurrent update detected",
+                        ));
+                    }
                 }
                 store.ontology_releases.insert(release.id, release.clone());
                 Ok(release)
@@ -207,6 +219,7 @@ impl AppState {
                          archived_at = $22,
                          updated_at = $23
                      WHERE tenant_id = $1 AND id = $2
+                       AND ($24 IS NULL OR status = $24)
                      RETURNING id, version, domain_scope, source_run_id, parent_release_id, rollback_target_release_id, status, release_class, object_count, relation_count, action_count, migration_policy, gate_result, materialized_object_ids, materialized_link_ids, evidence_refs, promoted_by, promoted_at, rolled_back_by, rolled_back_at, archived_at, created_at, updated_at",
                 )
                 .bind(self.current_tenant_id())
@@ -232,9 +245,10 @@ impl AppState {
                 .bind(release.rolled_back_at)
                 .bind(release.archived_at)
                 .bind(release.updated_at)
+                .bind(expected_status)
                 .fetch_optional(pool)
                 .await?
-                .ok_or_else(|| AppError::not_found("ontology release not found"))?;
+                .ok_or_else(|| AppError::bad_request("ontology release status conflict: concurrent update detected"))?;
                 ontology_release_from_row(row)
             }
         }
@@ -395,6 +409,8 @@ impl AppState {
                     AppError::not_found("ontology release rollback target not found")
                 })?;
                 restored.status = "active".to_string();
+                restored.rolled_back_by = None;
+                restored.rolled_back_at = None;
                 restored.updated_at = now;
                 Ok((release, restored.clone()))
             }
@@ -443,7 +459,10 @@ impl AppState {
                 .await?;
                 let row = sqlx::query(
                     "UPDATE ontology_releases
-                     SET status = 'active', updated_at = $3
+                     SET status = 'active',
+                         rolled_back_by = NULL,
+                         rolled_back_at = NULL,
+                         updated_at = $3
                      WHERE tenant_id = $1 AND id = $2
                      RETURNING id, version, domain_scope, source_run_id, parent_release_id, rollback_target_release_id, status, release_class, object_count, relation_count, action_count, migration_policy, gate_result, materialized_object_ids, materialized_link_ids, evidence_refs, promoted_by, promoted_at, rolled_back_by, rolled_back_at, archived_at, created_at, updated_at",
                 )
