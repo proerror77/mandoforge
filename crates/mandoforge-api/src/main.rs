@@ -67,6 +67,7 @@ mod store_entities;
 mod store_environments;
 mod store_eval;
 mod store_events;
+mod store_github_bindings;
 mod store_governance;
 mod store_manager_plans;
 mod store_memory_writeback;
@@ -2672,6 +2673,27 @@ struct OntologyRelease {
     archived_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProjectGitHubBinding {
+    id: Uuid,
+    repo_full_name: String,
+    pack_installation_id: Uuid,
+    webhook_secret_ref: String,
+    active: bool,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpsertProjectGitHubBinding {
+    repo_full_name: String,
+    pack_installation_id: Uuid,
+    #[serde(default)]
+    webhook_secret_ref: Option<String>,
+    #[serde(default)]
+    active: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -6966,7 +6988,12 @@ async fn main() -> Result<()> {
             let tenant_setting = format!("SET mandoforge.tenant_id = '{}'", tenant_id);
             let default_tenant_id = tenant_id;
             let pool = PgPoolOptions::new()
-                .max_connections(8)
+                .max_connections(
+                    std::env::var("MANDOFORGE_DB_MAX_CONNECTIONS")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(20),
+                )
                 .after_connect(move |conn, _meta| {
                     let tenant_setting = tenant_setting.clone();
                     Box::pin(async move {
@@ -7857,6 +7884,7 @@ fn build_router(state: AppState) -> Router {
             post(sync_codex_artifacts),
         )
         .merge(handlers::packs::router())
+        .merge(handlers::github::router())
         .route(
             "/api/eval/datasets",
             get(list_eval_datasets).post(create_eval_dataset),
@@ -7985,6 +8013,7 @@ fn build_router(state: AppState) -> Router {
             get(list_approval_escalation_rules).post(create_approval_escalation_rule),
         )
         .route("/api/execution-jobs", get(list_execution_jobs))
+        .route("/api/queue/notify-wait", get(queue_notify_wait))
         .route("/api/session-loop-jobs", get(list_session_loop_jobs))
         .route(
             "/api/session-loop-jobs/{id}/run",
@@ -26301,6 +26330,74 @@ fn workflow_run_runtime_envelope(
     );
     envelope.insert("request_envelope".to_string(), request_envelope.clone());
     Value::Object(envelope)
+}
+
+pub(crate) async fn trigger_workflow_run_from_webhook(
+    state: &AppState,
+    workflow_definition_id: Uuid,
+    input_payload: Value,
+) -> Result<WorkflowRun, AppError> {
+    let definition = state.get_workflow_definition(workflow_definition_id).await?;
+    let title = format!("Webhook: {}", definition.name);
+    let session = state
+        .create_session(CreateSession {
+            agent_id: definition.default_agent_id,
+            environment_id: definition.default_environment_id,
+            title,
+            message: None,
+        })
+        .await?;
+    ensure_primary_session_thread(state, session.id).await?;
+    let now = Utc::now();
+    let input_digest = workflow_input_digest(&input_payload);
+    let execution_strategy = definition.execution_strategy.clone();
+    let runtime_adapter = definition.runtime_adapter.clone();
+    let runtime_mode = definition.runtime_mode.clone();
+    let delegation_status =
+        (execution_strategy == "delegated_runtime").then_some("submitted".to_string());
+    let runtime_envelope = workflow_run_runtime_envelope(
+        &definition,
+        &execution_strategy,
+        runtime_adapter.as_deref(),
+        runtime_mode.as_deref(),
+        None,
+        &serde_json::json!({}),
+    );
+    let run = state
+        .create_workflow_run(WorkflowRun {
+            id: Uuid::new_v4(),
+            workflow_definition_id: definition.id,
+            pack_installation_id: definition.pack_installation_id,
+            source_event_id: None,
+            source_work_item_id: None,
+            source_schedule_id: None,
+            status: "queued".to_string(),
+            primary_session_id: session.id,
+            root_task_grant_id: None,
+            input_payload,
+            input_digest,
+            execution_strategy,
+            runtime_adapter,
+            runtime_mode,
+            delegation_status,
+            external_run_ref: None,
+            runtime_event_cursor: None,
+            runtime_envelope,
+            started_at: None,
+            completed_at: None,
+            audit_trace_id: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .await?;
+    let root_grant =
+        issue_root_task_grant_for_workflow_run(state, &run, &definition, &session).await?;
+    let run = state
+        .update_workflow_run_root_task_grant(run.id, root_grant.id)
+        .await?;
+    materialize_workflow_graph_start_steps(state, &definition, &run, &session, &root_grant)
+        .await?;
+    Ok(run)
 }
 
 async fn materialize_workflow_graph_step(
@@ -60231,6 +60328,68 @@ async fn list_execution_jobs(
             })
             .collect(),
     ))
+}
+
+/// Long-poll endpoint for workers. Blocks until the Postgres queue channel fires
+/// (a new job was enqueued) or the timeout elapses. Workers call this instead of
+/// sleeping between poll cycles, cutting reaction time from O(poll_interval) to ~0ms.
+///
+/// Query params:
+///   timeout_ms — how long to wait (default 5000, max 29000)
+///
+/// Returns 200 when a notification arrived, 204 on timeout.
+async fn queue_notify_wait(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    // Require at least worker-level auth so this endpoint isn't publicly accessible.
+    if let Err(e) = authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "queue_notify_wait",
+        None,
+    )
+    .await
+    {
+        return e.into_response();
+    }
+
+    let timeout_ms = params
+        .get("timeout_ms")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(5_000)
+        .min(29_000);
+
+    let Some(channel) = state.execution_queue.notify_channel() else {
+        // Memory backend — just sleep and return, no Postgres to listen on.
+        tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
+        return StatusCode::NO_CONTENT.into_response();
+    };
+
+    let StoreBackend::Postgres(pool) = &state.store else {
+        tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
+        return StatusCode::NO_CONTENT.into_response();
+    };
+
+    let mut listener = match sqlx::postgres::PgListener::connect_with(pool).await {
+        Ok(l) => l,
+        Err(_) => {
+            tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
+            return StatusCode::NO_CONTENT.into_response();
+        }
+    };
+
+    if listener.listen(&channel).await.is_err() {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+
+    let deadline = tokio::time::sleep(Duration::from_millis(timeout_ms));
+    tokio::select! {
+        _ = listener.recv() => StatusCode::OK.into_response(),
+        _ = deadline => StatusCode::NO_CONTENT.into_response(),
+    }
 }
 
 async fn list_session_loop_jobs(

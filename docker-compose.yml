@@ -30,6 +30,7 @@ services:
       MANDOFORGE_PROVIDER_MODEL: ${MANDOFORGE_PROVIDER_MODEL:-gpt-5.4-mini}
       MANDOFORGE_SHELL_RUNNER: ${MANDOFORGE_SHELL_RUNNER:-host}
       MANDOFORGE_SHELL_DOCKER_IMAGE: ${MANDOFORGE_SHELL_DOCKER_IMAGE:-alpine:3.20}
+      MANDOFORGE_DB_MAX_CONNECTIONS: ${MANDOFORGE_DB_MAX_CONNECTIONS:-20}
     ports:
       - "8787:8787"
     depends_on:
@@ -46,7 +47,7 @@ services:
     environment:
       BASE_URL: http://api:8787
       WORKER_ID: compose-worker-1
-      POLL_INTERVAL_SECONDS: ${MANDOFORGE_WORKER_POLL_INTERVAL_SECONDS:-2}
+      POLL_INTERVAL_SECONDS: ${MANDOFORGE_WORKER_POLL_INTERVAL_SECONDS:-0.5}
     depends_on:
       postgres:
         condition: service_healthy

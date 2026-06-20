@@ -1,0 +1,37 @@
+id: swe_issue_triage
+name: SWE Issue Triage
+description: >
+  Triggered when a GitHub issue is opened or labeled.
+  Fetches issue context, analyzes it with an LLM, and posts a triage comment.
+trigger_type: webhook
+execution_strategy: sequential
+
+step_graph:
+  - key: fetch_context
+    type: agent
+    agent_ref: github-context-fetcher
+    input_mapping:
+      event_type: "$.input.action"
+      repo: "$.input.repository.full_name"
+      issue_number: "$.input.issue.number"
+      issue_title: "$.input.issue.title"
+      issue_body: "$.input.issue.body"
+    on_success: analyze
+
+  - key: analyze
+    type: agent
+    agent_ref: issue-triage-analyzer
+    input_mapping:
+      context: "$.steps.fetch_context.output"
+      issue_title: "$.input.issue.title"
+      issue_body: "$.input.issue.body"
+      labels: "$.input.issue.labels"
+    on_success: post_result
+
+  - key: post_result
+    type: agent
+    agent_ref: result-poster
+    input_mapping:
+      repo: "$.input.repository.full_name"
+      issue_number: "$.input.issue.number"
+      comment_body: "$.steps.analyze.output.comment"

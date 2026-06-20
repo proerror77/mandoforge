@@ -1,7 +1,19 @@
-FROM rust:1.91-slim AS builder
+FROM lukemathwalker/cargo-chef:latest-rust-1.91-slim AS chef
 WORKDIR /app
+
+FROM chef AS planner
 COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+COPY --from=planner /app/recipe.json recipe.json
 ARG CARGO_BUILD_JOBS
+RUN if [ -n "$CARGO_BUILD_JOBS" ]; then \
+      cargo chef cook --release -p mandoforge-api --recipe-path recipe.json --jobs "$CARGO_BUILD_JOBS"; \
+    else \
+      cargo chef cook --release -p mandoforge-api --recipe-path recipe.json; \
+    fi
+COPY . .
 RUN if [ -n "$CARGO_BUILD_JOBS" ]; then \
       cargo build --release -p mandoforge-api --bins --jobs "$CARGO_BUILD_JOBS"; \
     else \

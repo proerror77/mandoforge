@@ -78,10 +78,12 @@ async fn main() -> Result<()> {
             "mandoforge-worker requires MANDOFORGE_WORKER_TOKEN, MANDOFORGE_DEV_ADMIN_TOKEN, or MANDOFORGE_INSECURE_DEV_AUTH=true"
         );
     }
-    let poll_interval = env::var("POLL_INTERVAL_SECONDS")
+    let poll_interval_ms = env::var("POLL_INTERVAL_SECONDS")
         .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(2);
+        .and_then(|value| value.parse::<f64>().ok())
+        .map(|secs| (secs * 1000.0) as u64)
+        .unwrap_or(2_000)
+        .max(100);
     let max_jobs = env::var("MAX_JOBS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
@@ -232,10 +234,31 @@ async fn main() -> Result<()> {
             println!("mandoforge worker processed {processed} job(s)");
             return Ok(());
         }
-        if poll_interval == 0 {
+        if poll_interval_ms == 0 {
             bail!("POLL_INTERVAL_SECONDS=0 requires RUN_ONCE=1 or MAX_JOBS > 0");
         }
-        sleep(Duration::from_secs(poll_interval)).await;
+        // Try the push-notify wait endpoint first. If it returns 200 a job was
+        // just enqueued and we loop immediately. On timeout (204) or any error
+        // we fall through and do a normal poll cycle — this keeps the worker
+        // correct even when the endpoint is unavailable.
+        let notified = client
+            .get(format!(
+                "{base_url}/api/queue/notify-wait?timeout_ms={poll_interval_ms}"
+            ))
+            .worker_auth(&worker_subject, &worker_roles, api_token.as_deref())
+            .worker_environment(worker_environment_id.as_deref())
+            .worker_pool(worker_pool.as_deref())
+            .timeout(Duration::from_millis(poll_interval_ms + 5_000))
+            .send()
+            .await
+            .ok()
+            .map(|r| r.status() == StatusCode::OK)
+            .unwrap_or(false);
+        if !notified {
+            // Endpoint not available or timed out — brief sleep to avoid
+            // hammering the API if the wait endpoint is down.
+            sleep(Duration::from_millis(poll_interval_ms)).await;
+        }
     }
 }
 

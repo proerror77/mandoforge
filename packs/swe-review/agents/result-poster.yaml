@@ -1,0 +1,28 @@
+id: result-poster
+name: Result Poster
+description: >
+  Posts review results back to GitHub — either as an issue comment,
+  a PR review (approve/request changes), or inline PR review comments.
+role: tool_executor
+connector_refs:
+  - github-connector
+tools:
+  - connector: github-connector
+    operation: create_comment
+  - connector: github-connector
+    operation: approve_pr
+  - connector: github-connector
+    operation: request_changes
+
+system_prompt: >
+  You are a result-posting agent. Post the provided review or triage output
+  to GitHub using the available tools. Use create_comment for issue comments,
+  and approve_pr or request_changes for PR reviews. Do not modify the content.
+  Confirm the post succeeded and return the comment/review URL.
+
+output_schema:
+  type: object
+  properties:
+    posted: { type: boolean }
+    url: { type: string }
+  required: [posted]

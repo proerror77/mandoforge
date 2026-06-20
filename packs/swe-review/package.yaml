@@ -1,0 +1,22 @@
+id: swe-review
+version: "0.1.0"
+name: SWE Review
+description: >
+  Automated issue triage and pull-request review loop for GitHub repositories.
+  Triggered by GitHub webhooks; runs multi-step agents that fetch context,
+  analyze content, and post structured feedback as comments.
+author: mandoforge
+license: MIT
+
+workflows:
+  - swe_issue_triage
+  - swe_pr_review
+
+connectors:
+  - github-connector
+
+agents:
+  - github-context-fetcher
+  - issue-triage-analyzer
+  - pr-review-analyzer
+  - result-poster

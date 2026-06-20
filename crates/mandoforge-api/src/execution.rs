@@ -491,6 +491,9 @@ async fn execute_approved_native_connector_or_generic_tool(
         if crate::native_connectors::is_supported_ecommerce_connector(connector_id) {
             return execute_approved_ecommerce_native_connector(state, approval, tool_call).await;
         }
+        if crate::native_connectors::is_supported_github_connector(connector_id) {
+            return execute_approved_github_native_connector(state, approval, tool_call).await;
+        }
     }
 
     let result = if tool_call.normalized_args_hash.is_some() {
@@ -523,6 +526,59 @@ async fn execute_approved_ecommerce_native_connector(
             .await?;
     let adapter_result =
         crate::native_connectors::execute_ecommerce_connector_call(&tool_call.args).await?;
+    let result = json!({
+        "approval": "approved",
+        "status": "native_connector_committed",
+        "approval_commit_token_id": token.id,
+        "normalized_args_hash": token.normalized_args_hash,
+        "target_binding": token.target_binding,
+        "adapter_result": adapter_result,
+    });
+    state
+        .append_event(
+            "tool",
+            Some(tool_call.id),
+            approval.session_id,
+            "tool.result",
+            json!({"tool_call_id": tool_call.id, "tool": tool_call.tool_name, "content": result}),
+        )
+        .await?;
+    state
+        .update_tool_call_status(tool_call.id, "completed", Some(result.clone()), None)
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(approval.session_id),
+            "worker",
+            Some(tool_call.id),
+            "tool.completed",
+            "tool_call",
+            Some(tool_call.id),
+            json!({
+                "tool": tool_call.tool_name,
+                "approval_id": approval.id,
+                "approval_commit_token_id": token.id,
+                "normalized_args_hash": token.normalized_args_hash,
+                "connector_id": tool_call.args.get("connector_id").cloned().unwrap_or(Value::Null),
+                "operation": tool_call.args.get("operation").cloned().unwrap_or(Value::Null),
+                "adapter_status": result["adapter_result"]["status"],
+                "resumed_after_approval": true
+            }),
+        ))
+        .await?;
+    Ok(())
+}
+
+async fn execute_approved_github_native_connector(
+    state: &AppState,
+    approval: &Approval,
+    tool_call: &ToolCall,
+) -> Result<(), AppError> {
+    let token =
+        crate::consume_valid_approval_commit_token_for_tool_call(state, approval, tool_call)
+            .await?;
+    let adapter_result =
+        crate::native_connectors::execute_github_connector_call(&tool_call.args).await?;
     let result = json!({
         "approval": "approved",
         "status": "native_connector_committed",
