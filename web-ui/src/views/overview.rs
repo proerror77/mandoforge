@@ -85,7 +85,7 @@ pub(crate) fn OverviewView(props: &OverviewProps) -> Html {
                             number="01"
                             icon="◎"
                             title={lang.text("Managed Agents", "托管智能体")}
-                            detail={lang.text("Observe fleet roles, sessions, tool calls, and approval pressure.", "观察智能体职责、会话、工具调用和审批压力。")}
+                            detail={lang.text("Running agents — observe fleet roles, sessions, tool calls, and approval pressure.", "Running agents — 观察智能体职责、会话、工具调用和审批压力。")}
                             value={if lang == UiLang::En { format!("{active_sessions} active") } else { format!("{active_sessions} 运行") }}
                             status={if pending_approvals > 0 { lang.text("REVIEW", "需复核") } else { lang.text("READY", "就绪") }}
                             tone={if pending_approvals > 0 { "warn" } else { "good" }}

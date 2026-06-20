@@ -33,8 +33,8 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 const DEFAULT_TENANT_ID: &str = "00000000-0000-4000-8000-000000000001";
-const CONSOLE_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-sBa2leB9IO7P/9QdCbuv6Dpah/TyJJqedeTA8EMZR1g='; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
-const CONSOLE_DEV_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-sBa2leB9IO7P/9QdCbuv6Dpah/TyJJqedeTA8EMZR1g='; connect-src 'self' http://127.0.0.1:* http://localhost:*; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+const CONSOLE_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-w1lKnuwwmhE0Xrkx/vuamFpvJ0MhJzm3MkSKnpQOQFQ='; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+const CONSOLE_DEV_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-w1lKnuwwmhE0Xrkx/vuamFpvJ0MhJzm3MkSKnpQOQFQ='; connect-src 'self' http://127.0.0.1:* http://localhost:*; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
 
 mod authorization;
 mod codex_app_server;
@@ -46,6 +46,7 @@ mod handlers;
 mod mcp_gateway;
 mod native_connectors;
 mod observability;
+mod ontology_source_adapters;
 mod policy;
 mod provider;
 mod remote_computer_runner;
@@ -2409,6 +2410,8 @@ struct CreateOntologyOnboardingRunRequest {
     industry: Option<String>,
     #[serde(default)]
     source_mode: Option<String>,
+    #[serde(default)]
+    source_payload: Option<ontology_source_adapters::OntologySourcePayload>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2419,6 +2422,12 @@ struct CreateOntologyReleaseCandidateRequest {
     migration_policy: Option<Value>,
     #[serde(default)]
     release_class: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OntologyReleaseListQuery {
+    #[serde(default)]
+    domain_scope: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -12742,6 +12751,13 @@ async fn create_ontology_onboarding_run(
     )
     .await?;
     let principal = principal_from_request(&state, &headers).await?;
+    if let Some(payload) = input.source_payload {
+        let adapted = ontology_source_adapters::adapt_payload(payload, None)?;
+        return Ok(Json(
+            create_ontology_onboarding_run_from_adapter(&state, adapted, &principal.subject_id)
+                .await?,
+        ));
+    }
     let industry = input.industry.as_deref().unwrap_or("ecommerce");
     let source_mode = input.source_mode.as_deref().unwrap_or("demo_ecommerce");
     Ok(Json(
@@ -12790,6 +12806,7 @@ async fn get_ontology_onboarding_run(
 
 async fn list_ontology_releases(
     State(state): State<AppState>,
+    Query(query): Query<OntologyReleaseListQuery>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<OntologyRelease>>, AppError> {
     authorize_request(
@@ -12800,7 +12817,11 @@ async fn list_ontology_releases(
         None,
     )
     .await?;
-    Ok(Json(state.list_ontology_releases().await?))
+    Ok(Json(
+        state
+            .list_ontology_releases_for_domain(query.domain_scope.as_deref())
+            .await?,
+    ))
 }
 
 async fn get_ontology_release(
@@ -15634,6 +15655,88 @@ async fn create_ontology_onboarding_run_with_actor(
     })
 }
 
+async fn create_ontology_onboarding_run_from_adapter(
+    state: &AppState,
+    adapted: ontology_source_adapters::OntologySourceAdapterOutput,
+    actor_subject: &str,
+) -> Result<OntologyOnboardingRun, AppError> {
+    let run_id = Uuid::new_v4();
+    let datasets = adapted.bundle.datasets.clone();
+    let profiles = ontology_profile_demo_datasets(&datasets);
+    let seed = adapted.seed.clone();
+    let proposals = ontology_generate_seed_proposals_for_run(run_id, &seed, &datasets, &profiles);
+    for proposal in &proposals {
+        state
+            .create_semantic_object(CreateSemanticObject {
+                source_id: None,
+                object_type: "ontology_onboarding_proposal".to_string(),
+                object_key: ontology_onboarding_proposal_object_key(run_id, proposal.id),
+                title: format!("Ontology onboarding proposal: {}", proposal.name),
+                summary: format!(
+                    "{} proposal from {} adapter; review required before materialization.",
+                    proposal.proposal_type, adapted.adapter_type
+                ),
+                content: ontology_onboarding_proposal_content(run_id, proposal, false, None)?,
+                semantic_scopes: json!({
+                    "domain_scope": seed.domain_scope,
+                    "workflow_scope": "enterprise-ontology-fast-onboarding",
+                    "memory_scope": "ontology",
+                    "share_policy": "review_required",
+                }),
+                source_uri: Some(format!(
+                    "mandoforge://ontology/onboarding/runs/{run_id}/proposals/{}",
+                    proposal.id
+                )),
+                provenance: json!({
+                    "source": "ontology_onboarding.adapter_run",
+                    "adapter_type": adapted.adapter_type,
+                    "source_label": adapted.source_label,
+                    "schema_only": adapted.schema_only,
+                    "authority": "proposal_only",
+                    "generated_at": Utc::now(),
+                }),
+                trust_level: "source_attested".to_string(),
+                freshness: "current".to_string(),
+                status: "active".to_string(),
+            })
+            .await?;
+    }
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "ontology_onboarding.adapter_run_created",
+            "ontology_onboarding_run",
+            Some(run_id),
+            json!({
+                "subject": actor_subject,
+                "run_id": run_id,
+                "adapter_type": adapted.adapter_type,
+                "source_label": adapted.source_label,
+                "schema_only": adapted.schema_only,
+                "dataset_count": datasets.len(),
+                "proposal_count": proposals.len(),
+                "warnings": adapted.warnings,
+            }),
+        ))
+        .await?;
+    Ok(OntologyOnboardingRun {
+        id: run_id,
+        status: "pending_review".to_string(),
+        source_mode: adapted.bundle.source_mode.clone(),
+        dataset_count: datasets.len(),
+        profile_count: profiles.len(),
+        proposal_count: proposals.len(),
+        approved_count: 0,
+        materialized_count: 0,
+        datasets,
+        profiles,
+        proposals,
+        generated_at: Utc::now(),
+    })
+}
+
 fn ontology_available_seed_packs() -> Vec<OntologySeedPack> {
     vec![
         ontology_ecommerce_seed_pack(),
@@ -15991,6 +16094,9 @@ async fn create_ontology_release_candidate_with_actor(
         .first()
         .map(ontology_proposal_domain_scope)
         .unwrap_or_else(|| "commerce".to_string());
+    let active_release = state
+        .active_ontology_release_for_domain(&domain_scope)
+        .await?;
     let materialized_object_ids =
         ontology_release_materialized_semantic_object_ids(state, &proposals).await?;
     let materialized_link_ids =
@@ -16010,8 +16116,8 @@ async fn create_ontology_release_candidate_with_actor(
         version,
         domain_scope,
         source_run_id: Some(run.id),
-        parent_release_id: None,
-        rollback_target_release_id: None,
+        parent_release_id: active_release.as_ref().map(|release| release.id),
+        rollback_target_release_id: active_release.as_ref().map(|release| release.id),
         status: "candidate".to_string(),
         release_class: ontology_release_class(input.release_class.as_deref())?,
         object_count: proposals
@@ -16246,6 +16352,7 @@ async fn gate_ontology_release_with_actor(
             "only candidate or failed_gate ontology releases can be gated",
         ));
     }
+    let original_status = release.status.clone();
     let active_release = state
         .active_ontology_release_for_domain(&release.domain_scope)
         .await?;
@@ -16286,11 +16393,20 @@ async fn gate_ontology_release_with_actor(
             "write-like ontology actions must carry transaction profile evidence".to_string(),
         );
     }
-    if release.rollback_target_release_id.is_none() {
-        if let Some(active) = active_release {
-            release.rollback_target_release_id = Some(active.id);
-            release.parent_release_id = Some(active.id);
-        }
+    if active_release.is_some() && release.rollback_target_release_id.is_none() {
+        checks.push(json!({
+            "id": "rollback_target",
+            "status": "failed",
+        }));
+        blockers.push(
+            "release candidate must declare rollback target when the domain already has an active release"
+                .to_string(),
+        );
+    } else {
+        checks.push(json!({
+            "id": "rollback_target",
+            "status": "passed",
+        }));
     }
     let passed = blockers.is_empty();
     release.status = if passed {
@@ -16306,7 +16422,9 @@ async fn gate_ontology_release_with_actor(
         "blockers": blockers,
     });
     release.updated_at = Utc::now();
-    let release = state.update_ontology_release(release).await?;
+    let release = state
+        .update_ontology_release(release, Some(original_status.as_str()))
+        .await?;
     state
         .append_audit_log(new_audit_log(
             None,
@@ -16333,44 +16451,9 @@ async fn promote_ontology_release_with_actor(
     release_id: Uuid,
     actor_subject: &str,
 ) -> Result<OntologyRelease, AppError> {
-    let mut release = state.get_ontology_release(release_id).await?;
-    if release.status != "candidate" {
-        return Err(AppError::bad_request(
-            "only candidate ontology releases can be promoted",
-        ));
-    }
-    if release.gate_result.get("status").and_then(Value::as_str) != Some("passed") {
-        return Err(AppError::bad_request(
-            "ontology release promotion requires a passed gate",
-        ));
-    }
-    let active_releases = state
-        .list_ontology_releases()
-        .await?
-        .into_iter()
-        .filter(|candidate| {
-            candidate.status == "active"
-                && candidate
-                    .domain_scope
-                    .eq_ignore_ascii_case(&release.domain_scope)
-        })
-        .collect::<Vec<_>>();
-    let previous_active = active_releases
-        .iter()
-        .max_by_key(|candidate| candidate.promoted_at.or(Some(candidate.created_at)))
-        .cloned();
-    for mut active in active_releases {
-        active.status = "superseded".to_string();
-        active.updated_at = Utc::now();
-        state.update_ontology_release(active).await?;
-    }
-    release.rollback_target_release_id = previous_active.as_ref().map(|active| active.id);
-    release.parent_release_id = previous_active.as_ref().map(|active| active.id);
-    release.status = "active".to_string();
-    release.promoted_by = Some(actor_subject.to_string());
-    release.promoted_at = Some(Utc::now());
-    release.updated_at = Utc::now();
-    let release = state.update_ontology_release(release).await?;
+    let (release, previous_active) = state
+        .promote_ontology_release_atomically(release_id, actor_subject)
+        .await?;
     state
         .append_audit_log(new_audit_log(
             None,
@@ -16396,34 +16479,9 @@ async fn rollback_ontology_release_with_actor(
     release_id: Uuid,
     actor_subject: &str,
 ) -> Result<OntologyRelease, AppError> {
-    let mut release = state.get_ontology_release(release_id).await?;
-    if release.status != "active" {
-        return Err(AppError::bad_request(
-            "only active ontology releases can be rolled back",
-        ));
-    }
-    let target_id = release
-        .rollback_target_release_id
-        .ok_or_else(|| AppError::bad_request("ontology release rollback target is missing"))?;
-    let mut target = state.get_ontology_release(target_id).await?;
-    if target.domain_scope != release.domain_scope {
-        return Err(AppError::bad_request(
-            "ontology release rollback target must share domain_scope",
-        ));
-    }
-    if target.archived_at.is_some() || target.status == "archived" {
-        return Err(AppError::bad_request(
-            "ontology release rollback target is archived",
-        ));
-    }
-    release.status = "rolled_back".to_string();
-    release.rolled_back_by = Some(actor_subject.to_string());
-    release.rolled_back_at = Some(Utc::now());
-    release.updated_at = Utc::now();
-    state.update_ontology_release(release.clone()).await?;
-    target.status = "active".to_string();
-    target.updated_at = Utc::now();
-    let target = state.update_ontology_release(target).await?;
+    let (release, target) = state
+        .rollback_ontology_release_atomically(release_id, actor_subject)
+        .await?;
     state
         .append_audit_log(new_audit_log(
             None,
@@ -16455,6 +16513,7 @@ async fn archive_ontology_release_with_actor(
             "active ontology releases cannot be archived",
         ));
     }
+    let original_status = release.status.clone();
     if state
         .list_ontology_releases()
         .await?
@@ -16474,7 +16533,9 @@ async fn archive_ontology_release_with_actor(
     release.status = "archived".to_string();
     release.archived_at = Some(Utc::now());
     release.updated_at = Utc::now();
-    let release = state.update_ontology_release(release).await?;
+    let release = state
+        .update_ontology_release(release, Some(original_status.as_str()))
+        .await?;
     state
         .append_audit_log(new_audit_log(
             None,
@@ -18619,26 +18680,40 @@ async fn build_ontology_engine_readiness(
 ) -> Result<OntologyEngineReadiness, AppError> {
     let registry = ontology_registry();
     let releases = state.list_ontology_releases().await?;
+    let lifecycle_releases = releases
+        .iter()
+        .filter(|release| {
+            matches!(
+                release.status.as_str(),
+                "candidate" | "active" | "superseded" | "rolled_back"
+            )
+        })
+        .collect::<Vec<_>>();
     let active_releases = releases
         .iter()
         .filter(|release| release.status == "active")
         .collect::<Vec<_>>();
+    let lifecycle_release_evidence_class =
+        ontology_active_release_evidence_class(&lifecycle_releases);
+    let lifecycle_release_evidence = ontology_active_release_evidence(&lifecycle_releases);
+    let has_lifecycle_release = !lifecycle_releases.is_empty();
     let active_release_evidence_class = ontology_active_release_evidence_class(&active_releases);
     let active_release_evidence = ontology_active_release_evidence(&active_releases);
-    let has_active_release = !active_releases.is_empty();
     let active_release_materialized = active_releases.iter().any(|release| {
-        release
-            .materialized_object_ids
-            .as_array()
-            .is_some_and(|ids| !ids.is_empty())
-            || release
-                .materialized_link_ids
+        release.gate_result.get("status").and_then(Value::as_str) == Some("passed")
+            && (release
+                .materialized_object_ids
                 .as_array()
                 .is_some_and(|ids| !ids.is_empty())
+                || release
+                    .materialized_link_ids
+                    .as_array()
+                    .is_some_and(|ids| !ids.is_empty()))
     });
-    let active_release_migration_ready = active_releases
-        .iter()
-        .any(|release| ontology_release_migration_policy_ready(&release.migration_policy));
+    let active_release_migration_ready = active_releases.iter().any(|release| {
+        release.gate_result.get("status").and_then(Value::as_str) == Some("passed")
+            && ontology_release_migration_policy_ready(&release.migration_policy)
+    });
     let checks = vec![
         ontology_engine_check(
             "core-registry",
@@ -18712,24 +18787,24 @@ async fn build_ontology_engine_readiness(
         ontology_engine_check(
             "domain-ontology-lifecycle",
             "Domain ontology lifecycle",
-            if has_active_release { "ready" } else { "blocked" },
-            &active_release_evidence_class,
-            if has_active_release {
-                active_release_evidence.clone()
+            if has_lifecycle_release { "ready" } else { "blocked" },
+            &lifecycle_release_evidence_class,
+            if has_lifecycle_release {
+                lifecycle_release_evidence
             } else {
                 vec![
                 "workflow packs can declare ontology seeds and ontology action types".to_string(),
                 "ontology_expansion proposals are persisted as semantic objects".to_string(),
                 ]
             },
-            if has_active_release {
+            if has_lifecycle_release {
                 Vec::new()
             } else {
                 vec![
                 "domain ontology versions cannot yet be promoted, rolled back, or migrated as first-class registry releases".to_string(),
                 ]
             },
-            if has_active_release {
+            if has_lifecycle_release {
                 vec![
                     "bind promoted ontology releases to customer workflow rollout policy".to_string(),
                 ]
@@ -37946,7 +38021,7 @@ async fn active_ontology_release_metadata_for_scopes(
     if let Some(release) = state.active_ontology_release_for_domain(scope).await? {
         return Ok(Some(ontology_release_runtime_metadata(&release)));
     }
-    Ok(None)
+    Ok(Some(Value::Null))
 }
 
 fn ontology_release_runtime_metadata(release: &OntologyRelease) -> Value {
@@ -66861,7 +66936,7 @@ mod tests {
             ontology_release_candidate_for_test(&state, "commerce-vtest-gate-missing-policy").await;
         release.migration_policy = json!({});
         state
-            .update_ontology_release(release.clone())
+            .update_ontology_release(release.clone(), None)
             .await
             .expect("clear policy");
 
@@ -94151,7 +94226,23 @@ not json
         .await
         .expect("release lookup");
 
-        assert!(metadata.is_none());
+        assert_eq!(metadata, Some(Value::Null));
+    }
+
+    #[tokio::test]
+    async fn rendered_context_marks_missing_active_ontology_release_as_null() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        let metadata = active_ontology_release_metadata_for_scopes(
+            &state,
+            &json!({
+                "domain_scope": "commerce",
+                "workflow_scope": "ontology-release-runtime"
+            }),
+        )
+        .await
+        .expect("release metadata lookup");
+
+        assert_eq!(metadata, Some(Value::Null));
     }
 
     #[tokio::test]
