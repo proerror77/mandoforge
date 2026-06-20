@@ -905,6 +905,47 @@ fn build_platform_output(
     }
 }
 
+fn overlay_export_csv(
+    out: &mut OntologySourceAdapterOutput,
+    export_file: Option<&RawFilePayload>,
+    bytes: Option<&[u8]>,
+    table_name: &str,
+    source_system: &str,
+) {
+    let Some(file) = export_file else {
+        return;
+    };
+    let Ok(raw) = bytes_or_inline(bytes, file) else {
+        return;
+    };
+    let Ok(csv_out) = adapt_csv(
+        CsvAdapterInput {
+            file: file.clone(),
+            delimiter: None,
+            sample_row_count: Some(20),
+            table_name_override: Some(table_name.to_string()),
+            source_system_override: Some(source_system.to_string()),
+        },
+        &raw,
+    ) else {
+        return;
+    };
+    let Some(target) = out
+        .bundle
+        .datasets
+        .iter_mut()
+        .find(|dataset| dataset.table_name == table_name)
+    else {
+        return;
+    };
+    let Some(source) = csv_out.bundle.datasets.first() else {
+        return;
+    };
+    target.rows = source.rows.clone();
+    target.fields = source.fields.clone();
+    out.schema_only = false;
+}
+
 fn rel(
     name: &str,
     from: &str,
@@ -1886,32 +1927,7 @@ pub fn adapt_shopify(
         metrics,
         actions,
     );
-    // If an export file was provided, overlay real row data on the orders table
-    if let (Some(file), Some(raw)) = (&input.export_file, bytes) {
-        if let Ok(csv_out) = adapt_csv(
-            CsvAdapterInput {
-                file: file.clone(),
-                delimiter: None,
-                sample_row_count: Some(20),
-                table_name_override: Some("orders".to_string()),
-                source_system_override: Some(label.to_string()),
-            },
-            raw,
-        ) {
-            if let Some(ds) = out
-                .bundle
-                .datasets
-                .iter_mut()
-                .find(|d| d.table_name == "orders")
-            {
-                if let Some(src) = csv_out.bundle.datasets.first() {
-                    ds.rows = src.rows.clone();
-                    ds.fields = src.fields.clone();
-                }
-            }
-            out.schema_only = false;
-        }
-    }
+    overlay_export_csv(&mut out, input.export_file.as_ref(), bytes, "orders", label);
     Ok(out)
 }
 
@@ -2003,7 +2019,7 @@ fn amz_table_for(t: &AmazonTable) -> (&'static str, &'static [FieldSpec]) {
 
 pub fn adapt_amazon_seller_central(
     input: AmazonSellerCentralAdapterInput,
-    _bytes: Option<&[u8]>,
+    bytes: Option<&[u8]>,
 ) -> Result<OntologySourceAdapterOutput, AppError> {
     let all = vec![
         AmazonTable::Orders,
@@ -2086,7 +2102,7 @@ pub fn adapt_amazon_seller_central(
             json!({"reads":["Return"]}),
         ),
     ];
-    Ok(build_platform_output(
+    let mut out = build_platform_output(
         "ecommerce",
         "amazon",
         "amazon_seller_central_export",
@@ -2097,7 +2113,9 @@ pub fn adapt_amazon_seller_central(
         relations,
         metrics,
         actions,
-    ))
+    );
+    overlay_export_csv(&mut out, input.export_file.as_ref(), bytes, "orders", label);
+    Ok(out)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2186,7 +2204,7 @@ fn tb_table_for(t: &TaobaoTable) -> (&'static str, &'static [FieldSpec]) {
 
 pub fn adapt_taobao(
     input: TaobaoAdapterInput,
-    _bytes: Option<&[u8]>,
+    bytes: Option<&[u8]>,
 ) -> Result<OntologySourceAdapterOutput, AppError> {
     let all = vec![
         TaobaoTable::Trades,
@@ -2251,7 +2269,7 @@ pub fn adapt_taobao(
             json!({"reads":["Refund","Trade"]}),
         ),
     ];
-    Ok(build_platform_output(
+    let mut out = build_platform_output(
         "ecommerce",
         "taobao",
         "taobao_export",
@@ -2262,7 +2280,9 @@ pub fn adapt_taobao(
         relations,
         metrics,
         actions,
-    ))
+    );
+    overlay_export_csv(&mut out, input.export_file.as_ref(), bytes, "trades", label);
+    Ok(out)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2363,7 +2383,7 @@ fn tt_table_for(t: &TiktokShopTable) -> (&'static str, &'static [FieldSpec]) {
 
 pub fn adapt_tiktok_shop(
     input: TiktokShopAdapterInput,
-    _bytes: Option<&[u8]>,
+    bytes: Option<&[u8]>,
 ) -> Result<OntologySourceAdapterOutput, AppError> {
     let all = vec![
         TiktokShopTable::Orders,
@@ -2430,7 +2450,7 @@ pub fn adapt_tiktok_shop(
             json!({"reads":["Creator"]}),
         ),
     ];
-    Ok(build_platform_output(
+    let mut out = build_platform_output(
         "ecommerce",
         "tiktok_shop",
         "tiktok_shop_export",
@@ -2441,7 +2461,9 @@ pub fn adapt_tiktok_shop(
         relations,
         metrics,
         actions,
-    ))
+    );
+    overlay_export_csv(&mut out, input.export_file.as_ref(), bytes, "orders", label);
+    Ok(out)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2527,7 +2549,7 @@ fn temu_table_for(t: &TemuTable) -> (&'static str, &'static [FieldSpec]) {
 
 pub fn adapt_temu(
     input: TemuAdapterInput,
-    _bytes: Option<&[u8]>,
+    bytes: Option<&[u8]>,
 ) -> Result<OntologySourceAdapterOutput, AppError> {
     let all = vec![
         TemuTable::Orders,
@@ -2592,7 +2614,7 @@ pub fn adapt_temu(
             json!({"reads":["Product","Order"]}),
         ),
     ];
-    Ok(build_platform_output(
+    let mut out = build_platform_output(
         "ecommerce",
         "temu",
         "temu_export",
@@ -2603,7 +2625,9 @@ pub fn adapt_temu(
         relations,
         metrics,
         actions,
-    ))
+    );
+    overlay_export_csv(&mut out, input.export_file.as_ref(), bytes, "orders", label);
+    Ok(out)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2700,7 +2724,7 @@ fn wc_table_for(t: &WoocommerceTable) -> (&'static str, &'static [FieldSpec]) {
 
 pub fn adapt_woocommerce(
     input: WoocommerceAdapterInput,
-    _bytes: Option<&[u8]>,
+    bytes: Option<&[u8]>,
 ) -> Result<OntologySourceAdapterOutput, AppError> {
     let all = vec![
         WoocommerceTable::Orders,
@@ -2767,7 +2791,7 @@ pub fn adapt_woocommerce(
             json!({"reads":["Product"]}),
         ),
     ];
-    Ok(build_platform_output(
+    let mut out = build_platform_output(
         "ecommerce",
         "woocommerce",
         "woocommerce_export",
@@ -2778,7 +2802,9 @@ pub fn adapt_woocommerce(
         relations,
         metrics,
         actions,
-    ))
+    );
+    overlay_export_csv(&mut out, input.export_file.as_ref(), bytes, "orders", label);
+    Ok(out)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2833,4 +2859,42 @@ fn bytes_or_inline(
         return Ok(b.to_vec());
     }
     file.decode_bytes()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ecommerce_export_file_overlays_primary_table_rows() {
+        let csv = "amazon_order_id,purchase_date,order_status,order_total\nA-100,2026-06-01,Shipped,42.50\n";
+        let out = adapt_amazon_seller_central(
+            AmazonSellerCentralAdapterInput {
+                export_file: Some(RawFilePayload {
+                    filename: "amazon-orders.csv".to_string(),
+                    content_base64: Some(base64::engine::general_purpose::STANDARD.encode(csv)),
+                }),
+                tables: Some(vec![AmazonTable::Orders]),
+                instance_label: Some("amazon_test".to_string()),
+            },
+            None,
+        )
+        .expect("adapter output");
+
+        assert!(!out.schema_only);
+        let orders = out
+            .bundle
+            .datasets
+            .iter()
+            .find(|dataset| dataset.table_name == "orders")
+            .expect("orders dataset");
+        assert_eq!(orders.rows.len(), 1);
+        assert_eq!(orders.rows[0]["amazon_order_id"], json!("A-100"));
+        assert!(
+            orders
+                .fields
+                .iter()
+                .any(|field| field.name == "order_total" && field.field_type == "decimal")
+        );
+    }
 }
