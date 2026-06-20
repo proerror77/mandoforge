@@ -13,6 +13,8 @@ seed ontology + source data/profile evidence
   -> review graph and prompt packet
   -> human proposal review
   -> semantic materialization
+  -> ontology release candidate
+  -> gate, promote, and rollback
   -> compiled tool specs for agents
 ```
 
@@ -191,6 +193,78 @@ curl -sS "${AUTH_HEADERS[@]}" \
   "$BASE_URL/api/ontology/onboarding/runs/$run_id/tool-specs" | jq
 ```
 
+## Release Loop
+
+Materialization proves reviewed proposals can become semantic objects and links.
+The production loop then turns that materialized evidence into a versioned
+ontology release.
+
+Create a release candidate from a materialized run:
+
+```bash
+release_id="$(
+  curl -sS -X POST "${AUTH_HEADERS[@]}" \
+    -H "content-type: application/json" \
+    -d '{"version":"commerce-v1","release_class":"customer_grade"}' \
+    "$BASE_URL/api/ontology/onboarding/runs/$run_id/release-candidate" | jq -r '.id'
+)"
+echo "$release_id"
+```
+
+Gate and promote the candidate:
+
+```bash
+curl -sS -X POST "${AUTH_HEADERS[@]}" \
+  "$BASE_URL/api/ontology/releases/$release_id/gate" | jq
+
+curl -sS -X POST "${AUTH_HEADERS[@]}" \
+  "$BASE_URL/api/ontology/releases/$release_id/promote" | jq
+```
+
+List or inspect releases:
+
+```bash
+curl -sS "${AUTH_HEADERS[@]}" \
+  "$BASE_URL/api/ontology/releases" | jq
+
+curl -sS "${AUTH_HEADERS[@]}" \
+  "$BASE_URL/api/ontology/releases/$release_id" | jq
+```
+
+Rollback a newer active release to its previous active release:
+
+```bash
+curl -sS -X POST "${AUTH_HEADERS[@]}" \
+  "$BASE_URL/api/ontology/releases/$new_release_id/rollback" | jq
+```
+
+Rollback does not delete semantic objects or links. It changes which release is
+active for the domain, so runtime context rendering can pin the active ontology
+version while preserving audit history.
+
+Render a context packet and check the pinned release metadata:
+
+```bash
+curl -sS -X POST "${AUTH_HEADERS[@]}" \
+  -H "content-type: application/json" \
+  -d '{"allow_on_demand_fetch":true}' \
+  "$BASE_URL/api/context-packets/$context_packet_id/render" \
+  | jq '.ontology_scope.ontology_release'
+```
+
+Read release-backed readiness:
+
+```bash
+curl -sS "${AUTH_HEADERS[@]}" \
+  "$BASE_URL/api/ontology/engine-readiness" | jq
+```
+
+After at least one active release exists, `domain-ontology-lifecycle`,
+`approved-release-materialization`, and `migration-policy` should report
+`ready`. `conflict-trust-runtime-gates` remains `pilot_ready` until customer
+workflow policy evidence binds trust and freshness downgrade behavior to every
+high-risk lane, so overall readiness is still expected to be `blocked`.
+
 Inspect confidence calibration:
 
 ```bash
@@ -222,6 +296,20 @@ The gate writes evidence under:
 
 ```text
 .mandoforge/enterprise-ontology-fast-onboarding/
+```
+
+Run the release-loop gate against a running local API:
+
+```bash
+BASE_URL=http://127.0.0.1:8787 \
+./scripts/ontology-release-loop-gate.sh
+```
+
+The release-loop gate writes candidate, gate, promote, rollback, release list,
+and readiness evidence under:
+
+```text
+.mandoforge/ontology-release-loop/
 ```
 
 Expected evidence includes:

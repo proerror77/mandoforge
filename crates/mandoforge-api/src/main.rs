@@ -66830,6 +66830,62 @@ mod tests {
         assert_ne!(first.version, second.version);
     }
 
+    #[tokio::test]
+    async fn ontology_release_versions_are_unique_per_domain() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        let now = Utc::now();
+        let base_release = OntologyRelease {
+            id: Uuid::new_v4(),
+            version: "shared-v1".to_string(),
+            domain_scope: "commerce".to_string(),
+            source_run_id: None,
+            parent_release_id: None,
+            rollback_target_release_id: None,
+            status: "candidate".to_string(),
+            release_class: "repo_controlled".to_string(),
+            object_count: 0,
+            relation_count: 0,
+            action_count: 0,
+            migration_policy: default_ontology_release_migration_policy(),
+            gate_result: json!({}),
+            materialized_object_ids: json!([]),
+            materialized_link_ids: json!([]),
+            evidence_refs: json!([]),
+            promoted_by: None,
+            promoted_at: None,
+            rolled_back_by: None,
+            rolled_back_at: None,
+            archived_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+
+        state
+            .create_ontology_release(base_release.clone())
+            .await
+            .expect("first domain release");
+
+        let mut other_domain = base_release.clone();
+        other_domain.id = Uuid::new_v4();
+        other_domain.domain_scope = "insurance".to_string();
+        state
+            .create_ontology_release(other_domain)
+            .await
+            .expect("same version in another domain");
+
+        let mut duplicate_domain = base_release;
+        duplicate_domain.id = Uuid::new_v4();
+        duplicate_domain.domain_scope = "Commerce".to_string();
+        let err = state
+            .create_ontology_release(duplicate_domain)
+            .await
+            .expect_err("same domain version should be rejected");
+        assert!(
+            err.message
+                .contains("ontology release version already exists for domain")
+        );
+    }
+
     async fn ontology_release_candidate_for_test(
         state: &AppState,
         version: &str,
