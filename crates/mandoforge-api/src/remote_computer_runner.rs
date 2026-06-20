@@ -893,6 +893,20 @@ fn build_kubernetes_pod_request(
         .and_then(|value| value.as_bool())
         .unwrap_or(false)
         .to_string();
+    let session_workspace_path = request
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("session_workspace_path"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("/workspace")
+        .to_string();
+    let artifact_dir = request
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("artifact_dir"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("/workspace/artifacts")
+        .to_string();
     json!({
         "apiVersion": "v1",
         "kind": "Pod",
@@ -921,7 +935,13 @@ fn build_kubernetes_pod_request(
                     "image": "ghcr.io/proerror77/mandoforge-remote-computer:latest",
                     "imagePullPolicy": "IfNotPresent",
                     "command": ["sleep", "infinity"],
-                    "env": [{"name": "MANDOFORGE_REMOTE_COMPUTER_MODE", "value": "skeleton"}],
+                    "env": [
+                        {"name": "MANDOFORGE_REMOTE_COMPUTER_MODE", "value": "session-pod"},
+                        {"name": "MANDOFORGE_SESSION_ID", "value": session_id},
+                        {"name": "MANDOFORGE_REMOTE_COMPUTER_ID", "value": remote_computer_id},
+                        {"name": "MANDOFORGE_SESSION_WORKSPACE", "value": session_workspace_path},
+                        {"name": "MANDOFORGE_WORKSPACE_ROOT", "value": "/workspace"}
+                    ],
                     "securityContext": {
                         "allowPrivilegeEscalation": false,
                         "readOnlyRootFilesystem": false,
@@ -944,11 +964,11 @@ fn build_kubernetes_pod_request(
                     "command": ["python", "/opt/mandoforge/discover-artifacts.py"],
                     "env": [
                         {"name": "MANDOFORGE_ARTIFACT_DISCOVERY_ENABLED", "value": artifact_discovery_enabled},
-                        {"name": "MANDOFORGE_API_URL", "value": "http://mandoforge-api:8080"},
+                        {"name": "MANDOFORGE_API_URL", "value": "http://mandoforge-api:8787"},
                         {"name": "MANDOFORGE_SESSION_ID", "value": session_id},
                         {"name": "MANDOFORGE_REMOTE_COMPUTER_ID", "value": remote_computer_id},
                         {"name": "MANDOFORGE_ASSIGNMENT_ID", "value": assignment_id},
-                        {"name": "MANDOFORGE_ARTIFACT_DIR", "value": "/workspace/artifacts"},
+                        {"name": "MANDOFORGE_ARTIFACT_DIR", "value": artifact_dir},
                         {"name": "MANDOFORGE_ARTIFACT_DISCOVERY_INTERVAL_SECONDS", "value": "30"},
                         {"name": "MANDOFORGE_ARTIFACT_DISCOVERY_MAX_FILES", "value": "50"}
                     ],

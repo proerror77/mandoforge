@@ -10,6 +10,7 @@ resources:
   - otel-collector-networkpolicy.yaml
   - api.yaml
   - worker-serviceaccount.yaml
+  - worker-remote-computer-rbac.yaml
   - worker.yaml
   - worker-networkpolicy.yaml
   - worker-hpa.yaml
