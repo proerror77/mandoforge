@@ -70,6 +70,7 @@ mod store_governance;
 mod store_manager_plans;
 mod store_memory_writeback;
 mod store_ontology_releases;
+mod ontology_source_adapters;
 mod store_policy_revisions;
 mod store_releases;
 mod store_remote_computers;
@@ -2409,6 +2410,8 @@ struct CreateOntologyOnboardingRunRequest {
     industry: Option<String>,
     #[serde(default)]
     source_mode: Option<String>,
+    #[serde(default)]
+    source_payload: Option<ontology_source_adapters::OntologySourcePayload>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -12748,6 +12751,13 @@ async fn create_ontology_onboarding_run(
     )
     .await?;
     let principal = principal_from_request(&state, &headers).await?;
+    if let Some(payload) = input.source_payload {
+        let adapted = ontology_source_adapters::adapt_payload(payload, None)?;
+        return Ok(Json(
+            create_ontology_onboarding_run_from_adapter(&state, adapted, &principal.subject_id)
+                .await?,
+        ));
+    }
     let industry = input.industry.as_deref().unwrap_or("ecommerce");
     let source_mode = input.source_mode.as_deref().unwrap_or("demo_ecommerce");
     Ok(Json(
@@ -15633,6 +15643,88 @@ async fn create_ontology_onboarding_run_with_actor(
         id: run_id,
         status: "pending_review".to_string(),
         source_mode: source.source_mode,
+        dataset_count: datasets.len(),
+        profile_count: profiles.len(),
+        proposal_count: proposals.len(),
+        approved_count: 0,
+        materialized_count: 0,
+        datasets,
+        profiles,
+        proposals,
+        generated_at: Utc::now(),
+    })
+}
+
+async fn create_ontology_onboarding_run_from_adapter(
+    state: &AppState,
+    adapted: ontology_source_adapters::OntologySourceAdapterOutput,
+    actor_subject: &str,
+) -> Result<OntologyOnboardingRun, AppError> {
+    let run_id = Uuid::new_v4();
+    let datasets = adapted.bundle.datasets.clone();
+    let profiles = ontology_profile_demo_datasets(&datasets);
+    let seed = adapted.seed.clone();
+    let proposals = ontology_generate_seed_proposals_for_run(run_id, &seed, &datasets, &profiles);
+    for proposal in &proposals {
+        state
+            .create_semantic_object(CreateSemanticObject {
+                source_id: None,
+                object_type: "ontology_onboarding_proposal".to_string(),
+                object_key: ontology_onboarding_proposal_object_key(run_id, proposal.id),
+                title: format!("Ontology onboarding proposal: {}", proposal.name),
+                summary: format!(
+                    "{} proposal from {} adapter; review required before materialization.",
+                    proposal.proposal_type, adapted.adapter_type
+                ),
+                content: ontology_onboarding_proposal_content(run_id, proposal, false, None)?,
+                semantic_scopes: json!({
+                    "domain_scope": seed.domain_scope,
+                    "workflow_scope": "enterprise-ontology-fast-onboarding",
+                    "memory_scope": "ontology",
+                    "share_policy": "review_required",
+                }),
+                source_uri: Some(format!(
+                    "mandoforge://ontology/onboarding/runs/{run_id}/proposals/{}",
+                    proposal.id
+                )),
+                provenance: json!({
+                    "source": "ontology_onboarding.adapter_run",
+                    "adapter_type": adapted.adapter_type,
+                    "source_label": adapted.source_label,
+                    "schema_only": adapted.schema_only,
+                    "authority": "proposal_only",
+                    "generated_at": Utc::now(),
+                }),
+                trust_level: "source_attested".to_string(),
+                freshness: "current".to_string(),
+                status: "active".to_string(),
+            })
+            .await?;
+    }
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "ontology_onboarding.adapter_run_created",
+            "ontology_onboarding_run",
+            Some(run_id),
+            json!({
+                "subject": actor_subject,
+                "run_id": run_id,
+                "adapter_type": adapted.adapter_type,
+                "source_label": adapted.source_label,
+                "schema_only": adapted.schema_only,
+                "dataset_count": datasets.len(),
+                "proposal_count": proposals.len(),
+                "warnings": adapted.warnings,
+            }),
+        ))
+        .await?;
+    Ok(OntologyOnboardingRun {
+        id: run_id,
+        status: "pending_review".to_string(),
+        source_mode: adapted.bundle.source_mode.clone(),
         dataset_count: datasets.len(),
         profile_count: profiles.len(),
         proposal_count: proposals.len(),
