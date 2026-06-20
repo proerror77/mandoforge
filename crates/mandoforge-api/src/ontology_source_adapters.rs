@@ -8,16 +8,16 @@
 //   SaaS schemas : Salesforce, HubSpot, SAP S/4HANA, Oracle NetSuite
 //   E-commerce   : Amazon Seller Central, Taobao/Tmall, TikTok Shop, Temu, Shopify, WooCommerce
 
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
 use base64::Engine as _;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
-use crate::{
-    OntologyOnboardingDataset, OntologyOnboardingField, OntologySeedActionMapping,
-    OntologySeedMetricMapping, OntologySeedObjectMapping, OntologySeedPack,
-    OntologySeedRelationMapping, OntologySourceBundle, OntologyActionTransactionProfile,
-};
 use crate::AppError;
+use crate::{
+    OntologyActionTransactionProfile, OntologyOnboardingDataset, OntologyOnboardingField,
+    OntologySeedActionMapping, OntologySeedMetricMapping, OntologySeedObjectMapping,
+    OntologySeedPack, OntologySeedRelationMapping, OntologySourceBundle,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Top-level discriminated union
@@ -79,7 +79,13 @@ impl RawFilePayload {
 
 fn to_snake_case(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
         .collect::<String>()
         .split('_')
         .filter(|p| !p.is_empty())
@@ -116,9 +122,9 @@ fn infer_field_type(values: &[&str]) -> &'static str {
         return "decimal";
     }
     let ts_patterns = ["-", "T", ":", "Z"];
-    let looks_timestamp = non_empty.iter().all(|v| {
-        v.len() >= 8 && ts_patterns.iter().any(|p| v.contains(p))
-    });
+    let looks_timestamp = non_empty
+        .iter()
+        .all(|v| v.len() >= 8 && ts_patterns.iter().any(|p| v.contains(p)));
     if looks_timestamp {
         return "timestamp";
     }
@@ -197,7 +203,10 @@ pub struct CsvAdapterInput {
     pub source_system_override: Option<String>,
 }
 
-pub fn adapt_csv(input: CsvAdapterInput, bytes: &[u8]) -> Result<OntologySourceAdapterOutput, AppError> {
+pub fn adapt_csv(
+    input: CsvAdapterInput,
+    bytes: &[u8],
+) -> Result<OntologySourceAdapterOutput, AppError> {
     let sample_limit = input.sample_row_count.unwrap_or(8).min(50);
     let table_name = input
         .table_name_override
@@ -208,7 +217,9 @@ pub fn adapt_csv(input: CsvAdapterInput, bytes: &[u8]) -> Result<OntologySourceA
         .clone()
         .unwrap_or_else(|| "file_upload".to_string());
 
-    let delimiter = input.delimiter.unwrap_or_else(|| detect_csv_delimiter(bytes)) as u8;
+    let delimiter = input
+        .delimiter
+        .unwrap_or_else(|| detect_csv_delimiter(bytes)) as u8;
     let mut reader = csv::ReaderBuilder::new()
         .delimiter(delimiter)
         .has_headers(true)
@@ -232,10 +243,7 @@ pub fn adapt_csv(input: CsvAdapterInput, bytes: &[u8]) -> Result<OntologySourceA
 
     let mut fields = Vec::new();
     for (col_idx, col_name) in headers.iter().enumerate() {
-        let col_vals: Vec<&str> = all_rows
-            .iter()
-            .filter_map(|row| row.get(col_idx))
-            .collect();
+        let col_vals: Vec<&str> = all_rows.iter().filter_map(|row| row.get(col_idx)).collect();
         let field_type = infer_field_type(&col_vals);
         let sample_values: Vec<Value> = col_vals
             .iter()
@@ -288,7 +296,11 @@ fn detect_csv_delimiter(bytes: &[u8]) -> char {
         .iter()
         .map(|&d| (d as char, sample.iter().filter(|&&b| b == d).count()))
         .collect::<Vec<_>>();
-    counts.into_iter().max_by_key(|(_, c)| *c).map(|(d, _)| d).unwrap_or(',')
+    counts
+        .into_iter()
+        .max_by_key(|(_, c)| *c)
+        .map(|(d, _)| d)
+        .unwrap_or(',')
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -315,7 +327,10 @@ pub struct JsonAdapterInput {
     pub source_system_override: Option<String>,
 }
 
-pub fn adapt_json(input: JsonAdapterInput, bytes: &[u8]) -> Result<OntologySourceAdapterOutput, AppError> {
+pub fn adapt_json(
+    input: JsonAdapterInput,
+    bytes: &[u8],
+) -> Result<OntologySourceAdapterOutput, AppError> {
     let sample_limit = input.sample_row_count.unwrap_or(8).min(50);
     let table_name = input
         .table_name_override
@@ -332,7 +347,10 @@ pub fn adapt_json(input: JsonAdapterInput, bytes: &[u8]) -> Result<OntologySourc
     let rows: Vec<Value> = match (&input.shape, &root) {
         (Some(JsonShape::ObjectOfArrays), _) | (None, Value::Object(_)) => {
             if let Some(obj) = root.as_object() {
-                let len = obj.values().find_map(|v| v.as_array().map(|a| a.len())).unwrap_or(0);
+                let len = obj
+                    .values()
+                    .find_map(|v| v.as_array().map(|a| a.len()))
+                    .unwrap_or(0);
                 (0..len)
                     .map(|i| {
                         let mut map = serde_json::Map::new();
@@ -345,14 +363,17 @@ pub fn adapt_json(input: JsonAdapterInput, bytes: &[u8]) -> Result<OntologySourc
                     })
                     .collect()
             } else {
-                return Err(AppError::bad_request("JSON object-of-arrays must be a top-level object"));
+                return Err(AppError::bad_request(
+                    "JSON object-of-arrays must be a top-level object",
+                ));
             }
         }
-        _ => {
-            root.as_array()
-                .ok_or_else(|| AppError::bad_request("JSON must be an array of objects or object of arrays"))?
-                .clone()
-        }
+        _ => root
+            .as_array()
+            .ok_or_else(|| {
+                AppError::bad_request("JSON must be an array of objects or object of arrays")
+            })?
+            .clone(),
     };
 
     let headers: Vec<String> = rows
@@ -377,7 +398,12 @@ pub fn adapt_json(input: JsonAdapterInput, bytes: &[u8]) -> Result<OntologySourc
             .collect();
         let col_str_refs: Vec<&str> = col_vals.iter().map(|s| s.as_str()).collect();
         let field_type = infer_field_type(&col_str_refs);
-        let sample_values: Vec<Value> = rows.iter().take(sample_limit).filter_map(|r| r.get(col)).cloned().collect();
+        let sample_values: Vec<Value> = rows
+            .iter()
+            .take(sample_limit)
+            .filter_map(|r| r.get(col))
+            .cloned()
+            .collect();
         fields.push(OntologyOnboardingField {
             name: col.clone(),
             field_type: field_type.to_string(),
@@ -386,7 +412,13 @@ pub fn adapt_json(input: JsonAdapterInput, bytes: &[u8]) -> Result<OntologySourc
     }
 
     let sample_rows = rows.into_iter().take(sample_limit).collect();
-    let dataset = build_dataset(&table_name, &source_system, &table_name, fields, sample_rows);
+    let dataset = build_dataset(
+        &table_name,
+        &source_system,
+        &table_name,
+        fields,
+        sample_rows,
+    );
     let datasets = vec![dataset];
     let domain_scope = table_name.clone();
     let seed = generic_seed_pack("generic", &domain_scope, "file_json", "data", &datasets);
@@ -421,7 +453,10 @@ pub struct ParquetAdapterInput {
     pub source_system_override: Option<String>,
 }
 
-pub fn adapt_parquet(input: ParquetAdapterInput, bytes: &[u8]) -> Result<OntologySourceAdapterOutput, AppError> {
+pub fn adapt_parquet(
+    input: ParquetAdapterInput,
+    bytes: &[u8],
+) -> Result<OntologySourceAdapterOutput, AppError> {
     let sample_limit = input.sample_row_count.unwrap_or(8).min(50);
     let table_name = input
         .table_name_override
@@ -436,7 +471,8 @@ pub fn adapt_parquet(input: ParquetAdapterInput, bytes: &[u8]) -> Result<Ontolog
     // Parse column names and types from the Parquet file footer metadata.
     // We use a simple byte scan for the Parquet magic bytes and schema encoding
     // via the parquet crate's low-level API.
-    let (fields, rows, schema_only) = parse_parquet_schema_and_rows(bytes, sample_limit, &mut warnings)?;
+    let (fields, rows, schema_only) =
+        parse_parquet_schema_and_rows(bytes, sample_limit, &mut warnings)?;
 
     let dataset = build_dataset(&table_name, &source_system, &table_name, fields, rows);
     let datasets = vec![dataset];
@@ -464,7 +500,9 @@ fn parse_parquet_schema_and_rows(
     warnings: &mut Vec<String>,
 ) -> Result<(Vec<OntologyOnboardingField>, Vec<Value>, bool), AppError> {
     if bytes.len() < 8 || &bytes[..4] != b"PAR1" || &bytes[bytes.len() - 4..] != b"PAR1" {
-        return Err(AppError::bad_request("file does not appear to be a valid Parquet file"));
+        return Err(AppError::bad_request(
+            "file does not appear to be a valid Parquet file",
+        ));
     }
 
     use parquet::file::reader::{FileReader, SerializedFileReader};
@@ -576,7 +614,10 @@ pub struct PdfAdapterInput {
     pub source_system_override: Option<String>,
 }
 
-pub fn adapt_pdf(input: PdfAdapterInput, bytes: &[u8]) -> Result<OntologySourceAdapterOutput, AppError> {
+pub fn adapt_pdf(
+    input: PdfAdapterInput,
+    bytes: &[u8],
+) -> Result<OntologySourceAdapterOutput, AppError> {
     let table_name = input
         .table_name_override
         .clone()
@@ -629,7 +670,8 @@ fn extract_schema_hints_from_pdf_text(text: &str) -> Vec<OntologyOnboardingField
         }
         let identifier_like = tokens.iter().all(|t| {
             !t.is_empty()
-                && t.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+                && t.chars()
+                    .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
                 && t.chars().any(|c| c.is_alphabetic())
         });
         if identifier_like {
@@ -665,8 +707,11 @@ pub struct ExcelAdapterInput {
     pub source_system_override: Option<String>,
 }
 
-pub fn adapt_excel(input: ExcelAdapterInput, bytes: &[u8]) -> Result<OntologySourceAdapterOutput, AppError> {
-    use calamine::{open_workbook_from_rs, Data, Reader, Xlsx};
+pub fn adapt_excel(
+    input: ExcelAdapterInput,
+    bytes: &[u8],
+) -> Result<OntologySourceAdapterOutput, AppError> {
+    use calamine::{Data, Reader, Xlsx, open_workbook_from_rs};
 
     let sample_limit = input.sample_row_count.unwrap_or(8).min(50);
     let table_name = input
@@ -682,9 +727,10 @@ pub fn adapt_excel(input: ExcelAdapterInput, bytes: &[u8]) -> Result<OntologySou
     let mut workbook: Xlsx<_> = open_workbook_from_rs(cursor)
         .map_err(|e| AppError::bad_request(format!("Excel open error: {e}")))?;
 
-    let sheet_name = input.sheet.clone().unwrap_or_else(|| {
-        workbook.sheet_names().first().cloned().unwrap_or_default()
-    });
+    let sheet_name = input
+        .sheet
+        .clone()
+        .unwrap_or_else(|| workbook.sheet_names().first().cloned().unwrap_or_default());
 
     let range = workbook
         .worksheet_range(&sheet_name)
@@ -716,8 +762,8 @@ pub fn adapt_excel(input: ExcelAdapterInput, bytes: &[u8]) -> Result<OntologySou
             })
             .collect();
         let col_str_refs: Vec<&str> = col_vals.iter().map(|s| s.as_str()).collect();
-        let field_type = excel_col_type(&data_rows, col_idx)
-            .unwrap_or_else(|| infer_field_type(&col_str_refs));
+        let field_type =
+            excel_col_type(&data_rows, col_idx).unwrap_or_else(|| infer_field_type(&col_str_refs));
         let sample_values: Vec<Value> = col_vals
             .iter()
             .take(sample_limit)
@@ -736,14 +782,17 @@ pub fn adapt_excel(input: ExcelAdapterInput, bytes: &[u8]) -> Result<OntologySou
         .map(|row| {
             let mut map = serde_json::Map::new();
             for (i, h) in headers.iter().enumerate() {
-                let v = row.get(i).map(|c| match c {
-                    Data::Int(x) => json!(x),
-                    Data::Float(x) => json!(x),
-                    Data::String(x) => json!(x),
-                    Data::Bool(x) => json!(x),
-                    Data::DateTime(_) => json!(c.to_string()),
-                    _ => Value::Null,
-                }).unwrap_or(Value::Null);
+                let v = row
+                    .get(i)
+                    .map(|c| match c {
+                        Data::Int(x) => json!(x),
+                        Data::Float(x) => json!(x),
+                        Data::String(x) => json!(x),
+                        Data::Bool(x) => json!(x),
+                        Data::DateTime(_) => json!(c.to_string()),
+                        _ => Value::Null,
+                    })
+                    .unwrap_or(Value::Null);
                 map.insert(h.clone(), v);
             }
             Value::Object(map)
@@ -789,7 +838,11 @@ fn excel_col_type(rows: &[Vec<calamine::Data>], col_idx: usize) -> Option<&'stat
 type FieldSpec = (&'static str, &'static str); // (field_name, field_type)
 type TableSpec = (&'static str, &'static [FieldSpec]); // (table_name, fields)
 
-fn build_schema_only_dataset(table_name: &'static str, source_system: &str, fields_spec: &[FieldSpec]) -> OntologyOnboardingDataset {
+fn build_schema_only_dataset(
+    table_name: &'static str,
+    source_system: &str,
+    fields_spec: &[FieldSpec],
+) -> OntologyOnboardingDataset {
     let fields = fields_spec
         .iter()
         .map(|(name, ft)| OntologyOnboardingField {
@@ -852,7 +905,15 @@ fn build_platform_output(
     }
 }
 
-fn rel(name: &str, from: &str, relation: &str, to: &str, src_table: &str, src_field: &str, ref_table: &str) -> OntologySeedRelationMapping {
+fn rel(
+    name: &str,
+    from: &str,
+    relation: &str,
+    to: &str,
+    src_table: &str,
+    src_field: &str,
+    ref_table: &str,
+) -> OntologySeedRelationMapping {
     OntologySeedRelationMapping {
         name: name.to_string(),
         from_object: from.to_string(),
@@ -873,7 +934,13 @@ fn metric(name: &str, target: &str, expr: &str) -> OntologySeedMetricMapping {
     }
 }
 
-fn action(name: &str, target: &str, approval_required: bool, inputs: Value, reads: Value) -> OntologySeedActionMapping {
+fn action(
+    name: &str,
+    target: &str,
+    approval_required: bool,
+    inputs: Value,
+    reads: Value,
+) -> OntologySeedActionMapping {
     OntologySeedActionMapping {
         name: name.to_string(),
         target_object: target.to_string(),
@@ -901,45 +968,95 @@ pub struct SalesforceAdapterInput {
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub enum SalesforceObject {
-    Account, Contact, Lead, Opportunity, Case, Product2, Pricebook2Entry, Order,
+    Account,
+    Contact,
+    Lead,
+    Opportunity,
+    Case,
+    Product2,
+    Pricebook2Entry,
+    Order,
 }
 
 static SF_ACCOUNT: &[FieldSpec] = &[
-    ("id","string"),("name","string"),("type","string"),("industry","string"),
-    ("annual_revenue","decimal"),("billing_country","string"),
-    ("created_date","timestamp"),("owner_id","string"),
+    ("id", "string"),
+    ("name", "string"),
+    ("type", "string"),
+    ("industry", "string"),
+    ("annual_revenue", "decimal"),
+    ("billing_country", "string"),
+    ("created_date", "timestamp"),
+    ("owner_id", "string"),
 ];
 static SF_CONTACT: &[FieldSpec] = &[
-    ("id","string"),("account_id","string"),("first_name","string"),("last_name","string"),
-    ("email","string"),("phone","string"),("title","string"),
-    ("lead_source","string"),("created_date","timestamp"),
+    ("id", "string"),
+    ("account_id", "string"),
+    ("first_name", "string"),
+    ("last_name", "string"),
+    ("email", "string"),
+    ("phone", "string"),
+    ("title", "string"),
+    ("lead_source", "string"),
+    ("created_date", "timestamp"),
 ];
 static SF_LEAD: &[FieldSpec] = &[
-    ("id","string"),("first_name","string"),("last_name","string"),("email","string"),
-    ("company","string"),("status","string"),("lead_source","string"),
-    ("annual_revenue","decimal"),("created_date","timestamp"),
+    ("id", "string"),
+    ("first_name", "string"),
+    ("last_name", "string"),
+    ("email", "string"),
+    ("company", "string"),
+    ("status", "string"),
+    ("lead_source", "string"),
+    ("annual_revenue", "decimal"),
+    ("created_date", "timestamp"),
 ];
 static SF_OPPORTUNITY: &[FieldSpec] = &[
-    ("id","string"),("account_id","string"),("name","string"),("stage_name","string"),
-    ("amount","decimal"),("close_date","date"),("probability","decimal"),
-    ("type","string"),("created_date","timestamp"),
+    ("id", "string"),
+    ("account_id", "string"),
+    ("name", "string"),
+    ("stage_name", "string"),
+    ("amount", "decimal"),
+    ("close_date", "date"),
+    ("probability", "decimal"),
+    ("type", "string"),
+    ("created_date", "timestamp"),
 ];
 static SF_CASE: &[FieldSpec] = &[
-    ("id","string"),("account_id","string"),("contact_id","string"),("subject","string"),
-    ("status","string"),("priority","string"),("origin","string"),
-    ("created_date","timestamp"),("closed_date","timestamp"),
+    ("id", "string"),
+    ("account_id", "string"),
+    ("contact_id", "string"),
+    ("subject", "string"),
+    ("status", "string"),
+    ("priority", "string"),
+    ("origin", "string"),
+    ("created_date", "timestamp"),
+    ("closed_date", "timestamp"),
 ];
 static SF_PRODUCT2: &[FieldSpec] = &[
-    ("id","string"),("name","string"),("product_code","string"),("description","string"),
-    ("is_active","boolean"),("family","string"),("created_date","timestamp"),
+    ("id", "string"),
+    ("name", "string"),
+    ("product_code", "string"),
+    ("description", "string"),
+    ("is_active", "boolean"),
+    ("family", "string"),
+    ("created_date", "timestamp"),
 ];
 static SF_PRICEBOOK2ENTRY: &[FieldSpec] = &[
-    ("id","string"),("pricebook2_id","string"),("product2_id","string"),
-    ("unit_price","decimal"),("is_active","boolean"),("currency_iso_code","string"),
+    ("id", "string"),
+    ("pricebook2_id", "string"),
+    ("product2_id", "string"),
+    ("unit_price", "decimal"),
+    ("is_active", "boolean"),
+    ("currency_iso_code", "string"),
 ];
 static SF_ORDER: &[FieldSpec] = &[
-    ("id","string"),("account_id","string"),("order_number","string"),("status","string"),
-    ("total_amount","decimal"),("effective_date","date"),("created_date","timestamp"),
+    ("id", "string"),
+    ("account_id", "string"),
+    ("order_number", "string"),
+    ("status", "string"),
+    ("total_amount", "decimal"),
+    ("effective_date", "date"),
+    ("created_date", "timestamp"),
 ];
 
 fn sf_table_for(obj: &SalesforceObject) -> (&'static str, &'static [FieldSpec]) {
@@ -955,11 +1072,18 @@ fn sf_table_for(obj: &SalesforceObject) -> (&'static str, &'static [FieldSpec]) 
     }
 }
 
-pub fn adapt_salesforce(input: SalesforceAdapterInput) -> Result<OntologySourceAdapterOutput, AppError> {
+pub fn adapt_salesforce(
+    input: SalesforceAdapterInput,
+) -> Result<OntologySourceAdapterOutput, AppError> {
     let all_objects = vec![
-        SalesforceObject::Account, SalesforceObject::Contact, SalesforceObject::Lead,
-        SalesforceObject::Opportunity, SalesforceObject::Case, SalesforceObject::Product2,
-        SalesforceObject::Pricebook2Entry, SalesforceObject::Order,
+        SalesforceObject::Account,
+        SalesforceObject::Contact,
+        SalesforceObject::Lead,
+        SalesforceObject::Opportunity,
+        SalesforceObject::Case,
+        SalesforceObject::Product2,
+        SalesforceObject::Pricebook2Entry,
+        SalesforceObject::Order,
     ];
     let selected = input.objects.as_deref().unwrap_or(&all_objects);
     let label = input.instance_label.as_deref().unwrap_or("salesforce");
@@ -968,29 +1092,119 @@ pub fn adapt_salesforce(input: SalesforceAdapterInput) -> Result<OntologySourceA
     let tables_static: Vec<(&'static str, &'static [FieldSpec])> = tables;
 
     let relations = vec![
-        rel("ContactBelongsToAccount","Contact","belongs_to","Account","contact","account_id","account"),
-        rel("OpportunityBelongsToAccount","Opportunity","belongs_to","Account","opportunity","account_id","account"),
-        rel("CaseBelongsToAccount","Case","belongs_to","Account","case","account_id","account"),
-        rel("CaseBelongsToContact","Case","belongs_to","Contact","case","contact_id","contact"),
-        rel("OrderBelongsToAccount","Order","belongs_to","Account","order","account_id","account"),
-        rel("Pricebook2EntryHasProduct","Pricebook2Entry","references","Product2","pricebook2entry","product2_id","product2"),
+        rel(
+            "ContactBelongsToAccount",
+            "Contact",
+            "belongs_to",
+            "Account",
+            "contact",
+            "account_id",
+            "account",
+        ),
+        rel(
+            "OpportunityBelongsToAccount",
+            "Opportunity",
+            "belongs_to",
+            "Account",
+            "opportunity",
+            "account_id",
+            "account",
+        ),
+        rel(
+            "CaseBelongsToAccount",
+            "Case",
+            "belongs_to",
+            "Account",
+            "case",
+            "account_id",
+            "account",
+        ),
+        rel(
+            "CaseBelongsToContact",
+            "Case",
+            "belongs_to",
+            "Contact",
+            "case",
+            "contact_id",
+            "contact",
+        ),
+        rel(
+            "OrderBelongsToAccount",
+            "Order",
+            "belongs_to",
+            "Account",
+            "order",
+            "account_id",
+            "account",
+        ),
+        rel(
+            "Pricebook2EntryHasProduct",
+            "Pricebook2Entry",
+            "references",
+            "Product2",
+            "pricebook2entry",
+            "product2_id",
+            "product2",
+        ),
     ];
     let metrics = vec![
-        metric("total_pipeline_value","Opportunity","SUM(amount) WHERE stage_name NOT IN ('Closed Lost','Closed Won')"),
-        metric("win_rate","Opportunity","COUNT(*) FILTER(stage_name='Closed Won') / COUNT(*) * 100"),
-        metric("avg_deal_size","Opportunity","AVG(amount) WHERE stage_name='Closed Won'"),
-        metric("open_case_count","Case","COUNT(*) WHERE status NOT IN ('Closed')"),
-        metric("annual_revenue_total","Account","SUM(annual_revenue)"),
+        metric(
+            "total_pipeline_value",
+            "Opportunity",
+            "SUM(amount) WHERE stage_name NOT IN ('Closed Lost','Closed Won')",
+        ),
+        metric(
+            "win_rate",
+            "Opportunity",
+            "COUNT(*) FILTER(stage_name='Closed Won') / COUNT(*) * 100",
+        ),
+        metric(
+            "avg_deal_size",
+            "Opportunity",
+            "AVG(amount) WHERE stage_name='Closed Won'",
+        ),
+        metric(
+            "open_case_count",
+            "Case",
+            "COUNT(*) WHERE status NOT IN ('Closed')",
+        ),
+        metric("annual_revenue_total", "Account", "SUM(annual_revenue)"),
     ];
     let actions = vec![
-        action("convert_lead","Lead",true,json!({"status":"string","account_name":"string"}),json!({"reads":["Lead","Account"]})),
-        action("close_opportunity","Opportunity",true,json!({"stage_name":"string","close_date":"date"}),json!({"reads":["Opportunity"]})),
-        action("escalate_case","Case",false,json!({"priority":"string","owner_id":"string"}),json!({"reads":["Case"]})),
+        action(
+            "convert_lead",
+            "Lead",
+            true,
+            json!({"status":"string","account_name":"string"}),
+            json!({"reads":["Lead","Account"]}),
+        ),
+        action(
+            "close_opportunity",
+            "Opportunity",
+            true,
+            json!({"stage_name":"string","close_date":"date"}),
+            json!({"reads":["Opportunity"]}),
+        ),
+        action(
+            "escalate_case",
+            "Case",
+            false,
+            json!({"priority":"string","owner_id":"string"}),
+            json!({"reads":["Case"]}),
+        ),
     ];
 
     Ok(build_platform_output(
-        "crm", "salesforce", "salesforce_export", "crm",
-        "salesforce", label, &tables_static, relations, metrics, actions,
+        "crm",
+        "salesforce",
+        "salesforce_export",
+        "crm",
+        "salesforce",
+        label,
+        &tables_static,
+        relations,
+        metrics,
+        actions,
     ))
 }
 
@@ -1008,62 +1222,170 @@ pub struct HubspotAdapterInput {
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum HubspotObject { Contacts, Companies, Deals, Tickets, LineItems }
+pub enum HubspotObject {
+    Contacts,
+    Companies,
+    Deals,
+    Tickets,
+    LineItems,
+}
 
 static HS_CONTACTS: &[FieldSpec] = &[
-    ("vid","string"),("email","string"),("firstname","string"),("lastname","string"),
-    ("phone","string"),("company","string"),("lifecyclestage","string"),
-    ("hs_lead_status","string"),("createdate","timestamp"),("lastmodifieddate","timestamp"),
+    ("vid", "string"),
+    ("email", "string"),
+    ("firstname", "string"),
+    ("lastname", "string"),
+    ("phone", "string"),
+    ("company", "string"),
+    ("lifecyclestage", "string"),
+    ("hs_lead_status", "string"),
+    ("createdate", "timestamp"),
+    ("lastmodifieddate", "timestamp"),
 ];
 static HS_COMPANIES: &[FieldSpec] = &[
-    ("company_id","string"),("name","string"),("domain","string"),("industry","string"),
-    ("city","string"),("country","string"),("annualrevenue","decimal"),("numberofemployees","integer"),
+    ("company_id", "string"),
+    ("name", "string"),
+    ("domain", "string"),
+    ("industry", "string"),
+    ("city", "string"),
+    ("country", "string"),
+    ("annualrevenue", "decimal"),
+    ("numberofemployees", "integer"),
 ];
 static HS_DEALS: &[FieldSpec] = &[
-    ("deal_id","string"),("dealname","string"),("dealstage","string"),("amount","decimal"),
-    ("closedate","date"),("pipeline","string"),("associated_company_id","string"),("owner_id","string"),
+    ("deal_id", "string"),
+    ("dealname", "string"),
+    ("dealstage", "string"),
+    ("amount", "decimal"),
+    ("closedate", "date"),
+    ("pipeline", "string"),
+    ("associated_company_id", "string"),
+    ("owner_id", "string"),
 ];
 static HS_TICKETS: &[FieldSpec] = &[
-    ("ticket_id","string"),("subject","string"),("content","string"),("status","string"),
-    ("priority","string"),("category","string"),("associated_contact_id","string"),("createdate","timestamp"),
+    ("ticket_id", "string"),
+    ("subject", "string"),
+    ("content", "string"),
+    ("status", "string"),
+    ("priority", "string"),
+    ("category", "string"),
+    ("associated_contact_id", "string"),
+    ("createdate", "timestamp"),
 ];
 static HS_LINE_ITEMS: &[FieldSpec] = &[
-    ("line_item_id","string"),("deal_id","string"),("product_id","string"),("name","string"),
-    ("quantity","decimal"),("price","decimal"),("amount","decimal"),("discount","decimal"),
+    ("line_item_id", "string"),
+    ("deal_id", "string"),
+    ("product_id", "string"),
+    ("name", "string"),
+    ("quantity", "decimal"),
+    ("price", "decimal"),
+    ("amount", "decimal"),
+    ("discount", "decimal"),
 ];
 
 fn hs_table_for(obj: &HubspotObject) -> (&'static str, &'static [FieldSpec]) {
     match obj {
-        HubspotObject::Contacts   => ("contacts",   HS_CONTACTS),
-        HubspotObject::Companies  => ("companies",  HS_COMPANIES),
-        HubspotObject::Deals      => ("deals",      HS_DEALS),
-        HubspotObject::Tickets    => ("tickets",    HS_TICKETS),
-        HubspotObject::LineItems  => ("line_items", HS_LINE_ITEMS),
+        HubspotObject::Contacts => ("contacts", HS_CONTACTS),
+        HubspotObject::Companies => ("companies", HS_COMPANIES),
+        HubspotObject::Deals => ("deals", HS_DEALS),
+        HubspotObject::Tickets => ("tickets", HS_TICKETS),
+        HubspotObject::LineItems => ("line_items", HS_LINE_ITEMS),
     }
 }
 
 pub fn adapt_hubspot(input: HubspotAdapterInput) -> Result<OntologySourceAdapterOutput, AppError> {
-    let all = vec![HubspotObject::Contacts, HubspotObject::Companies, HubspotObject::Deals, HubspotObject::Tickets, HubspotObject::LineItems];
+    let all = vec![
+        HubspotObject::Contacts,
+        HubspotObject::Companies,
+        HubspotObject::Deals,
+        HubspotObject::Tickets,
+        HubspotObject::LineItems,
+    ];
     let selected = input.objects.as_deref().unwrap_or(&all);
     let label = input.instance_label.as_deref().unwrap_or("hubspot");
     let tables: Vec<TableSpec> = selected.iter().map(hs_table_for).collect();
     let relations = vec![
-        rel("ContactBelongsToCompany","Contact","belongs_to","Company","contacts","company","companies"),
-        rel("DealBelongsToCompany","Deal","belongs_to","Company","deals","associated_company_id","companies"),
-        rel("TicketBelongsToContact","Ticket","belongs_to","Contact","tickets","associated_contact_id","contacts"),
-        rel("LineItemBelongsToDeal","LineItem","belongs_to","Deal","line_items","deal_id","deals"),
+        rel(
+            "ContactBelongsToCompany",
+            "Contact",
+            "belongs_to",
+            "Company",
+            "contacts",
+            "company",
+            "companies",
+        ),
+        rel(
+            "DealBelongsToCompany",
+            "Deal",
+            "belongs_to",
+            "Company",
+            "deals",
+            "associated_company_id",
+            "companies",
+        ),
+        rel(
+            "TicketBelongsToContact",
+            "Ticket",
+            "belongs_to",
+            "Contact",
+            "tickets",
+            "associated_contact_id",
+            "contacts",
+        ),
+        rel(
+            "LineItemBelongsToDeal",
+            "LineItem",
+            "belongs_to",
+            "Deal",
+            "line_items",
+            "deal_id",
+            "deals",
+        ),
     ];
     let metrics = vec![
-        metric("total_pipeline_value","Deal","SUM(amount) WHERE dealstage NOT LIKE '%closed%'"),
-        metric("mrr","Deal","SUM(amount) / 12 WHERE dealstage='closedwon'"),
-        metric("open_ticket_count","Ticket","COUNT(*) WHERE status NOT IN ('closed')"),
+        metric(
+            "total_pipeline_value",
+            "Deal",
+            "SUM(amount) WHERE dealstage NOT LIKE '%closed%'",
+        ),
+        metric(
+            "mrr",
+            "Deal",
+            "SUM(amount) / 12 WHERE dealstage='closedwon'",
+        ),
+        metric(
+            "open_ticket_count",
+            "Ticket",
+            "COUNT(*) WHERE status NOT IN ('closed')",
+        ),
     ];
     let actions = vec![
-        action("close_deal","Deal",true,json!({"dealstage":"string","closedate":"date"}),json!({"reads":["Deal","Contact"]})),
-        action("merge_contacts","Contact",true,json!({"primary_vid":"string","secondary_vid":"string"}),json!({"reads":["Contact"]})),
+        action(
+            "close_deal",
+            "Deal",
+            true,
+            json!({"dealstage":"string","closedate":"date"}),
+            json!({"reads":["Deal","Contact"]}),
+        ),
+        action(
+            "merge_contacts",
+            "Contact",
+            true,
+            json!({"primary_vid":"string","secondary_vid":"string"}),
+            json!({"reads":["Contact"]}),
+        ),
     ];
     Ok(build_platform_output(
-        "crm","hubspot","hubspot_export","crm","hubspot",label,&tables,relations,metrics,actions,
+        "crm",
+        "hubspot",
+        "hubspot_export",
+        "crm",
+        "hubspot",
+        label,
+        &tables,
+        relations,
+        metrics,
+        actions,
     ))
 }
 
@@ -1081,60 +1403,146 @@ pub struct SapS4HanaAdapterInput {
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum SapModule { Finance, Sales, Materials }
+pub enum SapModule {
+    Finance,
+    Sales,
+    Materials,
+}
 
 static SAP_BKPF: &[FieldSpec] = &[
-    ("mandt","string"),("bukrs","string"),("belnr","string"),("gjahr","string"),
-    ("blart","string"),("bldat","date"),("budat","date"),("monat","string"),
-    ("waers","string"),("usnam","string"),
+    ("mandt", "string"),
+    ("bukrs", "string"),
+    ("belnr", "string"),
+    ("gjahr", "string"),
+    ("blart", "string"),
+    ("bldat", "date"),
+    ("budat", "date"),
+    ("monat", "string"),
+    ("waers", "string"),
+    ("usnam", "string"),
 ];
 static SAP_BSEG: &[FieldSpec] = &[
-    ("mandt","string"),("bukrs","string"),("belnr","string"),("gjahr","string"),
-    ("buzei","string"),("koart","string"),("hkont","string"),
-    ("dmbtr","decimal"),("wrbtr","decimal"),("kostl","string"),
+    ("mandt", "string"),
+    ("bukrs", "string"),
+    ("belnr", "string"),
+    ("gjahr", "string"),
+    ("buzei", "string"),
+    ("koart", "string"),
+    ("hkont", "string"),
+    ("dmbtr", "decimal"),
+    ("wrbtr", "decimal"),
+    ("kostl", "string"),
 ];
 static SAP_VBAK: &[FieldSpec] = &[
-    ("mandt","string"),("vbeln","string"),("erdat","date"),("auart","string"),
-    ("kunnr","string"),("netwr","decimal"),("waerk","string"),
-    ("vkorg","string"),("vtweg","string"),("spart","string"),
+    ("mandt", "string"),
+    ("vbeln", "string"),
+    ("erdat", "date"),
+    ("auart", "string"),
+    ("kunnr", "string"),
+    ("netwr", "decimal"),
+    ("waerk", "string"),
+    ("vkorg", "string"),
+    ("vtweg", "string"),
+    ("spart", "string"),
 ];
 static SAP_VBAP: &[FieldSpec] = &[
-    ("mandt","string"),("vbeln","string"),("posnr","string"),("matnr","string"),
-    ("arktx","string"),("kwmeng","decimal"),("vrkme","string"),
-    ("netpr","decimal"),("waerk","string"),("werks","string"),
+    ("mandt", "string"),
+    ("vbeln", "string"),
+    ("posnr", "string"),
+    ("matnr", "string"),
+    ("arktx", "string"),
+    ("kwmeng", "decimal"),
+    ("vrkme", "string"),
+    ("netpr", "decimal"),
+    ("waerk", "string"),
+    ("werks", "string"),
 ];
 static SAP_MARA: &[FieldSpec] = &[
-    ("mandt","string"),("matnr","string"),("ersda","date"),("ernam","string"),
-    ("mtart","string"),("matkl","string"),("meins","string"),
-    ("brgew","decimal"),("ntgew","decimal"),("gewei","string"),
+    ("mandt", "string"),
+    ("matnr", "string"),
+    ("ersda", "date"),
+    ("ernam", "string"),
+    ("mtart", "string"),
+    ("matkl", "string"),
+    ("meins", "string"),
+    ("brgew", "decimal"),
+    ("ntgew", "decimal"),
+    ("gewei", "string"),
 ];
 
-pub fn adapt_sap_s4hana(input: SapS4HanaAdapterInput) -> Result<OntologySourceAdapterOutput, AppError> {
+pub fn adapt_sap_s4hana(
+    input: SapS4HanaAdapterInput,
+) -> Result<OntologySourceAdapterOutput, AppError> {
     let all_modules = vec![SapModule::Finance, SapModule::Sales, SapModule::Materials];
     let selected = input.modules.as_deref().unwrap_or(&all_modules);
     let label = input.instance_label.as_deref().unwrap_or("sap_s4hana");
     let mut tables: Vec<TableSpec> = vec![];
     for module in selected {
         match module {
-            SapModule::Finance   => { tables.push(("bkpf", SAP_BKPF)); tables.push(("bseg", SAP_BSEG)); }
-            SapModule::Sales     => { tables.push(("vbak", SAP_VBAK)); tables.push(("vbap", SAP_VBAP)); }
-            SapModule::Materials => { tables.push(("mara", SAP_MARA)); }
+            SapModule::Finance => {
+                tables.push(("bkpf", SAP_BKPF));
+                tables.push(("bseg", SAP_BSEG));
+            }
+            SapModule::Sales => {
+                tables.push(("vbak", SAP_VBAK));
+                tables.push(("vbap", SAP_VBAP));
+            }
+            SapModule::Materials => {
+                tables.push(("mara", SAP_MARA));
+            }
         }
     }
     let relations = vec![
-        rel("BsegBelongsToBkpf","Bseg","belongs_to","Bkpf","bseg","belnr","bkpf"),
-        rel("VbapBelongsToVbak","Vbap","belongs_to","Vbak","vbap","vbeln","vbak"),
+        rel(
+            "BsegBelongsToBkpf",
+            "Bseg",
+            "belongs_to",
+            "Bkpf",
+            "bseg",
+            "belnr",
+            "bkpf",
+        ),
+        rel(
+            "VbapBelongsToVbak",
+            "Vbap",
+            "belongs_to",
+            "Vbak",
+            "vbap",
+            "vbeln",
+            "vbak",
+        ),
     ];
     let metrics = vec![
-        metric("total_revenue","Vbak","SUM(netwr)"),
-        metric("material_gross_weight","Mara","SUM(brgew)"),
+        metric("total_revenue", "Vbak", "SUM(netwr)"),
+        metric("material_gross_weight", "Mara", "SUM(brgew)"),
     ];
     let actions = vec![
-        action("block_sales_order","Vbak",true,json!({"vbeln":"string","reason":"string"}),json!({"reads":["Vbak"]})),
-        action("change_material_status","Mara",true,json!({"matnr":"string","new_status":"string"}),json!({"reads":["Mara"]})),
+        action(
+            "block_sales_order",
+            "Vbak",
+            true,
+            json!({"vbeln":"string","reason":"string"}),
+            json!({"reads":["Vbak"]}),
+        ),
+        action(
+            "change_material_status",
+            "Mara",
+            true,
+            json!({"matnr":"string","new_status":"string"}),
+            json!({"reads":["Mara"]}),
+        ),
     ];
     Ok(build_platform_output(
-        "erp","sap_s4hana","sap_s4hana_export","erp","sap_s4hana",label,&tables,relations,metrics,actions,
+        "erp",
+        "sap_s4hana",
+        "sap_s4hana_export",
+        "erp",
+        "sap_s4hana",
+        label,
+        &tables,
+        relations,
+        metrics,
+        actions,
     ))
 }
 
@@ -1152,58 +1560,132 @@ pub struct OracleNetsuiteAdapterInput {
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
-pub enum NetsuiteObject { Customer, SalesOrder, Item, Invoice, Vendor }
+pub enum NetsuiteObject {
+    Customer,
+    SalesOrder,
+    Item,
+    Invoice,
+    Vendor,
+}
 
 static NS_CUSTOMER: &[FieldSpec] = &[
-    ("id","string"),("entity_id","string"),("company_name","string"),
-    ("email","string"),("phone","string"),("currency","string"),
-    ("terms","string"),("date_created","timestamp"),
+    ("id", "string"),
+    ("entity_id", "string"),
+    ("company_name", "string"),
+    ("email", "string"),
+    ("phone", "string"),
+    ("currency", "string"),
+    ("terms", "string"),
+    ("date_created", "timestamp"),
 ];
 static NS_SALESORDER: &[FieldSpec] = &[
-    ("id","string"),("tran_id","string"),("entity_id","string"),("tran_date","date"),
-    ("status","string"),("amount","decimal"),("subsidiary","string"),("currency","string"),
+    ("id", "string"),
+    ("tran_id", "string"),
+    ("entity_id", "string"),
+    ("tran_date", "date"),
+    ("status", "string"),
+    ("amount", "decimal"),
+    ("subsidiary", "string"),
+    ("currency", "string"),
 ];
 static NS_ITEM: &[FieldSpec] = &[
-    ("id","string"),("item_id","string"),("display_name","string"),("type","string"),
-    ("base_price","decimal"),("purchase_price","decimal"),("is_inactive","boolean"),
+    ("id", "string"),
+    ("item_id", "string"),
+    ("display_name", "string"),
+    ("type", "string"),
+    ("base_price", "decimal"),
+    ("purchase_price", "decimal"),
+    ("is_inactive", "boolean"),
 ];
 static NS_INVOICE: &[FieldSpec] = &[
-    ("id","string"),("tran_id","string"),("entity_id","string"),("tran_date","date"),
-    ("due_date","date"),("status","string"),("amount_remaining","decimal"),("total","decimal"),
+    ("id", "string"),
+    ("tran_id", "string"),
+    ("entity_id", "string"),
+    ("tran_date", "date"),
+    ("due_date", "date"),
+    ("status", "string"),
+    ("amount_remaining", "decimal"),
+    ("total", "decimal"),
 ];
 static NS_VENDOR: &[FieldSpec] = &[
-    ("id","string"),("entity_id","string"),("company_name","string"),
-    ("email","string"),("currency","string"),("terms","string"),("is_inactive","boolean"),
+    ("id", "string"),
+    ("entity_id", "string"),
+    ("company_name", "string"),
+    ("email", "string"),
+    ("currency", "string"),
+    ("terms", "string"),
+    ("is_inactive", "boolean"),
 ];
 
 fn ns_table_for(obj: &NetsuiteObject) -> (&'static str, &'static [FieldSpec]) {
     match obj {
-        NetsuiteObject::Customer   => ("customer",    NS_CUSTOMER),
+        NetsuiteObject::Customer => ("customer", NS_CUSTOMER),
         NetsuiteObject::SalesOrder => ("sales_order", NS_SALESORDER),
-        NetsuiteObject::Item       => ("item",        NS_ITEM),
-        NetsuiteObject::Invoice    => ("invoice",     NS_INVOICE),
-        NetsuiteObject::Vendor     => ("vendor",      NS_VENDOR),
+        NetsuiteObject::Item => ("item", NS_ITEM),
+        NetsuiteObject::Invoice => ("invoice", NS_INVOICE),
+        NetsuiteObject::Vendor => ("vendor", NS_VENDOR),
     }
 }
 
-pub fn adapt_oracle_netsuite(input: OracleNetsuiteAdapterInput) -> Result<OntologySourceAdapterOutput, AppError> {
-    let all = vec![NetsuiteObject::Customer,NetsuiteObject::SalesOrder,NetsuiteObject::Item,NetsuiteObject::Invoice,NetsuiteObject::Vendor];
+pub fn adapt_oracle_netsuite(
+    input: OracleNetsuiteAdapterInput,
+) -> Result<OntologySourceAdapterOutput, AppError> {
+    let all = vec![
+        NetsuiteObject::Customer,
+        NetsuiteObject::SalesOrder,
+        NetsuiteObject::Item,
+        NetsuiteObject::Invoice,
+        NetsuiteObject::Vendor,
+    ];
     let selected = input.objects.as_deref().unwrap_or(&all);
     let label = input.instance_label.as_deref().unwrap_or("netsuite");
     let tables: Vec<TableSpec> = selected.iter().map(ns_table_for).collect();
     let relations = vec![
-        rel("SalesOrderBelongsToCustomer","SalesOrder","belongs_to","Customer","sales_order","entity_id","customer"),
-        rel("InvoiceBelongsToCustomer","Invoice","belongs_to","Customer","invoice","entity_id","customer"),
+        rel(
+            "SalesOrderBelongsToCustomer",
+            "SalesOrder",
+            "belongs_to",
+            "Customer",
+            "sales_order",
+            "entity_id",
+            "customer",
+        ),
+        rel(
+            "InvoiceBelongsToCustomer",
+            "Invoice",
+            "belongs_to",
+            "Customer",
+            "invoice",
+            "entity_id",
+            "customer",
+        ),
     ];
     let metrics = vec![
-        metric("outstanding_ar","Invoice","SUM(amount_remaining) WHERE status='open'"),
-        metric("total_sales","SalesOrder","SUM(amount)"),
+        metric(
+            "outstanding_ar",
+            "Invoice",
+            "SUM(amount_remaining) WHERE status='open'",
+        ),
+        metric("total_sales", "SalesOrder", "SUM(amount)"),
     ];
-    let actions = vec![
-        action("apply_payment","Invoice",true,json!({"invoice_id":"string","amount":"decimal"}),json!({"reads":["Invoice","Customer"]})),
-    ];
+    let actions = vec![action(
+        "apply_payment",
+        "Invoice",
+        true,
+        json!({"invoice_id":"string","amount":"decimal"}),
+        json!({"reads":["Invoice","Customer"]}),
+    )];
     Ok(build_platform_output(
-        "erp","netsuite","netsuite_export","erp","oracle_netsuite",label,&tables,relations,metrics,actions,
+        "erp",
+        "netsuite",
+        "netsuite_export",
+        "erp",
+        "oracle_netsuite",
+        label,
+        &tables,
+        relations,
+        metrics,
+        actions,
     ))
 }
 
@@ -1223,86 +1705,205 @@ pub struct ShopifyAdapterInput {
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ShopifyTable { Orders, Customers, Products, Variants, Fulfillments, Refunds }
+pub enum ShopifyTable {
+    Orders,
+    Customers,
+    Products,
+    Variants,
+    Fulfillments,
+    Refunds,
+}
 
 static SHOPIFY_ORDERS: &[FieldSpec] = &[
-    ("id","string"),("email","string"),("financial_status","string"),
-    ("fulfillment_status","string"),("total_price","decimal"),("subtotal_price","decimal"),
-    ("total_tax","decimal"),("currency","string"),("created_at","timestamp"),
-    ("customer_id","string"),("shipping_country","string"),("tags","string"),
+    ("id", "string"),
+    ("email", "string"),
+    ("financial_status", "string"),
+    ("fulfillment_status", "string"),
+    ("total_price", "decimal"),
+    ("subtotal_price", "decimal"),
+    ("total_tax", "decimal"),
+    ("currency", "string"),
+    ("created_at", "timestamp"),
+    ("customer_id", "string"),
+    ("shipping_country", "string"),
+    ("tags", "string"),
 ];
 static SHOPIFY_CUSTOMERS: &[FieldSpec] = &[
-    ("id","string"),("email","string"),("first_name","string"),("last_name","string"),
-    ("phone","string"),("orders_count","integer"),("total_spent","decimal"),
-    ("accepts_marketing","boolean"),("created_at","timestamp"),
+    ("id", "string"),
+    ("email", "string"),
+    ("first_name", "string"),
+    ("last_name", "string"),
+    ("phone", "string"),
+    ("orders_count", "integer"),
+    ("total_spent", "decimal"),
+    ("accepts_marketing", "boolean"),
+    ("created_at", "timestamp"),
 ];
 static SHOPIFY_PRODUCTS: &[FieldSpec] = &[
-    ("id","string"),("title","string"),("vendor","string"),("product_type","string"),
-    ("status","string"),("tags","string"),("created_at","timestamp"),
+    ("id", "string"),
+    ("title", "string"),
+    ("vendor", "string"),
+    ("product_type", "string"),
+    ("status", "string"),
+    ("tags", "string"),
+    ("created_at", "timestamp"),
 ];
 static SHOPIFY_VARIANTS: &[FieldSpec] = &[
-    ("id","string"),("product_id","string"),("sku","string"),("price","decimal"),
-    ("compare_at_price","decimal"),("inventory_quantity","integer"),
-    ("weight","decimal"),("option1","string"),("option2","string"),
+    ("id", "string"),
+    ("product_id", "string"),
+    ("sku", "string"),
+    ("price", "decimal"),
+    ("compare_at_price", "decimal"),
+    ("inventory_quantity", "integer"),
+    ("weight", "decimal"),
+    ("option1", "string"),
+    ("option2", "string"),
 ];
 static SHOPIFY_FULFILLMENTS: &[FieldSpec] = &[
-    ("id","string"),("order_id","string"),("status","string"),
-    ("tracking_company","string"),("tracking_number","string"),("created_at","timestamp"),
+    ("id", "string"),
+    ("order_id", "string"),
+    ("status", "string"),
+    ("tracking_company", "string"),
+    ("tracking_number", "string"),
+    ("created_at", "timestamp"),
 ];
 static SHOPIFY_REFUNDS: &[FieldSpec] = &[
-    ("id","string"),("order_id","string"),("created_at","timestamp"),
-    ("note","string"),("restock","boolean"),
+    ("id", "string"),
+    ("order_id", "string"),
+    ("created_at", "timestamp"),
+    ("note", "string"),
+    ("restock", "boolean"),
 ];
 
 fn shopify_table_for(t: &ShopifyTable) -> (&'static str, &'static [FieldSpec]) {
     match t {
-        ShopifyTable::Orders       => ("orders",       SHOPIFY_ORDERS),
-        ShopifyTable::Customers    => ("customers",    SHOPIFY_CUSTOMERS),
-        ShopifyTable::Products     => ("products",     SHOPIFY_PRODUCTS),
-        ShopifyTable::Variants     => ("variants",     SHOPIFY_VARIANTS),
+        ShopifyTable::Orders => ("orders", SHOPIFY_ORDERS),
+        ShopifyTable::Customers => ("customers", SHOPIFY_CUSTOMERS),
+        ShopifyTable::Products => ("products", SHOPIFY_PRODUCTS),
+        ShopifyTable::Variants => ("variants", SHOPIFY_VARIANTS),
         ShopifyTable::Fulfillments => ("fulfillments", SHOPIFY_FULFILLMENTS),
-        ShopifyTable::Refunds      => ("refunds",      SHOPIFY_REFUNDS),
+        ShopifyTable::Refunds => ("refunds", SHOPIFY_REFUNDS),
     }
 }
 
-pub fn adapt_shopify(input: ShopifyAdapterInput, bytes: Option<&[u8]>) -> Result<OntologySourceAdapterOutput, AppError> {
-    let all = vec![ShopifyTable::Orders, ShopifyTable::Customers, ShopifyTable::Products,
-                   ShopifyTable::Variants, ShopifyTable::Fulfillments, ShopifyTable::Refunds];
+pub fn adapt_shopify(
+    input: ShopifyAdapterInput,
+    bytes: Option<&[u8]>,
+) -> Result<OntologySourceAdapterOutput, AppError> {
+    let all = vec![
+        ShopifyTable::Orders,
+        ShopifyTable::Customers,
+        ShopifyTable::Products,
+        ShopifyTable::Variants,
+        ShopifyTable::Fulfillments,
+        ShopifyTable::Refunds,
+    ];
     let selected = input.tables.as_deref().unwrap_or(&all);
     let label = input.instance_label.as_deref().unwrap_or("shopify");
     let tables: Vec<TableSpec> = selected.iter().map(shopify_table_for).collect();
 
     let relations = vec![
-        rel("CustomerPlacesOrder","Customer","places","Order","orders","customer_id","customers"),
-        rel("VariantRepresentsProduct","Variant","represents","Product","variants","product_id","products"),
-        rel("OrderHasFulfillment","Fulfillment","belongs_to","Order","fulfillments","order_id","orders"),
-        rel("OrderHasRefund","Refund","belongs_to","Order","refunds","order_id","orders"),
+        rel(
+            "CustomerPlacesOrder",
+            "Customer",
+            "places",
+            "Order",
+            "orders",
+            "customer_id",
+            "customers",
+        ),
+        rel(
+            "VariantRepresentsProduct",
+            "Variant",
+            "represents",
+            "Product",
+            "variants",
+            "product_id",
+            "products",
+        ),
+        rel(
+            "OrderHasFulfillment",
+            "Fulfillment",
+            "belongs_to",
+            "Order",
+            "fulfillments",
+            "order_id",
+            "orders",
+        ),
+        rel(
+            "OrderHasRefund",
+            "Refund",
+            "belongs_to",
+            "Order",
+            "refunds",
+            "order_id",
+            "orders",
+        ),
     ];
     let metrics = vec![
-        metric("gmv","Order","SUM(total_price)"),
-        metric("aov","Order","AVG(total_price)"),
-        metric("refund_rate","Order","COUNT(refunds) / COUNT(orders) * 100"),
-        metric("ltv","Customer","SUM(total_spent)"),
+        metric("gmv", "Order", "SUM(total_price)"),
+        metric("aov", "Order", "AVG(total_price)"),
+        metric(
+            "refund_rate",
+            "Order",
+            "COUNT(refunds) / COUNT(orders) * 100",
+        ),
+        metric("ltv", "Customer", "SUM(total_spent)"),
     ];
     let actions = vec![
-        action("cancel_order","Order",true,json!({"order_id":"string","reason":"string"}),json!({"reads":["Order"]})),
-        action("process_refund","Order",true,json!({"order_id":"string","amount":"decimal","restock":"boolean"}),json!({"reads":["Order","Variant"]})),
-        action("restock_variant","Variant",false,json!({"variant_id":"string","quantity":"integer"}),json!({"reads":["Variant","Product"]})),
+        action(
+            "cancel_order",
+            "Order",
+            true,
+            json!({"order_id":"string","reason":"string"}),
+            json!({"reads":["Order"]}),
+        ),
+        action(
+            "process_refund",
+            "Order",
+            true,
+            json!({"order_id":"string","amount":"decimal","restock":"boolean"}),
+            json!({"reads":["Order","Variant"]}),
+        ),
+        action(
+            "restock_variant",
+            "Variant",
+            false,
+            json!({"variant_id":"string","quantity":"integer"}),
+            json!({"reads":["Variant","Product"]}),
+        ),
     ];
 
     let mut out = build_platform_output(
-        "ecommerce","shopify","shopify_export","commerce","shopify",label,&tables,relations,metrics,actions,
+        "ecommerce",
+        "shopify",
+        "shopify_export",
+        "commerce",
+        "shopify",
+        label,
+        &tables,
+        relations,
+        metrics,
+        actions,
     );
     // If an export file was provided, overlay real row data on the orders table
     if let (Some(file), Some(raw)) = (&input.export_file, bytes) {
-        if let Ok(csv_out) = adapt_csv(CsvAdapterInput {
-            file: file.clone(),
-            delimiter: None,
-            sample_row_count: Some(20),
-            table_name_override: Some("orders".to_string()),
-            source_system_override: Some(label.to_string()),
-        }, raw) {
-            if let Some(ds) = out.bundle.datasets.iter_mut().find(|d| d.table_name == "orders") {
+        if let Ok(csv_out) = adapt_csv(
+            CsvAdapterInput {
+                file: file.clone(),
+                delimiter: None,
+                sample_row_count: Some(20),
+                table_name_override: Some("orders".to_string()),
+                source_system_override: Some(label.to_string()),
+            },
+            raw,
+        ) {
+            if let Some(ds) = out
+                .bundle
+                .datasets
+                .iter_mut()
+                .find(|d| d.table_name == "orders")
+            {
                 if let Some(src) = csv_out.bundle.datasets.first() {
                     ds.rows = src.rows.clone();
                     ds.fields = src.fields.clone();
@@ -1330,65 +1931,172 @@ pub struct AmazonSellerCentralAdapterInput {
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum AmazonTable { Orders, OrderItems, Products, Inventory, Returns }
+pub enum AmazonTable {
+    Orders,
+    OrderItems,
+    Products,
+    Inventory,
+    Returns,
+}
 
 static AMZ_ORDERS: &[FieldSpec] = &[
-    ("amazon_order_id","string"),("purchase_date","timestamp"),("order_status","string"),
-    ("fulfillment_channel","string"),("sales_channel","string"),("ship_service_level","string"),
-    ("order_total","decimal"),("currency","string"),("buyer_email","string"),
+    ("amazon_order_id", "string"),
+    ("purchase_date", "timestamp"),
+    ("order_status", "string"),
+    ("fulfillment_channel", "string"),
+    ("sales_channel", "string"),
+    ("ship_service_level", "string"),
+    ("order_total", "decimal"),
+    ("currency", "string"),
+    ("buyer_email", "string"),
 ];
 static AMZ_ORDER_ITEMS: &[FieldSpec] = &[
-    ("amazon_order_id","string"),("asin","string"),("seller_sku","string"),
-    ("title","string"),("quantity_ordered","integer"),("item_price","decimal"),
-    ("item_tax","decimal"),("promotion_discount","decimal"),
+    ("amazon_order_id", "string"),
+    ("asin", "string"),
+    ("seller_sku", "string"),
+    ("title", "string"),
+    ("quantity_ordered", "integer"),
+    ("item_price", "decimal"),
+    ("item_tax", "decimal"),
+    ("promotion_discount", "decimal"),
 ];
 static AMZ_PRODUCTS: &[FieldSpec] = &[
-    ("asin","string"),("item_name","string"),("item_description","string"),
-    ("listing_id","string"),("price","decimal"),("status","string"),("open_date","date"),
+    ("asin", "string"),
+    ("item_name", "string"),
+    ("item_description", "string"),
+    ("listing_id", "string"),
+    ("price", "decimal"),
+    ("status", "string"),
+    ("open_date", "date"),
 ];
 static AMZ_INVENTORY: &[FieldSpec] = &[
-    ("sku","string"),("asin","string"),("fnsku","string"),("product_name","string"),
-    ("condition","string"),("your_price","decimal"),("mfn_listing_exists","boolean"),
-    ("afn_fulfillable_quantity","integer"),("afn_reserved_quantity","integer"),
+    ("sku", "string"),
+    ("asin", "string"),
+    ("fnsku", "string"),
+    ("product_name", "string"),
+    ("condition", "string"),
+    ("your_price", "decimal"),
+    ("mfn_listing_exists", "boolean"),
+    ("afn_fulfillable_quantity", "integer"),
+    ("afn_reserved_quantity", "integer"),
 ];
 static AMZ_RETURNS: &[FieldSpec] = &[
-    ("order_id","string"),("return_date","date"),("sku","string"),("asin","string"),
-    ("title","string"),("quantity","integer"),("return_reason","string"),("status","string"),
+    ("order_id", "string"),
+    ("return_date", "date"),
+    ("sku", "string"),
+    ("asin", "string"),
+    ("title", "string"),
+    ("quantity", "integer"),
+    ("return_reason", "string"),
+    ("status", "string"),
 ];
 
 fn amz_table_for(t: &AmazonTable) -> (&'static str, &'static [FieldSpec]) {
     match t {
-        AmazonTable::Orders      => ("orders",       AMZ_ORDERS),
-        AmazonTable::OrderItems  => ("order_items",  AMZ_ORDER_ITEMS),
-        AmazonTable::Products    => ("products",     AMZ_PRODUCTS),
-        AmazonTable::Inventory   => ("inventory",    AMZ_INVENTORY),
-        AmazonTable::Returns     => ("returns",      AMZ_RETURNS),
+        AmazonTable::Orders => ("orders", AMZ_ORDERS),
+        AmazonTable::OrderItems => ("order_items", AMZ_ORDER_ITEMS),
+        AmazonTable::Products => ("products", AMZ_PRODUCTS),
+        AmazonTable::Inventory => ("inventory", AMZ_INVENTORY),
+        AmazonTable::Returns => ("returns", AMZ_RETURNS),
     }
 }
 
-pub fn adapt_amazon_seller_central(input: AmazonSellerCentralAdapterInput, _bytes: Option<&[u8]>) -> Result<OntologySourceAdapterOutput, AppError> {
-    let all = vec![AmazonTable::Orders,AmazonTable::OrderItems,AmazonTable::Products,AmazonTable::Inventory,AmazonTable::Returns];
+pub fn adapt_amazon_seller_central(
+    input: AmazonSellerCentralAdapterInput,
+    _bytes: Option<&[u8]>,
+) -> Result<OntologySourceAdapterOutput, AppError> {
+    let all = vec![
+        AmazonTable::Orders,
+        AmazonTable::OrderItems,
+        AmazonTable::Products,
+        AmazonTable::Inventory,
+        AmazonTable::Returns,
+    ];
     let selected = input.tables.as_deref().unwrap_or(&all);
     let label = input.instance_label.as_deref().unwrap_or("amazon_seller");
     let tables: Vec<TableSpec> = selected.iter().map(amz_table_for).collect();
     let relations = vec![
-        rel("OrderItemBelongsToOrder","OrderItem","belongs_to","Order","order_items","amazon_order_id","orders"),
-        rel("OrderItemReferencesProduct","OrderItem","references","Product","order_items","asin","products"),
-        rel("InventoryTracksProduct","Inventory","tracks","Product","inventory","asin","products"),
-        rel("ReturnBelongsToOrder","Return","belongs_to","Order","returns","order_id","orders"),
+        rel(
+            "OrderItemBelongsToOrder",
+            "OrderItem",
+            "belongs_to",
+            "Order",
+            "order_items",
+            "amazon_order_id",
+            "orders",
+        ),
+        rel(
+            "OrderItemReferencesProduct",
+            "OrderItem",
+            "references",
+            "Product",
+            "order_items",
+            "asin",
+            "products",
+        ),
+        rel(
+            "InventoryTracksProduct",
+            "Inventory",
+            "tracks",
+            "Product",
+            "inventory",
+            "asin",
+            "products",
+        ),
+        rel(
+            "ReturnBelongsToOrder",
+            "Return",
+            "belongs_to",
+            "Order",
+            "returns",
+            "order_id",
+            "orders",
+        ),
     ];
     let metrics = vec![
-        metric("net_sales","OrderItem","SUM(item_price - promotion_discount)"),
-        metric("return_rate","Order","COUNT(returns) / COUNT(orders) * 100"),
-        metric("inventory_value","Inventory","SUM(your_price * afn_fulfillable_quantity)"),
+        metric(
+            "net_sales",
+            "OrderItem",
+            "SUM(item_price - promotion_discount)",
+        ),
+        metric(
+            "return_rate",
+            "Order",
+            "COUNT(returns) / COUNT(orders) * 100",
+        ),
+        metric(
+            "inventory_value",
+            "Inventory",
+            "SUM(your_price * afn_fulfillable_quantity)",
+        ),
     ];
     let actions = vec![
-        action("update_listing_price","Product",false,json!({"asin":"string","new_price":"decimal"}),json!({"reads":["Product","Inventory"]})),
-        action("submit_return_disposition","Return",true,json!({"order_id":"string","disposition":"string"}),json!({"reads":["Return"]})),
+        action(
+            "update_listing_price",
+            "Product",
+            false,
+            json!({"asin":"string","new_price":"decimal"}),
+            json!({"reads":["Product","Inventory"]}),
+        ),
+        action(
+            "submit_return_disposition",
+            "Return",
+            true,
+            json!({"order_id":"string","disposition":"string"}),
+            json!({"reads":["Return"]}),
+        ),
     ];
     Ok(build_platform_output(
-        "ecommerce","amazon","amazon_seller_central_export","commerce",
-        "amazon_seller_central",label,&tables,relations,metrics,actions,
+        "ecommerce",
+        "amazon",
+        "amazon_seller_central_export",
+        "commerce",
+        "amazon_seller_central",
+        label,
+        &tables,
+        relations,
+        metrics,
+        actions,
     ))
 }
 
@@ -1408,61 +2116,152 @@ pub struct TaobaoAdapterInput {
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum TaobaoTable { Trades, Products, Buyers, Refunds }
+pub enum TaobaoTable {
+    Trades,
+    Products,
+    Buyers,
+    Refunds,
+}
 
 static TB_TRADES: &[FieldSpec] = &[
-    ("tid","string"),("buyer_nick","string"),("seller_nick","string"),
-    ("status","string"),("payment","decimal"),("discount_fee","decimal"),
-    ("post_fee","decimal"),("total_fee","decimal"),("num_iid","string"),
-    ("title","string"),("num","integer"),("created","timestamp"),("end_time","timestamp"),
-    ("receiver_name","string"),("receiver_province","string"),("receiver_city","string"),
+    ("tid", "string"),
+    ("buyer_nick", "string"),
+    ("seller_nick", "string"),
+    ("status", "string"),
+    ("payment", "decimal"),
+    ("discount_fee", "decimal"),
+    ("post_fee", "decimal"),
+    ("total_fee", "decimal"),
+    ("num_iid", "string"),
+    ("title", "string"),
+    ("num", "integer"),
+    ("created", "timestamp"),
+    ("end_time", "timestamp"),
+    ("receiver_name", "string"),
+    ("receiver_province", "string"),
+    ("receiver_city", "string"),
 ];
 static TB_PRODUCTS: &[FieldSpec] = &[
-    ("num_iid","string"),("title","string"),("price","decimal"),("num","integer"),
-    ("cid","string"),("seller_nick","string"),("created","timestamp"),
-    ("delist_time","timestamp"),("pic_url","string"),("detail_url","string"),
+    ("num_iid", "string"),
+    ("title", "string"),
+    ("price", "decimal"),
+    ("num", "integer"),
+    ("cid", "string"),
+    ("seller_nick", "string"),
+    ("created", "timestamp"),
+    ("delist_time", "timestamp"),
+    ("pic_url", "string"),
+    ("detail_url", "string"),
 ];
 static TB_BUYERS: &[FieldSpec] = &[
-    ("nick","string"),("buyer_credit_level","integer"),("sex","string"),
-    ("created","timestamp"),("buyer_area","string"),
+    ("nick", "string"),
+    ("buyer_credit_level", "integer"),
+    ("sex", "string"),
+    ("created", "timestamp"),
+    ("buyer_area", "string"),
 ];
 static TB_REFUNDS: &[FieldSpec] = &[
-    ("refund_id","string"),("tid","string"),("num_iid","string"),
-    ("title","string"),("buyer_nick","string"),("seller_nick","string"),
-    ("total_fee","decimal"),("refund_fee","decimal"),("status","string"),
-    ("reason","string"),("created","timestamp"),("modified","timestamp"),
+    ("refund_id", "string"),
+    ("tid", "string"),
+    ("num_iid", "string"),
+    ("title", "string"),
+    ("buyer_nick", "string"),
+    ("seller_nick", "string"),
+    ("total_fee", "decimal"),
+    ("refund_fee", "decimal"),
+    ("status", "string"),
+    ("reason", "string"),
+    ("created", "timestamp"),
+    ("modified", "timestamp"),
 ];
 
 fn tb_table_for(t: &TaobaoTable) -> (&'static str, &'static [FieldSpec]) {
     match t {
-        TaobaoTable::Trades   => ("trades",   TB_TRADES),
+        TaobaoTable::Trades => ("trades", TB_TRADES),
         TaobaoTable::Products => ("products", TB_PRODUCTS),
-        TaobaoTable::Buyers   => ("buyers",   TB_BUYERS),
-        TaobaoTable::Refunds  => ("refunds",  TB_REFUNDS),
+        TaobaoTable::Buyers => ("buyers", TB_BUYERS),
+        TaobaoTable::Refunds => ("refunds", TB_REFUNDS),
     }
 }
 
-pub fn adapt_taobao(input: TaobaoAdapterInput, _bytes: Option<&[u8]>) -> Result<OntologySourceAdapterOutput, AppError> {
-    let all = vec![TaobaoTable::Trades,TaobaoTable::Products,TaobaoTable::Buyers,TaobaoTable::Refunds];
+pub fn adapt_taobao(
+    input: TaobaoAdapterInput,
+    _bytes: Option<&[u8]>,
+) -> Result<OntologySourceAdapterOutput, AppError> {
+    let all = vec![
+        TaobaoTable::Trades,
+        TaobaoTable::Products,
+        TaobaoTable::Buyers,
+        TaobaoTable::Refunds,
+    ];
     let selected = input.tables.as_deref().unwrap_or(&all);
     let label = input.instance_label.as_deref().unwrap_or("taobao");
     let tables: Vec<TableSpec> = selected.iter().map(tb_table_for).collect();
     let relations = vec![
-        rel("BuyerPlacesTrade","Buyer","places","Trade","trades","buyer_nick","buyers"),
-        rel("TradeReferencesProduct","Trade","references","Product","trades","num_iid","products"),
-        rel("RefundBelongsToTrade","Refund","belongs_to","Trade","refunds","tid","trades"),
+        rel(
+            "BuyerPlacesTrade",
+            "Buyer",
+            "places",
+            "Trade",
+            "trades",
+            "buyer_nick",
+            "buyers",
+        ),
+        rel(
+            "TradeReferencesProduct",
+            "Trade",
+            "references",
+            "Product",
+            "trades",
+            "num_iid",
+            "products",
+        ),
+        rel(
+            "RefundBelongsToTrade",
+            "Refund",
+            "belongs_to",
+            "Trade",
+            "refunds",
+            "tid",
+            "trades",
+        ),
     ];
     let metrics = vec![
-        metric("gmv","Trade","SUM(payment)"),
-        metric("refund_rate","Trade","COUNT(refunds) / COUNT(trades) * 100"),
-        metric("avg_order_value","Trade","AVG(payment)"),
+        metric("gmv", "Trade", "SUM(payment)"),
+        metric(
+            "refund_rate",
+            "Trade",
+            "COUNT(refunds) / COUNT(trades) * 100",
+        ),
+        metric("avg_order_value", "Trade", "AVG(payment)"),
     ];
     let actions = vec![
-        action("close_trade","Trade",true,json!({"tid":"string","reason":"string"}),json!({"reads":["Trade"]})),
-        action("agree_refund","Refund",true,json!({"refund_id":"string"}),json!({"reads":["Refund","Trade"]})),
+        action(
+            "close_trade",
+            "Trade",
+            true,
+            json!({"tid":"string","reason":"string"}),
+            json!({"reads":["Trade"]}),
+        ),
+        action(
+            "agree_refund",
+            "Refund",
+            true,
+            json!({"refund_id":"string"}),
+            json!({"reads":["Refund","Trade"]}),
+        ),
     ];
     Ok(build_platform_output(
-        "ecommerce","taobao","taobao_export","commerce","taobao",label,&tables,relations,metrics,actions,
+        "ecommerce",
+        "taobao",
+        "taobao_export",
+        "commerce",
+        "taobao",
+        label,
+        &tables,
+        relations,
+        metrics,
+        actions,
     ))
 }
 
@@ -1482,69 +2281,166 @@ pub struct TiktokShopAdapterInput {
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum TiktokShopTable { Orders, Products, Creators, Settlements, Returns }
+pub enum TiktokShopTable {
+    Orders,
+    Products,
+    Creators,
+    Settlements,
+    Returns,
+}
 
 static TT_ORDERS: &[FieldSpec] = &[
-    ("order_id","string"),("order_status","string"),("buyer_uid","string"),
-    ("create_time","timestamp"),("update_time","timestamp"),("payment_method","string"),
-    ("item_original_price","decimal"),("shipping_fee","decimal"),
-    ("platform_discount","decimal"),("seller_discount","decimal"),
-    ("order_income","decimal"),("currency","string"),("region","string"),
+    ("order_id", "string"),
+    ("order_status", "string"),
+    ("buyer_uid", "string"),
+    ("create_time", "timestamp"),
+    ("update_time", "timestamp"),
+    ("payment_method", "string"),
+    ("item_original_price", "decimal"),
+    ("shipping_fee", "decimal"),
+    ("platform_discount", "decimal"),
+    ("seller_discount", "decimal"),
+    ("order_income", "decimal"),
+    ("currency", "string"),
+    ("region", "string"),
 ];
 static TT_PRODUCTS: &[FieldSpec] = &[
-    ("product_id","string"),("product_name","string"),("product_status","string"),
-    ("category_chain","string"),("brand_id","string"),("seller_sku","string"),
-    ("price","decimal"),("currency","string"),("stock","integer"),
-    ("sales_30d","integer"),("rating","decimal"),("create_time","timestamp"),
+    ("product_id", "string"),
+    ("product_name", "string"),
+    ("product_status", "string"),
+    ("category_chain", "string"),
+    ("brand_id", "string"),
+    ("seller_sku", "string"),
+    ("price", "decimal"),
+    ("currency", "string"),
+    ("stock", "integer"),
+    ("sales_30d", "integer"),
+    ("rating", "decimal"),
+    ("create_time", "timestamp"),
 ];
 static TT_CREATORS: &[FieldSpec] = &[
-    ("creator_id","string"),("creator_name","string"),("creator_handle","string"),
-    ("region","string"),("followers","integer"),("gmv_30d","decimal"),
-    ("orders_30d","integer"),("commission_rate","decimal"),("status","string"),
+    ("creator_id", "string"),
+    ("creator_name", "string"),
+    ("creator_handle", "string"),
+    ("region", "string"),
+    ("followers", "integer"),
+    ("gmv_30d", "decimal"),
+    ("orders_30d", "integer"),
+    ("commission_rate", "decimal"),
+    ("status", "string"),
 ];
 static TT_SETTLEMENTS: &[FieldSpec] = &[
-    ("settlement_id","string"),("settlement_date","date"),("order_id","string"),
-    ("product_id","string"),("seller_revenue","decimal"),("platform_fee","decimal"),
-    ("shipping_subsidy","decimal"),("commission","decimal"),("currency","string"),
+    ("settlement_id", "string"),
+    ("settlement_date", "date"),
+    ("order_id", "string"),
+    ("product_id", "string"),
+    ("seller_revenue", "decimal"),
+    ("platform_fee", "decimal"),
+    ("shipping_subsidy", "decimal"),
+    ("commission", "decimal"),
+    ("currency", "string"),
 ];
 static TT_RETURNS: &[FieldSpec] = &[
-    ("return_id","string"),("order_id","string"),("product_id","string"),
-    ("return_reason","string"),("return_status","string"),("refund_amount","decimal"),
-    ("currency","string"),("create_time","timestamp"),
+    ("return_id", "string"),
+    ("order_id", "string"),
+    ("product_id", "string"),
+    ("return_reason", "string"),
+    ("return_status", "string"),
+    ("refund_amount", "decimal"),
+    ("currency", "string"),
+    ("create_time", "timestamp"),
 ];
 
 fn tt_table_for(t: &TiktokShopTable) -> (&'static str, &'static [FieldSpec]) {
     match t {
-        TiktokShopTable::Orders      => ("orders",      TT_ORDERS),
-        TiktokShopTable::Products    => ("products",    TT_PRODUCTS),
-        TiktokShopTable::Creators    => ("creators",    TT_CREATORS),
+        TiktokShopTable::Orders => ("orders", TT_ORDERS),
+        TiktokShopTable::Products => ("products", TT_PRODUCTS),
+        TiktokShopTable::Creators => ("creators", TT_CREATORS),
         TiktokShopTable::Settlements => ("settlements", TT_SETTLEMENTS),
-        TiktokShopTable::Returns     => ("returns",     TT_RETURNS),
+        TiktokShopTable::Returns => ("returns", TT_RETURNS),
     }
 }
 
-pub fn adapt_tiktok_shop(input: TiktokShopAdapterInput, _bytes: Option<&[u8]>) -> Result<OntologySourceAdapterOutput, AppError> {
-    let all = vec![TiktokShopTable::Orders,TiktokShopTable::Products,TiktokShopTable::Creators,TiktokShopTable::Settlements,TiktokShopTable::Returns];
+pub fn adapt_tiktok_shop(
+    input: TiktokShopAdapterInput,
+    _bytes: Option<&[u8]>,
+) -> Result<OntologySourceAdapterOutput, AppError> {
+    let all = vec![
+        TiktokShopTable::Orders,
+        TiktokShopTable::Products,
+        TiktokShopTable::Creators,
+        TiktokShopTable::Settlements,
+        TiktokShopTable::Returns,
+    ];
     let selected = input.tables.as_deref().unwrap_or(&all);
     let label = input.instance_label.as_deref().unwrap_or("tiktok_shop");
     let tables: Vec<TableSpec> = selected.iter().map(tt_table_for).collect();
     let relations = vec![
-        rel("SettlementBelongsToOrder","Settlement","belongs_to","Order","settlements","order_id","orders"),
-        rel("ReturnBelongsToOrder","Return","belongs_to","Order","returns","order_id","orders"),
-        rel("SettlementReferencesProduct","Settlement","references","Product","settlements","product_id","products"),
+        rel(
+            "SettlementBelongsToOrder",
+            "Settlement",
+            "belongs_to",
+            "Order",
+            "settlements",
+            "order_id",
+            "orders",
+        ),
+        rel(
+            "ReturnBelongsToOrder",
+            "Return",
+            "belongs_to",
+            "Order",
+            "returns",
+            "order_id",
+            "orders",
+        ),
+        rel(
+            "SettlementReferencesProduct",
+            "Settlement",
+            "references",
+            "Product",
+            "settlements",
+            "product_id",
+            "products",
+        ),
     ];
     let metrics = vec![
-        metric("gmv","Order","SUM(item_original_price)"),
-        metric("net_revenue","Settlement","SUM(seller_revenue)"),
-        metric("creator_gmv","Creator","SUM(gmv_30d)"),
-        metric("return_rate","Order","COUNT(returns) / COUNT(orders) * 100"),
+        metric("gmv", "Order", "SUM(item_original_price)"),
+        metric("net_revenue", "Settlement", "SUM(seller_revenue)"),
+        metric("creator_gmv", "Creator", "SUM(gmv_30d)"),
+        metric(
+            "return_rate",
+            "Order",
+            "COUNT(returns) / COUNT(orders) * 100",
+        ),
     ];
     let actions = vec![
-        action("approve_return","Return",true,json!({"return_id":"string"}),json!({"reads":["Return","Order"]})),
-        action("invite_creator","Creator",false,json!({"creator_id":"string","commission_rate":"decimal"}),json!({"reads":["Creator"]})),
+        action(
+            "approve_return",
+            "Return",
+            true,
+            json!({"return_id":"string"}),
+            json!({"reads":["Return","Order"]}),
+        ),
+        action(
+            "invite_creator",
+            "Creator",
+            false,
+            json!({"creator_id":"string","commission_rate":"decimal"}),
+            json!({"reads":["Creator"]}),
+        ),
     ];
     Ok(build_platform_output(
-        "ecommerce","tiktok_shop","tiktok_shop_export","commerce","tiktok_shop",label,&tables,relations,metrics,actions,
+        "ecommerce",
+        "tiktok_shop",
+        "tiktok_shop_export",
+        "commerce",
+        "tiktok_shop",
+        label,
+        &tables,
+        relations,
+        metrics,
+        actions,
     ))
 }
 
@@ -1564,62 +2460,149 @@ pub struct TemuAdapterInput {
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum TemuTable { Orders, Products, Pricing, Logistics }
+pub enum TemuTable {
+    Orders,
+    Products,
+    Pricing,
+    Logistics,
+}
 
 static TEMU_ORDERS: &[FieldSpec] = &[
-    ("order_sn","string"),("order_status","string"),("buyer_id","string"),
-    ("goods_id","string"),("goods_name","string"),("goods_spec","string"),
-    ("goods_count","integer"),("goods_price","decimal"),("order_amount","decimal"),
-    ("freight_amount","decimal"),("currency","string"),("pay_time","timestamp"),
-    ("region","string"),
+    ("order_sn", "string"),
+    ("order_status", "string"),
+    ("buyer_id", "string"),
+    ("goods_id", "string"),
+    ("goods_name", "string"),
+    ("goods_spec", "string"),
+    ("goods_count", "integer"),
+    ("goods_price", "decimal"),
+    ("order_amount", "decimal"),
+    ("freight_amount", "decimal"),
+    ("currency", "string"),
+    ("pay_time", "timestamp"),
+    ("region", "string"),
 ];
 static TEMU_PRODUCTS: &[FieldSpec] = &[
-    ("goods_id","string"),("goods_name","string"),("goods_status","string"),
-    ("cat_id","string"),("goods_spec","string"),("sku_id","string"),
-    ("goods_img","string"),("sales_volume","integer"),("goods_rating","decimal"),
-    ("platform_category","string"),
+    ("goods_id", "string"),
+    ("goods_name", "string"),
+    ("goods_status", "string"),
+    ("cat_id", "string"),
+    ("goods_spec", "string"),
+    ("sku_id", "string"),
+    ("goods_img", "string"),
+    ("sales_volume", "integer"),
+    ("goods_rating", "decimal"),
+    ("platform_category", "string"),
 ];
 static TEMU_PRICING: &[FieldSpec] = &[
-    ("sku_id","string"),("goods_id","string"),("goods_spec","string"),
-    ("cost_price","decimal"),("sale_price","decimal"),("suggested_price","decimal"),
-    ("currency","string"),("discount_rate","decimal"),("effective_date","date"),
+    ("sku_id", "string"),
+    ("goods_id", "string"),
+    ("goods_spec", "string"),
+    ("cost_price", "decimal"),
+    ("sale_price", "decimal"),
+    ("suggested_price", "decimal"),
+    ("currency", "string"),
+    ("discount_rate", "decimal"),
+    ("effective_date", "date"),
 ];
 static TEMU_LOGISTICS: &[FieldSpec] = &[
-    ("order_sn","string"),("logistics_no","string"),("logistics_company","string"),
-    ("ship_time","timestamp"),("delivery_time","timestamp"),
-    ("logistics_status","string"),("country","string"),("weight_kg","decimal"),
+    ("order_sn", "string"),
+    ("logistics_no", "string"),
+    ("logistics_company", "string"),
+    ("ship_time", "timestamp"),
+    ("delivery_time", "timestamp"),
+    ("logistics_status", "string"),
+    ("country", "string"),
+    ("weight_kg", "decimal"),
 ];
 
 fn temu_table_for(t: &TemuTable) -> (&'static str, &'static [FieldSpec]) {
     match t {
-        TemuTable::Orders    => ("orders",    TEMU_ORDERS),
-        TemuTable::Products  => ("products",  TEMU_PRODUCTS),
-        TemuTable::Pricing   => ("pricing",   TEMU_PRICING),
+        TemuTable::Orders => ("orders", TEMU_ORDERS),
+        TemuTable::Products => ("products", TEMU_PRODUCTS),
+        TemuTable::Pricing => ("pricing", TEMU_PRICING),
         TemuTable::Logistics => ("logistics", TEMU_LOGISTICS),
     }
 }
 
-pub fn adapt_temu(input: TemuAdapterInput, _bytes: Option<&[u8]>) -> Result<OntologySourceAdapterOutput, AppError> {
-    let all = vec![TemuTable::Orders,TemuTable::Products,TemuTable::Pricing,TemuTable::Logistics];
+pub fn adapt_temu(
+    input: TemuAdapterInput,
+    _bytes: Option<&[u8]>,
+) -> Result<OntologySourceAdapterOutput, AppError> {
+    let all = vec![
+        TemuTable::Orders,
+        TemuTable::Products,
+        TemuTable::Pricing,
+        TemuTable::Logistics,
+    ];
     let selected = input.tables.as_deref().unwrap_or(&all);
     let label = input.instance_label.as_deref().unwrap_or("temu");
     let tables: Vec<TableSpec> = selected.iter().map(temu_table_for).collect();
     let relations = vec![
-        rel("OrderReferencesProduct","Order","references","Product","orders","goods_id","products"),
-        rel("LogisticsBelongsToOrder","Logistics","belongs_to","Order","logistics","order_sn","orders"),
-        rel("PricingReferencesProduct","Pricing","references","Product","pricing","goods_id","products"),
+        rel(
+            "OrderReferencesProduct",
+            "Order",
+            "references",
+            "Product",
+            "orders",
+            "goods_id",
+            "products",
+        ),
+        rel(
+            "LogisticsBelongsToOrder",
+            "Logistics",
+            "belongs_to",
+            "Order",
+            "logistics",
+            "order_sn",
+            "orders",
+        ),
+        rel(
+            "PricingReferencesProduct",
+            "Pricing",
+            "references",
+            "Product",
+            "pricing",
+            "goods_id",
+            "products",
+        ),
     ];
     let metrics = vec![
-        metric("gmv","Order","SUM(order_amount)"),
-        metric("avg_selling_price","Pricing","AVG(sale_price)"),
-        metric("logistics_on_time_rate","Logistics","COUNT(*) FILTER(delivery_time <= expected_time) / COUNT(*) * 100"),
+        metric("gmv", "Order", "SUM(order_amount)"),
+        metric("avg_selling_price", "Pricing", "AVG(sale_price)"),
+        metric(
+            "logistics_on_time_rate",
+            "Logistics",
+            "COUNT(*) FILTER(delivery_time <= expected_time) / COUNT(*) * 100",
+        ),
     ];
     let actions = vec![
-        action("update_sku_price","Pricing",false,json!({"sku_id":"string","new_price":"decimal"}),json!({"reads":["Pricing","Product"]})),
-        action("withdraw_product","Product",true,json!({"goods_id":"string","reason":"string"}),json!({"reads":["Product","Order"]})),
+        action(
+            "update_sku_price",
+            "Pricing",
+            false,
+            json!({"sku_id":"string","new_price":"decimal"}),
+            json!({"reads":["Pricing","Product"]}),
+        ),
+        action(
+            "withdraw_product",
+            "Product",
+            true,
+            json!({"goods_id":"string","reason":"string"}),
+            json!({"reads":["Product","Order"]}),
+        ),
     ];
     Ok(build_platform_output(
-        "ecommerce","temu","temu_export","commerce","temu",label,&tables,relations,metrics,actions,
+        "ecommerce",
+        "temu",
+        "temu_export",
+        "commerce",
+        "temu",
+        label,
+        &tables,
+        relations,
+        metrics,
+        actions,
     ))
 }
 
@@ -1639,67 +2622,162 @@ pub struct WoocommerceAdapterInput {
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum WoocommerceTable { Orders, OrderItems, Products, Customers, Meta }
+pub enum WoocommerceTable {
+    Orders,
+    OrderItems,
+    Products,
+    Customers,
+    Meta,
+}
 
 static WC_ORDERS: &[FieldSpec] = &[
-    ("id","string"),("status","string"),("currency","string"),("date_created","timestamp"),
-    ("total","decimal"),("subtotal","decimal"),("total_tax","decimal"),
-    ("shipping_total","decimal"),("discount_total","decimal"),
-    ("customer_id","string"),("billing_country","string"),("payment_method","string"),
+    ("id", "string"),
+    ("status", "string"),
+    ("currency", "string"),
+    ("date_created", "timestamp"),
+    ("total", "decimal"),
+    ("subtotal", "decimal"),
+    ("total_tax", "decimal"),
+    ("shipping_total", "decimal"),
+    ("discount_total", "decimal"),
+    ("customer_id", "string"),
+    ("billing_country", "string"),
+    ("payment_method", "string"),
 ];
 static WC_ORDER_ITEMS: &[FieldSpec] = &[
-    ("id","string"),("order_id","string"),("product_id","string"),
-    ("variation_id","string"),("name","string"),("quantity","integer"),
-    ("subtotal","decimal"),("total","decimal"),("tax","decimal"),
+    ("id", "string"),
+    ("order_id", "string"),
+    ("product_id", "string"),
+    ("variation_id", "string"),
+    ("name", "string"),
+    ("quantity", "integer"),
+    ("subtotal", "decimal"),
+    ("total", "decimal"),
+    ("tax", "decimal"),
 ];
 static WC_PRODUCTS: &[FieldSpec] = &[
-    ("id","string"),("name","string"),("slug","string"),("type","string"),
-    ("status","string"),("sku","string"),("price","decimal"),
-    ("regular_price","decimal"),("sale_price","decimal"),("stock_quantity","integer"),
-    ("categories","string"),("date_created","timestamp"),
+    ("id", "string"),
+    ("name", "string"),
+    ("slug", "string"),
+    ("type", "string"),
+    ("status", "string"),
+    ("sku", "string"),
+    ("price", "decimal"),
+    ("regular_price", "decimal"),
+    ("sale_price", "decimal"),
+    ("stock_quantity", "integer"),
+    ("categories", "string"),
+    ("date_created", "timestamp"),
 ];
 static WC_CUSTOMERS: &[FieldSpec] = &[
-    ("id","string"),("email","string"),("first_name","string"),("last_name","string"),
-    ("username","string"),("date_created","timestamp"),("orders_count","integer"),
-    ("total_spent","decimal"),("billing_country","string"),
+    ("id", "string"),
+    ("email", "string"),
+    ("first_name", "string"),
+    ("last_name", "string"),
+    ("username", "string"),
+    ("date_created", "timestamp"),
+    ("orders_count", "integer"),
+    ("total_spent", "decimal"),
+    ("billing_country", "string"),
 ];
 static WC_META: &[FieldSpec] = &[
-    ("meta_id","string"),("object_id","string"),("object_type","string"),
-    ("meta_key","string"),("meta_value","string"),
+    ("meta_id", "string"),
+    ("object_id", "string"),
+    ("object_type", "string"),
+    ("meta_key", "string"),
+    ("meta_value", "string"),
 ];
 
 fn wc_table_for(t: &WoocommerceTable) -> (&'static str, &'static [FieldSpec]) {
     match t {
-        WoocommerceTable::Orders     => ("orders",      WC_ORDERS),
+        WoocommerceTable::Orders => ("orders", WC_ORDERS),
         WoocommerceTable::OrderItems => ("order_items", WC_ORDER_ITEMS),
-        WoocommerceTable::Products   => ("products",    WC_PRODUCTS),
-        WoocommerceTable::Customers  => ("customers",   WC_CUSTOMERS),
-        WoocommerceTable::Meta       => ("meta",        WC_META),
+        WoocommerceTable::Products => ("products", WC_PRODUCTS),
+        WoocommerceTable::Customers => ("customers", WC_CUSTOMERS),
+        WoocommerceTable::Meta => ("meta", WC_META),
     }
 }
 
-pub fn adapt_woocommerce(input: WoocommerceAdapterInput, _bytes: Option<&[u8]>) -> Result<OntologySourceAdapterOutput, AppError> {
-    let all = vec![WoocommerceTable::Orders,WoocommerceTable::OrderItems,WoocommerceTable::Products,WoocommerceTable::Customers,WoocommerceTable::Meta];
+pub fn adapt_woocommerce(
+    input: WoocommerceAdapterInput,
+    _bytes: Option<&[u8]>,
+) -> Result<OntologySourceAdapterOutput, AppError> {
+    let all = vec![
+        WoocommerceTable::Orders,
+        WoocommerceTable::OrderItems,
+        WoocommerceTable::Products,
+        WoocommerceTable::Customers,
+        WoocommerceTable::Meta,
+    ];
     let selected = input.tables.as_deref().unwrap_or(&all);
     let label = input.instance_label.as_deref().unwrap_or("woocommerce");
     let tables: Vec<TableSpec> = selected.iter().map(wc_table_for).collect();
     let relations = vec![
-        rel("CustomerPlacesOrder","Customer","places","Order","orders","customer_id","customers"),
-        rel("OrderItemBelongsToOrder","OrderItem","belongs_to","Order","order_items","order_id","orders"),
-        rel("OrderItemReferencesProduct","OrderItem","references","Product","order_items","product_id","products"),
+        rel(
+            "CustomerPlacesOrder",
+            "Customer",
+            "places",
+            "Order",
+            "orders",
+            "customer_id",
+            "customers",
+        ),
+        rel(
+            "OrderItemBelongsToOrder",
+            "OrderItem",
+            "belongs_to",
+            "Order",
+            "order_items",
+            "order_id",
+            "orders",
+        ),
+        rel(
+            "OrderItemReferencesProduct",
+            "OrderItem",
+            "references",
+            "Product",
+            "order_items",
+            "product_id",
+            "products",
+        ),
     ];
     let metrics = vec![
-        metric("gmv","Order","SUM(total)"),
-        metric("aov","Order","AVG(total)"),
-        metric("ltv","Customer","SUM(total_spent)"),
-        metric("items_per_order","OrderItem","COUNT(*) / COUNT(DISTINCT order_id)"),
+        metric("gmv", "Order", "SUM(total)"),
+        metric("aov", "Order", "AVG(total)"),
+        metric("ltv", "Customer", "SUM(total_spent)"),
+        metric(
+            "items_per_order",
+            "OrderItem",
+            "COUNT(*) / COUNT(DISTINCT order_id)",
+        ),
     ];
     let actions = vec![
-        action("update_order_status","Order",false,json!({"order_id":"string","status":"string"}),json!({"reads":["Order"]})),
-        action("adjust_stock","Product",false,json!({"product_id":"string","delta":"integer"}),json!({"reads":["Product"]})),
+        action(
+            "update_order_status",
+            "Order",
+            false,
+            json!({"order_id":"string","status":"string"}),
+            json!({"reads":["Order"]}),
+        ),
+        action(
+            "adjust_stock",
+            "Product",
+            false,
+            json!({"product_id":"string","delta":"integer"}),
+            json!({"reads":["Product"]}),
+        ),
     ];
     Ok(build_platform_output(
-        "ecommerce","woocommerce","woocommerce_export","commerce","woocommerce",label,&tables,relations,metrics,actions,
+        "ecommerce",
+        "woocommerce",
+        "woocommerce_export",
+        "commerce",
+        "woocommerce",
+        label,
+        &tables,
+        relations,
+        metrics,
+        actions,
     ))
 }
 
@@ -1707,7 +2785,10 @@ pub fn adapt_woocommerce(input: WoocommerceAdapterInput, _bytes: Option<&[u8]>) 
 // Top-level dispatcher — single entry point used by the HTTP handler
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub fn adapt_payload(payload: OntologySourcePayload, bytes: Option<&[u8]>) -> Result<OntologySourceAdapterOutput, AppError> {
+pub fn adapt_payload(
+    payload: OntologySourcePayload,
+    bytes: Option<&[u8]>,
+) -> Result<OntologySourceAdapterOutput, AppError> {
     match payload {
         OntologySourcePayload::Csv(input) => {
             let raw = bytes_or_inline(bytes, &input.file)?;
@@ -1729,20 +2810,25 @@ pub fn adapt_payload(payload: OntologySourcePayload, bytes: Option<&[u8]>) -> Re
             let raw = bytes_or_inline(bytes, &input.file)?;
             adapt_excel(input, &raw)
         }
-        OntologySourcePayload::Salesforce(input)      => adapt_salesforce(input),
-        OntologySourcePayload::Hubspot(input)          => adapt_hubspot(input),
-        OntologySourcePayload::SapS4Hana(input)        => adapt_sap_s4hana(input),
-        OntologySourcePayload::OracleNetsuite(input)   => adapt_oracle_netsuite(input),
-        OntologySourcePayload::AmazonSellerCentral(input) => adapt_amazon_seller_central(input, bytes),
-        OntologySourcePayload::Taobao(input)           => adapt_taobao(input, bytes),
-        OntologySourcePayload::TiktokShop(input)       => adapt_tiktok_shop(input, bytes),
-        OntologySourcePayload::Temu(input)             => adapt_temu(input, bytes),
-        OntologySourcePayload::Shopify(input)          => adapt_shopify(input, bytes),
-        OntologySourcePayload::Woocommerce(input)      => adapt_woocommerce(input, bytes),
+        OntologySourcePayload::Salesforce(input) => adapt_salesforce(input),
+        OntologySourcePayload::Hubspot(input) => adapt_hubspot(input),
+        OntologySourcePayload::SapS4Hana(input) => adapt_sap_s4hana(input),
+        OntologySourcePayload::OracleNetsuite(input) => adapt_oracle_netsuite(input),
+        OntologySourcePayload::AmazonSellerCentral(input) => {
+            adapt_amazon_seller_central(input, bytes)
+        }
+        OntologySourcePayload::Taobao(input) => adapt_taobao(input, bytes),
+        OntologySourcePayload::TiktokShop(input) => adapt_tiktok_shop(input, bytes),
+        OntologySourcePayload::Temu(input) => adapt_temu(input, bytes),
+        OntologySourcePayload::Shopify(input) => adapt_shopify(input, bytes),
+        OntologySourcePayload::Woocommerce(input) => adapt_woocommerce(input, bytes),
     }
 }
 
-fn bytes_or_inline(multipart_bytes: Option<&[u8]>, file: &RawFilePayload) -> Result<Vec<u8>, AppError> {
+fn bytes_or_inline(
+    multipart_bytes: Option<&[u8]>,
+    file: &RawFilePayload,
+) -> Result<Vec<u8>, AppError> {
     if let Some(b) = multipart_bytes {
         return Ok(b.to_vec());
     }

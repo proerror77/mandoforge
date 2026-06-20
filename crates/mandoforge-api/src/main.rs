@@ -46,6 +46,7 @@ mod handlers;
 mod mcp_gateway;
 mod native_connectors;
 mod observability;
+mod ontology_source_adapters;
 mod policy;
 mod provider;
 mod remote_computer_runner;
@@ -70,7 +71,6 @@ mod store_governance;
 mod store_manager_plans;
 mod store_memory_writeback;
 mod store_ontology_releases;
-mod ontology_source_adapters;
 mod store_policy_revisions;
 mod store_releases;
 mod store_remote_computers;
@@ -16422,7 +16422,9 @@ async fn gate_ontology_release_with_actor(
         "blockers": blockers,
     });
     release.updated_at = Utc::now();
-    let release = state.update_ontology_release(release, Some(original_status.as_str())).await?;
+    let release = state
+        .update_ontology_release(release, Some(original_status.as_str()))
+        .await?;
     state
         .append_audit_log(new_audit_log(
             None,
@@ -16531,7 +16533,9 @@ async fn archive_ontology_release_with_actor(
     release.status = "archived".to_string();
     release.archived_at = Some(Utc::now());
     release.updated_at = Utc::now();
-    let release = state.update_ontology_release(release, Some(original_status.as_str())).await?;
+    let release = state
+        .update_ontology_release(release, Some(original_status.as_str()))
+        .await?;
     state
         .append_audit_log(new_audit_log(
             None,

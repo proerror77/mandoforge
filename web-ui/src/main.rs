@@ -915,7 +915,7 @@ fn App() -> Html {
                 <div class="rail-brand">
                     <span>{ "MF" }</span>
                     <div>
-                        <strong>{ "MandoForge" }</strong>
+                        <strong>{ "MandoForge Co-Work" }</strong>
                         <small>{ (*ui_lang).text("Agent OS Kernel", "Agent OS Kernel") }</small>
                     </div>
                 </div>
