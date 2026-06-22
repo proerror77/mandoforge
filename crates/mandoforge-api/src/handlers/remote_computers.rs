@@ -4,12 +4,13 @@ use axum::{
     http::HeaderMap,
     routing::{get, post},
 };
+use chrono::Utc;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::authorization::Permission;
 use crate::{
-    AppError, AppState, CreateRemoteComputer, CreateRemoteComputerAttachment,
+    AppError, AppState, Artifact, CreateRemoteComputer, CreateRemoteComputerAttachment,
     CreateRemoteComputerLease, CreateRemoteComputerSidecarHeartbeat, CreateRemoteComputerStateLock,
     ReleaseRemoteComputerStateLock, RemoteComputer, RemoteComputerAttachment,
     RemoteComputerJobAssignment, RemoteComputerLease,
@@ -20,7 +21,8 @@ use crate::{
     RemoteComputerSidecarRecoveryRun, RemoteComputerStateLock,
     RemoteComputerStateSyncValidationRun,
     authorize_remote_computer_state_lock_release, authorize_request,
-    discover_remote_computer_artifacts as discover_remote_computer_artifacts_impl,
+    artifact_type_from_path,
+    discover_artifact_files,
     dry_run_remote_computer_runner as dry_run_remote_computer_runner_impl,
     get_remote_computer_production_path as get_remote_computer_production_path_impl,
     get_remote_computer_readiness as get_remote_computer_readiness_impl,
@@ -32,7 +34,7 @@ use crate::{
     record_remote_computer_attachment_event, record_remote_computer_lease_event,
     record_remote_computer_sidecar_heartbeat_event, record_remote_computer_state_lock_event,
     run_remote_computer_sidecar_recovery as run_remote_computer_sidecar_recovery_impl,
-    sync_remote_computer_artifacts as sync_remote_computer_artifacts_impl,
+    normalize_codex_artifact_path, normalize_remote_computer_artifact_dir,
     validate_remote_computer_state_sync as validate_remote_computer_state_sync_impl,
     UpdateRemoteComputerAttachment, UpdateRemoteComputerLease,
 };
@@ -164,7 +166,112 @@ async fn sync_remote_computer_artifacts(
     headers: HeaderMap,
     Json(input): Json<RemoteComputerArtifactSyncRequest>,
 ) -> Result<Json<RemoteComputerArtifactSyncResponse>, AppError> {
-    sync_remote_computer_artifacts_impl(state, headers, input).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRun,
+        "remote_computer",
+        Some(input.remote_computer_id),
+    )
+    .await?;
+    if input.artifacts.is_empty() {
+        return Err(AppError::bad_request("at least one artifact is required"));
+    }
+    if input.artifacts.len() > 50 {
+        return Err(AppError::bad_request(
+            "Remote Computer artifact sync accepts at most 50 artifacts per request",
+        ));
+    }
+    state.get_session(input.session_id).await?;
+    let remote_computer = state
+        .list_remote_computers()
+        .await?
+        .into_iter()
+        .find(|computer| computer.id == input.remote_computer_id)
+        .ok_or_else(|| AppError::not_found("Remote computer not found"))?;
+    if let Some(assignment_id) = input.assignment_id {
+        let assignment = state
+            .list_remote_computer_job_assignments()
+            .await?
+            .into_iter()
+            .find(|assignment| assignment.id == assignment_id)
+            .ok_or_else(|| AppError::not_found("Remote computer job assignment not found"))?;
+        if assignment.remote_computer_id != input.remote_computer_id
+            || assignment.session_id != input.session_id
+        {
+            return Err(AppError::bad_request(
+                "Remote Computer artifact sync assignment does not match session or remote computer",
+            ));
+        }
+    }
+
+    let mut artifacts = Vec::with_capacity(input.artifacts.len());
+    for artifact_input in input.artifacts {
+        let name = artifact_input.name.trim();
+        if name.is_empty() {
+            return Err(AppError::bad_request("artifact name is required"));
+        }
+        let artifact_type = artifact_input.artifact_type.trim();
+        if artifact_type.is_empty() {
+            return Err(AppError::bad_request("artifact_type is required"));
+        }
+        let path = normalize_codex_artifact_path(artifact_input.path.as_deref())?;
+        let artifact = Artifact {
+            id: Uuid::new_v4(),
+            session_id: input.session_id,
+            artifact_type: artifact_type.to_string(),
+            name: name.to_string(),
+            path,
+            content: artifact_input.content,
+            created_at: Utc::now(),
+        };
+        let artifact = state.insert_artifact(artifact).await?;
+        state
+            .append_event(
+                "worker",
+                Some(artifact.id),
+                input.session_id,
+                "artifact.created",
+                json!({
+                    "artifact_id": artifact.id,
+                    "name": artifact.name,
+                    "path": artifact.path,
+                    "artifact_type": artifact.artifact_type,
+                    "source": "remote_computer",
+                    "remote_computer_id": remote_computer.id,
+                    "assignment_id": input.assignment_id,
+                    "workspace_path": remote_computer.workspace_path,
+                    "metadata": artifact_input.metadata,
+                }),
+            )
+            .await?;
+        state
+            .append_audit_log(new_audit_log(
+                Some(input.session_id),
+                "worker",
+                Some(artifact.id),
+                "remote_computer.artifact_synced",
+                "artifact",
+                Some(artifact.id),
+                json!({
+                    "name": artifact.name,
+                    "path": artifact.path,
+                    "artifact_type": artifact.artifact_type,
+                    "remote_computer_id": remote_computer.id,
+                    "assignment_id": input.assignment_id,
+                }),
+            ))
+            .await?;
+        artifacts.push(artifact);
+    }
+
+    Ok(Json(RemoteComputerArtifactSyncResponse {
+        session_id: input.session_id,
+        remote_computer_id: input.remote_computer_id,
+        assignment_id: input.assignment_id,
+        artifact_count: artifacts.len(),
+        artifacts,
+    }))
 }
 
 async fn discover_remote_computer_artifacts(
@@ -172,7 +279,143 @@ async fn discover_remote_computer_artifacts(
     headers: HeaderMap,
     Json(input): Json<RemoteComputerArtifactDiscoverRequest>,
 ) -> Result<Json<RemoteComputerArtifactSyncResponse>, AppError> {
-    discover_remote_computer_artifacts_impl(state, headers, input).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRun,
+        "remote_computer",
+        Some(input.remote_computer_id),
+    )
+    .await?;
+    if input.max_files == 0 || input.max_files > 50 {
+        return Err(AppError::bad_request(
+            "Remote Computer artifact discovery accepts between 1 and 50 files per request",
+        ));
+    }
+    state.get_session(input.session_id).await?;
+    let remote_computer = state
+        .list_remote_computers()
+        .await?
+        .into_iter()
+        .find(|computer| computer.id == input.remote_computer_id)
+        .ok_or_else(|| AppError::not_found("Remote computer not found"))?;
+    if let Some(assignment_id) = input.assignment_id {
+        let assignment = state
+            .list_remote_computer_job_assignments()
+            .await?
+            .into_iter()
+            .find(|assignment| assignment.id == assignment_id)
+            .ok_or_else(|| AppError::not_found("Remote computer job assignment not found"))?;
+        if assignment.remote_computer_id != input.remote_computer_id
+            || assignment.session_id != input.session_id
+        {
+            return Err(AppError::bad_request(
+                "Remote Computer artifact discovery assignment does not match session or remote computer",
+            ));
+        }
+    }
+
+    let artifact_dir = normalize_remote_computer_artifact_dir(&input.artifact_dir)?;
+    let workspace_path = std::path::PathBuf::from(&remote_computer.workspace_path);
+    let discovery_root = workspace_path.join(&artifact_dir);
+    let root_metadata = tokio::fs::metadata(&discovery_root)
+        .await
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                AppError::not_found("Remote Computer artifact discovery directory not found")
+            } else {
+                AppError::from(error)
+            }
+        })?;
+    if !root_metadata.is_dir() {
+        return Err(AppError::bad_request(
+            "Remote Computer artifact discovery path must be a directory",
+        ));
+    }
+
+    let discovered_files =
+        discover_artifact_files(&discovery_root, input.max_files, 1_048_576).await?;
+    if discovered_files.is_empty() {
+        return Err(AppError::bad_request(
+            "Remote Computer artifact discovery found no files",
+        ));
+    }
+
+    let mut artifacts = Vec::with_capacity(discovered_files.len());
+    for discovered in discovered_files {
+        let relative_path = discovered
+            .path
+            .strip_prefix(&workspace_path)
+            .unwrap_or(&discovered.path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let name = discovered
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("artifact")
+            .to_string();
+        let artifact = Artifact {
+            id: Uuid::new_v4(),
+            session_id: input.session_id,
+            artifact_type: artifact_type_from_path(&discovered.path),
+            name,
+            path: Some(relative_path.clone()),
+            content: json!({
+                "text": discovered.content,
+                "bytes": discovered.bytes,
+                "source": "remote_computer_artifact_discovery",
+            }),
+            created_at: Utc::now(),
+        };
+        let artifact = state.insert_artifact(artifact).await?;
+        state
+            .append_event(
+                "worker",
+                Some(artifact.id),
+                input.session_id,
+                "artifact.created",
+                json!({
+                    "artifact_id": artifact.id,
+                    "name": artifact.name,
+                    "path": artifact.path,
+                    "artifact_type": artifact.artifact_type,
+                    "source": "remote_computer_artifact_discovery",
+                    "remote_computer_id": remote_computer.id,
+                    "assignment_id": input.assignment_id,
+                    "workspace_path": remote_computer.workspace_path,
+                    "artifact_dir": artifact_dir,
+                }),
+            )
+            .await?;
+        state
+            .append_audit_log(new_audit_log(
+                Some(input.session_id),
+                "worker",
+                Some(artifact.id),
+                "remote_computer.artifact_discovered",
+                "artifact",
+                Some(artifact.id),
+                json!({
+                    "name": artifact.name,
+                    "path": artifact.path,
+                    "artifact_type": artifact.artifact_type,
+                    "remote_computer_id": remote_computer.id,
+                    "assignment_id": input.assignment_id,
+                    "artifact_dir": artifact_dir,
+                }),
+            ))
+            .await?;
+        artifacts.push(artifact);
+    }
+
+    Ok(Json(RemoteComputerArtifactSyncResponse {
+        session_id: input.session_id,
+        remote_computer_id: input.remote_computer_id,
+        assignment_id: input.assignment_id,
+        artifact_count: artifacts.len(),
+        artifacts,
+    }))
 }
 
 async fn get_remote_computer_runner_readiness(
