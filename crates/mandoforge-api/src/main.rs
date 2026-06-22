@@ -186,10 +186,17 @@ pub(crate) use types::ontology::{
 pub(crate) use types::remote_computer::{
     CreateRemoteComputer, CreateRemoteComputerAttachment, CreateRemoteComputerJobAssignment,
     CreateRemoteComputerLease, CreateRemoteComputerSidecarHeartbeat, CreateRemoteComputerStateLock,
-    ReleaseRemoteComputerStateLock, RemoteComputer, RemoteComputerAttachment,
-    RemoteComputerJobAssignment, RemoteComputerLease, RemoteComputerReclaimRun,
-    RemoteComputerSidecarHeartbeat, RemoteComputerStateLock, UpdateRemoteComputerAttachment,
-    UpdateRemoteComputerLease,
+    ReleaseRemoteComputerStateLock, RemoteComputer,
+    RemoteComputerArtifactDiscoverySidecarConfigReadiness, RemoteComputerAttachment,
+    RemoteComputerAttentionItem, RemoteComputerAutoscalingReadiness,
+    RemoteComputerExecutionTransportReadiness, RemoteComputerJobAssignment, RemoteComputerLease,
+    RemoteComputerManifestReadiness, RemoteComputerProductionStateSyncReadiness,
+    RemoteComputerReadinessReport, RemoteComputerReclaimRun, RemoteComputerSidecarHeartbeat,
+    RemoteComputerSidecarRecoveryReadiness, RemoteComputerSidecarRecoveryRun,
+    RemoteComputerSidecarRecoveryTarget, RemoteComputerSidecarSupervisionReadiness,
+    RemoteComputerSidecarSupervisionRun, RemoteComputerStateFilesystemReadiness,
+    RemoteComputerStateLock, RemoteComputerStateSyncValidationRun,
+    RemoteComputerWarmPoolReadiness, UpdateRemoteComputerAttachment, UpdateRemoteComputerLease,
 };
 pub(crate) use types::semantic::{
     ContextPacketSemanticObject, CreateMemoryWritebackCandidates, CreateSemanticIngestionBatch,
@@ -1014,18 +1021,6 @@ struct SchedulerRunDueRequest {
     run_window_end: Option<DateTime<Utc>>,
     #[serde(default)]
     retry_policy: Option<SchedulerRetryPolicy>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RemoteComputerSidecarSupervisionRun {
-    status: String,
-    checked_at: DateTime<Utc>,
-    active_remote_computer_count: usize,
-    heartbeat_count: usize,
-    missing_heartbeat_count: usize,
-    stale_heartbeat_count: usize,
-    stale_after_seconds: i64,
-    actions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2038,193 +2033,6 @@ struct EnterpriseSecurityAdminCheck {
     evidence: Value,
     blockers: Vec<String>,
     next_actions: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct RemoteComputerReadinessReport {
-    generated_at: DateTime<Utc>,
-    status: String,
-    readiness_score: i64,
-    pod_template: RemoteComputerManifestReadiness,
-    service_account: RemoteComputerManifestReadiness,
-    state_filesystem: RemoteComputerStateFilesystemReadiness,
-    production_state_sync: RemoteComputerProductionStateSyncReadiness,
-    network_policy: RemoteComputerManifestReadiness,
-    autoscaling: RemoteComputerAutoscalingReadiness,
-    warm_pool: RemoteComputerWarmPoolReadiness,
-    artifact_discovery_sidecar: RemoteComputerManifestReadiness,
-    artifact_discovery_sidecar_config: RemoteComputerArtifactDiscoverySidecarConfigReadiness,
-    sidecar_supervision: RemoteComputerSidecarSupervisionReadiness,
-    sidecar_recovery: RemoteComputerSidecarRecoveryReadiness,
-    runner: RemoteComputerRunnerReadiness,
-    execution_transport: RemoteComputerExecutionTransportReadiness,
-    event_types: Vec<String>,
-    attention_items: Vec<RemoteComputerAttentionItem>,
-    runbook_actions: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RemoteComputerProductionStateSyncReadiness {
-    status: String,
-    production_blocked: bool,
-    distributed_filesystem_configured: bool,
-    production_profile_present: bool,
-    state_contract_present: bool,
-    lock_manager_configured: bool,
-    controller_required: bool,
-    controller_configured: bool,
-    latest_validation_at: Option<DateTime<Utc>>,
-    latest_validation_status: Option<String>,
-    latest_controller_status: Option<String>,
-    latest_controller_age_hours: Option<i64>,
-    controller_evidence_fresh: bool,
-    latest_controller_validated: bool,
-    conflict_policy: String,
-    provider: String,
-    blocking_reasons: Vec<String>,
-    message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct RemoteComputerStateSyncValidationRun {
-    status: String,
-    checked_at: DateTime<Utc>,
-    controller_required: bool,
-    controller_configured: bool,
-    controller_execution: Value,
-    issues: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RemoteComputerManifestReadiness {
-    present: bool,
-    path: String,
-    status: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RemoteComputerStateFilesystemReadiness {
-    pvc_present: bool,
-    pvc_path: String,
-    access_mode: String,
-    mount_path: String,
-    state_contract_present: bool,
-    state_contract_path: String,
-    state_layout_paths: Vec<String>,
-    conflict_policy: String,
-    lock_manager_configured: bool,
-    sync_contract_status: String,
-    distributed_filesystem_configured: bool,
-    provider: String,
-    provider_configured_by_env: bool,
-    provider_manifest_present: bool,
-    provider_manifest_path: String,
-    production_profile_present: bool,
-    production_profile_path: String,
-    production_claim_name: String,
-    supported_providers: Vec<String>,
-    status: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RemoteComputerAutoscalingReadiness {
-    worker_hpa_present: bool,
-    keda_manifest_present: bool,
-    remote_pool_scaled_object_present: bool,
-    remote_pool_scaled_object_path: String,
-    queue_depth_scaling_present: bool,
-    status: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RemoteComputerWarmPoolReadiness {
-    configured: bool,
-    manifest_present: bool,
-    manifest_path: String,
-    status: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RemoteComputerArtifactDiscoverySidecarConfigReadiness {
-    status: String,
-    expected_api_url: String,
-    pod_template_api_url_configured: bool,
-    warm_pool_api_url_configured: bool,
-    configmap_default_api_url_configured: bool,
-    blocking_reasons: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RemoteComputerSidecarSupervisionReadiness {
-    status: String,
-    heartbeat_count: usize,
-    active_remote_computer_count: usize,
-    missing_heartbeat_count: usize,
-    stale_heartbeat_count: usize,
-    stale_after_seconds: i64,
-    latest_observed_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RemoteComputerSidecarRecoveryReadiness {
-    status: String,
-    replacement_enabled: bool,
-    validation_controller_required: bool,
-    validation_controller_configured: bool,
-    runner_configured: bool,
-    runner_live_mutation_enabled: bool,
-    unhealthy_count: usize,
-    replaceable_pod_count: usize,
-    blocked_reason: Option<String>,
-    message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RemoteComputerSidecarRecoveryTarget {
-    remote_computer_id: Uuid,
-    name: String,
-    pod_name: Option<String>,
-    reason: String,
-    latest_observed_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct RemoteComputerSidecarRecoveryRun {
-    generated_at: DateTime<Utc>,
-    status: String,
-    replacement_enabled: bool,
-    validation_controller_required: bool,
-    validation_controller_configured: bool,
-    runner_status: String,
-    unhealthy_count: usize,
-    planned_replacement_count: usize,
-    attempted_replacement_count: usize,
-    blocked_replacement_count: usize,
-    targets: Vec<RemoteComputerSidecarRecoveryTarget>,
-    runner_responses: Vec<RemoteComputerRunnerDryRunResponse>,
-    validation_result: Value,
-    execution_enabled: bool,
-    message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RemoteComputerExecutionTransportReadiness {
-    mode: String,
-    requested_execution_enabled: bool,
-    execution_enabled: bool,
-    status: String,
-    assignment_count: usize,
-    active_assignment_count: usize,
-    supported_operations: Vec<String>,
-    required_implementation: Vec<String>,
-    message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RemoteComputerAttentionItem {
-    kind: String,
-    severity: String,
-    message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
