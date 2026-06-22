@@ -15792,10 +15792,42 @@ fn ontology_seed_and_source_for_request(
             ontology_insurance_seed_pack(),
             ontology_insurance_demo_source_bundle(),
         )),
-        _ => Err(AppError::bad_request(
-            "ontology onboarding supports ecommerce/demo_ecommerce and insurance/demo_insurance in this slice",
-        )),
+        _ => Ok(ontology_generic_seed_and_source(&industry, &source_mode)),
     }
+}
+
+fn ontology_generic_seed_and_source(
+    industry: &str,
+    source_mode: &str,
+) -> (OntologySeedPack, OntologySourceBundle) {
+    let domain_scope = format!("domain_{}", industry.replace(' ', "_"));
+    let tool_namespace = format!("tools.{}", industry.replace(' ', "_"));
+    let seed = OntologySeedPack {
+        industry: industry.to_string(),
+        domain_scope: domain_scope.clone(),
+        source_mode: source_mode.to_string(),
+        tool_namespace: tool_namespace.clone(),
+        objects: vec![OntologySeedObjectMapping {
+            table_name: "entities".to_string(),
+            object_name: "Entity".to_string(),
+        }],
+        relations: vec![],
+        metrics: vec![],
+        actions: vec![],
+    };
+    let source = OntologySourceBundle {
+        industry: industry.to_string(),
+        source_mode: source_mode.to_string(),
+        tool_namespace,
+        datasets: vec![OntologyOnboardingDataset {
+            table_name: "entities".to_string(),
+            source_system: industry.to_string(),
+            source_object: "entities".to_string(),
+            fields: vec![],
+            rows: vec![],
+        }],
+    };
+    (seed, source)
 }
 
 async fn list_ontology_onboarding_runs_for_state(
@@ -66698,6 +66730,37 @@ mod tests {
                 && spec.target_object == "Claim"
                 && spec.approval_required
         }));
+    }
+
+    #[tokio::test]
+    async fn ontology_onboarding_unknown_industry_uses_generic_seed() {
+        let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        let run = create_ontology_onboarding_run_with_actor(
+            &state,
+            "manufacturing",
+            "erp_upload",
+            "test",
+        )
+        .await
+        .expect("generic onboarding run");
+
+        assert_eq!(run.source_mode, "erp_upload");
+        assert_eq!(run.dataset_count, 1);
+        assert!(run.datasets.iter().any(|dataset| {
+            dataset.table_name == "entities" && dataset.source_system == "manufacturing"
+        }));
+        assert!(run.proposals.iter().any(|proposal| {
+            proposal.proposal_type == "object"
+                && proposal.name == "Entity"
+                && proposal.content["domain_scope"].as_str() == Some("domain_manufacturing")
+                && proposal.content["tool_namespace"].as_str() == Some("tools.manufacturing")
+        }));
+
+        let rehydrated = get_ontology_onboarding_run_for_state(&state, run.id)
+            .await
+            .expect("rehydrated generic run");
+        assert_eq!(rehydrated.source_mode, "erp_upload");
+        assert_eq!(rehydrated.dataset_count, 1);
     }
 
     #[tokio::test]
