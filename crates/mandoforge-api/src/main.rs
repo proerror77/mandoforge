@@ -41415,6 +41415,8 @@ fn tenant_isolation_tracked_tables() -> Vec<&'static str> {
         "context_packets",
         "memory_writeback_candidates",
         "ontology_releases",
+        "ontology_onboarding_runs",
+        "workflow_schedules",
     ]
 }
 
@@ -83239,6 +83241,11 @@ not json
         assert!(names.contains(&"0056_workflow_pack_runtime_objects.sql"));
         assert!(names.contains(&"0058_delegated_runtime_workflow_envelope.sql"));
         assert!(names.contains(&"0059_dynamic_workflow_plans.sql"));
+        assert!(names.contains(&"0061_ontology_releases.sql"));
+        assert!(names.contains(&"0064_agent_version_snapshot_fields.sql"));
+        assert!(names.contains(&"0065_ontology_onboarding_runs.sql"));
+        assert!(names.contains(&"0066_workflow_schedules.sql"));
+        assert!(names.contains(&"0067_task_grants_constraints.sql"));
         assert!(
             names.windows(2).all(|window| window[0] <= window[1]),
             "migrations should run lexicographically: {names:?}"
@@ -83292,6 +83299,8 @@ not json
             include_str!("../../../db/migrations/0056_workflow_pack_runtime_objects.sql"),
             include_str!("../../../db/migrations/0059_dynamic_workflow_plans.sql"),
             include_str!("../../../db/migrations/0061_ontology_releases.sql"),
+            include_str!("../../../db/migrations/0065_ontology_onboarding_runs.sql"),
+            include_str!("../../../db/migrations/0066_workflow_schedules.sql"),
         ]
         .join("\n");
         assert!(migration.contains("mandoforge_current_tenant_id"));
