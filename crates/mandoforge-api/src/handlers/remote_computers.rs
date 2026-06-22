@@ -1,22 +1,27 @@
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Path, State},
     http::HeaderMap,
     routing::{get, post},
 };
 use serde_json::Value;
+use uuid::Uuid;
 
 use crate::{
-    AppError, AppState, RemoteComputerArtifactDiscoverRequest, RemoteComputerArtifactSyncRequest,
+    AppError, AppState, CreateRemoteComputerStateLock, ReleaseRemoteComputerStateLock,
+    RemoteComputerArtifactDiscoverRequest, RemoteComputerArtifactSyncRequest,
     RemoteComputerArtifactSyncResponse, RemoteComputerReadinessReport,
     RemoteComputerRunnerDryRunRequest, RemoteComputerRunnerDryRunResponse,
-    RemoteComputerRunnerReadiness, RemoteComputerStateSyncValidationRun,
+    RemoteComputerRunnerReadiness, RemoteComputerStateLock, RemoteComputerStateSyncValidationRun,
+    acquire_remote_computer_state_lock as acquire_remote_computer_state_lock_impl,
     discover_remote_computer_artifacts as discover_remote_computer_artifacts_impl,
     dry_run_remote_computer_runner as dry_run_remote_computer_runner_impl,
     get_remote_computer_production_path as get_remote_computer_production_path_impl,
     get_remote_computer_readiness as get_remote_computer_readiness_impl,
     get_remote_computer_runner_readiness as get_remote_computer_runner_readiness_impl,
+    list_remote_computer_state_locks as list_remote_computer_state_locks_impl,
     mutate_remote_computer_runner as mutate_remote_computer_runner_impl,
+    release_remote_computer_state_lock as release_remote_computer_state_lock_impl,
     sync_remote_computer_artifacts as sync_remote_computer_artifacts_impl,
     validate_remote_computer_state_sync as validate_remote_computer_state_sync_impl,
 };
@@ -54,6 +59,14 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/api/remote-computers/runner/mutate",
             post(mutate_remote_computer_runner),
+        )
+        .route(
+            "/api/remote-computers/state-locks",
+            get(list_remote_computer_state_locks).post(acquire_remote_computer_state_lock),
+        )
+        .route(
+            "/api/remote-computers/state-locks/{id}/release",
+            post(release_remote_computer_state_lock),
         )
 }
 
@@ -115,4 +128,28 @@ async fn mutate_remote_computer_runner(
     Json(input): Json<RemoteComputerRunnerDryRunRequest>,
 ) -> Result<Json<RemoteComputerRunnerDryRunResponse>, AppError> {
     mutate_remote_computer_runner_impl(state, headers, input).await
+}
+
+async fn list_remote_computer_state_locks(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<RemoteComputerStateLock>>, AppError> {
+    list_remote_computer_state_locks_impl(state, headers).await
+}
+
+async fn acquire_remote_computer_state_lock(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateRemoteComputerStateLock>,
+) -> Result<Json<RemoteComputerStateLock>, AppError> {
+    acquire_remote_computer_state_lock_impl(state, headers, input).await
+}
+
+async fn release_remote_computer_state_lock(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<ReleaseRemoteComputerStateLock>,
+) -> Result<Json<RemoteComputerStateLock>, AppError> {
+    release_remote_computer_state_lock_impl(state, id, headers, input).await
 }

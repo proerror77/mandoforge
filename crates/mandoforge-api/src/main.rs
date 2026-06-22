@@ -2278,7 +2278,7 @@ struct RemoteComputerJobAssignment {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct RemoteComputerStateLock {
+pub(crate) struct RemoteComputerStateLock {
     id: Uuid,
     lock_key: String,
     status: String,
@@ -2347,7 +2347,7 @@ struct CreateRemoteComputerJobAssignment {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct CreateRemoteComputerStateLock {
+pub(crate) struct CreateRemoteComputerStateLock {
     lock_key: String,
     remote_computer_id: Option<Uuid>,
     lease_id: Option<Uuid>,
@@ -2358,7 +2358,7 @@ struct CreateRemoteComputerStateLock {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct ReleaseRemoteComputerStateLock {
+pub(crate) struct ReleaseRemoteComputerStateLock {
     reason: Option<String>,
     metadata: Option<Value>,
 }
@@ -3918,14 +3918,6 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/remote-computers/reclaim-stale",
             post(reclaim_stale_remote_computers),
-        )
-        .route(
-            "/api/remote-computers/state-locks",
-            get(list_remote_computer_state_locks).post(acquire_remote_computer_state_lock),
-        )
-        .route(
-            "/api/remote-computers/state-locks/{id}/release",
-            post(release_remote_computer_state_lock),
         )
         .route(
             "/api/remote-computers/sidecars/heartbeats",
@@ -53972,8 +53964,8 @@ async fn list_remote_computer_job_assignments(
     Ok(Json(state.list_remote_computer_job_assignments().await?))
 }
 
-async fn list_remote_computer_state_locks(
-    State(state): State<AppState>,
+pub(crate) async fn list_remote_computer_state_locks(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Vec<RemoteComputerStateLock>>, AppError> {
     authorize_request(
@@ -53987,10 +53979,10 @@ async fn list_remote_computer_state_locks(
     Ok(Json(state.list_remote_computer_state_locks().await?))
 }
 
-async fn acquire_remote_computer_state_lock(
-    State(state): State<AppState>,
+pub(crate) async fn acquire_remote_computer_state_lock(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<CreateRemoteComputerStateLock>,
+    input: CreateRemoteComputerStateLock,
 ) -> Result<Json<RemoteComputerStateLock>, AppError> {
     let session_id = input.session_id.ok_or_else(|| {
         AppError::bad_request("Remote Computer state lock requires session_id for scoped access")
@@ -54070,11 +54062,11 @@ async fn authorize_remote_computer_state_lock_release(
     Ok(())
 }
 
-async fn release_remote_computer_state_lock(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn release_remote_computer_state_lock(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<ReleaseRemoteComputerStateLock>,
+    input: ReleaseRemoteComputerStateLock,
 ) -> Result<Json<RemoteComputerStateLock>, AppError> {
     let existing = state
         .list_remote_computer_state_locks()
