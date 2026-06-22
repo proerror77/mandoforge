@@ -1189,7 +1189,7 @@ pub(crate) struct CodexArtifactSyncResponse {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct RemoteComputerArtifactSyncRequest {
+pub(crate) struct RemoteComputerArtifactSyncRequest {
     session_id: Uuid,
     remote_computer_id: Uuid,
     #[serde(default)]
@@ -1198,7 +1198,7 @@ struct RemoteComputerArtifactSyncRequest {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct RemoteComputerArtifactDiscoverRequest {
+pub(crate) struct RemoteComputerArtifactDiscoverRequest {
     session_id: Uuid,
     remote_computer_id: Uuid,
     #[serde(default)]
@@ -1210,7 +1210,7 @@ struct RemoteComputerArtifactDiscoverRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct RemoteComputerArtifactSyncResponse {
+pub(crate) struct RemoteComputerArtifactSyncResponse {
     session_id: Uuid,
     remote_computer_id: Uuid,
     assignment_id: Option<Uuid>,
@@ -3915,14 +3915,6 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::approval_notifications::router())
         .merge(handlers::execution_jobs::router())
         .merge(handlers::remote_computers::router())
-        .route(
-            "/api/remote-computers/artifacts/sync",
-            post(sync_remote_computer_artifacts),
-        )
-        .route(
-            "/api/remote-computers/artifacts/discover",
-            post(discover_remote_computer_artifacts),
-        )
         .route(
             "/api/remote-computers/runner/readiness",
             get(get_remote_computer_runner_readiness),
@@ -40153,10 +40145,10 @@ pub(crate) async fn sync_codex_artifacts(
     }))
 }
 
-async fn sync_remote_computer_artifacts(
-    State(state): State<AppState>,
+pub(crate) async fn sync_remote_computer_artifacts(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<RemoteComputerArtifactSyncRequest>,
+    input: RemoteComputerArtifactSyncRequest,
 ) -> Result<Json<RemoteComputerArtifactSyncResponse>, AppError> {
     authorize_request(
         &state,
@@ -40266,10 +40258,10 @@ async fn sync_remote_computer_artifacts(
     }))
 }
 
-async fn discover_remote_computer_artifacts(
-    State(state): State<AppState>,
+pub(crate) async fn discover_remote_computer_artifacts(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<RemoteComputerArtifactDiscoverRequest>,
+    input: RemoteComputerArtifactDiscoverRequest,
 ) -> Result<Json<RemoteComputerArtifactSyncResponse>, AppError> {
     authorize_request(
         &state,
