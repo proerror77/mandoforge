@@ -175,6 +175,7 @@ pub(crate) use types::eval::{
     EvalCase, EvalDataset, EvalDriftDecision, EvalGateDecision, EvalGateRequest, EvalRun,
     EvalSuiteBootstrap,
 };
+pub(crate) use types::github::{ProjectGitHubBinding, UpsertProjectGitHubBinding};
 pub(crate) use types::mcp::{
     CreateMcpServerRecord, McpServerDeploymentReadiness, McpServerDeploymentValidationRun,
     McpServerHealth, McpServerHealthRun, McpServerLatestRollout, McpServerRecord,
@@ -367,27 +368,6 @@ enum ExecutionQueueBackendSelection {
     Redis,
     Nats,
     NatsJetstream,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProjectGitHubBinding {
-    id: Uuid,
-    repo_full_name: String,
-    pack_installation_id: Uuid,
-    webhook_secret_ref: String,
-    active: bool,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Deserialize)]
-struct UpsertProjectGitHubBinding {
-    repo_full_name: String,
-    pack_installation_id: Uuid,
-    #[serde(default)]
-    webhook_secret_ref: Option<String>,
-    #[serde(default)]
-    active: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
