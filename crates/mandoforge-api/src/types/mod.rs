@@ -2,6 +2,7 @@
 // Keep this shell empty until a domain move lands in its own commit.
 pub(crate) mod agent;
 pub(crate) mod agent_handoff;
+pub(crate) mod audit;
 pub(crate) mod approval;
 pub(crate) mod deployment;
 pub(crate) mod eval;

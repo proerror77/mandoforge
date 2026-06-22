@@ -167,6 +167,7 @@ pub(crate) use types::approval::{
     CreateApprovalEscalationRule, CreateApprovalGroup,
     CreateApprovalNotificationChannelPolicy, EscalateApproval, ModifyApproval,
 };
+pub(crate) use types::audit::AuditLog;
 pub(crate) use types::deployment::{
     DeploymentVersion, ProductionAutoDeployRequest, ProductionDeploymentVerifyRequest,
 };
@@ -490,19 +491,6 @@ pub(crate) struct ToolCall {
     error: Option<Value>,
     started_at: Option<DateTime<Utc>>,
     completed_at: Option<DateTime<Utc>>,
-    created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct AuditLog {
-    id: Uuid,
-    session_id: Option<Uuid>,
-    actor_type: String,
-    actor_id: Option<Uuid>,
-    action: String,
-    resource_type: String,
-    resource_id: Option<Uuid>,
-    details: Value,
     created_at: DateTime<Utc>,
 }
 
