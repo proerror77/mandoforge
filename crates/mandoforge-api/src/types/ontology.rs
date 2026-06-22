@@ -189,6 +189,200 @@ pub(crate) struct CreateOntologyOnboardingRunRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct SchemaUnderstandingRequest {
+    #[serde(default)]
+    pub(crate) run_id: Option<Uuid>,
+    #[serde(default)]
+    pub(crate) industry: Option<String>,
+    #[serde(default)]
+    pub(crate) source_mode: Option<String>,
+    #[serde(default)]
+    pub(crate) max_sample_rows: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PropertyUnderstandingCandidate {
+    pub(crate) field_name: String,
+    pub(crate) field_type: String,
+    pub(crate) semantic_role: String,
+    pub(crate) confidence: f64,
+    pub(crate) evidence: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct TaxonomyLayerCandidate {
+    pub(crate) layer: usize,
+    pub(crate) label: String,
+    pub(crate) confidence: f64,
+    pub(crate) rationale: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct SchemaUnderstandingCandidate {
+    pub(crate) table_name: String,
+    pub(crate) source_system: String,
+    pub(crate) source_object: String,
+    pub(crate) object_type_candidate: String,
+    pub(crate) confidence: f64,
+    pub(crate) recommendation: String,
+    pub(crate) properties: Vec<PropertyUnderstandingCandidate>,
+    pub(crate) taxonomy_layers: Vec<TaxonomyLayerCandidate>,
+    pub(crate) evidence: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct SchemaUnderstandingResponse {
+    pub(crate) run_id: Option<Uuid>,
+    pub(crate) industry: String,
+    pub(crate) source_mode: String,
+    pub(crate) domain_scope: String,
+    pub(crate) tool_namespace: String,
+    pub(crate) candidate_count: usize,
+    pub(crate) candidates: Vec<SchemaUnderstandingCandidate>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct SubgraphProposalRequest {
+    #[serde(default)]
+    pub(crate) run_id: Option<Uuid>,
+    #[serde(default)]
+    pub(crate) industry: Option<String>,
+    #[serde(default)]
+    pub(crate) source_mode: Option<String>,
+    #[serde(default)]
+    pub(crate) target_object: Option<String>,
+    #[serde(default)]
+    pub(crate) review_decision: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct SubgraphProposalMember {
+    pub(crate) proposal_id: Uuid,
+    pub(crate) proposal_type: String,
+    pub(crate) name: String,
+    pub(crate) role: String,
+    pub(crate) confidence: f64,
+    pub(crate) review_status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct SubgraphProposalDraft {
+    pub(crate) id: String,
+    pub(crate) run_id: Option<Uuid>,
+    pub(crate) name: String,
+    pub(crate) target_object: String,
+    pub(crate) review_status: String,
+    pub(crate) confidence: f64,
+    pub(crate) recommendation: String,
+    pub(crate) members: Vec<SubgraphProposalMember>,
+    pub(crate) evidence: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct SubgraphProposalResponse {
+    pub(crate) run_id: Option<Uuid>,
+    pub(crate) industry: String,
+    pub(crate) source_mode: String,
+    pub(crate) domain_scope: String,
+    pub(crate) tool_namespace: String,
+    pub(crate) subgraph_count: usize,
+    pub(crate) subgraphs: Vec<SubgraphProposalDraft>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct EntityResolutionRequest {
+    #[serde(default)]
+    pub(crate) run_id: Option<Uuid>,
+    #[serde(default)]
+    pub(crate) candidate_name: Option<String>,
+    #[serde(default)]
+    pub(crate) candidate_object_type: Option<String>,
+    #[serde(default)]
+    pub(crate) domain_scope: Option<String>,
+    #[serde(default)]
+    pub(crate) min_score: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct EntityResolutionRetrievalHit {
+    pub(crate) object_id: Uuid,
+    pub(crate) object_key: String,
+    pub(crate) title: String,
+    pub(crate) object_type: String,
+    pub(crate) domain_scope: String,
+    pub(crate) normalized_name: String,
+    pub(crate) score: f64,
+    pub(crate) match_reasons: Vec<String>,
+    pub(crate) evidence: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct EntityResolutionDecisionDraft {
+    pub(crate) is_duplicate: bool,
+    pub(crate) canonical_name: String,
+    pub(crate) existing_node_uuid: Option<Uuid>,
+    pub(crate) confidence: f64,
+    pub(crate) decision: String,
+    pub(crate) review_required: bool,
+    pub(crate) rationale: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct EntityResolutionCandidate {
+    pub(crate) candidate_name: String,
+    pub(crate) candidate_object_type: String,
+    pub(crate) domain_scope: String,
+    pub(crate) normalized_name: String,
+    pub(crate) retrieval_hits: Vec<EntityResolutionRetrievalHit>,
+    pub(crate) decision: EntityResolutionDecisionDraft,
+    pub(crate) evidence: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct EntityResolutionResponse {
+    pub(crate) run_id: Option<Uuid>,
+    pub(crate) candidate_count: usize,
+    pub(crate) candidates: Vec<EntityResolutionCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ConfidenceCalibrationRecord {
+    pub(crate) id: Uuid,
+    pub(crate) run_id: Uuid,
+    pub(crate) proposal_id: Uuid,
+    pub(crate) proposal_type: String,
+    pub(crate) proposal_name: String,
+    pub(crate) model_confidence: f64,
+    pub(crate) deterministic_validator_score: f64,
+    pub(crate) retrieval_similarity_score: Option<f64>,
+    pub(crate) source_quality_score: f64,
+    pub(crate) reviewer_decision: String,
+    pub(crate) reviewer_status: String,
+    pub(crate) runtime_outcome: Option<String>,
+    pub(crate) evidence: Value,
+    pub(crate) recorded_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ConfidenceCalibrationBucket {
+    pub(crate) proposal_type: String,
+    pub(crate) reviewer_status: String,
+    pub(crate) count: usize,
+    pub(crate) average_model_confidence: f64,
+    pub(crate) average_validator_score: f64,
+    pub(crate) average_source_quality_score: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ConfidenceCalibrationResponse {
+    pub(crate) run_id: Uuid,
+    pub(crate) record_count: usize,
+    pub(crate) records: Vec<ConfidenceCalibrationRecord>,
+    pub(crate) buckets: Vec<ConfidenceCalibrationBucket>,
+    pub(crate) threshold_policy: Value,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct ExpandSemanticOntologyRequest {
     pub(crate) domain_scope: String,
     #[serde(default)]

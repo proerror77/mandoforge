@@ -158,19 +158,25 @@ pub(crate) use types::session::{
 };
 pub(crate) use types::ontology::{
     BuildSemanticOntologyRequest, CreateOntologyOnboardingRunRequest,
-    CreateOntologyReleaseCandidateRequest, CuratedDatasetDraft, ExpandSemanticOntologyRequest,
-    OntologyActionTransactionProfile, OntologyBuilderDag, OntologyBuilderEdge,
-    OntologyBuilderExecutionLevel, OntologyBuilderNode, OntologyDatasetProfile,
-    OntologyEngineReadiness, OntologyEngineReadinessCheck, OntologyForeignKeyCandidate,
-    OntologyObjectType, OntologyOnboardingDataset, OntologyOnboardingField,
-    OntologyOnboardingMaterializationResult, OntologyOnboardingProposalDraft,
-    OntologyOnboardingRun, OntologyOnboardingToolSpec, OntologyOnboardingToolSpecResponse,
-    OntologyPromptPacket, OntologyRegistry, OntologyRelationType, OntologyRelease,
-    OntologyReleaseListQuery, OntologyReviewGraph, OntologyReviewGraphEdge,
-    OntologyReviewGraphNode, OntologySeedActionMapping, OntologySeedMetricMapping,
-    OntologySeedObjectMapping, OntologySeedPack, OntologySeedPackSummary,
-    OntologySeedRelationMapping, OntologySourceBundle, ReviewOntologyCuratedDatasetRequest,
+    CreateOntologyReleaseCandidateRequest, CuratedDatasetDraft, EntityResolutionCandidate,
+    EntityResolutionDecisionDraft, EntityResolutionRequest, EntityResolutionResponse,
+    EntityResolutionRetrievalHit, ExpandSemanticOntologyRequest, OntologyActionTransactionProfile,
+    OntologyBuilderDag, OntologyBuilderEdge, OntologyBuilderExecutionLevel, OntologyBuilderNode,
+    OntologyDatasetProfile, OntologyEngineReadiness, OntologyEngineReadinessCheck,
+    OntologyForeignKeyCandidate, OntologyObjectType, OntologyOnboardingDataset,
+    OntologyOnboardingField, OntologyOnboardingMaterializationResult,
+    OntologyOnboardingProposalDraft, OntologyOnboardingRun, OntologyOnboardingToolSpec,
+    OntologyOnboardingToolSpecResponse, OntologyPromptPacket, OntologyRegistry,
+    OntologyRelationType, OntologyRelease, OntologyReleaseListQuery, OntologyReviewGraph,
+    OntologyReviewGraphEdge, OntologyReviewGraphNode, OntologySeedActionMapping,
+    OntologySeedMetricMapping, OntologySeedObjectMapping, OntologySeedPack,
+    OntologySeedPackSummary, OntologySeedRelationMapping, OntologySourceBundle,
+    PropertyUnderstandingCandidate, ReviewOntologyCuratedDatasetRequest,
     ReviewOntologyOnboardingProposalRequest, ReviewOntologyProposalRequest,
+    SchemaUnderstandingCandidate, SchemaUnderstandingRequest, SchemaUnderstandingResponse,
+    SubgraphProposalDraft, SubgraphProposalMember, SubgraphProposalRequest,
+    SubgraphProposalResponse, TaxonomyLayerCandidate, ConfidenceCalibrationBucket,
+    ConfidenceCalibrationRecord, ConfidenceCalibrationResponse,
 };
 pub(crate) use types::semantic::{
     ContextPacketSemanticObject, CreateMemoryWritebackCandidates, CreateSemanticIngestionBatch,
@@ -546,200 +552,6 @@ struct AttachAgentHandoffRemoteComputerAssignment {
     remote_computer_job_assignment_id: Uuid,
     #[serde(default = "empty_json_object")]
     metadata: Value,
-}
-
-#[derive(Debug, Deserialize)]
-struct SchemaUnderstandingRequest {
-    #[serde(default)]
-    run_id: Option<Uuid>,
-    #[serde(default)]
-    industry: Option<String>,
-    #[serde(default)]
-    source_mode: Option<String>,
-    #[serde(default)]
-    max_sample_rows: Option<usize>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PropertyUnderstandingCandidate {
-    field_name: String,
-    field_type: String,
-    semantic_role: String,
-    confidence: f64,
-    evidence: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TaxonomyLayerCandidate {
-    layer: usize,
-    label: String,
-    confidence: f64,
-    rationale: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SchemaUnderstandingCandidate {
-    table_name: String,
-    source_system: String,
-    source_object: String,
-    object_type_candidate: String,
-    confidence: f64,
-    recommendation: String,
-    properties: Vec<PropertyUnderstandingCandidate>,
-    taxonomy_layers: Vec<TaxonomyLayerCandidate>,
-    evidence: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SchemaUnderstandingResponse {
-    run_id: Option<Uuid>,
-    industry: String,
-    source_mode: String,
-    domain_scope: String,
-    tool_namespace: String,
-    candidate_count: usize,
-    candidates: Vec<SchemaUnderstandingCandidate>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SubgraphProposalRequest {
-    #[serde(default)]
-    run_id: Option<Uuid>,
-    #[serde(default)]
-    industry: Option<String>,
-    #[serde(default)]
-    source_mode: Option<String>,
-    #[serde(default)]
-    target_object: Option<String>,
-    #[serde(default)]
-    review_decision: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SubgraphProposalMember {
-    proposal_id: Uuid,
-    proposal_type: String,
-    name: String,
-    role: String,
-    confidence: f64,
-    review_status: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SubgraphProposalDraft {
-    id: String,
-    run_id: Option<Uuid>,
-    name: String,
-    target_object: String,
-    review_status: String,
-    confidence: f64,
-    recommendation: String,
-    members: Vec<SubgraphProposalMember>,
-    evidence: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SubgraphProposalResponse {
-    run_id: Option<Uuid>,
-    industry: String,
-    source_mode: String,
-    domain_scope: String,
-    tool_namespace: String,
-    subgraph_count: usize,
-    subgraphs: Vec<SubgraphProposalDraft>,
-}
-
-#[derive(Debug, Deserialize)]
-struct EntityResolutionRequest {
-    #[serde(default)]
-    run_id: Option<Uuid>,
-    #[serde(default)]
-    candidate_name: Option<String>,
-    #[serde(default)]
-    candidate_object_type: Option<String>,
-    #[serde(default)]
-    domain_scope: Option<String>,
-    #[serde(default)]
-    min_score: Option<f64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct EntityResolutionRetrievalHit {
-    object_id: Uuid,
-    object_key: String,
-    title: String,
-    object_type: String,
-    domain_scope: String,
-    normalized_name: String,
-    score: f64,
-    match_reasons: Vec<String>,
-    evidence: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct EntityResolutionDecisionDraft {
-    is_duplicate: bool,
-    canonical_name: String,
-    existing_node_uuid: Option<Uuid>,
-    confidence: f64,
-    decision: String,
-    review_required: bool,
-    rationale: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct EntityResolutionCandidate {
-    candidate_name: String,
-    candidate_object_type: String,
-    domain_scope: String,
-    normalized_name: String,
-    retrieval_hits: Vec<EntityResolutionRetrievalHit>,
-    decision: EntityResolutionDecisionDraft,
-    evidence: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct EntityResolutionResponse {
-    run_id: Option<Uuid>,
-    candidate_count: usize,
-    candidates: Vec<EntityResolutionCandidate>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ConfidenceCalibrationRecord {
-    id: Uuid,
-    run_id: Uuid,
-    proposal_id: Uuid,
-    proposal_type: String,
-    proposal_name: String,
-    model_confidence: f64,
-    deterministic_validator_score: f64,
-    retrieval_similarity_score: Option<f64>,
-    source_quality_score: f64,
-    reviewer_decision: String,
-    reviewer_status: String,
-    runtime_outcome: Option<String>,
-    evidence: Value,
-    recorded_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ConfidenceCalibrationBucket {
-    proposal_type: String,
-    reviewer_status: String,
-    count: usize,
-    average_model_confidence: f64,
-    average_validator_score: f64,
-    average_source_quality_score: f64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ConfidenceCalibrationResponse {
-    run_id: Uuid,
-    record_count: usize,
-    records: Vec<ConfidenceCalibrationRecord>,
-    buckets: Vec<ConfidenceCalibrationBucket>,
-    threshold_policy: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
