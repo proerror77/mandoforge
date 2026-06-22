@@ -7,9 +7,10 @@ use axum::{
 use uuid::Uuid;
 
 use crate::{
-    AppError, AppState, ClaimWorkflowStepRun, ClaimWorkflowStepRunResponse,
+    AgentInboxSnapshot, AppError, AppState, ClaimWorkflowStepRun, ClaimWorkflowStepRunResponse,
     CreateTaskGrant, CreateWorkflowDefinition, CreateWorkflowRun, CreateWorkflowStepRun,
-    RunDueWorkflowSteps, RunWorkflowStepRun, RunWorkflowStepRunResponse, TaskGrant,
+    RunDueWorkflowSteps, RunWorkflowStepRun, RunWorkflowStepRunResponse, TaskBoardSnapshot,
+    TaskGrant,
     UpdateWorkflowDefinition,
     UpdateWorkflowStepRun, WorkflowDefinition, WorkflowRun, WorkflowRunGraphConsole,
     WorkflowScheduledStepActivationRun, WorkflowStepRun, WorkflowTransition,
@@ -20,6 +21,8 @@ use crate::{
     create_workflow_run_route as create_workflow_run_impl,
     create_workflow_step_run_route as create_workflow_step_run_impl,
     get_workflow_run_graph_console_route as get_workflow_run_graph_console_impl,
+    get_agent_inbox_route as get_agent_inbox_impl,
+    get_task_board_route as get_task_board_impl,
     get_workflow_definition_route as get_workflow_definition_impl,
     get_workflow_run_route as get_workflow_run_impl,
     get_task_grant_route as get_task_grant_impl,
@@ -82,6 +85,8 @@ pub(crate) fn router() -> Router<AppState> {
             get(list_workflow_task_grants).post(create_workflow_task_grant),
         )
         .route("/api/task-grants/{id}", get(get_task_grant))
+        .route("/api/task-board", get(get_task_board))
+        .route("/api/agents/{id}/inbox", get(get_agent_inbox))
 }
 
 async fn list_workflow_definitions(
@@ -232,4 +237,19 @@ async fn create_workflow_task_grant(
     Json(input): Json<CreateTaskGrant>,
 ) -> Result<Json<TaskGrant>, AppError> {
     create_workflow_task_grant_impl(state, id, headers, input).await
+}
+
+async fn get_task_board(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<TaskBoardSnapshot>, AppError> {
+    get_task_board_impl(state, headers).await
+}
+
+async fn get_agent_inbox(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<AgentInboxSnapshot>, AppError> {
+    get_agent_inbox_impl(state, id, headers).await
 }

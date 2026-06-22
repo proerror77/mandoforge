@@ -3957,8 +3957,6 @@ fn build_router(state: AppState) -> Router {
             "/api/work-items",
             get(list_work_items).post(create_work_item),
         )
-        .route("/api/task-board", get(get_task_board_route))
-        .route("/api/agents/{id}/inbox", get(get_agent_inbox_route))
         .route(
             "/api/agent-teammates",
             get(list_agent_teammates).post(create_agent_teammate),
@@ -21299,8 +21297,8 @@ pub(crate) async fn get_workflow_run_graph_console_route(
     Ok(Json(build_workflow_run_graph_console(&state, &run).await?))
 }
 
-async fn get_task_board_route(
-    State(state): State<AppState>,
+pub(crate) async fn get_task_board_route(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<TaskBoardSnapshot>, AppError> {
     authorize_request(
@@ -21314,9 +21312,9 @@ async fn get_task_board_route(
     Ok(Json(build_task_board_snapshot(&state).await?))
 }
 
-async fn get_agent_inbox_route(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn get_agent_inbox_route(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<AgentInboxSnapshot>, AppError> {
     authorize_request(
