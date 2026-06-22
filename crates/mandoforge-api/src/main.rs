@@ -3889,7 +3889,6 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::ontology_intelligence::router())
         .merge(handlers::ontology::router())
         .merge(handlers::memory_governance::router())
-        .route("/api/agents/{id}/versions", get(list_agent_versions))
         .route(
             "/api/agents/releases/summary",
             get(get_agent_release_rollout_summary),
@@ -3929,10 +3928,6 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/agents/{id}/releases/{release_id}/rollback",
             post(rollback_agent_release),
-        )
-        .route(
-            "/api/agents/{id}/versions/{version}",
-            get(get_agent_version),
         )
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/{id}", get(get_session))
@@ -14198,15 +14193,6 @@ async fn record_semantic_link_audit(
     Ok(())
 }
 
-async fn list_agent_versions(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<AgentVersion>>, AppError> {
-    authorize_request(&state, &headers, Permission::AgentsRead, "agent", Some(id)).await?;
-    Ok(Json(state.list_agent_versions(id).await?))
-}
-
 async fn list_agent_releases(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -16046,15 +16032,6 @@ async fn rollback_agent_release(
         ))
         .await?;
     Ok(Json(rolled_back))
-}
-
-async fn get_agent_version(
-    State(state): State<AppState>,
-    Path((id, version)): Path<(Uuid, i32)>,
-    headers: HeaderMap,
-) -> Result<Json<AgentVersion>, AppError> {
-    authorize_request(&state, &headers, Permission::AgentsRead, "agent", Some(id)).await?;
-    Ok(Json(state.get_agent_version(id, version).await?))
 }
 
 async fn list_sessions(
