@@ -8,21 +8,25 @@ use uuid::Uuid;
 
 use crate::{
     AppError, AppState, ClaimWorkflowStepRun, ClaimWorkflowStepRunResponse,
-    CreateWorkflowDefinition, CreateWorkflowRun, CreateWorkflowStepRun, RunDueWorkflowSteps,
-    RunWorkflowStepRun, RunWorkflowStepRunResponse, UpdateWorkflowDefinition,
+    CreateTaskGrant, CreateWorkflowDefinition, CreateWorkflowRun, CreateWorkflowStepRun,
+    RunDueWorkflowSteps, RunWorkflowStepRun, RunWorkflowStepRunResponse, TaskGrant,
+    UpdateWorkflowDefinition,
     UpdateWorkflowStepRun, WorkflowDefinition, WorkflowRun, WorkflowRunGraphConsole,
     WorkflowScheduledStepActivationRun, WorkflowStepRun, WorkflowTransition,
     WorkflowTransitionQuery,
     claim_workflow_step_run_route as claim_workflow_step_run_impl,
+    create_workflow_task_grant_route as create_workflow_task_grant_impl,
     create_workflow_definition_route as create_workflow_definition_impl,
     create_workflow_run_route as create_workflow_run_impl,
     create_workflow_step_run_route as create_workflow_step_run_impl,
     get_workflow_run_graph_console_route as get_workflow_run_graph_console_impl,
     get_workflow_definition_route as get_workflow_definition_impl,
     get_workflow_run_route as get_workflow_run_impl,
+    get_task_grant_route as get_task_grant_impl,
     list_workflow_definitions_route as list_workflow_definitions_impl,
     list_workflow_runs_route as list_workflow_runs_impl,
     list_workflow_step_runs_route as list_workflow_step_runs_impl,
+    list_workflow_task_grants_route as list_workflow_task_grants_impl,
     list_workflow_transitions_route as list_workflow_transitions_impl,
     run_due_workflow_steps_route as run_due_workflow_steps_impl,
     run_workflow_step_run_route as run_workflow_step_run_impl,
@@ -73,6 +77,11 @@ pub(crate) fn router() -> Router<AppState> {
             "/api/workflow-step-runs/{id}/run",
             post(run_workflow_step_run),
         )
+        .route(
+            "/api/workflow-runs/{id}/task-grants",
+            get(list_workflow_task_grants).post(create_workflow_task_grant),
+        )
+        .route("/api/task-grants/{id}", get(get_task_grant))
 }
 
 async fn list_workflow_definitions(
@@ -198,4 +207,29 @@ async fn run_workflow_step_run(
     Json(input): Json<RunWorkflowStepRun>,
 ) -> Result<Json<RunWorkflowStepRunResponse>, AppError> {
     run_workflow_step_run_impl(state, id, headers, input).await
+}
+
+async fn list_workflow_task_grants(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<TaskGrant>>, AppError> {
+    list_workflow_task_grants_impl(state, id, headers).await
+}
+
+async fn get_task_grant(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<TaskGrant>, AppError> {
+    get_task_grant_impl(state, id, headers).await
+}
+
+async fn create_workflow_task_grant(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateTaskGrant>,
+) -> Result<Json<TaskGrant>, AppError> {
+    create_workflow_task_grant_impl(state, id, headers, input).await
 }

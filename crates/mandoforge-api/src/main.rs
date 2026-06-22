@@ -3895,11 +3895,6 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::manager_plans::router())
         .merge(handlers::dynamic_workflow_plans::router())
         .merge(handlers::workflows::router())
-        .route(
-            "/api/workflow-runs/{id}/task-grants",
-            get(list_workflow_task_grants_route).post(create_workflow_task_grant_route),
-        )
-        .route("/api/task-grants/{id}", get(get_task_grant_route))
         .merge(handlers::tools::router())
         .route(
             "/api/organizations",
@@ -24873,9 +24868,9 @@ async fn update_workflow_run_status_and_record(
     Ok(updated)
 }
 
-async fn list_workflow_task_grants_route(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn list_workflow_task_grants_route(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<Vec<TaskGrant>>, AppError> {
     let run = state.get_workflow_run(id).await?;
@@ -24890,9 +24885,9 @@ async fn list_workflow_task_grants_route(
     Ok(Json(state.list_task_grants_for_workflow_run(id).await?))
 }
 
-async fn get_task_grant_route(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn get_task_grant_route(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<TaskGrant>, AppError> {
     let grant = state.get_task_grant(id).await?;
@@ -24908,11 +24903,11 @@ async fn get_task_grant_route(
     Ok(Json(grant))
 }
 
-async fn create_workflow_task_grant_route(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn create_workflow_task_grant_route(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<CreateTaskGrant>,
+    input: CreateTaskGrant,
 ) -> Result<Json<TaskGrant>, AppError> {
     let run = state.get_workflow_run(id).await?;
     authorize_request(
