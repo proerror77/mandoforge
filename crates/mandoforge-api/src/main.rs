@@ -46848,32 +46848,6 @@ fn merge_approval_evidence(target: &mut Value, patch: Value) {
     }
 }
 
-pub(crate) async fn list_approvals(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<Vec<Approval>>, AppError> {
-    let principal =
-        authorize_collection_request(&state, &headers, Permission::SessionsRead, "approvals")
-            .await?;
-    let visible_session_ids = visible_session_ids_for_principal(&state, &principal).await?;
-    Ok(Json(
-        state
-            .list_approvals()
-            .await?
-            .into_iter()
-            .filter(|approval| visible_session_ids.contains(&approval.session_id))
-            .collect(),
-    ))
-}
-
-pub(crate) async fn list_approval_groups(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<Vec<ApprovalGroup>>, AppError> {
-    authorize_request(&state, &headers, Permission::Admin, "approval_groups", None).await?;
-    Ok(Json(state.list_approval_groups().await?))
-}
-
 pub(crate) async fn create_approval_group(
     state: AppState,
     headers: HeaderMap,
@@ -46907,21 +46881,6 @@ pub(crate) async fn create_approval_group(
         ))
         .await?;
     Ok(Json(group))
-}
-
-pub(crate) async fn list_approval_escalation_rules(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<Vec<ApprovalEscalationRule>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "approval_escalation_rules",
-        None,
-    )
-    .await?;
-    Ok(Json(state.list_approval_escalation_rules().await?))
 }
 
 pub(crate) async fn create_approval_escalation_rule(

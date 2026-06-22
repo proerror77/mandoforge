@@ -9,12 +9,14 @@ use uuid::Uuid;
 use crate::{
     AppError, AppState, Approval, ApprovalEscalationDueRun, ApprovalEscalationRule,
     ApprovalGroup, CreateApprovalEscalationRule, CreateApprovalGroup, EscalateApproval,
-    ModifyApproval, approve as approve_impl, create_approval_escalation_rule as create_approval_escalation_rule_impl,
-    create_approval_group as create_approval_group_impl, escalate_approval as escalate_approval_impl,
-    expire as expire_impl, list_approval_escalation_rules as list_approval_escalation_rules_impl,
-    list_approval_groups as list_approval_groups_impl, list_approvals as list_approvals_impl,
-    modify_approval as modify_approval_impl, reject as reject_impl,
+    ModifyApproval, Permission, approve as approve_impl, authorize_collection_request,
+    authorize_request,
+    create_approval_escalation_rule as create_approval_escalation_rule_impl,
+    create_approval_group as create_approval_group_impl,
+    escalate_approval as escalate_approval_impl,
+    expire as expire_impl, modify_approval as modify_approval_impl, reject as reject_impl,
     run_due_approval_escalations as run_due_approval_escalations_impl,
+    visible_session_ids_for_principal,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -43,7 +45,18 @@ async fn list_approvals(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<Approval>>, AppError> {
-    list_approvals_impl(state, headers).await
+    let principal =
+        authorize_collection_request(&state, &headers, Permission::SessionsRead, "approvals")
+            .await?;
+    let visible_session_ids = visible_session_ids_for_principal(&state, &principal).await?;
+    Ok(Json(
+        state
+            .list_approvals()
+            .await?
+            .into_iter()
+            .filter(|approval| visible_session_ids.contains(&approval.session_id))
+            .collect(),
+    ))
 }
 
 async fn approve(
@@ -99,7 +112,8 @@ async fn list_approval_groups(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<ApprovalGroup>>, AppError> {
-    list_approval_groups_impl(state, headers).await
+    authorize_request(&state, &headers, Permission::Admin, "approval_groups", None).await?;
+    Ok(Json(state.list_approval_groups().await?))
 }
 
 async fn create_approval_group(
@@ -114,7 +128,15 @@ async fn list_approval_escalation_rules(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<ApprovalEscalationRule>>, AppError> {
-    list_approval_escalation_rules_impl(state, headers).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "approval_escalation_rules",
+        None,
+    )
+    .await?;
+    Ok(Json(state.list_approval_escalation_rules().await?))
 }
 
 async fn create_approval_escalation_rule(
