@@ -1217,7 +1217,7 @@ struct RemoteComputerArtifactSyncResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct CodexAppServerRun {
+pub(crate) struct CodexAppServerRun {
     id: Uuid,
     operation: String,
     thread_id: Option<String>,
@@ -1231,7 +1231,7 @@ struct CodexAppServerRun {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct CodexAppServerPollRequest {
+pub(crate) struct CodexAppServerPollRequest {
     #[serde(default = "default_codex_poll_attempts")]
     max_attempts: u32,
     #[serde(default)]
@@ -1239,7 +1239,7 @@ struct CodexAppServerPollRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct CodexAppServerPollResponse {
+pub(crate) struct CodexAppServerPollResponse {
     run: CodexAppServerRun,
     attempts: u32,
     terminal: bool,
@@ -1247,7 +1247,7 @@ struct CodexAppServerPollResponse {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct CodexAppServerStalePollRequest {
+pub(crate) struct CodexAppServerStalePollRequest {
     #[serde(default = "default_codex_stale_after_seconds")]
     stale_after_seconds: u64,
     #[serde(default = "default_codex_poll_attempts")]
@@ -1270,7 +1270,7 @@ impl Default for CodexAppServerStalePollRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct CodexAppServerStalePollRun {
+pub(crate) struct CodexAppServerStalePollRun {
     checked_at: DateTime<Utc>,
     stale_after_seconds: u64,
     candidate_count: usize,
@@ -1282,7 +1282,7 @@ struct CodexAppServerStalePollRun {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct CodexAppServerTraceSummary {
+pub(crate) struct CodexAppServerTraceSummary {
     generated_at: DateTime<Utc>,
     run_count: usize,
     turn_count: usize,
@@ -1295,7 +1295,7 @@ struct CodexAppServerTraceSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct CodexAppServerControlPlaneSummary {
+pub(crate) struct CodexAppServerControlPlaneSummary {
     generated_at: DateTime<Utc>,
     configured: bool,
     status: String,
@@ -1316,7 +1316,7 @@ struct CodexAppServerControlPlaneSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct CodexAppServerProductionOpsReadiness {
+pub(crate) struct CodexAppServerProductionOpsReadiness {
     status: String,
     production_blocked: bool,
     configured: bool,
@@ -1338,7 +1338,7 @@ struct CodexAppServerProductionOpsReadiness {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct CodexAppServerOpsValidationRun {
+pub(crate) struct CodexAppServerOpsValidationRun {
     status: String,
     configured: bool,
     production_ops_status: String,
@@ -1349,7 +1349,7 @@ struct CodexAppServerOpsValidationRun {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct CodexAppServerDeploymentReadiness {
+pub(crate) struct CodexAppServerDeploymentReadiness {
     status: String,
     production_blocked: bool,
     configured: bool,
@@ -1372,7 +1372,7 @@ struct CodexAppServerDeploymentReadiness {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct CodexAppServerControlPlaneAttentionItem {
+pub(crate) struct CodexAppServerControlPlaneAttentionItem {
     kind: String,
     severity: String,
     message: String,
@@ -1381,7 +1381,7 @@ struct CodexAppServerControlPlaneAttentionItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct CodexTurnTrace {
+pub(crate) struct CodexTurnTrace {
     trace_key: String,
     turn_id: Option<String>,
     thread_id: Option<String>,
@@ -1403,7 +1403,7 @@ struct CodexTurnTrace {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct CodexAppServerTraceDetail {
+pub(crate) struct CodexAppServerTraceDetail {
     generated_at: DateTime<Utc>,
     trace: CodexTurnTrace,
     runs: Vec<CodexAppServerRun>,
@@ -1421,7 +1421,7 @@ struct CodexAppServerTraceDetail {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct CodexAppServerStatusPoint {
+pub(crate) struct CodexAppServerStatusPoint {
     run_id: Uuid,
     operation: String,
     status: String,
@@ -3902,42 +3902,7 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::mcp::router())
         .merge(handlers::policy::router())
         .merge(handlers::vault::router())
-        .route(
-            "/api/codex-app-server/health",
-            get(get_codex_app_server_health),
-        )
-        .route(
-            "/api/codex-app-server/deployment/validate",
-            post(validate_codex_app_server_deployment),
-        )
-        .route(
-            "/api/codex-app-server/ops/validate",
-            post(validate_codex_app_server_ops),
-        )
-        .route(
-            "/api/codex-app-server/runs",
-            get(list_codex_app_server_runs),
-        )
-        .route(
-            "/api/codex-app-server/traces",
-            get(get_codex_app_server_traces),
-        )
-        .route(
-            "/api/codex-app-server/control-plane/summary",
-            get(get_codex_app_server_control_plane_summary),
-        )
-        .route(
-            "/api/codex-app-server/traces/{trace_key}",
-            get(get_codex_app_server_trace_detail),
-        )
-        .route(
-            "/api/codex-app-server/runs/{run_id}/poll",
-            post(poll_codex_app_server_run),
-        )
-        .route(
-            "/api/codex-app-server/runs/poll-stale",
-            post(poll_stale_codex_app_server_runs),
-        )
+        .merge(handlers::codex_app_server::router())
         .route("/api/codex-app-server/threads", post(create_codex_thread))
         .route(
             "/api/codex-app-server/threads/{thread_id}/turns",
@@ -38449,8 +38414,8 @@ async fn write_secret_value_if_provided(
     Ok(Some(()))
 }
 
-async fn get_codex_app_server_health(
-    State(state): State<AppState>,
+pub(crate) async fn get_codex_app_server_health(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Value>, AppError> {
     authorize_request(
@@ -38495,8 +38460,8 @@ async fn get_codex_app_server_health(
     }
 }
 
-async fn validate_codex_app_server_deployment(
-    State(state): State<AppState>,
+pub(crate) async fn validate_codex_app_server_deployment(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Value>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
@@ -38613,8 +38578,8 @@ async fn validate_codex_app_server_deployment(
     Ok(Json(result))
 }
 
-async fn validate_codex_app_server_ops(
-    State(state): State<AppState>,
+pub(crate) async fn validate_codex_app_server_ops(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<CodexAppServerOpsValidationRun>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
@@ -38865,8 +38830,8 @@ async fn execute_codex_command(
     Ok(Json(response))
 }
 
-async fn list_codex_app_server_runs(
-    State(state): State<AppState>,
+pub(crate) async fn list_codex_app_server_runs(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Vec<CodexAppServerRun>>, AppError> {
     authorize_request(
@@ -38880,8 +38845,8 @@ async fn list_codex_app_server_runs(
     Ok(Json(state.list_codex_app_server_runs().await?))
 }
 
-async fn get_codex_app_server_traces(
-    State(state): State<AppState>,
+pub(crate) async fn get_codex_app_server_traces(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<CodexAppServerTraceSummary>, AppError> {
     authorize_request(
@@ -38896,8 +38861,8 @@ async fn get_codex_app_server_traces(
     Ok(Json(build_codex_app_server_trace_summary(&runs)))
 }
 
-async fn get_codex_app_server_control_plane_summary(
-    State(state): State<AppState>,
+pub(crate) async fn get_codex_app_server_control_plane_summary(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<CodexAppServerControlPlaneSummary>, AppError> {
     authorize_request(
@@ -38918,9 +38883,9 @@ async fn get_codex_app_server_control_plane_summary(
     )))
 }
 
-async fn get_codex_app_server_trace_detail(
-    State(state): State<AppState>,
-    Path(trace_key): Path<String>,
+pub(crate) async fn get_codex_app_server_trace_detail(
+    state: AppState,
+    trace_key: String,
     headers: HeaderMap,
 ) -> Result<Json<CodexAppServerTraceDetail>, AppError> {
     authorize_request(
@@ -38940,11 +38905,11 @@ async fn get_codex_app_server_trace_detail(
     build_codex_app_server_trace_detail(&runs, &trace_key, &events, &audit_logs).map(Json)
 }
 
-async fn poll_codex_app_server_run(
-    State(state): State<AppState>,
-    Path(run_id): Path<Uuid>,
+pub(crate) async fn poll_codex_app_server_run(
+    state: AppState,
+    run_id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<CodexAppServerPollRequest>,
+    input: CodexAppServerPollRequest,
 ) -> Result<Json<CodexAppServerPollResponse>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
@@ -38961,10 +38926,10 @@ async fn poll_codex_app_server_run(
     ))
 }
 
-async fn poll_stale_codex_app_server_runs(
-    State(state): State<AppState>,
+pub(crate) async fn poll_stale_codex_app_server_runs(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<CodexAppServerStalePollRequest>,
+    input: CodexAppServerStalePollRequest,
 ) -> Result<Json<CodexAppServerStalePollRun>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {

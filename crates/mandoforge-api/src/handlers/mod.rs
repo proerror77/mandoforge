@@ -3,6 +3,7 @@ pub(crate) mod agent_releases;
 pub(crate) mod agent_handoffs;
 pub(crate) mod audit_logs;
 pub(crate) mod collaboration;
+pub(crate) mod codex_app_server;
 pub(crate) mod deployment;
 pub(crate) mod dynamic_workflow_plans;
 pub(crate) mod github;
