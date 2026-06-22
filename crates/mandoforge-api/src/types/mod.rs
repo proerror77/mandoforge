@@ -6,3 +6,4 @@ pub(crate) mod eval;
 pub(crate) mod session;
 pub(crate) mod tenant;
 pub(crate) mod tools;
+pub(crate) mod workflow_pack;

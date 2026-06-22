@@ -169,6 +169,10 @@ use types::tools::{
     SemanticLinkExpandTool, SemanticObjectFetchTool, SemanticObjectSearchTool, ShellExecTool,
     SqlQueryTool, SqlSchemaTool, ToolDescriptor,
 };
+pub(crate) use types::workflow_pack::{
+    WorkflowPackBinding, WorkflowPackInstallation, WorkflowPackProfileAsset,
+    WorkflowPackRuntimeObject,
+};
 use secrets::{
     SecretProvider, SecretProviderConfig, SecretProviderKind, SecretRef, SecretValue,
     VaultSecretProvider, secret_provider_from_env,
@@ -607,71 +611,6 @@ struct AttachAgentHandoffRemoteComputerAssignment {
     remote_computer_job_assignment_id: Uuid,
     #[serde(default = "empty_json_object")]
     metadata: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WorkflowPackInstallation {
-    id: Uuid,
-    pack_id: String,
-    kind: String,
-    version: String,
-    manifest_path: String,
-    manifest: Value,
-    validation_report: Value,
-    status: String,
-    eval_gate_status: String,
-    release_gate_status: String,
-    gate_evidence: Value,
-    staged_at: Option<DateTime<Utc>>,
-    released_at: Option<DateTime<Utc>>,
-    archived_at: Option<DateTime<Utc>>,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WorkflowPackProfileAsset {
-    id: Uuid,
-    installation_id: Uuid,
-    profile_id: String,
-    content: String,
-    version: i32,
-    status: String,
-    created_at: DateTime<Utc>,
-    archived_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WorkflowPackBinding {
-    id: Uuid,
-    installation_id: Uuid,
-    pack_id: String,
-    pack_version: String,
-    binding_type: String,
-    binding_key: String,
-    source_path: Option<String>,
-    target_kind: String,
-    target_id: Option<Uuid>,
-    status: String,
-    materialized_payload: Value,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WorkflowPackRuntimeObject {
-    id: Uuid,
-    installation_id: Uuid,
-    binding_id: Uuid,
-    pack_id: String,
-    pack_version: String,
-    object_type: String,
-    object_key: String,
-    runtime_kind: String,
-    status: String,
-    spec: Value,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
