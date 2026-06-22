@@ -822,14 +822,14 @@ fn approval_webhook_url_from_env() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn approval_slack_webhook_url_from_env() -> Option<String> {
+pub(crate) fn approval_slack_webhook_url_from_env() -> Option<String> {
     std::env::var("MANDOFORGE_APPROVAL_SLACK_WEBHOOK_URL")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
 }
 
-fn approval_email_relay_url_from_env() -> Option<String> {
+pub(crate) fn approval_email_relay_url_from_env() -> Option<String> {
     std::env::var("MANDOFORGE_APPROVAL_EMAIL_RELAY_URL")
         .ok()
         .map(|value| value.trim().to_string())
@@ -47447,53 +47447,6 @@ pub(crate) async fn validate_approval_notification_ops(
     Ok(Json(run))
 }
 
-pub(crate) async fn get_approval_notification_delivery_runs(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<ApprovalNotificationDeliveryRunSummary>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "approval_notifications",
-        None,
-    )
-    .await?;
-    let audit_logs = state.list_audit_logs(None).await?;
-    let routing = build_approval_notification_routing_summary(
-        state.list_approvals().await?,
-        state.list_approval_groups().await?,
-        state.list_approval_escalation_rules().await?,
-        state.list_approval_notification_channel_policies().await?,
-        state.approval_webhook_url.is_some(),
-        approval_slack_webhook_url_from_env().is_some(),
-        approval_email_relay_url_from_env().is_some(),
-    )
-    .await;
-    Ok(Json(build_approval_notification_delivery_run_summary(
-        &audit_logs,
-        Utc::now(),
-        &routing,
-    )))
-}
-
-pub(crate) async fn list_approval_notification_channel_policies(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<Vec<ApprovalNotificationChannelPolicy>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "approval_notification_channel_policies",
-        None,
-    )
-    .await?;
-    Ok(Json(
-        state.list_approval_notification_channel_policies().await?,
-    ))
-}
-
 pub(crate) async fn create_approval_notification_channel_policy(
     state: AppState,
     headers: HeaderMap,
@@ -47574,32 +47527,6 @@ pub(crate) async fn archive_approval_notification_channel_policy(
         ))
         .await?;
     Ok(Json(policy))
-}
-
-pub(crate) async fn get_approval_notification_routing_summary(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<ApprovalNotificationRoutingSummary>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "approval_notifications",
-        None,
-    )
-    .await?;
-    Ok(Json(
-        build_approval_notification_routing_summary(
-            state.list_approvals().await?,
-            state.list_approval_groups().await?,
-            state.list_approval_escalation_rules().await?,
-            state.list_approval_notification_channel_policies().await?,
-            state.approval_webhook_url.is_some(),
-            approval_slack_webhook_url_from_env().is_some(),
-            approval_email_relay_url_from_env().is_some(),
-        )
-        .await,
-    ))
 }
 
 async fn execute_approval_notification_delivery_run(
@@ -47695,7 +47622,7 @@ fn recently_notified_approval_ids(audit_logs: &[AuditLog], now: DateTime<Utc>) -
         .collect()
 }
 
-fn build_approval_notification_delivery_run_summary(
+pub(crate) fn build_approval_notification_delivery_run_summary(
     audit_logs: &[AuditLog],
     generated_at: DateTime<Utc>,
     routing: &ApprovalNotificationRoutingSummary,
@@ -48290,7 +48217,7 @@ fn approval_notification_delivery_run_from_audit_log(
     })
 }
 
-async fn build_approval_notification_routing_summary(
+pub(crate) async fn build_approval_notification_routing_summary(
     approvals: Vec<Approval>,
     approval_groups: Vec<ApprovalGroup>,
     escalation_rules: Vec<ApprovalEscalationRule>,

@@ -4,19 +4,21 @@ use axum::{
     http::HeaderMap,
     routing::{get, post},
 };
+use chrono::Utc;
 use uuid::Uuid;
 
 use crate::{
     AppError, AppState, ApprovalNotificationChannelPolicy, ApprovalNotificationDelivery,
     ApprovalNotificationDeliveryRun, ApprovalNotificationDeliveryRunSummary,
     ApprovalNotificationDeploymentValidationRun, ApprovalNotificationOpsValidationRun,
-    ApprovalNotificationRoutingSummary, CreateApprovalNotificationChannelPolicy,
+    ApprovalNotificationRoutingSummary, CreateApprovalNotificationChannelPolicy, Permission,
+    approval_email_relay_url_from_env, approval_slack_webhook_url_from_env,
+    authorize_request,
     archive_approval_notification_channel_policy as archive_approval_notification_channel_policy_impl,
+    build_approval_notification_delivery_run_summary,
+    build_approval_notification_routing_summary,
     create_approval_notification_channel_policy as create_approval_notification_channel_policy_impl,
     deliver_approval as deliver_approval_impl,
-    get_approval_notification_delivery_runs as get_approval_notification_delivery_runs_impl,
-    get_approval_notification_routing_summary as get_approval_notification_routing_summary_impl,
-    list_approval_notification_channel_policies as list_approval_notification_channel_policies_impl,
     run_approval_notifications as run_approval_notifications_impl,
     validate_approval_notification_deployment as validate_approval_notification_deployment_impl,
     validate_approval_notification_ops as validate_approval_notification_ops_impl,
@@ -89,14 +91,47 @@ async fn get_approval_notification_delivery_runs(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<ApprovalNotificationDeliveryRunSummary>, AppError> {
-    get_approval_notification_delivery_runs_impl(state, headers).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "approval_notifications",
+        None,
+    )
+    .await?;
+    let audit_logs = state.list_audit_logs(None).await?;
+    let routing = build_approval_notification_routing_summary(
+        state.list_approvals().await?,
+        state.list_approval_groups().await?,
+        state.list_approval_escalation_rules().await?,
+        state.list_approval_notification_channel_policies().await?,
+        state.approval_webhook_url.is_some(),
+        approval_slack_webhook_url_from_env().is_some(),
+        approval_email_relay_url_from_env().is_some(),
+    )
+    .await;
+    Ok(Json(build_approval_notification_delivery_run_summary(
+        &audit_logs,
+        Utc::now(),
+        &routing,
+    )))
 }
 
 async fn list_approval_notification_channel_policies(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<ApprovalNotificationChannelPolicy>>, AppError> {
-    list_approval_notification_channel_policies_impl(state, headers).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "approval_notification_channel_policies",
+        None,
+    )
+    .await?;
+    Ok(Json(
+        state.list_approval_notification_channel_policies().await?,
+    ))
 }
 
 async fn create_approval_notification_channel_policy(
@@ -119,5 +154,24 @@ async fn get_approval_notification_routing_summary(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<ApprovalNotificationRoutingSummary>, AppError> {
-    get_approval_notification_routing_summary_impl(state, headers).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "approval_notifications",
+        None,
+    )
+    .await?;
+    Ok(Json(
+        build_approval_notification_routing_summary(
+            state.list_approvals().await?,
+            state.list_approval_groups().await?,
+            state.list_approval_escalation_rules().await?,
+            state.list_approval_notification_channel_policies().await?,
+            state.approval_webhook_url.is_some(),
+            approval_slack_webhook_url_from_env().is_some(),
+            approval_email_relay_url_from_env().is_some(),
+        )
+        .await,
+    ))
 }
