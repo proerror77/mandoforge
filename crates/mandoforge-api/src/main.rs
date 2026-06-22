@@ -157,12 +157,17 @@ pub(crate) use types::session::{
     SessionLoopJob, SessionLoopJobStatus, SessionStatus, SessionThread, StreamEventsQuery,
 };
 pub(crate) use types::semantic::{
-    CreateSemanticIngestionBatch, CreateSemanticLink, CreateSemanticObject, CreateSemanticSource,
-    ResolveSemanticConflictRequest, SemanticGovernanceRunRequest, SemanticGovernanceRunResult,
-    SemanticGraphConflict, SemanticGraphEdge, SemanticGraphNode, SemanticGraphPartition,
-    SemanticGraphSnapshot, SemanticIngestionBatchResult, SemanticIngestionObjectRef, SemanticLink,
-    SemanticObject, SemanticProductQuery, SemanticSearchResponse, SemanticSearchResult,
-    SemanticSource, UpdateSemanticLink, UpdateSemanticObject, UpdateSemanticSource,
+    ContextPacketSemanticObject, CreateSemanticIngestionBatch, CreateSemanticLink,
+    CreateSemanticObject, CreateSemanticSource, ExpandSemanticLinksRequest,
+    ExpandSemanticLinksResponse, FetchSemanticObjectRequest, FetchSemanticObjectResponse,
+    FetchableSemanticObject, RenderedSemanticObject, ResolveSemanticConflictRequest,
+    SearchSemanticObjectsRequest, SearchSemanticObjectsResponse, SemanticGovernanceRunRequest,
+    SemanticGovernanceRunResult, SemanticGraphConflict, SemanticGraphEdge, SemanticGraphNode,
+    SemanticGraphPartition, SemanticGraphSnapshot, SemanticIngestionBatchResult,
+    SemanticIngestionObjectRef, SemanticLink, SemanticObject, SemanticProductQuery,
+    SemanticRetrievalBackendRegistry, SemanticRetrievalBackendStatus, SemanticSearchResponse,
+    SemanticSearchResult, SemanticSource, UpdateSemanticLink, UpdateSemanticObject,
+    UpdateSemanticSource,
 };
 pub(crate) use types::tenant::{
     AcceptTenantInvitation, AcceptedTenantInvitation, BootstrapTenantProvisioning,
@@ -1217,21 +1222,6 @@ struct ContextPacketSourceRef {
     freshness: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ContextPacketSemanticObject {
-    id: Uuid,
-    object_type: String,
-    object_key: String,
-    title: String,
-    summary: String,
-    source_id: Option<Uuid>,
-    source_uri: Option<String>,
-    trust_level: String,
-    freshness: String,
-    semantic_scopes: Value,
-    provenance: Value,
-}
-
 #[derive(Debug, Deserialize)]
 struct RenderContextPacketRequest {
     #[serde(default)]
@@ -1265,18 +1255,6 @@ struct RenderedExecutionContext {
     full_content_included: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RenderedSemanticObject {
-    id: Uuid,
-    object_type: String,
-    object_key: String,
-    title: String,
-    summary: String,
-    trust_level: String,
-    freshness: String,
-    source_uri: Option<String>,
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct RenderedContextOmissions {
     token_budget_exceeded: usize,
@@ -1293,97 +1271,6 @@ struct RenderedContextBudget {
     max_objects: usize,
     max_summary_chars: usize,
     max_policy_reminders: usize,
-}
-
-#[derive(Debug, Deserialize)]
-struct FetchSemanticObjectRequest {
-    context_packet_id: Uuid,
-    #[serde(default)]
-    include_content: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SearchSemanticObjectsRequest {
-    context_packet_id: Uuid,
-    #[serde(default)]
-    query: Option<String>,
-    #[serde(default)]
-    object_type: Option<String>,
-    #[serde(default)]
-    max_results: Option<usize>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct FetchSemanticObjectResponse {
-    context_packet_id: Uuid,
-    object: FetchableSemanticObject,
-    content_included: bool,
-    fetch_policy: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SearchSemanticObjectsResponse {
-    context_packet_id: Uuid,
-    boundary: String,
-    query: Option<String>,
-    object_type: Option<String>,
-    results: Vec<RenderedSemanticObject>,
-    omitted: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct FetchableSemanticObject {
-    id: Uuid,
-    object_type: String,
-    object_key: String,
-    title: String,
-    summary: String,
-    content: Option<Value>,
-    semantic_scopes: Value,
-    source_uri: Option<String>,
-    trust_level: String,
-    freshness: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ExpandSemanticLinksRequest {
-    context_packet_id: Uuid,
-    object_id: Uuid,
-    #[serde(default)]
-    relation_type: Option<String>,
-    #[serde(default)]
-    max_links: Option<usize>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ExpandSemanticLinksResponse {
-    context_packet_id: Uuid,
-    object_id: Uuid,
-    links: Vec<SemanticLink>,
-    omitted: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SemanticRetrievalBackendRegistry {
-    selected_backend: String,
-    effective_backend: String,
-    fail_closed: bool,
-    object_model_required: bool,
-    backends: Vec<SemanticRetrievalBackendStatus>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SemanticRetrievalBackendStatus {
-    backend: String,
-    backend_type: String,
-    status: String,
-    selected: bool,
-    effective: bool,
-    configured: bool,
-    required_env_vars: Vec<String>,
-    missing_env_vars: Vec<String>,
-    object_link_context_packet_required: bool,
-    blocking_reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

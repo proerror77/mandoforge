@@ -375,3 +375,121 @@ pub(crate) struct ResolveSemanticConflictRequest {
     #[serde(default)]
     pub(crate) reason: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ContextPacketSemanticObject {
+    pub(crate) id: Uuid,
+    pub(crate) object_type: String,
+    pub(crate) object_key: String,
+    pub(crate) title: String,
+    pub(crate) summary: String,
+    pub(crate) source_id: Option<Uuid>,
+    pub(crate) source_uri: Option<String>,
+    pub(crate) trust_level: String,
+    pub(crate) freshness: String,
+    pub(crate) semantic_scopes: Value,
+    pub(crate) provenance: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct RenderedSemanticObject {
+    pub(crate) id: Uuid,
+    pub(crate) object_type: String,
+    pub(crate) object_key: String,
+    pub(crate) title: String,
+    pub(crate) summary: String,
+    pub(crate) trust_level: String,
+    pub(crate) freshness: String,
+    pub(crate) source_uri: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct FetchSemanticObjectRequest {
+    pub(crate) context_packet_id: Uuid,
+    #[serde(default)]
+    pub(crate) include_content: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct SearchSemanticObjectsRequest {
+    pub(crate) context_packet_id: Uuid,
+    #[serde(default)]
+    pub(crate) query: Option<String>,
+    #[serde(default)]
+    pub(crate) object_type: Option<String>,
+    #[serde(default)]
+    pub(crate) max_results: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct FetchSemanticObjectResponse {
+    pub(crate) context_packet_id: Uuid,
+    pub(crate) object: FetchableSemanticObject,
+    pub(crate) content_included: bool,
+    pub(crate) fetch_policy: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct SearchSemanticObjectsResponse {
+    pub(crate) context_packet_id: Uuid,
+    pub(crate) boundary: String,
+    pub(crate) query: Option<String>,
+    pub(crate) object_type: Option<String>,
+    pub(crate) results: Vec<RenderedSemanticObject>,
+    pub(crate) omitted: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct FetchableSemanticObject {
+    pub(crate) id: Uuid,
+    pub(crate) object_type: String,
+    pub(crate) object_key: String,
+    pub(crate) title: String,
+    pub(crate) summary: String,
+    pub(crate) content: Option<Value>,
+    pub(crate) semantic_scopes: Value,
+    pub(crate) source_uri: Option<String>,
+    pub(crate) trust_level: String,
+    pub(crate) freshness: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ExpandSemanticLinksRequest {
+    pub(crate) context_packet_id: Uuid,
+    pub(crate) object_id: Uuid,
+    #[serde(default)]
+    pub(crate) relation_type: Option<String>,
+    #[serde(default)]
+    pub(crate) max_links: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ExpandSemanticLinksResponse {
+    pub(crate) context_packet_id: Uuid,
+    pub(crate) object_id: Uuid,
+    pub(crate) links: Vec<SemanticLink>,
+    pub(crate) omitted: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct SemanticRetrievalBackendRegistry {
+    pub(crate) selected_backend: String,
+    pub(crate) effective_backend: String,
+    pub(crate) fail_closed: bool,
+    pub(crate) object_model_required: bool,
+    pub(crate) backends: Vec<SemanticRetrievalBackendStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct SemanticRetrievalBackendStatus {
+    pub(crate) backend: String,
+    pub(crate) backend_type: String,
+    pub(crate) status: String,
+    pub(crate) selected: bool,
+    pub(crate) effective: bool,
+    pub(crate) configured: bool,
+    pub(crate) required_env_vars: Vec<String>,
+    pub(crate) missing_env_vars: Vec<String>,
+    pub(crate) object_link_context_packet_required: bool,
+    pub(crate) blocking_reasons: Vec<String>,
+}
