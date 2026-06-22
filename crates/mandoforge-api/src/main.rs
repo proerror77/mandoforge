@@ -3898,15 +3898,7 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::tools::router())
         .merge(handlers::tenant::router())
         .merge(handlers::collaboration::router())
-        .route(
-            "/api/teams/{id}/provider-access",
-            get(list_provider_access).post(create_provider_access),
-        )
-        .route("/api/provider-access/{id}", patch(update_provider_access))
-        .route(
-            "/api/provider-access/{id}/archive",
-            post(archive_provider_access),
-        )
+        .merge(handlers::providers::router())
         .route(
             "/api/teams/{id}/mcp-servers",
             get(list_mcp_servers).post(create_mcp_server),
@@ -35045,30 +35037,30 @@ pub(crate) async fn accept_tenant_invitation(
     }))
 }
 
-async fn list_provider_access(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn list_provider_access(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<Vec<ProviderAccess>>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "team", Some(id)).await?;
     Ok(Json(state.list_provider_access(id).await?))
 }
 
-async fn create_provider_access(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn create_provider_access(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<CreateProviderAccess>,
+    input: CreateProviderAccess,
 ) -> Result<Json<ProviderAccess>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "team", Some(id)).await?;
     Ok(Json(state.create_provider_access(id, input).await?))
 }
 
-async fn update_provider_access(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn update_provider_access(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<UpdateProviderAccess>,
+    input: UpdateProviderAccess,
 ) -> Result<Json<ProviderAccess>, AppError> {
     authorize_request(
         &state,
@@ -35099,9 +35091,9 @@ async fn update_provider_access(
     Ok(Json(access))
 }
 
-async fn archive_provider_access(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn archive_provider_access(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<ProviderAccess>, AppError> {
     authorize_request(

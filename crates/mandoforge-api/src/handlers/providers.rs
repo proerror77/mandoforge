@@ -1,0 +1,62 @@
+use axum::{
+    Json, Router,
+    extract::{Path, State},
+    http::HeaderMap,
+    routing::{get, patch, post},
+};
+use uuid::Uuid;
+
+use crate::{
+    AppError, AppState, CreateProviderAccess, ProviderAccess, UpdateProviderAccess,
+    archive_provider_access as archive_provider_access_impl,
+    create_provider_access as create_provider_access_impl,
+    list_provider_access as list_provider_access_impl,
+    update_provider_access as update_provider_access_impl,
+};
+
+pub(crate) fn router() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/api/teams/{id}/provider-access",
+            get(list_provider_access).post(create_provider_access),
+        )
+        .route("/api/provider-access/{id}", patch(update_provider_access))
+        .route(
+            "/api/provider-access/{id}/archive",
+            post(archive_provider_access),
+        )
+}
+
+async fn list_provider_access(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ProviderAccess>>, AppError> {
+    list_provider_access_impl(state, id, headers).await
+}
+
+async fn create_provider_access(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateProviderAccess>,
+) -> Result<Json<ProviderAccess>, AppError> {
+    create_provider_access_impl(state, id, headers, input).await
+}
+
+async fn update_provider_access(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateProviderAccess>,
+) -> Result<Json<ProviderAccess>, AppError> {
+    update_provider_access_impl(state, id, headers, input).await
+}
+
+async fn archive_provider_access(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<ProviderAccess>, AppError> {
+    archive_provider_access_impl(state, id, headers).await
+}

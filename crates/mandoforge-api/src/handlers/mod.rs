@@ -13,6 +13,7 @@ pub(crate) mod ontology_intelligence;
 pub(crate) mod ontology_onboarding;
 pub(crate) mod ontology_releases;
 pub(crate) mod packs;
+pub(crate) mod providers;
 pub(crate) mod semantic;
 pub(crate) mod sessions;
 pub(crate) mod tools;
