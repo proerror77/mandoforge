@@ -4482,7 +4482,7 @@ fn build_router(state: AppState) -> Router {
             "/api/execution-jobs/{id}/run",
             post(run_execution_job_route),
         )
-        .route("/api/audit-logs", get(list_audit_logs))
+        .merge(handlers::audit_logs::router())
         .fallback_service(ServeDir::new("web"))
         .route_layer(middleware::from_fn_with_state(
             tenant_context_state,
@@ -53069,8 +53069,8 @@ pub(crate) async fn list_session_tool_calls(
     Ok(Json(state.list_tool_calls(Some(id)).await?))
 }
 
-async fn list_audit_logs(
-    State(state): State<AppState>,
+pub(crate) async fn list_audit_logs(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Vec<AuditLog>>, AppError> {
     let principal =
