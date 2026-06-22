@@ -3894,14 +3894,7 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::sessions::router())
         .merge(handlers::manager_plans::router())
         .merge(handlers::dynamic_workflow_plans::router())
-        .route(
-            "/api/workflow-definitions",
-            get(list_workflow_definitions_route).post(create_workflow_definition_route),
-        )
-        .route(
-            "/api/workflow-definitions/{id}",
-            get(get_workflow_definition_route).patch(update_workflow_definition_route),
-        )
+        .merge(handlers::workflows::router())
         .route(
             "/api/workflow-runs",
             get(list_workflow_runs_route).post(create_workflow_run_route),
@@ -19039,8 +19032,8 @@ fn validate_handoff_payload_schema(
     Ok(())
 }
 
-async fn list_workflow_definitions_route(
-    State(state): State<AppState>,
+pub(crate) async fn list_workflow_definitions_route(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Vec<WorkflowDefinition>>, AppError> {
     authorize_request(
@@ -19054,9 +19047,9 @@ async fn list_workflow_definitions_route(
     Ok(Json(state.list_workflow_definitions().await?))
 }
 
-async fn get_workflow_definition_route(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn get_workflow_definition_route(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<WorkflowDefinition>, AppError> {
     authorize_request(
@@ -19070,10 +19063,10 @@ async fn get_workflow_definition_route(
     Ok(Json(state.get_workflow_definition(id).await?))
 }
 
-async fn create_workflow_definition_route(
-    State(state): State<AppState>,
+pub(crate) async fn create_workflow_definition_route(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<CreateWorkflowDefinition>,
+    input: CreateWorkflowDefinition,
 ) -> Result<Json<WorkflowDefinition>, AppError> {
     authorize_request(
         &state,
@@ -19174,11 +19167,11 @@ async fn create_workflow_definition_route(
     Ok(Json(definition))
 }
 
-async fn update_workflow_definition_route(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn update_workflow_definition_route(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<UpdateWorkflowDefinition>,
+    input: UpdateWorkflowDefinition,
 ) -> Result<Json<WorkflowDefinition>, AppError> {
     authorize_request(
         &state,
