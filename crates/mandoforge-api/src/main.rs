@@ -15,7 +15,7 @@ use axum::{
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response, Sse, sse::Event, sse::KeepAlive},
-    routing::{delete, get, patch, post},
+    routing::{get, patch, post},
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures_util::StreamExt as _;
@@ -3897,20 +3897,6 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::workflows::router())
         .merge(handlers::tools::router())
         .merge(handlers::tenant::router())
-        .route(
-            "/api/organizations/{id}/memberships",
-            get(list_memberships).post(create_membership),
-        )
-        .route("/api/memberships/{id}", delete(delete_membership))
-        .route(
-            "/api/organizations/{id}/invitations",
-            get(list_tenant_invitations).post(create_tenant_invitation),
-        )
-        .route(
-            "/api/invitations/{id}/revoke",
-            post(revoke_tenant_invitation),
-        )
-        .route("/api/invitations/accept", post(accept_tenant_invitation))
         .route(
             "/api/work-items",
             get(list_work_items).post(create_work_item),
@@ -34859,9 +34845,9 @@ async fn list_work_item_activity(
     Ok(Json(state.list_work_item_activity(id).await?))
 }
 
-async fn list_memberships(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn list_memberships(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<Vec<Membership>>, AppError> {
     authorize_request(
@@ -34875,11 +34861,11 @@ async fn list_memberships(
     Ok(Json(state.list_memberships(id).await?))
 }
 
-async fn create_membership(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn create_membership(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<CreateMembership>,
+    input: CreateMembership,
 ) -> Result<Json<Membership>, AppError> {
     authorize_request(
         &state,
@@ -34892,9 +34878,9 @@ async fn create_membership(
     Ok(Json(state.create_membership(id, input).await?))
 }
 
-async fn delete_membership(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn delete_membership(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<Membership>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
@@ -34927,9 +34913,9 @@ async fn delete_membership(
     Ok(Json(membership))
 }
 
-async fn list_tenant_invitations(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn list_tenant_invitations(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<Vec<TenantInvitation>>, AppError> {
     authorize_request(
@@ -34943,11 +34929,11 @@ async fn list_tenant_invitations(
     Ok(Json(state.list_tenant_invitations(id).await?))
 }
 
-async fn create_tenant_invitation(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn create_tenant_invitation(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<CreateTenantInvitation>,
+    input: CreateTenantInvitation,
 ) -> Result<Json<TenantInvitation>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
@@ -34983,9 +34969,9 @@ async fn create_tenant_invitation(
     Ok(Json(invitation))
 }
 
-async fn revoke_tenant_invitation(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn revoke_tenant_invitation(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<TenantInvitation>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
@@ -35017,10 +35003,10 @@ async fn revoke_tenant_invitation(
     Ok(Json(invitation))
 }
 
-async fn accept_tenant_invitation(
-    State(state): State<AppState>,
+pub(crate) async fn accept_tenant_invitation(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<AcceptTenantInvitation>,
+    input: AcceptTenantInvitation,
 ) -> Result<Json<AcceptedTenantInvitation>, AppError> {
     let subject_id = subject_from_headers(&headers)?;
     let invitation = state.tenant_invitation_by_token(input.token.trim()).await?;

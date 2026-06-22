@@ -2,24 +2,33 @@ use axum::{
     Json, Router,
     extract::{Path, State},
     http::HeaderMap,
-    routing::{get, patch, post},
+    routing::{delete, get, patch, post},
 };
 use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{
-    AppError, AppState, BootstrapTenantProvisioning, CreateOrganization, CreateProject,
-    CreateTeam, Organization, Project, Team, TenantIsolationReadinessReport,
-    TenantProvisioningResult, TransferOrganizationOwnership,
+    AcceptTenantInvitation, AcceptedTenantInvitation, AppError, AppState,
+    BootstrapTenantProvisioning, CreateMembership, CreateOrganization, CreateProject,
+    CreateTeam, CreateTenantInvitation, Membership, Organization, Project, Team,
+    TenantInvitation, TenantIsolationReadinessReport, TenantProvisioningResult,
+    TransferOrganizationOwnership,
+    accept_tenant_invitation as accept_tenant_invitation_impl,
     archive_organization as archive_organization_impl,
     archive_project as archive_project_impl, archive_team as archive_team_impl,
     bootstrap_tenant_provisioning as bootstrap_tenant_provisioning_impl,
+    create_membership as create_membership_impl,
     create_organization as create_organization_impl, create_project as create_project_impl,
-    create_team as create_team_impl, delete_organization as delete_organization_impl,
-    delete_project as delete_project_impl, delete_team as delete_team_impl,
+    create_team as create_team_impl,
+    create_tenant_invitation as create_tenant_invitation_impl,
+    delete_membership as delete_membership_impl,
+    delete_organization as delete_organization_impl, delete_project as delete_project_impl,
+    delete_team as delete_team_impl,
     get_tenant_isolation_readiness as get_tenant_isolation_readiness_impl,
-    list_organizations as list_organizations_impl, list_projects as list_projects_impl,
-    list_teams as list_teams_impl,
+    list_memberships as list_memberships_impl, list_organizations as list_organizations_impl,
+    list_projects as list_projects_impl, list_teams as list_teams_impl,
+    list_tenant_invitations as list_tenant_invitations_impl,
+    revoke_tenant_invitation as revoke_tenant_invitation_impl,
     transfer_organization_ownership as transfer_organization_ownership_impl,
     update_organization as update_organization_impl, update_project as update_project_impl,
     update_team as update_team_impl,
@@ -52,6 +61,20 @@ pub(crate) fn router() -> Router<AppState> {
             "/api/organizations/{id}/teams",
             get(list_teams).post(create_team),
         )
+        .route(
+            "/api/organizations/{id}/memberships",
+            get(list_memberships).post(create_membership),
+        )
+        .route("/api/memberships/{id}", delete(delete_membership))
+        .route(
+            "/api/organizations/{id}/invitations",
+            get(list_tenant_invitations).post(create_tenant_invitation),
+        )
+        .route(
+            "/api/invitations/{id}/revoke",
+            post(revoke_tenant_invitation),
+        )
+        .route("/api/invitations/accept", post(accept_tenant_invitation))
         .route(
             "/api/organizations/{id}/archive",
             post(archive_organization),
@@ -226,4 +249,62 @@ async fn delete_project(
     headers: HeaderMap,
 ) -> Result<Json<Project>, AppError> {
     delete_project_impl(state, id, headers).await
+}
+
+async fn list_memberships(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<Membership>>, AppError> {
+    list_memberships_impl(state, id, headers).await
+}
+
+async fn create_membership(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateMembership>,
+) -> Result<Json<Membership>, AppError> {
+    create_membership_impl(state, id, headers, input).await
+}
+
+async fn delete_membership(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Membership>, AppError> {
+    delete_membership_impl(state, id, headers).await
+}
+
+async fn list_tenant_invitations(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<TenantInvitation>>, AppError> {
+    list_tenant_invitations_impl(state, id, headers).await
+}
+
+async fn create_tenant_invitation(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateTenantInvitation>,
+) -> Result<Json<TenantInvitation>, AppError> {
+    create_tenant_invitation_impl(state, id, headers, input).await
+}
+
+async fn revoke_tenant_invitation(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<TenantInvitation>, AppError> {
+    revoke_tenant_invitation_impl(state, id, headers).await
+}
+
+async fn accept_tenant_invitation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<AcceptTenantInvitation>,
+) -> Result<Json<AcceptedTenantInvitation>, AppError> {
+    accept_tenant_invitation_impl(state, headers, input).await
 }
