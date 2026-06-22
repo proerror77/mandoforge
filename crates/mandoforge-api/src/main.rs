@@ -291,6 +291,12 @@ pub(crate) use types::usage::{
     UsageFinanceProductionCloseReadiness, UsageForecastHorizon, UsageForecastSummary, UsageRollup,
     UsageSummary, UsageTrendPeriod, UsageTrendProvider, UsageTrendSummary,
 };
+pub(crate) use types::vault::{
+    CreateSecretRecord, RotateSecretRecord, SecretProviderHealth, SecretRecord,
+    VaultKmsReadiness, VaultKmsRecoveryReadiness, VaultKmsRecoveryValidationRun,
+    VaultKmsRotationDetail, VaultKmsRotationRun, VaultProductionRotationReadiness,
+    VaultReadinessAttentionItem, VaultReadinessCheck, VaultReadinessReport,
+};
 pub(crate) use types::workflow::{
     CompileDynamicWorkflowPlan, CreateDynamicWorkflowPlan, CreateTaskGrant,
     CreateWorkflowDefinition, CreateWorkflowRun, CreateWorkflowStepRun,
@@ -1449,184 +1455,6 @@ struct WorkItemActivityEntry {
     summary: String,
     metadata: Value,
     created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SecretProviderHealth {
-    provider_kind: String,
-    healthy: bool,
-    status: String,
-    issues: Vec<String>,
-    checks: Value,
-    checked_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct VaultReadinessReport {
-    generated_at: DateTime<Utc>,
-    status: String,
-    secret_provider: SecretProviderHealth,
-    kms: VaultKmsReadiness,
-    production_rotation: VaultProductionRotationReadiness,
-    production_recovery: VaultKmsRecoveryReadiness,
-    secret_record_count: usize,
-    active_secret_record_count: usize,
-    provider_ref_count: usize,
-    mcp_secret_ref_count: usize,
-    eval_judge_secret_ref_count: usize,
-    unresolved_ref_count: usize,
-    stale_rotation_count: usize,
-    checks: Vec<VaultReadinessCheck>,
-    attention_items: Vec<VaultReadinessAttentionItem>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct VaultProductionRotationReadiness {
-    status: String,
-    production_blocked: bool,
-    vault_healthy: bool,
-    kms_ready: bool,
-    unresolved_refs_clear: bool,
-    stale_rotations_clear: bool,
-    latest_rotation_validated: bool,
-    latest_rotation_run_at: Option<DateTime<Utc>>,
-    latest_rotation_run_status: Option<String>,
-    blocking_reasons: Vec<String>,
-    message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct VaultKmsRecoveryReadiness {
-    status: String,
-    production_blocked: bool,
-    controller_required: bool,
-    controller_configured: bool,
-    latest_recovery_at: Option<DateTime<Utc>>,
-    latest_recovery_status: Option<String>,
-    latest_controller_status: Option<String>,
-    latest_controller_age_hours: Option<i64>,
-    controller_evidence_fresh: bool,
-    latest_controller_validated: bool,
-    latest_controller_production_backend: bool,
-    latest_controller_backend_kind: Option<String>,
-    latest_controller_environment: Option<String>,
-    latest_controller_backend_id: Option<String>,
-    latest_controller_key_id: Option<String>,
-    latest_controller_hsm_provider: Option<String>,
-    latest_rotation_validated: bool,
-    blocking_reasons: Vec<String>,
-    message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct VaultKmsReadiness {
-    provider: String,
-    status: String,
-    configured: bool,
-    key_id_configured: bool,
-    rotation_policy_configured: bool,
-    endpoint_configured: bool,
-    validation_mode: String,
-    issues: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct VaultKmsRotationRun {
-    status: String,
-    checked_at: DateTime<Utc>,
-    kms_provider: String,
-    kms_status: String,
-    kms_endpoint_configured: bool,
-    secret_provider_status: String,
-    secret_record_count: usize,
-    stale_rotation_count: usize,
-    rotated_count: usize,
-    catalog_updated_count: usize,
-    rotation_details: Vec<VaultKmsRotationDetail>,
-    blocked_count: usize,
-    actions: Vec<String>,
-    external_execution: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct VaultKmsRotationDetail {
-    key_id: String,
-    rotation_id: String,
-    secret_record_id: Uuid,
-    status: String,
-    catalog_updated: bool,
-    audit_id: Uuid,
-    rotated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct VaultKmsRecoveryValidationRun {
-    status: String,
-    checked_at: DateTime<Utc>,
-    kms_provider: String,
-    secret_record_count: usize,
-    latest_rotation_validated: bool,
-    controller_required: bool,
-    controller_configured: bool,
-    controller_execution: Value,
-    issues: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct VaultReadinessCheck {
-    resource_type: String,
-    resource_id: Option<Uuid>,
-    resource_name: String,
-    status: String,
-    secret_refs: Vec<String>,
-    blockers: Vec<String>,
-    warnings: Vec<String>,
-    recommendations: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct VaultReadinessAttentionItem {
-    resource_type: String,
-    resource_id: Option<Uuid>,
-    resource_name: String,
-    kind: String,
-    severity: String,
-    message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SecretRecord {
-    id: Uuid,
-    name: String,
-    path: String,
-    key: String,
-    scope_type: String,
-    scope_id: Option<Uuid>,
-    status: String,
-    version: i32,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateSecretRecord {
-    name: String,
-    path: String,
-    key: String,
-    #[serde(default = "default_secret_scope_type")]
-    scope_type: String,
-    #[serde(default)]
-    scope_id: Option<Uuid>,
-    #[serde(default)]
-    value: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RotateSecretRecord {
-    path: String,
-    key: String,
-    #[serde(default)]
-    value: Option<String>,
 }
 
 #[async_trait]
