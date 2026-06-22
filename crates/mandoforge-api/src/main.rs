@@ -555,7 +555,7 @@ struct UpsertProjectGitHubBinding {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ContextPacket {
+pub(crate) struct ContextPacket {
     id: Uuid,
     session_id: Uuid,
     agent_id: Uuid,
@@ -607,7 +607,7 @@ struct ContextPacketSourceRef {
 }
 
 #[derive(Debug, Deserialize)]
-struct RenderContextPacketRequest {
+pub(crate) struct RenderContextPacketRequest {
     #[serde(default)]
     max_prompt_tokens: Option<usize>,
     #[serde(default)]
@@ -623,7 +623,7 @@ struct RenderContextPacketRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct RenderedExecutionContext {
+pub(crate) struct RenderedExecutionContext {
     context_packet_id: Uuid,
     session_id: Uuid,
     agent_id: Uuid,
@@ -3892,14 +3892,6 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::memory_governance::router())
         .merge(handlers::sessions::router())
         .route(
-            "/api/sessions/{id}/context-packet",
-            get(get_session_context_packet).post(create_session_context_packet),
-        )
-        .route(
-            "/api/sessions/{id}/context-packets",
-            get(list_session_context_packets),
-        )
-        .route(
             "/api/sessions/{id}/memory-writeback-candidates",
             get(list_session_memory_writeback_candidates)
                 .post(create_session_memory_writeback_candidates),
@@ -3907,11 +3899,6 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/sessions/{id}/semantic-synthesis-runs",
             post(create_session_semantic_synthesis_run),
-        )
-        .route("/api/context-packets/{id}", get(get_context_packet))
-        .route(
-            "/api/context-packets/{id}/render",
-            post(render_context_packet),
         )
         .route(
             "/api/semantic-retrieval/backends",
@@ -29509,100 +29496,6 @@ async fn enforce_resource_scope(
     }
 }
 
-async fn get_session_context_packet(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-) -> Result<Json<ContextPacket>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "session",
-        Some(id),
-    )
-    .await?;
-    state.get_session(id).await?;
-    let packet = state
-        .list_context_packets(id)
-        .await?
-        .into_iter()
-        .max_by_key(|packet| packet.version)
-        .ok_or_else(|| AppError::not_found("context packet not found"))?;
-    Ok(Json(packet))
-}
-
-async fn create_session_context_packet(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-) -> Result<Json<ContextPacket>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "session",
-        Some(id),
-    )
-    .await?;
-    let packet = generate_and_persist_context_packet(&state, id).await?;
-    Ok(Json(packet))
-}
-
-async fn list_session_context_packets(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<ContextPacket>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "session",
-        Some(id),
-    )
-    .await?;
-    state.get_session(id).await?;
-    Ok(Json(state.list_context_packets(id).await?))
-}
-
-async fn get_context_packet(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-) -> Result<Json<ContextPacket>, AppError> {
-    let packet = state.get_context_packet(id).await?;
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "context_packet",
-        Some(packet.session_id),
-    )
-    .await?;
-    Ok(Json(packet))
-}
-
-async fn render_context_packet(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-    Json(input): Json<RenderContextPacketRequest>,
-) -> Result<Json<RenderedExecutionContext>, AppError> {
-    let packet = state.get_context_packet(id).await?;
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "context_packet",
-        Some(packet.session_id),
-    )
-    .await?;
-    Ok(Json(
-        render_execution_context_for_packet(&state, &packet, input).await?,
-    ))
-}
-
 async fn get_semantic_retrieval_backends(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -30219,7 +30112,7 @@ fn normalize_semantic_synthesis_freshness(value: &str) -> Result<String, AppErro
     }
 }
 
-async fn generate_and_persist_context_packet(
+pub(crate) async fn generate_and_persist_context_packet(
     state: &AppState,
     session_id: Uuid,
 ) -> Result<ContextPacket, AppError> {
@@ -31476,7 +31369,7 @@ fn render_execution_context(
     }
 }
 
-async fn render_execution_context_for_packet(
+pub(crate) async fn render_execution_context_for_packet(
     state: &AppState,
     packet: &ContextPacket,
     input: RenderContextPacketRequest,

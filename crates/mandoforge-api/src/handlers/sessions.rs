@@ -8,10 +8,12 @@ use uuid::Uuid;
 
 use crate::{
     AddMessage, AppError, AppState, AuthorizationRequest, CreateSession, Permission,
-    SendSessionEvents, Session, SessionEvent, SessionThread, append_incoming_session_event,
-    append_user_message_event, authorize_collection_request, authorize_request, authorize_session_run,
-    enqueue_session_loop, ensure_primary_session_thread, principal_from_request,
-    project_session_event_to_loop, visible_session_ids_for_principal,
+    SendSessionEvents, Session, SessionEvent, SessionThread, ContextPacket,
+    RenderContextPacketRequest, RenderedExecutionContext, append_incoming_session_event,
+    append_user_message_event, authorize_collection_request, authorize_request,
+    authorize_session_run, enqueue_session_loop, ensure_primary_session_thread,
+    generate_and_persist_context_packet, principal_from_request, project_session_event_to_loop,
+    render_execution_context_for_packet, visible_session_ids_for_principal,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -25,8 +27,21 @@ pub(crate) fn router() -> Router<AppState> {
             get(list_events).post(send_session_events),
         )
         .route("/api/sessions/{id}/threads", get(list_session_threads))
+        .route(
+            "/api/sessions/{id}/context-packet",
+            get(get_session_context_packet).post(create_session_context_packet),
+        )
+        .route(
+            "/api/sessions/{id}/context-packets",
+            get(list_session_context_packets),
+        )
         .route("/api/session-threads", get(list_session_threads_collection))
         .route("/api/session-threads/{id}", get(get_session_thread))
+        .route("/api/context-packets/{id}", get(get_context_packet))
+        .route(
+            "/api/context-packets/{id}/render",
+            post(render_context_packet),
+        )
 }
 
 async fn list_sessions(
@@ -220,4 +235,98 @@ async fn get_session_thread(
     )
     .await?;
     Ok(Json(thread))
+}
+
+async fn get_session_context_packet(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<ContextPacket>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(id),
+    )
+    .await?;
+    state.get_session(id).await?;
+    let packet = state
+        .list_context_packets(id)
+        .await?
+        .into_iter()
+        .max_by_key(|packet| packet.version)
+        .ok_or_else(|| AppError::not_found("context packet not found"))?;
+    Ok(Json(packet))
+}
+
+async fn create_session_context_packet(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<ContextPacket>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(id),
+    )
+    .await?;
+    let packet = generate_and_persist_context_packet(&state, id).await?;
+    Ok(Json(packet))
+}
+
+async fn list_session_context_packets(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ContextPacket>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(id),
+    )
+    .await?;
+    state.get_session(id).await?;
+    Ok(Json(state.list_context_packets(id).await?))
+}
+
+async fn get_context_packet(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<ContextPacket>, AppError> {
+    let packet = state.get_context_packet(id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "context_packet",
+        Some(packet.session_id),
+    )
+    .await?;
+    Ok(Json(packet))
+}
+
+async fn render_context_packet(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<RenderContextPacketRequest>,
+) -> Result<Json<RenderedExecutionContext>, AppError> {
+    let packet = state.get_context_packet(id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "context_packet",
+        Some(packet.session_id),
+    )
+    .await?;
+    Ok(Json(
+        render_execution_context_for_packet(&state, &packet, input).await?,
+    ))
 }
