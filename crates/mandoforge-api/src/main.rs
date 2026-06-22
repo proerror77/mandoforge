@@ -3916,10 +3916,6 @@ fn build_router(state: AppState) -> Router {
             "/api/semantic-ontology/builder",
             post(build_semantic_ontology),
         )
-        .route(
-            "/api/semantic-ontology/proposals/{id}/review",
-            post(review_semantic_ontology_proposal),
-        )
         .merge(handlers::ontology_onboarding::router())
         .merge(handlers::ontology_releases::router())
         .merge(handlers::ontology_intelligence::router())
@@ -7180,84 +7176,6 @@ async fn build_semantic_ontology(
     Ok(Json(json!({
         "status": "proposed",
         "builder": builder,
-        "object": object,
-    })))
-}
-
-async fn review_semantic_ontology_proposal(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-    Json(input): Json<ReviewOntologyProposalRequest>,
-) -> Result<Json<Value>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::AgentsWrite,
-        "semantic_ontology",
-        Some(id),
-    )
-    .await?;
-    let proposal = state.get_semantic_object(id).await?;
-    if proposal.object_type != "ontology_expansion" {
-        return Err(AppError::bad_request(
-            "semantic ontology proposal review requires an ontology_expansion object",
-        ));
-    }
-    let decision = normalize_ontology_review_decision(&input.decision)?;
-    let status = match decision.as_str() {
-        "approve" => "approved",
-        "reject" => "rejected",
-        "request_changes" => "changes_requested",
-        _ => "reviewed",
-    };
-    let principal = principal_from_request(&state, &headers).await?;
-    let mut content = proposal.content.as_object().cloned().unwrap_or_default();
-    content.insert("status".to_string(), json!(status));
-    content.insert(
-        "review".to_string(),
-        json!({
-            "decision": decision.clone(),
-            "reason": input.reason.clone(),
-            "reviewer": principal.subject_id.clone(),
-            "reviewed_at": Utc::now(),
-        }),
-    );
-    let object = state
-        .update_semantic_object(
-            proposal.id,
-            UpdateSemanticObject {
-                title: None,
-                summary: None,
-                content: Some(Value::Object(content)),
-                semantic_scopes: None,
-                source_uri: None,
-                provenance: None,
-                trust_level: None,
-                freshness: None,
-                status: None,
-            },
-        )
-        .await?;
-    state
-        .append_audit_log(new_audit_log(
-            None,
-            "user",
-            None,
-            "semantic_ontology.proposal_reviewed",
-            "semantic_object",
-            Some(object.id),
-            json!({
-                "subject": principal.subject_id,
-                "status": status,
-                "decision": decision.clone(),
-                "reason": input.reason,
-                "semantic_object_id": object.id,
-            }),
-        ))
-        .await?;
-    Ok(Json(json!({
-        "status": status,
         "object": object,
     })))
 }

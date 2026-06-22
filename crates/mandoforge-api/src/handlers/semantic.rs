@@ -12,18 +12,18 @@ use uuid::Uuid;
 use crate::{
     AppError, AppState, CreateSemanticLink, CreateSemanticObject, CreateSemanticSource,
     ExpandSemanticLinksRequest, ExpandSemanticLinksResponse, ExpandSemanticOntologyRequest,
-    FetchSemanticObjectRequest, FetchSemanticObjectResponse, Permission, SemanticGraphSnapshot,
-    SemanticLink, SemanticObject, SemanticGovernanceRunRequest, SemanticGovernanceRunResult,
-    SemanticProductQuery, SemanticSearchResponse, SemanticSearchResult, SemanticSource,
+    FetchSemanticObjectRequest, FetchSemanticObjectResponse, Permission, ReviewOntologyProposalRequest,
+    SemanticGraphSnapshot, SemanticLink, SemanticObject, SemanticGovernanceRunRequest,
+    SemanticGovernanceRunResult, SemanticProductQuery, SemanticSearchResponse, SemanticSearchResult, SemanticSource,
     UpdateSemanticLink, UpdateSemanticObject, UpdateSemanticSource, authorize_request,
     build_semantic_graph_snapshot, domain_ontology_object_type_suggestions,
     domain_ontology_relation_type_suggestions, expand_semantic_links_for_context,
     fetch_semantic_object_for_context,
     memory_governance_object_partition_key, memory_governance_scope_value, new_audit_log,
-    normalize_optional_text, normalize_semantic_conflict_strategy, principal_from_request,
-    record_semantic_link_audit, record_semantic_object_audit, record_semantic_source_audit,
-    semantic_object_matched_fields, semantic_object_matches_product_query, validate_handoff_token,
-    validate_semantic_link_against_ontology,
+    normalize_ontology_review_decision, normalize_optional_text, normalize_semantic_conflict_strategy,
+    principal_from_request, record_semantic_link_audit, record_semantic_object_audit,
+    record_semantic_source_audit, semantic_object_matched_fields, semantic_object_matches_product_query,
+    validate_handoff_token, validate_semantic_link_against_ontology,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -66,6 +66,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/api/semantic-ontology/expand",
             post(expand_semantic_ontology),
+        )
+        .route(
+            "/api/semantic-ontology/proposals/{id}/review",
+            post(review_semantic_ontology_proposal),
         )
         .route(
             "/api/semantic-links",
@@ -685,6 +689,84 @@ async fn expand_semantic_ontology(
         .await?;
     Ok(Json(json!({
         "status": "proposed",
+        "object": object,
+    })))
+}
+
+async fn review_semantic_ontology_proposal(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<ReviewOntologyProposalRequest>,
+) -> Result<Json<Value>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsWrite,
+        "semantic_ontology",
+        Some(id),
+    )
+    .await?;
+    let proposal = state.get_semantic_object(id).await?;
+    if proposal.object_type != "ontology_expansion" {
+        return Err(AppError::bad_request(
+            "semantic ontology proposal review requires an ontology_expansion object",
+        ));
+    }
+    let decision = normalize_ontology_review_decision(&input.decision)?;
+    let status = match decision.as_str() {
+        "approve" => "approved",
+        "reject" => "rejected",
+        "request_changes" => "changes_requested",
+        _ => "reviewed",
+    };
+    let principal = principal_from_request(&state, &headers).await?;
+    let mut content = proposal.content.as_object().cloned().unwrap_or_default();
+    content.insert("status".to_string(), json!(status));
+    content.insert(
+        "review".to_string(),
+        json!({
+            "decision": decision.clone(),
+            "reason": input.reason.clone(),
+            "reviewer": principal.subject_id.clone(),
+            "reviewed_at": Utc::now(),
+        }),
+    );
+    let object = state
+        .update_semantic_object(
+            proposal.id,
+            UpdateSemanticObject {
+                title: None,
+                summary: None,
+                content: Some(Value::Object(content)),
+                semantic_scopes: None,
+                source_uri: None,
+                provenance: None,
+                trust_level: None,
+                freshness: None,
+                status: None,
+            },
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "semantic_ontology.proposal_reviewed",
+            "semantic_object",
+            Some(object.id),
+            json!({
+                "subject": principal.subject_id,
+                "status": status,
+                "decision": decision.clone(),
+                "reason": input.reason,
+                "semantic_object_id": object.id,
+            }),
+        ))
+        .await?;
+    Ok(Json(json!({
+        "status": status,
         "object": object,
     })))
 }
