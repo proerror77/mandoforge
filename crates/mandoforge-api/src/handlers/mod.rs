@@ -20,4 +20,5 @@ pub(crate) mod semantic;
 pub(crate) mod sessions;
 pub(crate) mod tools;
 pub(crate) mod tenant;
+pub(crate) mod vault;
 pub(crate) mod workflows;

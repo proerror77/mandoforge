@@ -3901,18 +3901,7 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::providers::router())
         .merge(handlers::mcp::router())
         .merge(handlers::policy::router())
-        .route("/api/vault/health", get(get_vault_health))
-        .route("/api/vault/readiness", get(get_vault_readiness))
-        .route("/api/vault/kms/rotation/run", post(run_vault_kms_rotation))
-        .route(
-            "/api/vault/kms/recovery/validate",
-            post(validate_vault_kms_recovery),
-        )
-        .route(
-            "/api/vault/secrets",
-            get(list_secret_records).post(create_secret_record),
-        )
-        .route("/api/vault/secrets/{id}/rotate", post(rotate_secret_record))
+        .merge(handlers::vault::router())
         .route(
             "/api/codex-app-server/health",
             get(get_codex_app_server_health),
@@ -37852,8 +37841,8 @@ fn normalize_policy_gate_cases(
     Ok((source.to_string(), normalized))
 }
 
-async fn get_vault_health(
-    State(state): State<AppState>,
+pub(crate) async fn get_vault_health(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<SecretProviderHealth>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "vault", None).await?;
@@ -37862,8 +37851,8 @@ async fn get_vault_health(
     ))
 }
 
-async fn get_vault_readiness(
-    State(state): State<AppState>,
+pub(crate) async fn get_vault_readiness(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<VaultReadinessReport>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "vault", None).await?;
@@ -37887,8 +37876,8 @@ async fn get_vault_readiness(
     )))
 }
 
-async fn run_vault_kms_rotation(
-    State(state): State<AppState>,
+pub(crate) async fn run_vault_kms_rotation(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<VaultKmsRotationRun>, AppError> {
     authorize_request(
@@ -37902,8 +37891,8 @@ async fn run_vault_kms_rotation(
     Ok(Json(execute_vault_kms_rotation(&state).await?))
 }
 
-async fn validate_vault_kms_recovery(
-    State(state): State<AppState>,
+pub(crate) async fn validate_vault_kms_recovery(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<VaultKmsRecoveryValidationRun>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
@@ -38026,18 +38015,18 @@ async fn validate_vault_kms_recovery(
     }))
 }
 
-async fn list_secret_records(
-    State(state): State<AppState>,
+pub(crate) async fn list_secret_records(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Vec<SecretRecord>>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "vault", None).await?;
     Ok(Json(state.list_secret_records().await?))
 }
 
-async fn create_secret_record(
-    State(state): State<AppState>,
+pub(crate) async fn create_secret_record(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<CreateSecretRecord>,
+    input: CreateSecretRecord,
 ) -> Result<Json<SecretRecord>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
@@ -38075,11 +38064,11 @@ async fn create_secret_record(
     Ok(Json(record))
 }
 
-async fn rotate_secret_record(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn rotate_secret_record(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<RotateSecretRecord>,
+    input: RotateSecretRecord,
 ) -> Result<Json<SecretRecord>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
