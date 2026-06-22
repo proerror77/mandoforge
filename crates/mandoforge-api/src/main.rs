@@ -3892,7 +3892,6 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::memory_governance::router())
         .merge(handlers::sessions::router())
         .route("/api/sessions/{id}/run", post(run_session))
-        .route("/api/sessions/{id}/threads", get(list_session_threads))
         .route(
             "/api/sessions/{id}/context-packet",
             get(get_session_context_packet).post(create_session_context_packet),
@@ -4462,8 +4461,6 @@ fn build_router(state: AppState) -> Router {
             "/api/session-loop-jobs/{id}/run",
             post(run_session_loop_job_route),
         )
-        .route("/api/session-threads", get(list_session_threads_collection))
-        .route("/api/session-threads/{id}", get(get_session_thread))
         .route(
             "/api/execution-jobs/{id}/cancel",
             post(cancel_execution_job_route),
@@ -15446,62 +15443,6 @@ fn attention_priority(reason: &str) -> usize {
     } else {
         5
     }
-}
-
-async fn list_session_threads_collection(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<SessionThread>>, AppError> {
-    let principal = authorize_collection_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "session_threads",
-    )
-    .await?;
-    let visible_session_ids = visible_session_ids_for_principal(&state, &principal).await?;
-    Ok(Json(
-        state
-            .list_session_threads(None)
-            .await?
-            .into_iter()
-            .filter(|thread| visible_session_ids.contains(&thread.session_id))
-            .collect(),
-    ))
-}
-
-async fn list_session_threads(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<SessionThread>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "session",
-        Some(id),
-    )
-    .await?;
-    state.get_session(id).await?;
-    Ok(Json(state.list_session_threads(Some(id)).await?))
-}
-
-async fn get_session_thread(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-) -> Result<Json<SessionThread>, AppError> {
-    let thread = state.get_session_thread(id).await?;
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "session",
-        Some(thread.session_id),
-    )
-    .await?;
-    Ok(Json(thread))
 }
 
 pub(crate) async fn append_incoming_session_event(
@@ -29437,7 +29378,7 @@ async fn authorize_request(
     enforce_resource_scope(state, &principal, &request).await
 }
 
-async fn authorize_collection_request(
+pub(crate) async fn authorize_collection_request(
     state: &AppState,
     headers: &HeaderMap,
     permission: Permission,
@@ -29454,7 +29395,7 @@ async fn authorize_collection_request(
     Ok(principal)
 }
 
-async fn visible_session_ids_for_principal(
+pub(crate) async fn visible_session_ids_for_principal(
     state: &AppState,
     principal: &Principal,
 ) -> Result<HashSet<Uuid>, AppError> {
