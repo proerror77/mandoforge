@@ -4,26 +4,21 @@ use axum::{
     http::HeaderMap,
     routing::{delete, get, patch, post},
 };
+use chrono::Utc;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::authorization::{AuthorizationRequest, Permission};
 use crate::{
     AcceptTenantInvitation, AcceptedTenantInvitation, AppError, AppState,
-    BootstrapTenantProvisioning, CreateMembership, CreateOrganization, CreateProject,
-    CreateTeam, CreateTenantInvitation, Membership, Organization, Project, Team,
-    TenantInvitation, TenantIsolationReadinessReport, TenantProvisioningResult,
-    TransferOrganizationOwnership, authorize_request,
-    accept_tenant_invitation as accept_tenant_invitation_impl,
+    BootstrapTenantProvisioning, CreateMembership, CreateOrganization, CreateProject, CreateTeam,
+    CreateTenantInvitation, Membership, Organization, Project, Team, TenantInvitation,
+    TenantIsolationReadinessReport, TenantProvisioningResult, TransferOrganizationOwnership,
+    authorize_request,
     bootstrap_tenant_provisioning as bootstrap_tenant_provisioning_impl,
-    create_membership as create_membership_impl,
-    create_tenant_invitation as create_tenant_invitation_impl,
-    delete_membership as delete_membership_impl,
     enforce_resource_scope,
     get_tenant_isolation_readiness as get_tenant_isolation_readiness_impl,
-    list_memberships as list_memberships_impl,
-    list_tenant_invitations as list_tenant_invitations_impl,
-    new_audit_log, principal_from_request, revoke_tenant_invitation as revoke_tenant_invitation_impl,
+    new_audit_log, principal_from_request, subject_from_headers,
     validate_tenant_production_routing as validate_tenant_production_routing_impl,
 };
 
@@ -544,7 +539,15 @@ async fn list_memberships(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<Membership>>, AppError> {
-    list_memberships_impl(state, id, headers).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "organization",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.list_memberships(id).await?))
 }
 
 async fn create_membership(
@@ -553,7 +556,15 @@ async fn create_membership(
     headers: HeaderMap,
     Json(input): Json<CreateMembership>,
 ) -> Result<Json<Membership>, AppError> {
-    create_membership_impl(state, id, headers, input).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "organization",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.create_membership(id, input).await?))
 }
 
 async fn delete_membership(
@@ -561,7 +572,34 @@ async fn delete_membership(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<Membership>, AppError> {
-    delete_membership_impl(state, id, headers).await
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.current_tenant_id(),
+        permission: Permission::Admin,
+        resource_type: "membership".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    let membership = state.delete_membership(id).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "membership.deleted",
+            "membership",
+            Some(id),
+            json!({
+                "subject": principal.subject_id,
+                "user_id": membership.user_id,
+                "organization_id": membership.organization_id,
+                "team_id": membership.team_id,
+                "project_id": membership.project_id,
+                "role": membership.role
+            }),
+        ))
+        .await?;
+    Ok(Json(membership))
 }
 
 async fn list_tenant_invitations(
@@ -569,7 +607,15 @@ async fn list_tenant_invitations(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<TenantInvitation>>, AppError> {
-    list_tenant_invitations_impl(state, id, headers).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "organization",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.list_tenant_invitations(id).await?))
 }
 
 async fn create_tenant_invitation(
@@ -578,7 +624,38 @@ async fn create_tenant_invitation(
     headers: HeaderMap,
     Json(input): Json<CreateTenantInvitation>,
 ) -> Result<Json<TenantInvitation>, AppError> {
-    create_tenant_invitation_impl(state, id, headers, input).await
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.current_tenant_id(),
+        permission: Permission::Admin,
+        resource_type: "organization".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let invitation = state
+        .create_tenant_invitation(id, input, principal.subject_id.clone())
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "tenant.invitation_created",
+            "tenant_invitation",
+            Some(invitation.id),
+            json!({
+                "subject": principal.subject_id,
+                "organization_id": invitation.organization_id,
+                "team_id": invitation.team_id,
+                "project_id": invitation.project_id,
+                "email": invitation.email,
+                "role": invitation.role,
+                "expires_at": invitation.expires_at
+            }),
+        ))
+        .await?;
+    Ok(Json(invitation))
 }
 
 async fn revoke_tenant_invitation(
@@ -586,7 +663,33 @@ async fn revoke_tenant_invitation(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<TenantInvitation>, AppError> {
-    revoke_tenant_invitation_impl(state, id, headers).await
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.current_tenant_id(),
+        permission: Permission::Admin,
+        resource_type: "tenant_invitation".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let invitation = state.revoke_tenant_invitation(id).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "tenant.invitation_revoked",
+            "tenant_invitation",
+            Some(invitation.id),
+            json!({
+                "subject": principal.subject_id,
+                "organization_id": invitation.organization_id,
+                "email": invitation.email,
+                "decided_at": invitation.decided_at
+            }),
+        ))
+        .await?;
+    Ok(Json(invitation))
 }
 
 async fn accept_tenant_invitation(
@@ -594,5 +697,64 @@ async fn accept_tenant_invitation(
     headers: HeaderMap,
     Json(input): Json<AcceptTenantInvitation>,
 ) -> Result<Json<AcceptedTenantInvitation>, AppError> {
-    accept_tenant_invitation_impl(state, headers, input).await
+    let subject_id = subject_from_headers(&headers)?;
+    let invitation = state.tenant_invitation_by_token(input.token.trim()).await?;
+    if invitation.status != "pending" {
+        return Err(AppError::bad_request("tenant invitation is not pending"));
+    }
+    if Utc::now() > invitation.expires_at {
+        let expired = state.expire_tenant_invitation(invitation.id).await?;
+        state
+            .append_audit_log(new_audit_log(
+                None,
+                "system",
+                None,
+                "tenant.invitation_expired",
+                "tenant_invitation",
+                Some(expired.id),
+                json!({
+                    "organization_id": expired.organization_id,
+                    "email": expired.email,
+                    "expires_at": expired.expires_at
+                }),
+            ))
+            .await?;
+        return Err(AppError::bad_request("tenant invitation has expired"));
+    }
+    let membership = state
+        .create_membership(
+            invitation.organization_id,
+            CreateMembership {
+                user_id: subject_id.clone(),
+                team_id: invitation.team_id,
+                project_id: invitation.project_id,
+                role: invitation.role.clone(),
+            },
+        )
+        .await?;
+    let invitation = state
+        .mark_tenant_invitation_accepted(invitation.id, subject_id.clone())
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "tenant.invitation_accepted",
+            "tenant_invitation",
+            Some(invitation.id),
+            json!({
+                "subject": subject_id,
+                "organization_id": invitation.organization_id,
+                "team_id": invitation.team_id,
+                "project_id": invitation.project_id,
+                "membership_id": membership.id,
+                "role": membership.role
+            }),
+        ))
+        .await?;
+    Ok(Json(AcceptedTenantInvitation {
+        invitation,
+        membership,
+    }))
 }
