@@ -14,12 +14,9 @@ use crate::{
     BootstrapTenantProvisioning, CreateMembership, CreateOrganization, CreateProject, CreateTeam,
     CreateTenantInvitation, Membership, Organization, Project, Team, TenantInvitation,
     TenantIsolationReadinessReport, TenantProvisioningResult, TransferOrganizationOwnership,
-    authorize_request,
-    bootstrap_tenant_provisioning as bootstrap_tenant_provisioning_impl,
-    enforce_resource_scope,
-    get_tenant_isolation_readiness as get_tenant_isolation_readiness_impl,
-    new_audit_log, principal_from_request, subject_from_headers,
-    validate_tenant_production_routing as validate_tenant_production_routing_impl,
+    authorize_request, build_tenant_isolation_readiness, enforce_resource_scope,
+    execute_tenant_production_routing_controller, new_audit_log, optional_trimmed,
+    principal_from_request, required_trimmed, subject_from_headers,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -127,21 +124,184 @@ async fn bootstrap_tenant_provisioning(
     headers: HeaderMap,
     Json(input): Json<BootstrapTenantProvisioning>,
 ) -> Result<Json<TenantProvisioningResult>, AppError> {
-    bootstrap_tenant_provisioning_impl(state, headers, input).await
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.current_tenant_id(),
+        permission: Permission::Admin,
+        resource_type: "tenant_provisioning".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let owner_subject = required_trimmed(&input.owner_subject, "owner_subject")?;
+    let organization_name = required_trimmed(&input.organization_name, "organization_name")?;
+    let organization_slug = required_trimmed(&input.organization_slug, "organization_slug")?;
+    let team_parts = match (
+        optional_trimmed(input.team_name.as_deref()),
+        optional_trimmed(input.team_slug.as_deref()),
+    ) {
+        (Some(name), Some(slug)) => Some((name, slug)),
+        (None, None) => None,
+        _ => {
+            return Err(AppError::bad_request(
+                "team_name and team_slug must be provided together",
+            ));
+        }
+    };
+    let project_parts = match (
+        optional_trimmed(input.project_name.as_deref()),
+        optional_trimmed(input.project_slug.as_deref()),
+    ) {
+        (Some(name), Some(slug)) => {
+            if team_parts.is_none() {
+                return Err(AppError::bad_request(
+                    "project provisioning requires team_name and team_slug",
+                ));
+            }
+            Some((name, slug))
+        }
+        (None, None) => None,
+        _ => {
+            return Err(AppError::bad_request(
+                "project_name and project_slug must be provided together",
+            ));
+        }
+    };
+    let organization = state
+        .create_organization(
+            CreateOrganization {
+                name: organization_name,
+                slug: organization_slug,
+            },
+            Some(owner_subject.clone()),
+        )
+        .await?;
+    let team = match team_parts {
+        Some((name, slug)) => Some(
+            state
+                .create_team(organization.id, CreateTeam { name, slug })
+                .await?,
+        ),
+        None => None,
+    };
+    let project = match project_parts {
+        Some((name, slug)) => {
+            let team = team.as_ref().expect("project parts require team parts");
+            Some(
+                state
+                    .create_project(team.id, CreateProject { name, slug })
+                    .await?,
+            )
+        }
+        None => None,
+    };
+    let owner_membership = state
+        .create_membership(
+            organization.id,
+            CreateMembership {
+                user_id: owner_subject.clone(),
+                team_id: team.as_ref().map(|team| team.id),
+                project_id: project.as_ref().map(|project| project.id),
+                role: input.owner_role.trim().to_string(),
+            },
+        )
+        .await?;
+    let result = TenantProvisioningResult {
+        organization,
+        team,
+        project,
+        owner_membership,
+    };
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "tenant.provisioned",
+            "tenant_provisioning",
+            Some(result.organization.id),
+            json!({
+                "subject": principal.subject_id,
+                "organization_id": result.organization.id,
+                "team_id": result.team.as_ref().map(|team| team.id),
+                "project_id": result.project.as_ref().map(|project| project.id),
+                "owner_subject": owner_subject,
+                "owner_membership_id": result.owner_membership.id
+            }),
+        ))
+        .await?;
+    Ok(Json(result))
 }
 
 async fn get_tenant_isolation_readiness(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<TenantIsolationReadinessReport>, AppError> {
-    get_tenant_isolation_readiness_impl(state, headers).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "tenant_isolation",
+        None,
+    )
+    .await?;
+    Ok(Json(build_tenant_isolation_readiness(&state).await?))
 }
 
 async fn validate_tenant_production_routing(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, AppError> {
-    validate_tenant_production_routing_impl(state, headers).await
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.current_tenant_id(),
+        permission: Permission::Admin,
+        resource_type: "tenant_isolation".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let readiness = build_tenant_isolation_readiness(&state).await?;
+    let checked_at = Utc::now();
+    let execution = execute_tenant_production_routing_controller(
+        &|key| std::env::var(key).ok(),
+        Some(principal.subject_id.as_str()),
+        checked_at,
+        &readiness,
+    )
+    .await?;
+    let status = execution
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("failed")
+        .to_string();
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "tenant.production_routing_validation_run",
+            "tenant_isolation",
+            None,
+            json!({
+                "subject": principal.subject_id,
+                "status": status,
+                "controller_configured": true,
+                "controller_execution": execution,
+                "runtime_tenant_mode": readiness.runtime_tenant_mode,
+                "rls_status": readiness.rls.status,
+                "checked_at": checked_at,
+            }),
+        ))
+        .await?;
+    Ok(Json(json!({
+        "status": status,
+        "checked_at": checked_at,
+        "controller_configured": true,
+        "controller_execution": execution,
+        "readiness_status": readiness.status,
+        "production_routing_status": readiness.production_routing.status,
+    })))
 }
 
 async fn update_organization(
