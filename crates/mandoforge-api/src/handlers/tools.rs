@@ -7,9 +7,9 @@ use axum::{
 use serde_json::Value;
 
 use crate::{
-    AppError, AppState, ExecuteTool, Permission, ToolCall, ToolDescriptor,
-    authorize_collection_request, authorize_request, execute_tool as execute_tool_impl,
-    tool_descriptors, visible_session_ids_for_principal,
+    AppError, AppState, ExecuteTool, Permission, ToolCall, ToolDescriptor, ToolInvocationOrigin,
+    authorize_collection_request, authorize_request, authorize_tool_execution,
+    execute_tool_invocation, tool_descriptors, visible_session_ids_for_principal,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -33,7 +33,18 @@ async fn execute_tool(
     headers: HeaderMap,
     Json(input): Json<ExecuteTool>,
 ) -> Result<Json<Value>, AppError> {
-    execute_tool_impl(state, name, headers, input).await
+    authorize_tool_execution(&state, &headers, &name).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(input.session_id),
+    )
+    .await?;
+    Ok(Json(
+        execute_tool_invocation(&state, &name, input, ToolInvocationOrigin::ManualRoute).await?,
+    ))
 }
 
 async fn list_tool_calls(

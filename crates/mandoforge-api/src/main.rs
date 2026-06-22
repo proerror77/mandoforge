@@ -28476,27 +28476,7 @@ pub(crate) fn tool_descriptors() -> Vec<ToolDescriptor> {
     descriptors
 }
 
-pub(crate) async fn execute_tool(
-    state: AppState,
-    name: String,
-    headers: HeaderMap,
-    input: ExecuteTool,
-) -> Result<Json<Value>, AppError> {
-    authorize_tool_execution(&state, &headers, &name).await?;
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "session",
-        Some(input.session_id),
-    )
-    .await?;
-    Ok(Json(
-        execute_tool_invocation(&state, &name, input, ToolInvocationOrigin::ManualRoute).await?,
-    ))
-}
-
-async fn authorize_tool_execution(
+pub(crate) async fn authorize_tool_execution(
     state: &AppState,
     headers: &HeaderMap,
     tool_name: &str,
@@ -28759,7 +28739,7 @@ fn parse_roles_header(value: &str) -> Result<Vec<Role>, AppError> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ToolInvocationOrigin {
+pub(crate) enum ToolInvocationOrigin {
     ManualRoute,
     SessionLoop,
 }
@@ -28939,7 +28919,7 @@ async fn refresh_tool_call_commit_binding_if_required(
         .await
 }
 
-async fn execute_tool_invocation(
+pub(crate) async fn execute_tool_invocation(
     state: &AppState,
     name: &str,
     input: ExecuteTool,
