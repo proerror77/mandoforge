@@ -155,7 +155,11 @@ pub(crate) use types::agent_handoff::{
     EscalateAgentHandoffEvent, ManagerAgentPlan, ReviewManagerAgentPlan,
     TransitionAgentHandoffEvent,
 };
-pub(crate) use types::artifact::Artifact;
+pub(crate) use types::artifact::{
+    Artifact, CodexArtifactSyncRequest, CodexArtifactSyncResponse,
+    RemoteComputerArtifactDiscoverRequest, RemoteComputerArtifactSyncRequest,
+    RemoteComputerArtifactSyncResponse,
+};
 pub(crate) use types::approval::{
     Approval, ApprovalCommitToken, ApprovalEscalationDueRun, ApprovalEscalationRule,
     ApprovalGroup, ApprovalNotificationChannelDelivery, ApprovalNotificationChannelPolicy,
@@ -496,68 +500,6 @@ struct RenderedContextBudget {
     max_objects: usize,
     max_summary_chars: usize,
     max_policy_reminders: usize,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct CodexArtifactSyncRequest {
-    session_id: Uuid,
-    #[serde(default)]
-    turn_id: Option<String>,
-    #[serde(default)]
-    command_id: Option<String>,
-    artifacts: Vec<CodexArtifactInput>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct CodexArtifactInput {
-    name: String,
-    #[serde(default = "default_artifact_type")]
-    artifact_type: String,
-    #[serde(default)]
-    path: Option<String>,
-    #[serde(default = "empty_json_object")]
-    content: Value,
-    #[serde(default = "empty_json_object")]
-    metadata: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct CodexArtifactSyncResponse {
-    session_id: Uuid,
-    turn_id: Option<String>,
-    command_id: Option<String>,
-    artifact_count: usize,
-    artifacts: Vec<Artifact>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct RemoteComputerArtifactSyncRequest {
-    session_id: Uuid,
-    remote_computer_id: Uuid,
-    #[serde(default)]
-    assignment_id: Option<Uuid>,
-    artifacts: Vec<CodexArtifactInput>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct RemoteComputerArtifactDiscoverRequest {
-    session_id: Uuid,
-    remote_computer_id: Uuid,
-    #[serde(default)]
-    assignment_id: Option<Uuid>,
-    #[serde(default = "default_remote_computer_artifact_dir")]
-    artifact_dir: String,
-    #[serde(default = "default_remote_computer_artifact_discovery_limit")]
-    max_files: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct RemoteComputerArtifactSyncResponse {
-    session_id: Uuid,
-    remote_computer_id: Uuid,
-    assignment_id: Option<Uuid>,
-    artifact_count: usize,
-    artifacts: Vec<Artifact>,
 }
 
 #[async_trait]
@@ -54436,18 +54378,6 @@ fn default_release_environment() -> String {
 
 fn default_secret_scope_type() -> String {
     "tenant".to_string()
-}
-
-fn default_artifact_type() -> String {
-    "json".to_string()
-}
-
-fn default_remote_computer_artifact_dir() -> String {
-    "artifacts".to_string()
-}
-
-fn default_remote_computer_artifact_discovery_limit() -> usize {
-    50
 }
 
 fn default_cost_alert_severity_filter() -> String {
