@@ -15,7 +15,7 @@ use axum::{
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response, Sse, sse::Event, sse::KeepAlive},
-    routing::{get, patch, post},
+    routing::{get, post},
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures_util::StreamExt as _;
@@ -3900,24 +3900,6 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::collaboration::router())
         .merge(handlers::providers::router())
         .merge(handlers::mcp::router())
-        .route("/api/providers/{id}/status", patch(update_provider_status))
-        .route(
-            "/api/providers/{id}/status-approval",
-            post(request_provider_status_approval),
-        )
-        .route(
-            "/api/providers/{id}/status-approval/approve",
-            post(approve_provider_status_approval),
-        )
-        .route(
-            "/api/providers/{id}/status-approval/reject",
-            post(reject_provider_status_approval),
-        )
-        .route(
-            "/api/providers/{id}/api-key-ref/rotate",
-            post(rotate_provider_api_key_ref),
-        )
-        .route("/api/providers/{id}/health", get(get_provider_health))
         .route("/api/policy", get(get_policy))
         .route("/api/policy/runtime", get(get_policy_runtime))
         .route("/api/policy/rollout/cancel", post(cancel_policy_rollout))
@@ -41648,11 +41630,11 @@ fn provider_api_key_ref(provider: &ProviderRecord) -> Option<String> {
         .and_then(|value| normalize_provider_api_key_ref(value).ok())
 }
 
-async fn update_provider_status(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn update_provider_status(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<UpdateProviderStatus>,
+    input: UpdateProviderStatus,
 ) -> Result<Json<ProviderRecord>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
@@ -41701,11 +41683,11 @@ async fn update_provider_status(
     Ok(Json(provider))
 }
 
-async fn request_provider_status_approval(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn request_provider_status_approval(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<RequestProviderStatusApproval>,
+    input: RequestProviderStatusApproval,
 ) -> Result<Json<ProviderStatusApprovalResponse>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
@@ -41775,20 +41757,20 @@ async fn request_provider_status_approval(
     }))
 }
 
-async fn approve_provider_status_approval(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn approve_provider_status_approval(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<DecideProviderStatusApproval>,
+    input: DecideProviderStatusApproval,
 ) -> Result<Json<ProviderStatusApprovalResponse>, AppError> {
     decide_provider_status_approval(state, id, headers, "approved", input.comment).await
 }
 
-async fn reject_provider_status_approval(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn reject_provider_status_approval(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<DecideProviderStatusApproval>,
+    input: DecideProviderStatusApproval,
 ) -> Result<Json<ProviderStatusApprovalResponse>, AppError> {
     decide_provider_status_approval(state, id, headers, "rejected", input.comment).await
 }
@@ -41892,11 +41874,11 @@ async fn provider_by_id(state: &AppState, id: Uuid) -> Result<ProviderRecord, Ap
         .ok_or_else(|| AppError::not_found("provider not found"))
 }
 
-async fn rotate_provider_api_key_ref(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn rotate_provider_api_key_ref(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<RotateProviderApiKeyRef>,
+    input: RotateProviderApiKeyRef,
 ) -> Result<Json<ProviderRecord>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
@@ -42122,9 +42104,9 @@ pub(crate) async fn resolve_mcp_runtime_secret_refs(
     Ok(refs.len())
 }
 
-async fn get_provider_health(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn get_provider_health(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<ProviderHealth>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
