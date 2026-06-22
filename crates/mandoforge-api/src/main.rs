@@ -165,9 +165,9 @@ pub(crate) use types::tenant::{
     TenantRuntimeMode, TransferOrganizationOwnership,
 };
 pub(crate) use types::workflow::{
-    CreateWorkflowDefinition, CreateWorkflowRun, CreateWorkflowStepRun, UpdateWorkflowDefinition,
-    UpdateWorkflowStepRun, WorkflowDefinition, WorkflowRun, WorkflowStepRun, WorkflowTransition,
-    WorkflowTransitionFilter, WorkflowTransitionQuery,
+    CreateTaskGrant, CreateWorkflowDefinition, CreateWorkflowRun, CreateWorkflowStepRun,
+    TaskGrant, UpdateWorkflowDefinition, UpdateWorkflowStepRun, WorkflowDefinition, WorkflowRun,
+    WorkflowStepRun, WorkflowTransition, WorkflowTransitionFilter, WorkflowTransitionQuery,
 };
 use types::tools::{
     ApprovalRequestTool, ArtifactCreateTool, FileReadTool, McpCallTool, OntologyTypeLookupTool,
@@ -805,95 +805,6 @@ struct SessionRuntimeRefs {
     artifact_ids: Vec<Uuid>,
     approval_ids: Vec<Uuid>,
     tool_call_ids: Vec<Uuid>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TaskGrant {
-    id: Uuid,
-    workflow_run_id: Uuid,
-    workflow_step_run_id: Option<Uuid>,
-    session_id: Option<Uuid>,
-    parent_grant_id: Option<Uuid>,
-    source_event_id: Option<Uuid>,
-    source_handoff_id: Option<Uuid>,
-    issuer_subject: String,
-    grantee_agent_id: Option<Uuid>,
-    grantee_session_id: Option<Uuid>,
-    agent_class: Option<String>,
-    objective: String,
-    risk_level: String,
-    status: String,
-    expires_at: Option<DateTime<Utc>>,
-    max_turns: Option<i32>,
-    max_tool_calls: Option<i32>,
-    max_runtime_seconds: Option<i32>,
-    max_cost_usd_micros: Option<i64>,
-    semantic_scopes: Value,
-    memory_scope: Value,
-    tool_scope: Value,
-    connector_scope: Value,
-    approval_policy: Value,
-    external_effects: Value,
-    context_packet_id: Option<Uuid>,
-    policy_revision_id: Option<Uuid>,
-    immutable_args_hash: Option<String>,
-    audit_trace_id: Option<Uuid>,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateTaskGrant {
-    #[serde(default)]
-    parent_grant_id: Option<Uuid>,
-    #[serde(default)]
-    workflow_step_run_id: Option<Uuid>,
-    #[serde(default)]
-    session_id: Option<Uuid>,
-    #[serde(default)]
-    source_event_id: Option<Uuid>,
-    #[serde(default)]
-    source_handoff_id: Option<Uuid>,
-    #[serde(default)]
-    issuer_subject: Option<String>,
-    #[serde(default)]
-    grantee_agent_id: Option<Uuid>,
-    #[serde(default)]
-    grantee_session_id: Option<Uuid>,
-    #[serde(default)]
-    agent_class: Option<String>,
-    #[serde(default)]
-    objective: Option<String>,
-    #[serde(default = "default_task_grant_risk_level")]
-    risk_level: String,
-    #[serde(default)]
-    expires_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    max_turns: Option<i32>,
-    #[serde(default)]
-    max_tool_calls: Option<i32>,
-    #[serde(default)]
-    max_runtime_seconds: Option<i32>,
-    #[serde(default)]
-    max_cost_usd_micros: Option<i64>,
-    #[serde(default = "empty_json_object")]
-    semantic_scopes: Value,
-    #[serde(default = "default_task_grant_memory_scope")]
-    memory_scope: Value,
-    #[serde(default = "default_task_grant_tool_scope")]
-    tool_scope: Value,
-    #[serde(default = "default_task_grant_connector_scope")]
-    connector_scope: Value,
-    #[serde(default = "default_task_grant_approval_policy")]
-    approval_policy: Value,
-    #[serde(default = "default_task_grant_external_effects")]
-    external_effects: Value,
-    #[serde(default)]
-    context_packet_id: Option<Uuid>,
-    #[serde(default)]
-    policy_revision_id: Option<Uuid>,
-    #[serde(default)]
-    immutable_args_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

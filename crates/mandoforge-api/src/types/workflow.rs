@@ -274,3 +274,92 @@ pub(crate) struct UpdateWorkflowStepRun {
     #[serde(default)]
     pub(crate) tool_call_ids: Option<Vec<Uuid>>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct TaskGrant {
+    pub(crate) id: Uuid,
+    pub(crate) workflow_run_id: Uuid,
+    pub(crate) workflow_step_run_id: Option<Uuid>,
+    pub(crate) session_id: Option<Uuid>,
+    pub(crate) parent_grant_id: Option<Uuid>,
+    pub(crate) source_event_id: Option<Uuid>,
+    pub(crate) source_handoff_id: Option<Uuid>,
+    pub(crate) issuer_subject: String,
+    pub(crate) grantee_agent_id: Option<Uuid>,
+    pub(crate) grantee_session_id: Option<Uuid>,
+    pub(crate) agent_class: Option<String>,
+    pub(crate) objective: String,
+    pub(crate) risk_level: String,
+    pub(crate) status: String,
+    pub(crate) expires_at: Option<DateTime<Utc>>,
+    pub(crate) max_turns: Option<i32>,
+    pub(crate) max_tool_calls: Option<i32>,
+    pub(crate) max_runtime_seconds: Option<i32>,
+    pub(crate) max_cost_usd_micros: Option<i64>,
+    pub(crate) semantic_scopes: Value,
+    pub(crate) memory_scope: Value,
+    pub(crate) tool_scope: Value,
+    pub(crate) connector_scope: Value,
+    pub(crate) approval_policy: Value,
+    pub(crate) external_effects: Value,
+    pub(crate) context_packet_id: Option<Uuid>,
+    pub(crate) policy_revision_id: Option<Uuid>,
+    pub(crate) immutable_args_hash: Option<String>,
+    pub(crate) audit_trace_id: Option<Uuid>,
+    pub(crate) created_at: DateTime<Utc>,
+    pub(crate) updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CreateTaskGrant {
+    #[serde(default)]
+    pub(crate) parent_grant_id: Option<Uuid>,
+    #[serde(default)]
+    pub(crate) workflow_step_run_id: Option<Uuid>,
+    #[serde(default)]
+    pub(crate) session_id: Option<Uuid>,
+    #[serde(default)]
+    pub(crate) source_event_id: Option<Uuid>,
+    #[serde(default)]
+    pub(crate) source_handoff_id: Option<Uuid>,
+    #[serde(default)]
+    pub(crate) issuer_subject: Option<String>,
+    #[serde(default)]
+    pub(crate) grantee_agent_id: Option<Uuid>,
+    #[serde(default)]
+    pub(crate) grantee_session_id: Option<Uuid>,
+    #[serde(default)]
+    pub(crate) agent_class: Option<String>,
+    #[serde(default)]
+    pub(crate) objective: Option<String>,
+    #[serde(default = "crate::default_task_grant_risk_level")]
+    pub(crate) risk_level: String,
+    #[serde(default)]
+    pub(crate) expires_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub(crate) max_turns: Option<i32>,
+    #[serde(default)]
+    pub(crate) max_tool_calls: Option<i32>,
+    #[serde(default)]
+    pub(crate) max_runtime_seconds: Option<i32>,
+    #[serde(default)]
+    pub(crate) max_cost_usd_micros: Option<i64>,
+    #[serde(default = "crate::empty_json_object")]
+    pub(crate) semantic_scopes: Value,
+    #[serde(default = "crate::default_task_grant_memory_scope")]
+    pub(crate) memory_scope: Value,
+    #[serde(default = "crate::default_task_grant_tool_scope")]
+    pub(crate) tool_scope: Value,
+    #[serde(default = "crate::default_task_grant_connector_scope")]
+    pub(crate) connector_scope: Value,
+    #[serde(default = "crate::default_task_grant_approval_policy")]
+    pub(crate) approval_policy: Value,
+    #[serde(default = "crate::default_task_grant_external_effects")]
+    pub(crate) external_effects: Value,
+    #[serde(default)]
+    pub(crate) context_packet_id: Option<Uuid>,
+    #[serde(default)]
+    pub(crate) policy_revision_id: Option<Uuid>,
+    #[serde(default)]
+    pub(crate) immutable_args_hash: Option<String>,
+}
