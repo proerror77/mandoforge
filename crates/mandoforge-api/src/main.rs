@@ -3900,9 +3900,6 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::collaboration::router())
         .merge(handlers::providers::router())
         .merge(handlers::mcp::router())
-        .route("/api/providers", get(list_providers).post(create_provider))
-        .route("/api/providers/{id}", patch(update_provider))
-        .route("/api/providers/summary", get(get_provider_summary))
         .route(
             "/api/providers/deployment/validate",
             post(validate_provider_deployment),
@@ -35070,28 +35067,28 @@ pub(crate) async fn archive_provider_access(
     Ok(Json(access))
 }
 
-async fn list_providers(
-    State(state): State<AppState>,
+pub(crate) async fn list_providers(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Vec<ProviderRecord>>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "providers", None).await?;
     Ok(Json(state.list_providers().await?))
 }
 
-async fn create_provider(
-    State(state): State<AppState>,
+pub(crate) async fn create_provider(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<CreateProviderRecord>,
+    input: CreateProviderRecord,
 ) -> Result<Json<ProviderRecord>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "providers", None).await?;
     Ok(Json(state.create_provider(input).await?))
 }
 
-async fn update_provider(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn update_provider(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<CreateProviderRecord>,
+    input: CreateProviderRecord,
 ) -> Result<Json<ProviderRecord>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "providers", Some(id)).await?;
     let provider = state.update_provider(id, input).await?;
@@ -35114,8 +35111,8 @@ async fn update_provider(
     Ok(Json(provider))
 }
 
-async fn get_provider_summary(
-    State(state): State<AppState>,
+pub(crate) async fn get_provider_summary(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<ProviderGovernanceSummary>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "providers", None).await?;
