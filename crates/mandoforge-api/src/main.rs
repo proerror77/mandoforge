@@ -10,15 +10,15 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use axum::{
     Json, Router,
-    extract::Request,
-    extract::{Path, State},
+    extract::{Request, State},
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response, Sse, sse::Event, sse::KeepAlive},
-    routing::{get, post},
 };
 #[cfg(test)]
 use axum::extract::Query;
+#[cfg(test)]
+use axum::routing::{get, post};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures_util::StreamExt as _;
 use serde::{Deserialize, Serialize};
@@ -2249,7 +2249,7 @@ pub(crate) struct RemoteComputerLease {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct RemoteComputerAttachment {
+pub(crate) struct RemoteComputerAttachment {
     id: Uuid,
     remote_computer_id: Uuid,
     lease_id: Uuid,
@@ -2264,7 +2264,7 @@ struct RemoteComputerAttachment {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct RemoteComputerJobAssignment {
+pub(crate) struct RemoteComputerJobAssignment {
     id: Uuid,
     execution_job_id: Uuid,
     remote_computer_id: Uuid,
@@ -2326,13 +2326,13 @@ pub(crate) struct CreateRemoteComputerLease {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct UpdateRemoteComputerLease {
+pub(crate) struct UpdateRemoteComputerLease {
     reason: Option<String>,
     metadata: Option<Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct CreateRemoteComputerAttachment {
+pub(crate) struct CreateRemoteComputerAttachment {
     session_id: Uuid,
     attached_by: Option<String>,
     stale_after_seconds: Option<i64>,
@@ -2374,7 +2374,7 @@ pub(crate) struct CreateRemoteComputerSidecarHeartbeat {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct UpdateRemoteComputerAttachment {
+pub(crate) struct UpdateRemoteComputerAttachment {
     reason: Option<String>,
     metadata: Option<Value>,
 }
@@ -3915,42 +3915,6 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::approval_notifications::router())
         .merge(handlers::execution_jobs::router())
         .merge(handlers::remote_computers::router())
-        .route(
-            "/api/remote-computer-leases/{id}/attach",
-            post(attach_remote_computer_lease),
-        )
-        .route(
-            "/api/remote-computer-leases",
-            get(list_remote_computer_leases),
-        )
-        .route(
-            "/api/remote-computer-attachments",
-            get(list_remote_computer_attachments),
-        )
-        .route(
-            "/api/remote-computer-job-assignments",
-            get(list_remote_computer_job_assignments),
-        )
-        .route(
-            "/api/remote-computer-attachments/stale",
-            get(list_stale_remote_computer_attachments),
-        )
-        .route(
-            "/api/remote-computer-attachments/{id}/release",
-            post(release_remote_computer_attachment),
-        )
-        .route(
-            "/api/remote-computer-leases/{id}/heartbeat",
-            post(heartbeat_remote_computer_lease),
-        )
-        .route(
-            "/api/remote-computer-leases/{id}/release",
-            post(release_remote_computer_lease),
-        )
-        .route(
-            "/api/remote-computer-leases/{id}/fail",
-            post(fail_remote_computer_lease),
-        )
         .merge(handlers::audit_logs::router())
         .fallback_service(ServeDir::new("web"))
         .route_layer(middleware::from_fn_with_state(
@@ -53817,8 +53781,8 @@ pub(crate) async fn create_remote_computer(
     Ok(Json(record))
 }
 
-async fn list_remote_computer_leases(
-    State(state): State<AppState>,
+pub(crate) async fn list_remote_computer_leases(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Vec<RemoteComputerLease>>, AppError> {
     authorize_request(
@@ -53851,11 +53815,11 @@ pub(crate) async fn create_remote_computer_lease(
     Ok(Json(lease))
 }
 
-async fn attach_remote_computer_lease(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn attach_remote_computer_lease(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<CreateRemoteComputerAttachment>,
+    input: CreateRemoteComputerAttachment,
 ) -> Result<Json<RemoteComputerAttachment>, AppError> {
     authorize_request(
         &state,
@@ -53871,11 +53835,11 @@ async fn attach_remote_computer_lease(
     Ok(Json(attachment))
 }
 
-async fn heartbeat_remote_computer_lease(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn heartbeat_remote_computer_lease(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<UpdateRemoteComputerLease>,
+    input: UpdateRemoteComputerLease,
 ) -> Result<Json<RemoteComputerLease>, AppError> {
     authorize_request(
         &state,
@@ -53892,11 +53856,11 @@ async fn heartbeat_remote_computer_lease(
     Ok(Json(lease))
 }
 
-async fn release_remote_computer_lease(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn release_remote_computer_lease(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<UpdateRemoteComputerLease>,
+    input: UpdateRemoteComputerLease,
 ) -> Result<Json<RemoteComputerLease>, AppError> {
     authorize_request(
         &state,
@@ -53913,8 +53877,8 @@ async fn release_remote_computer_lease(
     Ok(Json(lease))
 }
 
-async fn list_remote_computer_attachments(
-    State(state): State<AppState>,
+pub(crate) async fn list_remote_computer_attachments(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Vec<RemoteComputerAttachment>>, AppError> {
     authorize_request(
@@ -53928,8 +53892,8 @@ async fn list_remote_computer_attachments(
     Ok(Json(state.list_remote_computer_attachments().await?))
 }
 
-async fn list_remote_computer_job_assignments(
-    State(state): State<AppState>,
+pub(crate) async fn list_remote_computer_job_assignments(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Vec<RemoteComputerJobAssignment>>, AppError> {
     authorize_request(
@@ -54142,8 +54106,8 @@ pub(crate) async fn run_remote_computer_sidecar_recovery(
     ))
 }
 
-async fn list_stale_remote_computer_attachments(
-    State(state): State<AppState>,
+pub(crate) async fn list_stale_remote_computer_attachments(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Vec<RemoteComputerAttachment>>, AppError> {
     authorize_request(
@@ -54157,11 +54121,11 @@ async fn list_stale_remote_computer_attachments(
     Ok(Json(state.list_stale_remote_computer_attachments().await?))
 }
 
-async fn release_remote_computer_attachment(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn release_remote_computer_attachment(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<UpdateRemoteComputerAttachment>,
+    input: UpdateRemoteComputerAttachment,
 ) -> Result<Json<RemoteComputerAttachment>, AppError> {
     authorize_request(
         &state,
@@ -54177,11 +54141,11 @@ async fn release_remote_computer_attachment(
     Ok(Json(attachment))
 }
 
-async fn fail_remote_computer_lease(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn fail_remote_computer_lease(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<UpdateRemoteComputerLease>,
+    input: UpdateRemoteComputerLease,
 ) -> Result<Json<RemoteComputerLease>, AppError> {
     authorize_request(
         &state,
