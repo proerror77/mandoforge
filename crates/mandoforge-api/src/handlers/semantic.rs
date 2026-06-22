@@ -11,17 +11,18 @@ use uuid::Uuid;
 
 use crate::{
     AppError, AppState, CreateSemanticLink, CreateSemanticObject, CreateSemanticSource,
-    ExpandSemanticLinksRequest, ExpandSemanticLinksResponse, FetchSemanticObjectRequest,
-    FetchSemanticObjectResponse, Permission, SemanticGraphSnapshot, SemanticLink, SemanticObject,
-    SemanticGovernanceRunRequest, SemanticGovernanceRunResult, SemanticProductQuery,
-    SemanticSearchResponse, SemanticSearchResult, SemanticSource, UpdateSemanticLink,
-    UpdateSemanticObject, UpdateSemanticSource, authorize_request, build_semantic_graph_snapshot,
-    domain_ontology_object_type_suggestions, domain_ontology_relation_type_suggestions,
-    expand_semantic_links_for_context, fetch_semantic_object_for_context,
+    ExpandSemanticLinksRequest, ExpandSemanticLinksResponse, ExpandSemanticOntologyRequest,
+    FetchSemanticObjectRequest, FetchSemanticObjectResponse, Permission, SemanticGraphSnapshot,
+    SemanticLink, SemanticObject, SemanticGovernanceRunRequest, SemanticGovernanceRunResult,
+    SemanticProductQuery, SemanticSearchResponse, SemanticSearchResult, SemanticSource,
+    UpdateSemanticLink, UpdateSemanticObject, UpdateSemanticSource, authorize_request,
+    build_semantic_graph_snapshot, domain_ontology_object_type_suggestions,
+    domain_ontology_relation_type_suggestions, expand_semantic_links_for_context,
+    fetch_semantic_object_for_context,
     memory_governance_object_partition_key, memory_governance_scope_value, new_audit_log,
     normalize_optional_text, normalize_semantic_conflict_strategy, principal_from_request,
     record_semantic_link_audit, record_semantic_object_audit, record_semantic_source_audit,
-    semantic_object_matched_fields, semantic_object_matches_product_query,
+    semantic_object_matched_fields, semantic_object_matches_product_query, validate_handoff_token,
     validate_semantic_link_against_ontology,
 };
 
@@ -61,6 +62,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/api/semantic-governance/run",
             post(run_semantic_governance),
+        )
+        .route(
+            "/api/semantic-ontology/expand",
+            post(expand_semantic_ontology),
         )
         .route(
             "/api/semantic-links",
@@ -601,6 +606,87 @@ async fn run_semantic_governance(
         ))
         .await?;
     Ok(Json(result))
+}
+
+async fn expand_semantic_ontology(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<ExpandSemanticOntologyRequest>,
+) -> Result<Json<Value>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsWrite,
+        "semantic_ontology",
+        None,
+    )
+    .await?;
+    let domain_scope = validate_handoff_token("domain_scope", &input.domain_scope)?;
+    let object_types = input
+        .object_types
+        .iter()
+        .map(|value| validate_handoff_token("object_type", value))
+        .collect::<Result<Vec<_>, _>>()?;
+    let relation_types = input
+        .relation_types
+        .iter()
+        .map(|value| validate_handoff_token("relation_type", value))
+        .collect::<Result<Vec<_>, _>>()?;
+    let object = state
+        .create_semantic_object(CreateSemanticObject {
+            source_id: None,
+            object_type: "ontology_expansion".to_string(),
+            object_key: format!("ontology:{domain_scope}:proposal:{}", Uuid::new_v4()),
+            title: format!("Ontology expansion proposal for {domain_scope}"),
+            summary: input
+                .reason
+                .clone()
+                .unwrap_or_else(|| format!("Proposed ontology expansion for {domain_scope}.")),
+            content: json!({
+                "domain_scope": domain_scope,
+                "object_types": object_types,
+                "relation_types": relation_types,
+                "reason": input.reason,
+                "status": "proposed",
+            }),
+            semantic_scopes: json!({
+                "domain_scope": domain_scope,
+                "workflow_scope": "ontology-expansion",
+                "memory_scope": "ontology",
+                "share_policy": "review_required",
+            }),
+            source_uri: Some(format!(
+                "mandoforge://semantic-ontology/{domain_scope}/proposals"
+            )),
+            provenance: json!({
+                "source": "semantic_ontology.expand",
+                "proposed_at": Utc::now(),
+            }),
+            trust_level: "source_attested".to_string(),
+            freshness: "current".to_string(),
+            status: "active".to_string(),
+        })
+        .await?;
+    let principal = principal_from_request(&state, &headers).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "semantic_ontology.expansion_proposed",
+            "semantic_object",
+            Some(object.id),
+            json!({
+                "subject": principal.subject_id,
+                "domain_scope": domain_scope,
+                "semantic_object_id": object.id,
+            }),
+        ))
+        .await?;
+    Ok(Json(json!({
+        "status": "proposed",
+        "object": object,
+    })))
 }
 
 async fn list_semantic_links(

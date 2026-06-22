@@ -3913,10 +3913,6 @@ fn build_router(state: AppState) -> Router {
         )
         .merge(handlers::semantic::router())
         .route(
-            "/api/semantic-ontology/expand",
-            post(expand_semantic_ontology),
-        )
-        .route(
             "/api/semantic-ontology/builder",
             post(build_semantic_ontology),
         )
@@ -7007,87 +7003,6 @@ fn agent_runtime_profile_command_allowlisted(command: &str, allowed_commands: &[
     allowed_commands
         .iter()
         .any(|allowed| allowed == command || allowed == basename)
-}
-
-async fn expand_semantic_ontology(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(input): Json<ExpandSemanticOntologyRequest>,
-) -> Result<Json<Value>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::AgentsWrite,
-        "semantic_ontology",
-        None,
-    )
-    .await?;
-    let domain_scope = validate_handoff_token("domain_scope", &input.domain_scope)?;
-    let object_types = input
-        .object_types
-        .iter()
-        .map(|value| validate_handoff_token("object_type", value))
-        .collect::<Result<Vec<_>, _>>()?;
-    let relation_types = input
-        .relation_types
-        .iter()
-        .map(|value| validate_handoff_token("relation_type", value))
-        .collect::<Result<Vec<_>, _>>()?;
-    let object = state
-        .create_semantic_object(CreateSemanticObject {
-            source_id: None,
-            object_type: "ontology_expansion".to_string(),
-            object_key: format!("ontology:{domain_scope}:proposal:{}", Uuid::new_v4()),
-            title: format!("Ontology expansion proposal for {domain_scope}"),
-            summary: input
-                .reason
-                .clone()
-                .unwrap_or_else(|| format!("Proposed ontology expansion for {domain_scope}.")),
-            content: json!({
-                "domain_scope": domain_scope,
-                "object_types": object_types,
-                "relation_types": relation_types,
-                "reason": input.reason,
-                "status": "proposed",
-            }),
-            semantic_scopes: json!({
-                "domain_scope": domain_scope,
-                "workflow_scope": "ontology-expansion",
-                "memory_scope": "ontology",
-                "share_policy": "review_required",
-            }),
-            source_uri: Some(format!(
-                "mandoforge://semantic-ontology/{domain_scope}/proposals"
-            )),
-            provenance: json!({
-                "source": "semantic_ontology.expand",
-                "proposed_at": Utc::now(),
-            }),
-            trust_level: "source_attested".to_string(),
-            freshness: "current".to_string(),
-            status: "active".to_string(),
-        })
-        .await?;
-    let principal = principal_from_request(&state, &headers).await?;
-    state
-        .append_audit_log(new_audit_log(
-            None,
-            "user",
-            None,
-            "semantic_ontology.expansion_proposed",
-            "semantic_object",
-            Some(object.id),
-            json!({
-                "subject": principal.subject_id,
-                "domain_scope": domain_scope,
-                "semantic_object_id": object.id,
-            }),
-        ))
-        .await?;
-    Ok(Json(json!({
-        "status": "proposed",
-        "object": object,
-    })))
 }
 
 async fn build_semantic_ontology(
