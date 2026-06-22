@@ -3896,34 +3896,7 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::dynamic_workflow_plans::router())
         .merge(handlers::workflows::router())
         .merge(handlers::tools::router())
-        .route(
-            "/api/organizations",
-            get(list_organizations).post(create_organization),
-        )
-        .route(
-            "/api/tenant-provisioning/bootstrap",
-            post(bootstrap_tenant_provisioning),
-        )
-        .route(
-            "/api/tenant-isolation/readiness",
-            get(get_tenant_isolation_readiness),
-        )
-        .route(
-            "/api/tenant-isolation/routing/validate",
-            post(validate_tenant_production_routing),
-        )
-        .route(
-            "/api/organizations/{id}",
-            patch(update_organization).delete(delete_organization),
-        )
-        .route(
-            "/api/organizations/{id}/archive",
-            post(archive_organization),
-        )
-        .route(
-            "/api/organizations/{id}/transfer-ownership",
-            post(transfer_organization_ownership),
-        )
+        .merge(handlers::tenant::router())
         .route(
             "/api/organizations/{id}/teams",
             get(list_teams).post(create_team),
@@ -33320,16 +33293,16 @@ async fn execute_tool_invocation(
     Ok(result)
 }
 
-async fn list_organizations(
-    State(state): State<AppState>,
+pub(crate) async fn list_organizations(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Vec<Organization>>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "organizations", None).await?;
     Ok(Json(state.list_organizations().await?))
 }
 
-async fn get_tenant_isolation_readiness(
-    State(state): State<AppState>,
+pub(crate) async fn get_tenant_isolation_readiness(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<TenantIsolationReadinessReport>, AppError> {
     authorize_request(
@@ -33343,8 +33316,8 @@ async fn get_tenant_isolation_readiness(
     Ok(Json(build_tenant_isolation_readiness(&state).await?))
 }
 
-async fn validate_tenant_production_routing(
-    State(state): State<AppState>,
+pub(crate) async fn validate_tenant_production_routing(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Value>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
@@ -33901,10 +33874,10 @@ fn tenant_isolation_table_coverage(
         .collect()
 }
 
-async fn create_organization(
-    State(state): State<AppState>,
+pub(crate) async fn create_organization(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<CreateOrganization>,
+    input: CreateOrganization,
 ) -> Result<Json<Organization>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
@@ -33932,10 +33905,10 @@ async fn create_organization(
     Ok(Json(organization))
 }
 
-async fn bootstrap_tenant_provisioning(
-    State(state): State<AppState>,
+pub(crate) async fn bootstrap_tenant_provisioning(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<BootstrapTenantProvisioning>,
+    input: BootstrapTenantProvisioning,
 ) -> Result<Json<TenantProvisioningResult>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
@@ -34046,11 +34019,11 @@ async fn bootstrap_tenant_provisioning(
     Ok(Json(result))
 }
 
-async fn update_organization(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn update_organization(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<CreateOrganization>,
+    input: CreateOrganization,
 ) -> Result<Json<Organization>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
@@ -34080,9 +34053,9 @@ async fn update_organization(
     Ok(Json(organization))
 }
 
-async fn archive_organization(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn archive_organization(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<Organization>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
@@ -34109,9 +34082,9 @@ async fn archive_organization(
     Ok(Json(organization))
 }
 
-async fn delete_organization(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn delete_organization(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<Organization>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
@@ -34142,11 +34115,11 @@ async fn delete_organization(
     Ok(Json(organization))
 }
 
-async fn transfer_organization_ownership(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn transfer_organization_ownership(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<TransferOrganizationOwnership>,
+    input: TransferOrganizationOwnership,
 ) -> Result<Json<Organization>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
