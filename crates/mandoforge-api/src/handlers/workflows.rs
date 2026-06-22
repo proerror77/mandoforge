@@ -4,6 +4,7 @@ use axum::{
     http::HeaderMap,
     routing::{get, patch, post},
 };
+use chrono::Utc;
 use uuid::Uuid;
 
 use crate::{
@@ -12,15 +13,14 @@ use crate::{
     RunDueWorkflowSteps, RunWorkflowStepRun, RunWorkflowStepRunResponse, TaskBoardSnapshot,
     TaskGrant, UpdateWorkflowDefinition, UpdateWorkflowStepRun, WorkflowDefinition, WorkflowRun,
     WorkflowRunGraphConsole, WorkflowScheduledStepActivationRun, WorkflowStepRun,
-    WorkflowTransition, WorkflowTransitionQuery, Permission, authorize_collection_request,
-    authorize_request, build_agent_inbox_snapshot, build_task_board_snapshot,
-    build_workflow_run_graph_console,
+    WorkflowTransition, WorkflowTransitionQuery, Permission, activate_due_workflow_steps_for_run,
+    authorize_collection_request, authorize_request, build_agent_inbox_snapshot,
+    build_task_board_snapshot, build_workflow_run_graph_console,
     claim_workflow_step_run_route as claim_workflow_step_run_impl,
     create_workflow_task_grant_route as create_workflow_task_grant_impl,
     create_workflow_definition_route as create_workflow_definition_impl,
     create_workflow_run_route as create_workflow_run_impl,
     create_workflow_step_run_route as create_workflow_step_run_impl,
-    run_due_workflow_steps_route as run_due_workflow_steps_impl,
     run_workflow_step_run_route as run_workflow_step_run_impl,
     update_workflow_definition_route as update_workflow_definition_impl,
     update_workflow_step_run_route as update_workflow_step_run_impl,
@@ -216,7 +216,20 @@ async fn run_due_workflow_steps(
     headers: HeaderMap,
     Json(input): Json<RunDueWorkflowSteps>,
 ) -> Result<Json<WorkflowScheduledStepActivationRun>, AppError> {
-    run_due_workflow_steps_impl(state, id, headers, input).await
+    let _ = input;
+    let run = state.get_workflow_run(id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRun,
+        "session",
+        Some(run.primary_session_id),
+    )
+    .await?;
+    let checked_at = Utc::now();
+    Ok(Json(
+        activate_due_workflow_steps_for_run(&state, &run, checked_at).await?,
+    ))
 }
 
 async fn list_workflow_step_runs(

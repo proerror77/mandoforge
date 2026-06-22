@@ -18097,27 +18097,6 @@ fn workflow_step_status_successful(status: &str) -> bool {
     matches!(status, "completed" | "skipped")
 }
 
-pub(crate) async fn run_due_workflow_steps_route(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-    _input: RunDueWorkflowSteps,
-) -> Result<Json<WorkflowScheduledStepActivationRun>, AppError> {
-    let run = state.get_workflow_run(id).await?;
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRun,
-        "session",
-        Some(run.primary_session_id),
-    )
-    .await?;
-    let checked_at = Utc::now();
-    Ok(Json(
-        activate_due_workflow_steps_for_run(&state, &run, checked_at).await?,
-    ))
-}
-
 async fn activate_due_workflow_steps_for_run(
     state: &AppState,
     run: &WorkflowRun,
