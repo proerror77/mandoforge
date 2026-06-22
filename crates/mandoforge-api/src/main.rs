@@ -53,6 +53,7 @@ mod provider;
 mod remote_computer_runner;
 mod secrets;
 mod shell_runner;
+mod state;
 mod types;
 mod store_agent_handoffs;
 mod store_approval_groups;
@@ -91,7 +92,7 @@ mod store_workflows;
 mod workflow_pack;
 
 use authorization::{
-    AuthorizationRequest, Authorizer, Permission, Principal, Role, RoleBasedAuthorizer,
+    AuthorizationRequest, Permission, Principal, Role, RoleBasedAuthorizer,
 };
 use codex_app_server::{
     CodexAppServerClient, CodexAppServerConfig, CodexCommandRequest, CodexCommandResponse,
@@ -251,32 +252,8 @@ use secrets::{
 #[cfg(test)]
 use shell_runner::docker_shell_args;
 use shell_runner::{shell_command, shell_runner};
+pub(crate) use state::AppState;
 use store_backend::{MemoryStore, StoreBackend};
-
-#[derive(Clone)]
-struct AppState {
-    store: StoreBackend,
-    execution_queue: ExecutionQueue,
-    execution_worker: Arc<dyn ExecutionWorker>,
-    authorizer: Arc<dyn Authorizer>,
-    observability_config: ObservabilityConfig,
-    telemetry_exporter: Arc<dyn TelemetryExporter>,
-    mcp_gateway_config: Option<McpGatewayConfig>,
-    mcp_gateway_client: Arc<dyn McpGatewayClient>,
-    codex_app_server_config: Option<CodexAppServerConfig>,
-    codex_app_server_client: Arc<dyn CodexAppServerClient>,
-    eval_judge_config: Option<EvalJudgeConfig>,
-    eval_judge_client: Arc<dyn EvalJudgeClient>,
-    cost_alert_webhook_url: Option<String>,
-    cost_alert_email_relay_url: Option<String>,
-    cost_alert_smtp_config: Option<CostAlertSmtpConfig>,
-    approval_webhook_url: Option<String>,
-    #[allow(dead_code)]
-    workspace_root: PathBuf,
-    tenant_id: Uuid,
-    tenant_runtime_mode: TenantRuntimeMode,
-    policy: Arc<RwLock<PolicyRuntime>>,
-}
 
 tokio::task_local! {
     static REQUEST_TENANT_ID: Uuid;
