@@ -7,9 +7,8 @@ use axum::{
 
 use crate::{
     AppError, AppState, SchedulerDeploymentValidationRun, SchedulerDuePlan, SchedulerDueRun,
-    SchedulerOrchestrationSummary, SchedulerRunDueRequest,
-    get_scheduler_due_plan as get_scheduler_due_plan_impl,
-    get_scheduler_summary as get_scheduler_summary_impl,
+    SchedulerOrchestrationSummary, SchedulerRunDueRequest, Permission, authorize_request,
+    build_scheduler_due_plan, build_scheduler_orchestration_summary,
     run_scheduler_due_tasks as run_scheduler_due_tasks_impl,
     validate_scheduler_deployment as validate_scheduler_deployment_impl,
 };
@@ -29,14 +28,16 @@ async fn get_scheduler_summary(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<SchedulerOrchestrationSummary>, AppError> {
-    get_scheduler_summary_impl(state, headers).await
+    authorize_request(&state, &headers, Permission::Admin, "scheduler", None).await?;
+    Ok(Json(build_scheduler_orchestration_summary(&state).await?))
 }
 
 async fn get_scheduler_due_plan(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<SchedulerDuePlan>, AppError> {
-    get_scheduler_due_plan_impl(state, headers).await
+    authorize_request(&state, &headers, Permission::Admin, "scheduler", None).await?;
+    Ok(Json(build_scheduler_due_plan(&state).await?))
 }
 
 async fn validate_scheduler_deployment(

@@ -42566,23 +42566,7 @@ pub(crate) async fn validate_scheduler_deployment(
     }))
 }
 
-pub(crate) async fn get_scheduler_due_plan(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<SchedulerDuePlan>, AppError> {
-    authorize_request(&state, &headers, Permission::Admin, "scheduler", None).await?;
-    Ok(Json(build_scheduler_due_plan(&state).await?))
-}
-
-pub(crate) async fn get_scheduler_summary(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<SchedulerOrchestrationSummary>, AppError> {
-    authorize_request(&state, &headers, Permission::Admin, "scheduler", None).await?;
-    Ok(Json(build_scheduler_orchestration_summary(&state).await?))
-}
-
-async fn build_scheduler_orchestration_summary(
+pub(crate) async fn build_scheduler_orchestration_summary(
     state: &AppState,
 ) -> Result<SchedulerOrchestrationSummary, AppError> {
     let generated_at = Utc::now();
@@ -43014,7 +42998,9 @@ fn scheduler_run_history_item(log: AuditLog) -> Option<SchedulerRunHistoryItem> 
     })
 }
 
-async fn build_scheduler_due_plan(state: &AppState) -> Result<SchedulerDuePlan, AppError> {
+pub(crate) async fn build_scheduler_due_plan(
+    state: &AppState,
+) -> Result<SchedulerDuePlan, AppError> {
     let generated_at = Utc::now();
     let mut actions = Vec::new();
     let policy_revisions = state.list_policy_revisions().await?;
