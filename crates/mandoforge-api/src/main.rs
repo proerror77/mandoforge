@@ -179,7 +179,9 @@ pub(crate) use types::codex_app_server::{
     CodexTraceEvidence, CodexTurnTrace, default_codex_stale_after_seconds,
 };
 pub(crate) use types::deployment::{
-    DeploymentVersion, ProductionAutoDeployRequest, ProductionDeploymentVerifyRequest,
+    DeploymentVersion, EnterpriseProductCompletionLane, EnterpriseProductCompletionReadiness,
+    EnterpriseSecurityAdminCheck, EnterpriseSecurityAdminReadiness, ProductionAutoDeployRequest,
+    ProductionDeploymentVerifyRequest, Stage2CompletionReadiness, Stage2EvidenceRequirement,
 };
 pub(crate) use types::eval::{
     BootstrapEvalSuite, CreateEvalCase, CreateEvalDataset, CreateEvalJudgeProfile, CreateEvalRun,
@@ -551,99 +553,6 @@ pub(crate) struct RemoteComputerArtifactSyncResponse {
     assignment_id: Option<Uuid>,
     artifact_count: usize,
     artifacts: Vec<Artifact>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Stage2CompletionReadiness {
-    generated_at: DateTime<Utc>,
-    status: String,
-    objective: String,
-    audit_path: String,
-    audit_present: bool,
-    open_gap_count: usize,
-    open_gaps: Vec<String>,
-    evidence_requirements: Vec<Stage2EvidenceRequirement>,
-    completion_blocked: bool,
-    message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Stage2EvidenceRequirement {
-    id: String,
-    title: String,
-    category: String,
-    required_for_core: bool,
-    required_for_stage2_production: bool,
-    enterprise_optional: bool,
-    gap: String,
-    production_target: String,
-    evidence_scripts: Vec<String>,
-    evidence_job_manifests: Vec<String>,
-    readiness_endpoints: Vec<String>,
-    validation_endpoints: Vec<String>,
-    required_flags: Vec<String>,
-    required_artifacts: Vec<String>,
-    required_evidence: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct EnterpriseProductCompletionReadiness {
-    generated_at: DateTime<Utc>,
-    status: String,
-    objective: String,
-    contract_path: String,
-    contract_present: bool,
-    required_evidence_class: String,
-    lane_count: usize,
-    ready_lane_count: usize,
-    pilot_ready_lane_count: usize,
-    blocked_lane_count: usize,
-    completion_blocked: bool,
-    lanes: Vec<EnterpriseProductCompletionLane>,
-    next_actions: Vec<String>,
-    message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct EnterpriseProductCompletionLane {
-    id: String,
-    title: String,
-    status: String,
-    current_evidence_class: String,
-    required_evidence_class: String,
-    current_boundary: String,
-    production_target: String,
-    readiness_endpoints: Vec<String>,
-    evidence_scripts: Vec<String>,
-    required_evidence: Vec<String>,
-    blockers: Vec<String>,
-    next_actions: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct EnterpriseSecurityAdminReadiness {
-    generated_at: DateTime<Utc>,
-    status: String,
-    required_evidence_class: String,
-    check_count: usize,
-    ready_check_count: usize,
-    blocked_check_count: usize,
-    completion_blocked: bool,
-    checks: Vec<EnterpriseSecurityAdminCheck>,
-    next_actions: Vec<String>,
-    message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct EnterpriseSecurityAdminCheck {
-    id: String,
-    title: String,
-    status: String,
-    current_evidence_class: String,
-    required_evidence_class: String,
-    evidence: Value,
-    blockers: Vec<String>,
-    next_actions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
