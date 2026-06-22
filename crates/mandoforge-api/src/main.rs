@@ -3890,14 +3890,6 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::ontology_intelligence::router())
         .merge(handlers::ontology::router())
         .merge(handlers::memory_governance::router())
-        .route(
-            "/api/agents/releases/deployment/validate",
-            post(validate_agent_release_deployment),
-        )
-        .route(
-            "/api/agents/releases/orchestration/validate",
-            post(validate_agent_release_orchestration),
-        )
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/{id}", get(get_session))
         .route("/api/sessions/{id}/messages", post(add_message))
@@ -14162,268 +14154,6 @@ async fn record_semantic_link_audit(
     Ok(())
 }
 
-async fn validate_agent_release_deployment(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<AgentReleaseDeploymentValidationRun>, AppError> {
-    let principal = principal_from_request(&state, &headers).await?;
-    let request = AuthorizationRequest {
-        tenant_id: state.current_tenant_id(),
-        permission: Permission::Admin,
-        resource_type: "agent_release".to_string(),
-        resource_id: None,
-    };
-    state.authorizer.authorize(&principal, &request).await?;
-    enforce_resource_scope(&state, &principal, &request).await?;
-
-    let checked_at = Utc::now();
-    let audit_logs = state.list_audit_logs(None).await?;
-    let rollout_summary =
-        build_agent_release_rollout_summary(state.list_all_agent_releases().await?, checked_at);
-    let automation_summary =
-        build_agent_release_automation_run_summary(&audit_logs, &rollout_summary, checked_at);
-    let production_ops = automation_summary.production_ops.clone();
-    let production_orchestration = automation_summary.production_orchestration.clone();
-    let lookup = |key: &str| std::env::var(key).ok();
-    let controller_required = agent_release_deployment_controller_required(&lookup);
-    let controller_configured = agent_release_deployment_controller_configured(&lookup);
-    let mut issues = Vec::new();
-
-    if rollout_summary.release_count == 0 {
-        issues.push("agent release deployment validation covered no releases".to_string());
-    }
-    if production_ops.production_blocked {
-        issues.push(production_ops.message.clone());
-    }
-    if production_orchestration.production_blocked {
-        issues.push(production_orchestration.message.clone());
-    }
-
-    let mut healthy = issues.is_empty();
-    let mut controller_execution = json!({
-        "attempted": false,
-        "status": "skipped",
-        "reason": if controller_configured {
-            "release_deployment_not_ready"
-        } else {
-            "controller_not_configured"
-        }
-    });
-
-    if healthy && controller_configured {
-        match execute_agent_release_deployment_controller(
-            &lookup,
-            &principal.subject_id,
-            checked_at,
-            &rollout_summary,
-            &automation_summary,
-        )
-        .await
-        {
-            Ok(execution) => {
-                let controller_status = execution
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .unwrap_or("failed")
-                    .to_string();
-                controller_execution = execution;
-                if controller_status != "validated" {
-                    healthy = false;
-                    issues.push("agent release deployment controller did not validate".to_string());
-                }
-            }
-            Err(error) => {
-                healthy = false;
-                issues.push("agent release deployment controller failed".to_string());
-                controller_execution = json!({
-                    "attempted": true,
-                    "status": "failed",
-                    "error": error.message
-                });
-            }
-        }
-    }
-    if healthy && controller_required && !controller_configured {
-        healthy = false;
-        issues
-            .push("agent release deployment controller is required but not configured".to_string());
-    }
-
-    let status = if healthy { "healthy" } else { "blocked" }.to_string();
-    let audit_log = state
-        .append_audit_log(new_audit_log(
-            None,
-            "user",
-            None,
-            "agent.release_deployment_validation_run",
-            "agent_release",
-            None,
-            json!({
-                "subject": principal.subject_id,
-                "status": status,
-                "release_count": rollout_summary.release_count,
-                "pending_count": rollout_summary.pending_count,
-                "promoted_count": rollout_summary.promoted_count,
-                "rejected_count": rollout_summary.rejected_count,
-                "rolled_back_count": rollout_summary.rolled_back_count,
-                "latest_automation_status": automation_summary.latest_run.as_ref().map(|run| run.status.clone()),
-                "latest_automation_run_id": automation_summary.latest_run.as_ref().map(|run| run.id),
-                "production_ops": production_ops,
-                "production_orchestration": production_orchestration,
-                "controller_required": controller_required,
-                "controller_configured": controller_configured,
-                "controller_execution": controller_execution,
-                "issues": issues,
-            }),
-        ))
-        .await?;
-    Ok(Json(AgentReleaseDeploymentValidationRun {
-        status,
-        release_count: rollout_summary.release_count,
-        pending_count: rollout_summary.pending_count,
-        promoted_count: rollout_summary.promoted_count,
-        rejected_count: rollout_summary.rejected_count,
-        rolled_back_count: rollout_summary.rolled_back_count,
-        latest_automation_status: automation_summary
-            .latest_run
-            .as_ref()
-            .map(|run| run.status.clone()),
-        controller_required,
-        controller_configured,
-        controller_execution,
-        issues,
-        checked_at: audit_log.created_at,
-    }))
-}
-
-async fn validate_agent_release_orchestration(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<AgentReleaseOrchestrationValidationRun>, AppError> {
-    let principal = principal_from_request(&state, &headers).await?;
-    let request = AuthorizationRequest {
-        tenant_id: state.current_tenant_id(),
-        permission: Permission::Admin,
-        resource_type: "agent_release".to_string(),
-        resource_id: None,
-    };
-    state.authorizer.authorize(&principal, &request).await?;
-    enforce_resource_scope(&state, &principal, &request).await?;
-
-    let checked_at = Utc::now();
-    let audit_logs = state.list_audit_logs(None).await?;
-    let rollout_summary =
-        build_agent_release_rollout_summary(state.list_all_agent_releases().await?, checked_at);
-    let automation_summary =
-        build_agent_release_automation_run_summary(&audit_logs, &rollout_summary, checked_at);
-    let production_orchestration = automation_summary.production_orchestration.clone();
-    let lookup = |key: &str| std::env::var(key).ok();
-    let controller_required = agent_release_orchestration_controller_required(&lookup);
-    let controller_configured = agent_release_orchestration_controller_configured(&lookup);
-    let mut issues = Vec::new();
-
-    if rollout_summary.release_count == 0 {
-        issues.push("agent release orchestration validation covered no releases".to_string());
-    }
-    if production_orchestration.production_blocked {
-        issues.push(production_orchestration.message.clone());
-    }
-
-    let mut controller_execution = json!({
-        "attempted": false,
-        "status": "skipped",
-        "reason": if controller_configured {
-            "release_orchestration_not_ready"
-        } else {
-            "controller_not_configured"
-        }
-    });
-    if controller_configured {
-        match execute_agent_release_orchestration_controller(
-            &lookup,
-            &principal.subject_id,
-            checked_at,
-            &rollout_summary,
-            &automation_summary,
-        )
-        .await
-        {
-            Ok(execution) => {
-                if execution.get("status").and_then(Value::as_str) != Some("validated") {
-                    issues.push(
-                        "agent release orchestration controller did not validate".to_string(),
-                    );
-                }
-                controller_execution = execution;
-            }
-            Err(error) => {
-                issues.push("agent release orchestration controller failed".to_string());
-                controller_execution = json!({
-                    "attempted": true,
-                    "status": "failed",
-                    "error": error.message
-                });
-            }
-        }
-    } else if controller_required {
-        issues.push(
-            "agent release orchestration controller is required but not configured".to_string(),
-        );
-    }
-    if controller_required
-        && controller_execution.get("status").and_then(Value::as_str) != Some("validated")
-    {
-        issues.push(
-            "agent release orchestration controller evidence is missing or not validated"
-                .to_string(),
-        );
-    }
-    dedupe_strings(&mut issues);
-
-    let status = if issues.is_empty() {
-        "validated"
-    } else {
-        "blocked"
-    }
-    .to_string();
-    state
-        .append_audit_log(new_audit_log(
-            None,
-            "user",
-            None,
-            "agent.release_orchestration_validation_run",
-            "agent_release",
-            None,
-            json!({
-                "subject": principal.subject_id,
-                "status": status,
-                "release_count": rollout_summary.release_count,
-                "latest_automation_status": automation_summary.latest_run.as_ref().map(|run| run.status.clone()),
-                "latest_automation_run_id": automation_summary.latest_run.as_ref().map(|run| run.id),
-                "production_orchestration": production_orchestration,
-                "controller_required": controller_required,
-                "controller_configured": controller_configured,
-                "controller_execution": controller_execution,
-                "issues": issues,
-            }),
-        ))
-        .await?;
-
-    Ok(Json(AgentReleaseOrchestrationValidationRun {
-        status,
-        release_count: rollout_summary.release_count,
-        latest_automation_status: automation_summary
-            .latest_run
-            .as_ref()
-            .map(|run| run.status.clone()),
-        controller_required,
-        controller_configured,
-        controller_execution,
-        issues,
-        checked_at,
-    }))
-}
-
 pub(crate) async fn execute_due_agent_release_promotions(
     state: &AppState,
 ) -> Result<AgentReleaseAutomationRun, AppError> {
@@ -14721,7 +14451,7 @@ where
     }))
 }
 
-fn agent_release_deployment_controller_required<F>(lookup: &F) -> bool
+pub(crate) fn agent_release_deployment_controller_required<F>(lookup: &F) -> bool
 where
     F: Fn(&str) -> Option<String>,
 {
@@ -14735,7 +14465,7 @@ where
         .unwrap_or(false)
 }
 
-fn agent_release_deployment_controller_configured<F>(lookup: &F) -> bool
+pub(crate) fn agent_release_deployment_controller_configured<F>(lookup: &F) -> bool
 where
     F: Fn(&str) -> Option<String>,
 {
@@ -14744,7 +14474,7 @@ where
         .unwrap_or(false)
 }
 
-async fn execute_agent_release_deployment_controller<F>(
+pub(crate) async fn execute_agent_release_deployment_controller<F>(
     lookup: &F,
     subject: &str,
     requested_at: DateTime<Utc>,
@@ -14837,7 +14567,7 @@ where
     }))
 }
 
-fn agent_release_orchestration_controller_required<F>(lookup: &F) -> bool
+pub(crate) fn agent_release_orchestration_controller_required<F>(lookup: &F) -> bool
 where
     F: Fn(&str) -> Option<String>,
 {
@@ -14851,7 +14581,7 @@ where
         .unwrap_or(false)
 }
 
-fn agent_release_orchestration_controller_configured<F>(lookup: &F) -> bool
+pub(crate) fn agent_release_orchestration_controller_configured<F>(lookup: &F) -> bool
 where
     F: Fn(&str) -> Option<String>,
 {
@@ -14860,7 +14590,7 @@ where
         .unwrap_or(false)
 }
 
-async fn execute_agent_release_orchestration_controller<F>(
+pub(crate) async fn execute_agent_release_orchestration_controller<F>(
     lookup: &F,
     subject: &str,
     requested_at: DateTime<Utc>,
@@ -47364,7 +47094,7 @@ fn latest_usage_finance_audit(
         })
 }
 
-fn dedupe_strings(values: &mut Vec<String>) {
+pub(crate) fn dedupe_strings(values: &mut Vec<String>) {
     let mut seen = HashSet::new();
     values.retain(|value| seen.insert(value.clone()));
 }
