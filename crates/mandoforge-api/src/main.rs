@@ -391,9 +391,9 @@ struct ModifyApproval {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct AgentHandoffEvent {
+pub(crate) struct AgentHandoffEvent {
     id: Uuid,
-    source_session_id: Uuid,
+    pub(crate) source_session_id: Uuid,
     source_agent_id: Uuid,
     target_agent_id: Uuid,
     manager_plan_id: Option<Uuid>,
@@ -414,11 +414,11 @@ struct AgentHandoffEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct AgentHandoffAssignment {
+pub(crate) struct AgentHandoffAssignment {
     id: Uuid,
     agent_handoff_event_id: Uuid,
     manager_plan_id: Uuid,
-    source_session_id: Uuid,
+    pub(crate) source_session_id: Uuid,
     specialist_session_id: Uuid,
     source_agent_id: Uuid,
     target_agent_id: Uuid,
@@ -3884,6 +3884,7 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::deployment::router())
         .merge(handlers::agents::router())
         .merge(handlers::agent_releases::router())
+        .merge(handlers::agent_handoffs::router())
         .merge(handlers::semantic::router())
         .merge(handlers::ontology_onboarding::router())
         .merge(handlers::ontology_releases::router())
@@ -3894,10 +3895,6 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/sessions/{id}/agent-handoffs",
             get(list_session_agent_handoff_events).post(create_agent_handoff_event),
-        )
-        .route(
-            "/api/sessions/{id}/agent-handoff-assignments",
-            get(list_session_agent_handoff_assignments),
         )
         .route(
             "/api/sessions/{id}/manager-plans",
@@ -4531,19 +4528,9 @@ fn build_router(state: AppState) -> Router {
             "/api/remote-computer-leases/{id}/fail",
             post(fail_remote_computer_lease),
         )
-        .route("/api/agent-handoffs", get(list_agent_handoff_events))
-        .route("/api/agent-handoffs/{id}", get(get_agent_handoff_event))
         .route(
             "/api/agent-handoffs/{id}/assignment",
             get(get_agent_handoff_assignment_for_handoff).post(assign_agent_handoff_event),
-        )
-        .route(
-            "/api/agent-handoff-assignments",
-            get(list_agent_handoff_assignments),
-        )
-        .route(
-            "/api/agent-handoff-assignments/{id}",
-            get(get_agent_handoff_assignment),
         )
         .route(
             "/api/agent-handoff-assignments/{id}/remote-computer-assignment",
@@ -15725,28 +15712,6 @@ pub(crate) fn new_audit_log(
     }
 }
 
-async fn list_agent_handoff_events(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<AgentHandoffEvent>>, AppError> {
-    let principal = authorize_collection_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "agent_handoff_events",
-    )
-    .await?;
-    let visible_session_ids = visible_session_ids_for_principal(&state, &principal).await?;
-    Ok(Json(
-        state
-            .list_agent_handoff_events(None)
-            .await?
-            .into_iter()
-            .filter(|event| visible_session_ids.contains(&event.source_session_id))
-            .collect(),
-    ))
-}
-
 async fn list_session_agent_handoff_events(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -15761,61 +15726,6 @@ async fn list_session_agent_handoff_events(
     )
     .await?;
     Ok(Json(state.list_agent_handoff_events(Some(id)).await?))
-}
-
-async fn list_agent_handoff_assignments(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<AgentHandoffAssignment>>, AppError> {
-    let principal = authorize_collection_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "agent_handoff_assignments",
-    )
-    .await?;
-    let visible_session_ids = visible_session_ids_for_principal(&state, &principal).await?;
-    Ok(Json(
-        state
-            .list_agent_handoff_assignments(None)
-            .await?
-            .into_iter()
-            .filter(|assignment| visible_session_ids.contains(&assignment.source_session_id))
-            .collect(),
-    ))
-}
-
-async fn list_session_agent_handoff_assignments(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<AgentHandoffAssignment>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "session",
-        Some(id),
-    )
-    .await?;
-    Ok(Json(state.list_agent_handoff_assignments(Some(id)).await?))
-}
-
-async fn get_agent_handoff_assignment(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-) -> Result<Json<AgentHandoffAssignment>, AppError> {
-    let assignment = state.get_agent_handoff_assignment(id).await?;
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "session",
-        Some(assignment.source_session_id),
-    )
-    .await?;
-    Ok(Json(assignment))
 }
 
 async fn get_agent_handoff_assignment_for_handoff(
@@ -15837,23 +15747,6 @@ async fn get_agent_handoff_assignment_for_handoff(
         .await?
         .ok_or_else(|| AppError::not_found("agent handoff assignment not found"))?;
     Ok(Json(assignment))
-}
-
-async fn get_agent_handoff_event(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-) -> Result<Json<AgentHandoffEvent>, AppError> {
-    let event = state.get_agent_handoff_event(id).await?;
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "session",
-        Some(event.source_session_id),
-    )
-    .await?;
-    Ok(Json(event))
 }
 
 async fn list_manager_agent_plans(
