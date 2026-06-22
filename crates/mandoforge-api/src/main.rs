@@ -189,6 +189,14 @@ pub(crate) use types::observability::{
     ObservabilityRemediationSupervisionReadiness, ObservabilitySummary,
     ObservabilityTelemetryStatus,
 };
+pub(crate) use types::policy::{
+    CreatePolicyRevision, PolicyActivationWindow, PolicyDiffChange, PolicyGateCaseInput,
+    PolicyGateCaseResult, PolicyRevision, PolicyRevisionDiff, PolicyRevisionGate,
+    PolicyRevisionGateRequest, PolicyRollbackResult, PolicyRolloutControllerBinding,
+    PolicyRolloutOrchestrationReadiness, PolicyRolloutOrchestrationValidationRun, PolicyRuntime,
+    PolicyRuntimeStatus, PolicyScheduledRolloutRun, PolicyScheduledRolloutScanDetail,
+    PolicyTestResult, SimulatePolicy, StagedPolicyRuntime, TestPolicyRequest,
+};
 pub(crate) use types::session::{
     AddMessage, CreateSession, IncomingSessionEvent, SendSessionEvents, Session, SessionEvent,
     SessionLoopJob, SessionLoopJobStatus, SessionStatus, SessionThread, StreamEventsQuery,
@@ -338,115 +346,6 @@ pub(crate) fn current_request_tenant_id(default_tenant_id: Uuid) -> Uuid {
     REQUEST_TENANT_ID
         .try_with(|tenant_id| *tenant_id)
         .unwrap_or(default_tenant_id)
-}
-
-#[derive(Debug, Clone)]
-struct PolicyRuntime {
-    active_revision_id: Option<Uuid>,
-    active: PolicyConfig,
-    staged: Option<StagedPolicyRuntime>,
-}
-
-#[derive(Debug, Clone)]
-struct StagedPolicyRuntime {
-    #[allow(dead_code)]
-    revision_id: Uuid,
-    rollout_percent: u8,
-    policy: PolicyConfig,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PolicyRuntimeStatus {
-    active_revision_id: Option<Uuid>,
-    staged_revision_id: Option<Uuid>,
-    staged_rollout_percent: Option<u8>,
-    rollout_active: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PolicyRollbackResult {
-    rolled_back_from_revision_id: Uuid,
-    active_revision_id: Uuid,
-    active_revision: PolicyRevision,
-    rolled_back_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PolicyScheduledRolloutRun {
-    status: String,
-    activated_revision_id: Option<Uuid>,
-    activated_revision: Option<PolicyRevision>,
-    controller_id: Option<String>,
-    policy_store_id: Option<String>,
-    deployment_id: Option<String>,
-    scanned_count: usize,
-    skipped_count: usize,
-    scanned_revisions: Vec<PolicyScheduledRolloutScanDetail>,
-    checked_at: DateTime<Utc>,
-    reason: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PolicyScheduledRolloutScanDetail {
-    policy_id: String,
-    policy_name: String,
-    revision_id: Uuid,
-    controller_id: Option<String>,
-    policy_store_id: Option<String>,
-    deployment_id: Option<String>,
-    status: String,
-    audit_id: Uuid,
-    scanned_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone)]
-struct PolicyRolloutControllerBinding {
-    controller_id: String,
-    policy_store_id: String,
-    deployment_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PolicyRolloutOrchestrationReadiness {
-    status: String,
-    production_blocked: bool,
-    rollout_active: bool,
-    active_revision_id: Option<Uuid>,
-    staged_revision_id: Option<Uuid>,
-    latest_due_run_at: Option<DateTime<Utc>>,
-    latest_due_run_status: Option<String>,
-    latest_due_run_age_hours: Option<i64>,
-    due_run_fresh: bool,
-    latest_validation_at: Option<DateTime<Utc>>,
-    latest_validation_status: Option<String>,
-    latest_controller_status: Option<String>,
-    latest_controller_age_hours: Option<i64>,
-    controller_evidence_fresh: bool,
-    latest_controller_validated: bool,
-    latest_controller_production_target: bool,
-    latest_controller_target_kind: Option<String>,
-    latest_controller_environment: Option<String>,
-    latest_controller_id: Option<String>,
-    latest_controller_rollout_scope: Option<String>,
-    latest_controller_production_policy_store: Option<bool>,
-    latest_controller_rollback_supported: Option<bool>,
-    controller_required: bool,
-    controller_configured: bool,
-    blocking_reasons: Vec<String>,
-    message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PolicyRolloutOrchestrationValidationRun {
-    status: String,
-    rollout_active: bool,
-    active_revision_id: Option<Uuid>,
-    staged_revision_id: Option<Uuid>,
-    controller_required: bool,
-    controller_configured: bool,
-    controller_execution: Value,
-    issues: Vec<String>,
-    checked_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1550,102 +1449,6 @@ struct WorkItemActivityEntry {
     summary: String,
     metadata: Value,
     created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SimulatePolicy {
-    tool_name: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct TestPolicyRequest {
-    tool_names: Vec<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct PolicyTestResult {
-    decisions: Vec<policy::ToolPolicyDecision>,
-    tested_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PolicyDiffChange {
-    path: String,
-    kind: String,
-    current: Value,
-    proposed: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PolicyRevisionDiff {
-    revision_id: Uuid,
-    changes: Vec<PolicyDiffChange>,
-    generated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PolicyRevisionGate {
-    revision_id: Uuid,
-    status: String,
-    suite_source: String,
-    rollout_percent: u8,
-    activation_window: Option<PolicyActivationWindow>,
-    cases: Vec<PolicyGateCaseResult>,
-    diff: PolicyRevisionDiff,
-    checked_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PolicyActivationWindow {
-    activate_after: Option<DateTime<Utc>>,
-    activate_before: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-struct PolicyRevisionGateRequest {
-    #[serde(default)]
-    cases: Vec<PolicyGateCaseInput>,
-    #[serde(default)]
-    rollout_percent: Option<u8>,
-    #[serde(default)]
-    activate_after: Option<String>,
-    #[serde(default)]
-    activate_before: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct PolicyGateCaseInput {
-    tool_name: String,
-    expected_decision: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PolicyGateCaseResult {
-    tool_name: String,
-    expected_decision: String,
-    actual_decision: String,
-    passed: bool,
-    reason: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PolicyRevision {
-    id: Uuid,
-    name: String,
-    body: Value,
-    status: String,
-    created_by: Option<String>,
-    created_at: DateTime<Utc>,
-    activated_at: Option<DateTime<Utc>>,
-    gate_status: Option<String>,
-    gate_result: Value,
-    gated_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreatePolicyRevision {
-    name: String,
-    body: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
