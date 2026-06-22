@@ -13971,37 +13971,6 @@ fn validate_handoff_payload_schema(
     Ok(())
 }
 
-pub(crate) async fn list_workflow_definitions_route(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<Vec<WorkflowDefinition>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "workflow_definitions",
-        None,
-    )
-    .await?;
-    Ok(Json(state.list_workflow_definitions().await?))
-}
-
-pub(crate) async fn get_workflow_definition_route(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-) -> Result<Json<WorkflowDefinition>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "workflow_definition",
-        Some(id),
-    )
-    .await?;
-    Ok(Json(state.get_workflow_definition(id).await?))
-}
-
 pub(crate) async fn create_workflow_definition_route(
     state: AppState,
     headers: HeaderMap,
@@ -14258,41 +14227,6 @@ pub(crate) async fn update_workflow_definition_route(
         ))
         .await?;
     Ok(Json(updated))
-}
-
-pub(crate) async fn list_workflow_runs_route(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<Vec<WorkflowRun>>, AppError> {
-    let principal =
-        authorize_collection_request(&state, &headers, Permission::SessionsRead, "workflow_runs")
-            .await?;
-    let visible_session_ids = visible_session_ids_for_principal(&state, &principal).await?;
-    Ok(Json(
-        state
-            .list_workflow_runs()
-            .await?
-            .into_iter()
-            .filter(|run| visible_session_ids.contains(&run.primary_session_id))
-            .collect(),
-    ))
-}
-
-pub(crate) async fn get_workflow_run_route(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-) -> Result<Json<WorkflowRun>, AppError> {
-    let run = state.get_workflow_run(id).await?;
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "session",
-        Some(run.primary_session_id),
-    )
-    .await?;
-    Ok(Json(run))
 }
 
 pub(crate) async fn create_workflow_run_route(
@@ -16193,46 +16127,6 @@ fn native_connector_call_target(args: &Value) -> Result<NativeConnectorCallTarge
     })
 }
 
-pub(crate) async fn list_workflow_step_runs_route(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-) -> Result<Json<Vec<WorkflowStepRun>>, AppError> {
-    let run = state.get_workflow_run(id).await?;
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "session",
-        Some(run.primary_session_id),
-    )
-    .await?;
-    Ok(Json(state.list_workflow_step_runs(id).await?))
-}
-
-pub(crate) async fn list_workflow_transitions_route(
-    state: AppState,
-    id: Uuid,
-    query: WorkflowTransitionQuery,
-    headers: HeaderMap,
-) -> Result<Json<Vec<WorkflowTransition>>, AppError> {
-    let run = state.get_workflow_run(id).await?;
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "session",
-        Some(run.primary_session_id),
-    )
-    .await?;
-    let filter = workflow_transition_filter_from_query(query)?;
-    Ok(Json(
-        state
-            .list_workflow_transitions_with_filter(id, &filter)
-            .await?,
-    ))
-}
-
 fn workflow_transition_filter_from_query(
     query: WorkflowTransitionQuery,
 ) -> Result<WorkflowTransitionFilter, AppError> {
@@ -16257,55 +16151,6 @@ fn normalize_optional_filter(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-}
-
-pub(crate) async fn get_workflow_run_graph_console_route(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-) -> Result<Json<WorkflowRunGraphConsole>, AppError> {
-    let run = state.get_workflow_run(id).await?;
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "session",
-        Some(run.primary_session_id),
-    )
-    .await?;
-    Ok(Json(build_workflow_run_graph_console(&state, &run).await?))
-}
-
-pub(crate) async fn get_task_board_route(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<TaskBoardSnapshot>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "task_board",
-        None,
-    )
-    .await?;
-    Ok(Json(build_task_board_snapshot(&state).await?))
-}
-
-pub(crate) async fn get_agent_inbox_route(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-) -> Result<Json<AgentInboxSnapshot>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "agent_inbox",
-        Some(id),
-    )
-    .await?;
-    state.get_agent(id).await?;
-    Ok(Json(build_agent_inbox_snapshot(&state, id).await?))
 }
 
 async fn build_task_board_snapshot(state: &AppState) -> Result<TaskBoardSnapshot, AppError> {
@@ -19843,41 +19688,6 @@ async fn update_workflow_run_status_and_record(
         ))
         .await?;
     Ok(updated)
-}
-
-pub(crate) async fn list_workflow_task_grants_route(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-) -> Result<Json<Vec<TaskGrant>>, AppError> {
-    let run = state.get_workflow_run(id).await?;
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "session",
-        Some(run.primary_session_id),
-    )
-    .await?;
-    Ok(Json(state.list_task_grants_for_workflow_run(id).await?))
-}
-
-pub(crate) async fn get_task_grant_route(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-) -> Result<Json<TaskGrant>, AppError> {
-    let grant = state.get_task_grant(id).await?;
-    let run = state.get_workflow_run(grant.workflow_run_id).await?;
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "session",
-        Some(run.primary_session_id),
-    )
-    .await?;
-    Ok(Json(grant))
 }
 
 pub(crate) async fn create_workflow_task_grant_route(

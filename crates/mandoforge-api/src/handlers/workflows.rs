@@ -10,31 +10,21 @@ use crate::{
     AgentInboxSnapshot, AppError, AppState, ClaimWorkflowStepRun, ClaimWorkflowStepRunResponse,
     CreateTaskGrant, CreateWorkflowDefinition, CreateWorkflowRun, CreateWorkflowStepRun,
     RunDueWorkflowSteps, RunWorkflowStepRun, RunWorkflowStepRunResponse, TaskBoardSnapshot,
-    TaskGrant,
-    UpdateWorkflowDefinition,
-    UpdateWorkflowStepRun, WorkflowDefinition, WorkflowRun, WorkflowRunGraphConsole,
-    WorkflowScheduledStepActivationRun, WorkflowStepRun, WorkflowTransition,
-    WorkflowTransitionQuery,
+    TaskGrant, UpdateWorkflowDefinition, UpdateWorkflowStepRun, WorkflowDefinition, WorkflowRun,
+    WorkflowRunGraphConsole, WorkflowScheduledStepActivationRun, WorkflowStepRun,
+    WorkflowTransition, WorkflowTransitionQuery, Permission, authorize_collection_request,
+    authorize_request, build_agent_inbox_snapshot, build_task_board_snapshot,
+    build_workflow_run_graph_console,
     claim_workflow_step_run_route as claim_workflow_step_run_impl,
     create_workflow_task_grant_route as create_workflow_task_grant_impl,
     create_workflow_definition_route as create_workflow_definition_impl,
     create_workflow_run_route as create_workflow_run_impl,
     create_workflow_step_run_route as create_workflow_step_run_impl,
-    get_workflow_run_graph_console_route as get_workflow_run_graph_console_impl,
-    get_agent_inbox_route as get_agent_inbox_impl,
-    get_task_board_route as get_task_board_impl,
-    get_workflow_definition_route as get_workflow_definition_impl,
-    get_workflow_run_route as get_workflow_run_impl,
-    get_task_grant_route as get_task_grant_impl,
-    list_workflow_definitions_route as list_workflow_definitions_impl,
-    list_workflow_runs_route as list_workflow_runs_impl,
-    list_workflow_step_runs_route as list_workflow_step_runs_impl,
-    list_workflow_task_grants_route as list_workflow_task_grants_impl,
-    list_workflow_transitions_route as list_workflow_transitions_impl,
     run_due_workflow_steps_route as run_due_workflow_steps_impl,
     run_workflow_step_run_route as run_workflow_step_run_impl,
     update_workflow_definition_route as update_workflow_definition_impl,
     update_workflow_step_run_route as update_workflow_step_run_impl,
+    visible_session_ids_for_principal, workflow_transition_filter_from_query,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -93,7 +83,15 @@ async fn list_workflow_definitions(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<WorkflowDefinition>>, AppError> {
-    list_workflow_definitions_impl(state, headers).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "workflow_definitions",
+        None,
+    )
+    .await?;
+    Ok(Json(state.list_workflow_definitions().await?))
 }
 
 async fn get_workflow_definition(
@@ -101,7 +99,15 @@ async fn get_workflow_definition(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<WorkflowDefinition>, AppError> {
-    get_workflow_definition_impl(state, id, headers).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "workflow_definition",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.get_workflow_definition(id).await?))
 }
 
 async fn create_workflow_definition(
@@ -125,7 +131,18 @@ async fn list_workflow_runs(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<WorkflowRun>>, AppError> {
-    list_workflow_runs_impl(state, headers).await
+    let principal =
+        authorize_collection_request(&state, &headers, Permission::SessionsRead, "workflow_runs")
+            .await?;
+    let visible_session_ids = visible_session_ids_for_principal(&state, &principal).await?;
+    Ok(Json(
+        state
+            .list_workflow_runs()
+            .await?
+            .into_iter()
+            .filter(|run| visible_session_ids.contains(&run.primary_session_id))
+            .collect(),
+    ))
 }
 
 async fn get_workflow_run(
@@ -133,7 +150,16 @@ async fn get_workflow_run(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<WorkflowRun>, AppError> {
-    get_workflow_run_impl(state, id, headers).await
+    let run = state.get_workflow_run(id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(run.primary_session_id),
+    )
+    .await?;
+    Ok(Json(run))
 }
 
 async fn create_workflow_run(
@@ -150,7 +176,21 @@ async fn list_workflow_transitions(
     Query(query): Query<WorkflowTransitionQuery>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<WorkflowTransition>>, AppError> {
-    list_workflow_transitions_impl(state, id, query, headers).await
+    let run = state.get_workflow_run(id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(run.primary_session_id),
+    )
+    .await?;
+    let filter = workflow_transition_filter_from_query(query)?;
+    Ok(Json(
+        state
+            .list_workflow_transitions_with_filter(id, &filter)
+            .await?,
+    ))
 }
 
 async fn get_workflow_run_graph_console(
@@ -158,7 +198,16 @@ async fn get_workflow_run_graph_console(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<WorkflowRunGraphConsole>, AppError> {
-    get_workflow_run_graph_console_impl(state, id, headers).await
+    let run = state.get_workflow_run(id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(run.primary_session_id),
+    )
+    .await?;
+    Ok(Json(build_workflow_run_graph_console(&state, &run).await?))
 }
 
 async fn run_due_workflow_steps(
@@ -175,7 +224,16 @@ async fn list_workflow_step_runs(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<WorkflowStepRun>>, AppError> {
-    list_workflow_step_runs_impl(state, id, headers).await
+    let run = state.get_workflow_run(id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(run.primary_session_id),
+    )
+    .await?;
+    Ok(Json(state.list_workflow_step_runs(id).await?))
 }
 
 async fn create_workflow_step_run(
@@ -219,7 +277,16 @@ async fn list_workflow_task_grants(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<TaskGrant>>, AppError> {
-    list_workflow_task_grants_impl(state, id, headers).await
+    let run = state.get_workflow_run(id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(run.primary_session_id),
+    )
+    .await?;
+    Ok(Json(state.list_task_grants_for_workflow_run(id).await?))
 }
 
 async fn get_task_grant(
@@ -227,7 +294,17 @@ async fn get_task_grant(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<TaskGrant>, AppError> {
-    get_task_grant_impl(state, id, headers).await
+    let grant = state.get_task_grant(id).await?;
+    let run = state.get_workflow_run(grant.workflow_run_id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(run.primary_session_id),
+    )
+    .await?;
+    Ok(Json(grant))
 }
 
 async fn create_workflow_task_grant(
@@ -243,7 +320,15 @@ async fn get_task_board(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<TaskBoardSnapshot>, AppError> {
-    get_task_board_impl(state, headers).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "task_board",
+        None,
+    )
+    .await?;
+    Ok(Json(build_task_board_snapshot(&state).await?))
 }
 
 async fn get_agent_inbox(
@@ -251,5 +336,14 @@ async fn get_agent_inbox(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<AgentInboxSnapshot>, AppError> {
-    get_agent_inbox_impl(state, id, headers).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "agent_inbox",
+        Some(id),
+    )
+    .await?;
+    state.get_agent(id).await?;
+    Ok(Json(build_agent_inbox_snapshot(&state, id).await?))
 }
