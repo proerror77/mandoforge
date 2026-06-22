@@ -155,6 +155,7 @@ pub(crate) use types::agent_handoff::{
     EscalateAgentHandoffEvent, ManagerAgentPlan, ReviewManagerAgentPlan,
     TransitionAgentHandoffEvent,
 };
+pub(crate) use types::artifact::Artifact;
 pub(crate) use types::approval::{
     Approval, ApprovalCommitToken, ApprovalEscalationDueRun, ApprovalEscalationRule,
     ApprovalGroup, ApprovalNotificationChannelDelivery, ApprovalNotificationChannelPolicy,
@@ -491,17 +492,6 @@ pub(crate) struct ToolCall {
     error: Option<Value>,
     started_at: Option<DateTime<Utc>>,
     completed_at: Option<DateTime<Utc>>,
-    created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct Artifact {
-    id: Uuid,
-    session_id: Uuid,
-    artifact_type: String,
-    name: String,
-    path: Option<String>,
-    content: Value,
     created_at: DateTime<Utc>,
 }
 
