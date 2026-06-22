@@ -25221,7 +25221,7 @@ async fn tenant_context_middleware(
     Ok(REQUEST_TENANT_ID.scope(tenant_id, next.run(request)).await)
 }
 
-async fn authorize_request(
+pub(crate) async fn authorize_request(
     state: &AppState,
     headers: &HeaderMap,
     permission: Permission,
@@ -28634,7 +28634,7 @@ fn host_shell_exec_allowed_for_inline_tool() -> bool {
         .unwrap_or(false)
 }
 
-fn tool_descriptors() -> Vec<ToolDescriptor> {
+pub(crate) fn tool_descriptors() -> Vec<ToolDescriptor> {
     let mut descriptors: Vec<_> = tool_registry()
         .into_values()
         .map(|tool| tool.descriptor())
@@ -28663,14 +28663,6 @@ fn tool_descriptors() -> Vec<ToolDescriptor> {
     ]);
     descriptors.sort_by_key(|descriptor| descriptor.name);
     descriptors
-}
-
-pub(crate) async fn list_tools(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<Vec<ToolDescriptor>>, AppError> {
-    authorize_request(&state, &headers, Permission::AgentsRead, "tools", None).await?;
-    Ok(Json(tool_descriptors()))
 }
 
 pub(crate) async fn execute_tool(
@@ -49206,24 +49198,6 @@ pub(crate) async fn list_artifacts(
     )
     .await?;
     Ok(Json(state.list_artifacts(id).await?))
-}
-
-pub(crate) async fn list_tool_calls(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<Vec<ToolCall>>, AppError> {
-    let principal =
-        authorize_collection_request(&state, &headers, Permission::SessionsRead, "tool_calls")
-            .await?;
-    let visible_session_ids = visible_session_ids_for_principal(&state, &principal).await?;
-    Ok(Json(
-        state
-            .list_tool_calls(None)
-            .await?
-            .into_iter()
-            .filter(|tool_call| visible_session_ids.contains(&tool_call.session_id))
-            .collect(),
-    ))
 }
 
 pub(crate) async fn list_session_tool_calls(

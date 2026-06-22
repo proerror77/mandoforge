@@ -7,9 +7,9 @@ use axum::{
 use serde_json::Value;
 
 use crate::{
-    AppError, AppState, ExecuteTool, ToolCall, ToolDescriptor,
-    execute_tool as execute_tool_impl, list_tool_calls as list_tool_calls_impl,
-    list_tools as list_tools_impl,
+    AppError, AppState, ExecuteTool, Permission, ToolCall, ToolDescriptor,
+    authorize_collection_request, authorize_request, execute_tool as execute_tool_impl,
+    tool_descriptors, visible_session_ids_for_principal,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -23,7 +23,8 @@ async fn list_tools(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<ToolDescriptor>>, AppError> {
-    list_tools_impl(state, headers).await
+    authorize_request(&state, &headers, Permission::AgentsRead, "tools", None).await?;
+    Ok(Json(tool_descriptors()))
 }
 
 async fn execute_tool(
@@ -39,5 +40,16 @@ async fn list_tool_calls(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<ToolCall>>, AppError> {
-    list_tool_calls_impl(state, headers).await
+    let principal =
+        authorize_collection_request(&state, &headers, Permission::SessionsRead, "tool_calls")
+            .await?;
+    let visible_session_ids = visible_session_ids_for_principal(&state, &principal).await?;
+    Ok(Json(
+        state
+            .list_tool_calls(None)
+            .await?
+            .into_iter()
+            .filter(|tool_call| visible_session_ids.contains(&tool_call.session_id))
+            .collect(),
+    ))
 }
