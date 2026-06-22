@@ -156,6 +156,12 @@ pub(crate) use types::session::{
     AddMessage, CreateSession, IncomingSessionEvent, SendSessionEvents, Session, SessionEvent,
     SessionLoopJob, SessionLoopJobStatus, SessionStatus, SessionThread, StreamEventsQuery,
 };
+pub(crate) use types::ontology::{
+    BuildSemanticOntologyRequest, CreateOntologyReleaseCandidateRequest,
+    ExpandSemanticOntologyRequest, OntologyEngineReadiness, OntologyEngineReadinessCheck,
+    OntologyObjectType, OntologyRegistry, OntologyRelationType, OntologyRelease,
+    OntologyReleaseListQuery, ReviewOntologyProposalRequest,
+};
 pub(crate) use types::semantic::{
     ContextPacketSemanticObject, CreateMemoryWritebackCandidates, CreateSemanticIngestionBatch,
     CreateSemanticLink, CreateSemanticObject, CreateSemanticSource, CreateSemanticSynthesisRun,
@@ -533,76 +539,6 @@ struct AttachAgentHandoffRemoteComputerAssignment {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct OntologyRegistry {
-    version: String,
-    object_types: Vec<OntologyObjectType>,
-    relation_types: Vec<OntologyRelationType>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OntologyObjectType {
-    name: String,
-    description: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    entity_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    memory_level: Option<String>,
-    governance_boundary: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OntologyRelationType {
-    name: String,
-    from_entity_type: String,
-    to_entity_type: String,
-    description: String,
-    governance_boundary: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ExpandSemanticOntologyRequest {
-    domain_scope: String,
-    #[serde(default)]
-    object_types: Vec<String>,
-    #[serde(default)]
-    relation_types: Vec<String>,
-    #[serde(default)]
-    reason: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct BuildSemanticOntologyRequest {
-    domain_scope: String,
-    #[serde(default)]
-    workflow_scope: Option<String>,
-    #[serde(default)]
-    memory_scope: Option<String>,
-    #[serde(default)]
-    objective: Option<String>,
-    #[serde(default)]
-    source_text: Option<String>,
-    #[serde(default)]
-    source_refs: Vec<String>,
-    #[serde(default)]
-    evidence_object_ids: Vec<Uuid>,
-    #[serde(default)]
-    agent_draft: Option<Value>,
-    #[serde(default)]
-    max_object_types: Option<usize>,
-    #[serde(default)]
-    max_relation_types: Option<usize>,
-    #[serde(default)]
-    preview_only: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct ReviewOntologyProposalRequest {
-    decision: String,
-    #[serde(default)]
-    reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 struct OntologyOnboardingField {
     name: String,
     field_type: String,
@@ -758,22 +694,6 @@ struct CreateOntologyOnboardingRunRequest {
     source_mode: Option<String>,
     #[serde(default)]
     source_payload: Option<ontology_source_adapters::OntologySourcePayload>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct CreateOntologyReleaseCandidateRequest {
-    #[serde(default)]
-    version: Option<String>,
-    #[serde(default)]
-    migration_policy: Option<Value>,
-    #[serde(default)]
-    release_class: Option<String>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct OntologyReleaseListQuery {
-    #[serde(default)]
-    domain_scope: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -991,33 +911,6 @@ struct OntologyOnboardingMaterializationResult {
     tool_spec_count: usize,
     semantic_object_ids: Vec<Uuid>,
     semantic_link_ids: Vec<Uuid>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OntologyRelease {
-    id: Uuid,
-    version: String,
-    domain_scope: String,
-    source_run_id: Option<Uuid>,
-    parent_release_id: Option<Uuid>,
-    rollback_target_release_id: Option<Uuid>,
-    status: String,
-    release_class: String,
-    object_count: i32,
-    relation_count: i32,
-    action_count: i32,
-    migration_policy: Value,
-    gate_result: Value,
-    materialized_object_ids: Value,
-    materialized_link_ids: Value,
-    evidence_refs: Value,
-    promoted_by: Option<String>,
-    promoted_at: Option<DateTime<Utc>>,
-    rolled_back_by: Option<String>,
-    rolled_back_at: Option<DateTime<Utc>>,
-    archived_at: Option<DateTime<Utc>>,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2648,36 +2541,6 @@ struct EnterpriseSecurityAdminCheck {
     current_evidence_class: String,
     required_evidence_class: String,
     evidence: Value,
-    blockers: Vec<String>,
-    next_actions: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OntologyEngineReadiness {
-    generated_at: DateTime<Utc>,
-    status: String,
-    registry_version: String,
-    required_evidence_class: String,
-    object_type_count: usize,
-    relation_type_count: usize,
-    check_count: usize,
-    ready_check_count: usize,
-    pilot_ready_check_count: usize,
-    blocked_check_count: usize,
-    completion_blocked: bool,
-    checks: Vec<OntologyEngineReadinessCheck>,
-    next_actions: Vec<String>,
-    message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OntologyEngineReadinessCheck {
-    id: String,
-    title: String,
-    status: String,
-    current_evidence_class: String,
-    required_evidence_class: String,
-    evidence: Vec<String>,
     blockers: Vec<String>,
     next_actions: Vec<String>,
 }
