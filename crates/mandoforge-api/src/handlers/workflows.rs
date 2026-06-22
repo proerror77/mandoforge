@@ -2,23 +2,32 @@ use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::HeaderMap,
-    routing::get,
+    routing::{get, patch, post},
 };
 use uuid::Uuid;
 
 use crate::{
-    AppError, AppState, CreateWorkflowDefinition, CreateWorkflowRun, UpdateWorkflowDefinition,
-    WorkflowDefinition, WorkflowRun, WorkflowRunGraphConsole, WorkflowTransition,
+    AppError, AppState, ClaimWorkflowStepRun, ClaimWorkflowStepRunResponse,
+    CreateWorkflowDefinition, CreateWorkflowRun, CreateWorkflowStepRun, RunDueWorkflowSteps,
+    RunWorkflowStepRun, RunWorkflowStepRunResponse, UpdateWorkflowDefinition,
+    UpdateWorkflowStepRun, WorkflowDefinition, WorkflowRun, WorkflowRunGraphConsole,
+    WorkflowScheduledStepActivationRun, WorkflowStepRun, WorkflowTransition,
     WorkflowTransitionQuery,
+    claim_workflow_step_run_route as claim_workflow_step_run_impl,
     create_workflow_definition_route as create_workflow_definition_impl,
     create_workflow_run_route as create_workflow_run_impl,
+    create_workflow_step_run_route as create_workflow_step_run_impl,
     get_workflow_run_graph_console_route as get_workflow_run_graph_console_impl,
     get_workflow_definition_route as get_workflow_definition_impl,
     get_workflow_run_route as get_workflow_run_impl,
     list_workflow_definitions_route as list_workflow_definitions_impl,
     list_workflow_runs_route as list_workflow_runs_impl,
+    list_workflow_step_runs_route as list_workflow_step_runs_impl,
     list_workflow_transitions_route as list_workflow_transitions_impl,
+    run_due_workflow_steps_route as run_due_workflow_steps_impl,
+    run_workflow_step_run_route as run_workflow_step_run_impl,
     update_workflow_definition_route as update_workflow_definition_impl,
+    update_workflow_step_run_route as update_workflow_step_run_impl,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -43,6 +52,26 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/api/workflow-runs/{id}/graph",
             get(get_workflow_run_graph_console),
+        )
+        .route(
+            "/api/workflow-runs/{id}/scheduled-steps/run-due",
+            post(run_due_workflow_steps),
+        )
+        .route(
+            "/api/workflow-runs/{id}/steps",
+            get(list_workflow_step_runs).post(create_workflow_step_run),
+        )
+        .route(
+            "/api/workflow-step-runs/{id}",
+            patch(update_workflow_step_run),
+        )
+        .route(
+            "/api/workflow-step-runs/{id}/claim",
+            post(claim_workflow_step_run),
+        )
+        .route(
+            "/api/workflow-step-runs/{id}/run",
+            post(run_workflow_step_run),
         )
 }
 
@@ -116,4 +145,57 @@ async fn get_workflow_run_graph_console(
     headers: HeaderMap,
 ) -> Result<Json<WorkflowRunGraphConsole>, AppError> {
     get_workflow_run_graph_console_impl(state, id, headers).await
+}
+
+async fn run_due_workflow_steps(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<RunDueWorkflowSteps>,
+) -> Result<Json<WorkflowScheduledStepActivationRun>, AppError> {
+    run_due_workflow_steps_impl(state, id, headers, input).await
+}
+
+async fn list_workflow_step_runs(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<WorkflowStepRun>>, AppError> {
+    list_workflow_step_runs_impl(state, id, headers).await
+}
+
+async fn create_workflow_step_run(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateWorkflowStepRun>,
+) -> Result<Json<WorkflowStepRun>, AppError> {
+    create_workflow_step_run_impl(state, id, headers, input).await
+}
+
+async fn update_workflow_step_run(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateWorkflowStepRun>,
+) -> Result<Json<WorkflowStepRun>, AppError> {
+    update_workflow_step_run_impl(state, id, headers, input).await
+}
+
+async fn claim_workflow_step_run(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<ClaimWorkflowStepRun>,
+) -> Result<Json<ClaimWorkflowStepRunResponse>, AppError> {
+    claim_workflow_step_run_impl(state, id, headers, input).await
+}
+
+async fn run_workflow_step_run(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<RunWorkflowStepRun>,
+) -> Result<Json<RunWorkflowStepRunResponse>, AppError> {
+    run_workflow_step_run_impl(state, id, headers, input).await
 }

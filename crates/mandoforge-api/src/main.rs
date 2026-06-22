@@ -3896,26 +3896,6 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::dynamic_workflow_plans::router())
         .merge(handlers::workflows::router())
         .route(
-            "/api/workflow-runs/{id}/scheduled-steps/run-due",
-            post(run_due_workflow_steps_route),
-        )
-        .route(
-            "/api/workflow-runs/{id}/steps",
-            get(list_workflow_step_runs_route).post(create_workflow_step_run_route),
-        )
-        .route(
-            "/api/workflow-step-runs/{id}",
-            patch(update_workflow_step_run_route),
-        )
-        .route(
-            "/api/workflow-step-runs/{id}/claim",
-            post(claim_workflow_step_run_route),
-        )
-        .route(
-            "/api/workflow-step-runs/{id}/run",
-            post(run_workflow_step_run_route),
-        )
-        .route(
             "/api/workflow-runs/{id}/task-grants",
             get(list_workflow_task_grants_route).post(create_workflow_task_grant_route),
         )
@@ -21241,9 +21221,9 @@ fn native_connector_call_target(args: &Value) -> Result<NativeConnectorCallTarge
     })
 }
 
-async fn list_workflow_step_runs_route(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn list_workflow_step_runs_route(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<Vec<WorkflowStepRun>>, AppError> {
     let run = state.get_workflow_run(id).await?;
@@ -21709,11 +21689,11 @@ fn workflow_graph_console_summary(value: &Value) -> Value {
     }
 }
 
-async fn create_workflow_step_run_route(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn create_workflow_step_run_route(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<CreateWorkflowStepRun>,
+    input: CreateWorkflowStepRun,
 ) -> Result<Json<WorkflowStepRun>, AppError> {
     let run = state.get_workflow_run(id).await?;
     authorize_request(
@@ -21806,11 +21786,11 @@ async fn create_workflow_step_run_route(
     Ok(Json(step))
 }
 
-async fn claim_workflow_step_run_route(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn claim_workflow_step_run_route(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<ClaimWorkflowStepRun>,
+    input: ClaimWorkflowStepRun,
 ) -> Result<Json<ClaimWorkflowStepRunResponse>, AppError> {
     let current = state.get_workflow_step_run(id).await?;
     let run = state.get_workflow_run(current.workflow_run_id).await?;
@@ -21947,11 +21927,11 @@ async fn claim_workflow_step_run(
     })
 }
 
-async fn run_workflow_step_run_route(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn run_workflow_step_run_route(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<RunWorkflowStepRun>,
+    input: RunWorkflowStepRun,
 ) -> Result<Json<RunWorkflowStepRunResponse>, AppError> {
     let current = state.get_workflow_step_run(id).await?;
     let run = state.get_workflow_run(current.workflow_run_id).await?;
@@ -23223,11 +23203,11 @@ async fn record_agent_inbox_claimed(
     Ok(())
 }
 
-async fn update_workflow_step_run_route(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn update_workflow_step_run_route(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<UpdateWorkflowStepRun>,
+    input: UpdateWorkflowStepRun,
 ) -> Result<Json<WorkflowStepRun>, AppError> {
     let current = state.get_workflow_step_run(id).await?;
     let run = state.get_workflow_run(current.workflow_run_id).await?;
@@ -23300,11 +23280,11 @@ fn workflow_step_status_successful(status: &str) -> bool {
     matches!(status, "completed" | "skipped")
 }
 
-async fn run_due_workflow_steps_route(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn run_due_workflow_steps_route(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(_input): Json<RunDueWorkflowSteps>,
+    _input: RunDueWorkflowSteps,
 ) -> Result<Json<WorkflowScheduledStepActivationRun>, AppError> {
     let run = state.get_workflow_run(id).await?;
     authorize_request(
