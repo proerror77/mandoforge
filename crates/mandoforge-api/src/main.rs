@@ -3896,11 +3896,6 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::dynamic_workflow_plans::router())
         .merge(handlers::workflows::router())
         .route(
-            "/api/workflow-runs",
-            get(list_workflow_runs_route).post(create_workflow_run_route),
-        )
-        .route("/api/workflow-runs/{id}", get(get_workflow_run_route))
-        .route(
             "/api/workflow-runs/{id}/transitions",
             get(list_workflow_transitions_route),
         )
@@ -19321,8 +19316,8 @@ pub(crate) async fn update_workflow_definition_route(
     Ok(Json(updated))
 }
 
-async fn list_workflow_runs_route(
-    State(state): State<AppState>,
+pub(crate) async fn list_workflow_runs_route(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Vec<WorkflowRun>>, AppError> {
     let principal =
@@ -19339,9 +19334,9 @@ async fn list_workflow_runs_route(
     ))
 }
 
-async fn get_workflow_run_route(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn get_workflow_run_route(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<WorkflowRun>, AppError> {
     let run = state.get_workflow_run(id).await?;
@@ -19356,10 +19351,10 @@ async fn get_workflow_run_route(
     Ok(Json(run))
 }
 
-async fn create_workflow_run_route(
-    State(state): State<AppState>,
+pub(crate) async fn create_workflow_run_route(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<CreateWorkflowRun>,
+    input: CreateWorkflowRun,
 ) -> Result<Json<WorkflowRun>, AppError> {
     authorize_request(
         &state,
