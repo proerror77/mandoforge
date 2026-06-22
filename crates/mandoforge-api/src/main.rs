@@ -42203,45 +42203,7 @@ async fn execute_remote_computer_stale_reclaim(
     Ok(run)
 }
 
-pub(crate) async fn list_remote_computer_state_locks(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<Vec<RemoteComputerStateLock>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "remote_computer_state_locks",
-        None,
-    )
-    .await?;
-    Ok(Json(state.list_remote_computer_state_locks().await?))
-}
-
-pub(crate) async fn acquire_remote_computer_state_lock(
-    state: AppState,
-    headers: HeaderMap,
-    input: CreateRemoteComputerStateLock,
-) -> Result<Json<RemoteComputerStateLock>, AppError> {
-    let session_id = input.session_id.ok_or_else(|| {
-        AppError::bad_request("Remote Computer state lock requires session_id for scoped access")
-    })?;
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRun,
-        "session",
-        Some(session_id),
-    )
-    .await?;
-    ensure_remote_computer_lock_refs_match_session(&state, &input, session_id).await?;
-    let lock = state.acquire_remote_computer_state_lock(input).await?;
-    record_remote_computer_state_lock_event(&state, &lock, "remote_computer.state_lock_acquired")
-        .await?;
-    Ok(Json(lock))
-}
-
-async fn ensure_remote_computer_lock_refs_match_session(
+pub(crate) async fn ensure_remote_computer_lock_refs_match_session(
     state: &AppState,
     input: &CreateRemoteComputerStateLock,
     session_id: Uuid,
@@ -42269,7 +42231,7 @@ async fn ensure_remote_computer_lock_refs_match_session(
     Ok(())
 }
 
-async fn authorize_remote_computer_state_lock_release(
+pub(crate) async fn authorize_remote_computer_state_lock_release(
     state: &AppState,
     headers: &HeaderMap,
     lock: &RemoteComputerStateLock,
@@ -42301,65 +42263,7 @@ async fn authorize_remote_computer_state_lock_release(
     Ok(())
 }
 
-pub(crate) async fn release_remote_computer_state_lock(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-    input: ReleaseRemoteComputerStateLock,
-) -> Result<Json<RemoteComputerStateLock>, AppError> {
-    let existing = state
-        .list_remote_computer_state_locks()
-        .await?
-        .into_iter()
-        .find(|lock| lock.id == id)
-        .ok_or_else(|| AppError::not_found("Remote Computer state lock not found"))?;
-    authorize_remote_computer_state_lock_release(&state, &headers, &existing).await?;
-    let lock = state.release_remote_computer_state_lock(id, input).await?;
-    record_remote_computer_state_lock_event(&state, &lock, "remote_computer.state_lock_released")
-        .await?;
-    Ok(Json(lock))
-}
-
-pub(crate) async fn list_remote_computer_sidecar_heartbeats(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<Vec<RemoteComputerSidecarHeartbeat>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "remote_computer_sidecar_heartbeats",
-        None,
-    )
-    .await?;
-    Ok(Json(state.list_remote_computer_sidecar_heartbeats().await?))
-}
-
-pub(crate) async fn record_remote_computer_sidecar_heartbeat(
-    state: AppState,
-    headers: HeaderMap,
-    input: CreateRemoteComputerSidecarHeartbeat,
-) -> Result<Json<RemoteComputerSidecarHeartbeat>, AppError> {
-    let session_id = input.session_id.ok_or_else(|| {
-        AppError::bad_request("Remote Computer sidecar heartbeat requires session_id")
-    })?;
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRun,
-        "session",
-        Some(session_id),
-    )
-    .await?;
-    ensure_remote_computer_heartbeat_refs_match_session(&state, &input, session_id).await?;
-    let heartbeat = state
-        .record_remote_computer_sidecar_heartbeat(input)
-        .await?;
-    record_remote_computer_sidecar_heartbeat_event(&state, &heartbeat).await?;
-    Ok(Json(heartbeat))
-}
-
-async fn ensure_remote_computer_heartbeat_refs_match_session(
+pub(crate) async fn ensure_remote_computer_heartbeat_refs_match_session(
     state: &AppState,
     input: &CreateRemoteComputerSidecarHeartbeat,
     session_id: Uuid,
@@ -42520,7 +42424,7 @@ pub(crate) async fn record_remote_computer_job_assignment_event(
     Ok(())
 }
 
-async fn record_remote_computer_state_lock_event(
+pub(crate) async fn record_remote_computer_state_lock_event(
     state: &AppState,
     lock: &RemoteComputerStateLock,
     event_type: &str,
@@ -42556,7 +42460,7 @@ async fn record_remote_computer_state_lock_event(
     Ok(())
 }
 
-async fn record_remote_computer_sidecar_heartbeat_event(
+pub(crate) async fn record_remote_computer_sidecar_heartbeat_event(
     state: &AppState,
     heartbeat: &RemoteComputerSidecarHeartbeat,
 ) -> Result<(), AppError> {
