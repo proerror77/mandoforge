@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::{ContextPacket, Session, SessionLoopJob, WorkItem};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct DynamicWorkflowPlan {
     pub(crate) id: Uuid,
@@ -479,6 +481,108 @@ pub(crate) struct WorkflowGraphConsoleEdge {
     pub(crate) condition_summary: Value,
     pub(crate) result_summary: Value,
     pub(crate) created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct TaskBoardSnapshot {
+    pub(crate) generated_at: DateTime<Utc>,
+    pub(crate) work_item_count: usize,
+    pub(crate) workflow_run_count: usize,
+    pub(crate) workflow_step_count: usize,
+    pub(crate) claimable_count: usize,
+    pub(crate) status_counts: BTreeMap<String, usize>,
+    pub(crate) items: Vec<TaskBoardItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct TaskBoardItem {
+    pub(crate) work_item_id: Option<Uuid>,
+    pub(crate) work_item_title: Option<String>,
+    pub(crate) work_item_priority: Option<String>,
+    pub(crate) workflow_run_id: Uuid,
+    pub(crate) workflow_definition_id: Uuid,
+    pub(crate) workflow_step_run_id: Uuid,
+    pub(crate) step_key: String,
+    pub(crate) step_type: String,
+    pub(crate) agent_id: Option<Uuid>,
+    pub(crate) task_grant_id: Option<Uuid>,
+    pub(crate) context_packet_id: Option<Uuid>,
+    pub(crate) status: String,
+    pub(crate) claimable: bool,
+    pub(crate) blockers: Vec<String>,
+    pub(crate) claimed_by_worker: Option<String>,
+    pub(crate) lease_expires_at: Option<DateTime<Utc>>,
+    pub(crate) updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AgentInboxSnapshot {
+    pub(crate) agent_id: Uuid,
+    pub(crate) generated_at: DateTime<Utc>,
+    pub(crate) entry_count: usize,
+    pub(crate) claimable_count: usize,
+    pub(crate) entries: Vec<AgentInboxEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AgentInboxEntry {
+    pub(crate) workflow_run_id: Uuid,
+    pub(crate) workflow_definition_id: Uuid,
+    pub(crate) workflow_step_run_id: Uuid,
+    pub(crate) step_key: String,
+    pub(crate) step_type: String,
+    pub(crate) status: String,
+    pub(crate) task_grant_id: Option<Uuid>,
+    pub(crate) context_packet_id: Option<Uuid>,
+    pub(crate) work_item: Option<WorkItem>,
+    pub(crate) claimable: bool,
+    pub(crate) blockers: Vec<String>,
+    pub(crate) claimed_by_worker: Option<String>,
+    pub(crate) lease_expires_at: Option<DateTime<Utc>>,
+    pub(crate) input_summary: Value,
+    pub(crate) updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ClaimWorkflowStepRun {
+    pub(crate) agent_id: Uuid,
+    #[serde(default)]
+    pub(crate) worker_id: Option<String>,
+    #[serde(default)]
+    pub(crate) lease_seconds: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ClaimWorkflowStepRunResponse {
+    pub(crate) step: WorkflowStepRun,
+    pub(crate) task_grant: TaskGrant,
+    pub(crate) context_packet: ContextPacket,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct RunWorkflowStepRun {
+    #[serde(default)]
+    pub(crate) agent_id: Option<Uuid>,
+    #[serde(default)]
+    pub(crate) worker_id: Option<String>,
+    #[serde(default)]
+    pub(crate) lease_seconds: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct RunWorkflowStepRunResponse {
+    pub(crate) step: WorkflowStepRun,
+    pub(crate) task_grant: TaskGrant,
+    pub(crate) context_packet: ContextPacket,
+    pub(crate) session: Session,
+    pub(crate) session_loop_job: SessionLoopJob,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SessionRuntimeRefs {
+    pub(crate) artifact_ids: Vec<Uuid>,
+    pub(crate) approval_ids: Vec<Uuid>,
+    pub(crate) tool_call_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

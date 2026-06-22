@@ -170,11 +170,14 @@ pub(crate) use types::workflow::{
     DynamicWorkflowAdjudicationRequest, DynamicWorkflowAdjudicationResponse, DynamicWorkflowPlan,
     DynamicWorkflowPlanCompilationResponse, DynamicWorkflowPlanMaterializationResponse,
     DynamicWorkflowPressureTestRequest, DynamicWorkflowPressureTestResponse,
-    MaterializeDynamicWorkflowPlan, ReviewDynamicWorkflowPlan, RunDueWorkflowSteps, TaskGrant,
-    UpdateWorkflowDefinition, UpdateWorkflowStepRun, WorkflowDefinition,
-    WorkflowGraphConsoleEdge, WorkflowGraphConsoleNode, WorkflowRun, WorkflowRunGraphConsole,
-    WorkflowScheduledStepActivationRun, WorkflowScheduledStepActivationSweep, WorkflowStepRun,
-    WorkflowTransition, WorkflowTransitionFilter, WorkflowTransitionQuery,
+    AgentInboxEntry, AgentInboxSnapshot, ClaimWorkflowStepRun, ClaimWorkflowStepRunResponse,
+    MaterializeDynamicWorkflowPlan, ReviewDynamicWorkflowPlan, RunDueWorkflowSteps,
+    RunWorkflowStepRun, RunWorkflowStepRunResponse, SessionRuntimeRefs, TaskBoardItem,
+    TaskBoardSnapshot, TaskGrant, UpdateWorkflowDefinition, UpdateWorkflowStepRun,
+    WorkflowDefinition, WorkflowGraphConsoleEdge, WorkflowGraphConsoleNode, WorkflowRun,
+    WorkflowRunGraphConsole, WorkflowScheduledStepActivationRun,
+    WorkflowScheduledStepActivationSweep, WorkflowStepRun, WorkflowTransition,
+    WorkflowTransitionFilter, WorkflowTransitionQuery,
 };
 use types::tools::{
     ApprovalRequestTool, ArtifactCreateTool, FileReadTool, McpCallTool, OntologyTypeLookupTool,
@@ -506,108 +509,6 @@ struct AttachAgentHandoffRemoteComputerAssignment {
     remote_computer_job_assignment_id: Uuid,
     #[serde(default = "empty_json_object")]
     metadata: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TaskBoardSnapshot {
-    generated_at: DateTime<Utc>,
-    work_item_count: usize,
-    workflow_run_count: usize,
-    workflow_step_count: usize,
-    claimable_count: usize,
-    status_counts: BTreeMap<String, usize>,
-    items: Vec<TaskBoardItem>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TaskBoardItem {
-    work_item_id: Option<Uuid>,
-    work_item_title: Option<String>,
-    work_item_priority: Option<String>,
-    workflow_run_id: Uuid,
-    workflow_definition_id: Uuid,
-    workflow_step_run_id: Uuid,
-    step_key: String,
-    step_type: String,
-    agent_id: Option<Uuid>,
-    task_grant_id: Option<Uuid>,
-    context_packet_id: Option<Uuid>,
-    status: String,
-    claimable: bool,
-    blockers: Vec<String>,
-    claimed_by_worker: Option<String>,
-    lease_expires_at: Option<DateTime<Utc>>,
-    updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AgentInboxSnapshot {
-    agent_id: Uuid,
-    generated_at: DateTime<Utc>,
-    entry_count: usize,
-    claimable_count: usize,
-    entries: Vec<AgentInboxEntry>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AgentInboxEntry {
-    workflow_run_id: Uuid,
-    workflow_definition_id: Uuid,
-    workflow_step_run_id: Uuid,
-    step_key: String,
-    step_type: String,
-    status: String,
-    task_grant_id: Option<Uuid>,
-    context_packet_id: Option<Uuid>,
-    work_item: Option<WorkItem>,
-    claimable: bool,
-    blockers: Vec<String>,
-    claimed_by_worker: Option<String>,
-    lease_expires_at: Option<DateTime<Utc>>,
-    input_summary: Value,
-    updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ClaimWorkflowStepRun {
-    agent_id: Uuid,
-    #[serde(default)]
-    worker_id: Option<String>,
-    #[serde(default)]
-    lease_seconds: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ClaimWorkflowStepRunResponse {
-    step: WorkflowStepRun,
-    task_grant: TaskGrant,
-    context_packet: ContextPacket,
-}
-
-#[derive(Debug, Deserialize)]
-struct RunWorkflowStepRun {
-    #[serde(default)]
-    agent_id: Option<Uuid>,
-    #[serde(default)]
-    worker_id: Option<String>,
-    #[serde(default)]
-    lease_seconds: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RunWorkflowStepRunResponse {
-    step: WorkflowStepRun,
-    task_grant: TaskGrant,
-    context_packet: ContextPacket,
-    session: Session,
-    session_loop_job: SessionLoopJob,
-}
-
-#[derive(Debug, Clone, Default)]
-struct SessionRuntimeRefs {
-    artifact_ids: Vec<Uuid>,
-    approval_ids: Vec<Uuid>,
-    tool_call_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
