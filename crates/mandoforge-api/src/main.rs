@@ -133,6 +133,11 @@ use remote_computer_runner::{
     RemoteComputerRunnerDryRunResponse, RemoteComputerRunnerReadiness,
     remote_computer_runner_for_config,
 };
+use types::tools::{
+    ApprovalRequestTool, ArtifactCreateTool, FileReadTool, McpCallTool, OntologyTypeLookupTool,
+    SemanticLinkExpandTool, SemanticObjectFetchTool, SemanticObjectSearchTool, ShellExecTool,
+    SqlQueryTool, SqlSchemaTool, ToolDescriptor,
+};
 use secrets::{
     SecretProvider, SecretProviderConfig, SecretProviderKind, SecretRef, SecretValue,
     VaultSecretProvider, secret_provider_from_env,
@@ -6935,13 +6940,6 @@ struct CreateUsageRollup {
     period_end: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Serialize)]
-struct ToolDescriptor {
-    name: &'static str,
-    risk: &'static str,
-    description: &'static str,
-}
-
 #[async_trait]
 trait ToolExecutor: Send + Sync {
     fn descriptor(&self) -> ToolDescriptor;
@@ -6953,18 +6951,6 @@ trait ToolExecutor: Send + Sync {
         tool_call: &ToolCall,
     ) -> Result<Value, AppError>;
 }
-
-struct FileReadTool;
-struct SqlSchemaTool;
-struct SqlQueryTool;
-struct ShellExecTool;
-struct ArtifactCreateTool;
-struct ApprovalRequestTool;
-struct McpCallTool;
-struct SemanticObjectFetchTool;
-struct SemanticObjectSearchTool;
-struct SemanticLinkExpandTool;
-struct OntologyTypeLookupTool;
 
 #[derive(Debug, Deserialize)]
 struct ExecuteTool {
