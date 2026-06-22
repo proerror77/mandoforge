@@ -3901,19 +3901,6 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::providers::router())
         .merge(handlers::mcp::router())
         .route(
-            "/api/providers/deployment/validate",
-            post(validate_provider_deployment),
-        )
-        .route("/api/providers/policy-gate", get(get_provider_policy_gate))
-        .route(
-            "/api/providers/policy-gate/run",
-            post(run_provider_policy_gate),
-        )
-        .route(
-            "/api/providers/policy-gate/runs",
-            get(get_provider_policy_gate_runs),
-        )
-        .route(
             "/api/providers/production-rollout/run",
             post(run_provider_production_rollout),
         )
@@ -35124,8 +35111,8 @@ pub(crate) async fn get_provider_summary(
     )))
 }
 
-async fn validate_provider_deployment(
-    State(state): State<AppState>,
+pub(crate) async fn validate_provider_deployment(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<ProviderDeploymentValidationRun>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
@@ -35241,8 +35228,8 @@ async fn validate_provider_deployment(
     }))
 }
 
-async fn get_provider_policy_gate(
-    State(state): State<AppState>,
+pub(crate) async fn get_provider_policy_gate(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<ProviderPolicyGateReport>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "providers", None).await?;
@@ -35254,8 +35241,8 @@ async fn get_provider_policy_gate(
     )))
 }
 
-async fn run_provider_policy_gate(
-    State(state): State<AppState>,
+pub(crate) async fn run_provider_policy_gate(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<ProviderPolicyGateRunResponse>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
@@ -35318,8 +35305,8 @@ async fn execute_provider_policy_gate(
     Ok(ProviderPolicyGateRunResponse { run, report })
 }
 
-async fn get_provider_policy_gate_runs(
-    State(state): State<AppState>,
+pub(crate) async fn get_provider_policy_gate_runs(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<ProviderPolicyGateRunSummary>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "providers", None).await?;

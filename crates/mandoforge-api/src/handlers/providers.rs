@@ -8,15 +8,21 @@ use uuid::Uuid;
 
 use crate::{
     AppError, AppState, CreateProviderAccess, CreateProviderRecord, ProviderAccess,
-    ProviderGovernanceSummary, ProviderRecord, UpdateProviderAccess,
+    ProviderDeploymentValidationRun, ProviderGovernanceSummary, ProviderPolicyGateReport,
+    ProviderPolicyGateRunResponse, ProviderPolicyGateRunSummary, ProviderRecord,
+    UpdateProviderAccess,
     archive_provider_access as archive_provider_access_impl,
     create_provider as create_provider_impl,
     create_provider_access as create_provider_access_impl,
+    get_provider_policy_gate as get_provider_policy_gate_impl,
+    get_provider_policy_gate_runs as get_provider_policy_gate_runs_impl,
     get_provider_summary as get_provider_summary_impl,
     list_providers as list_providers_impl,
     list_provider_access as list_provider_access_impl,
+    run_provider_policy_gate as run_provider_policy_gate_impl,
     update_provider as update_provider_impl,
     update_provider_access as update_provider_access_impl,
+    validate_provider_deployment as validate_provider_deployment_impl,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -24,6 +30,19 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/api/providers", get(list_providers).post(create_provider))
         .route("/api/providers/{id}", patch(update_provider))
         .route("/api/providers/summary", get(get_provider_summary))
+        .route(
+            "/api/providers/deployment/validate",
+            post(validate_provider_deployment),
+        )
+        .route("/api/providers/policy-gate", get(get_provider_policy_gate))
+        .route(
+            "/api/providers/policy-gate/run",
+            post(run_provider_policy_gate),
+        )
+        .route(
+            "/api/providers/policy-gate/runs",
+            get(get_provider_policy_gate_runs),
+        )
         .route(
             "/api/teams/{id}/provider-access",
             get(list_provider_access).post(create_provider_access),
@@ -64,6 +83,34 @@ async fn get_provider_summary(
     headers: HeaderMap,
 ) -> Result<Json<ProviderGovernanceSummary>, AppError> {
     get_provider_summary_impl(state, headers).await
+}
+
+async fn validate_provider_deployment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ProviderDeploymentValidationRun>, AppError> {
+    validate_provider_deployment_impl(state, headers).await
+}
+
+async fn get_provider_policy_gate(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ProviderPolicyGateReport>, AppError> {
+    get_provider_policy_gate_impl(state, headers).await
+}
+
+async fn run_provider_policy_gate(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ProviderPolicyGateRunResponse>, AppError> {
+    run_provider_policy_gate_impl(state, headers).await
+}
+
+async fn get_provider_policy_gate_runs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ProviderPolicyGateRunSummary>, AppError> {
+    get_provider_policy_gate_runs_impl(state, headers).await
 }
 
 async fn list_provider_access(
