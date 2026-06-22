@@ -474,7 +474,7 @@ struct ReviewManagerAgentPlan {
 }
 
 #[derive(Debug, Deserialize)]
-struct CreateAgentHandoffEvent {
+pub(crate) struct CreateAgentHandoffEvent {
     target_agent_id: Uuid,
     #[serde(default)]
     manager_plan_id: Option<Uuid>,
@@ -3892,10 +3892,6 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::ontology::router())
         .merge(handlers::memory_governance::router())
         .merge(handlers::sessions::router())
-        .route(
-            "/api/sessions/{id}/agent-handoffs",
-            get(list_session_agent_handoff_events).post(create_agent_handoff_event),
-        )
         .route(
             "/api/sessions/{id}/manager-plans",
             get(list_session_manager_agent_plans).post(create_manager_agent_plan),
@@ -15712,22 +15708,6 @@ pub(crate) fn new_audit_log(
     }
 }
 
-async fn list_session_agent_handoff_events(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<AgentHandoffEvent>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "session",
-        Some(id),
-    )
-    .await?;
-    Ok(Json(state.list_agent_handoff_events(Some(id)).await?))
-}
-
 async fn get_agent_handoff_assignment_for_handoff(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -16706,20 +16686,11 @@ async fn review_manager_agent_plan(
     Ok(Json(reviewed))
 }
 
-async fn create_agent_handoff_event(
-    State(state): State<AppState>,
-    Path(session_id): Path<Uuid>,
-    headers: HeaderMap,
-    Json(input): Json<CreateAgentHandoffEvent>,
-) -> Result<Json<AgentHandoffEvent>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRun,
-        "session",
-        Some(session_id),
-    )
-    .await?;
+pub(crate) async fn create_agent_handoff_event_for_session(
+    state: &AppState,
+    session_id: Uuid,
+    input: CreateAgentHandoffEvent,
+) -> Result<AgentHandoffEvent, AppError> {
     let session = state.get_session(session_id).await?;
     let source_version = state.agent_version_for_session(session_id).await?;
     let target_agent = state.get_agent(input.target_agent_id).await?;
@@ -16822,12 +16793,12 @@ async fn create_agent_handoff_event(
         })
         .await?;
     let audit =
-        record_agent_handoff_audit_and_event(&state, &event, "agent_handoff.requested", None)
+        record_agent_handoff_audit_and_event(state, &event, "agent_handoff.requested", None)
             .await?;
     let event = state
         .update_agent_handoff_event_status(event.id, "requested", Some(audit.id))
         .await?;
-    Ok(Json(event))
+    Ok(event)
 }
 
 async fn accept_agent_handoff_event(

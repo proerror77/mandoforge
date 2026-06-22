@@ -7,14 +7,19 @@ use axum::{
 use uuid::Uuid;
 
 use crate::{
-    AgentHandoffAssignment, AgentHandoffEvent, AppError, AppState, Permission,
-    authorize_collection_request, authorize_request, visible_session_ids_for_principal,
+    AgentHandoffAssignment, AgentHandoffEvent, AppError, AppState, CreateAgentHandoffEvent,
+    Permission, authorize_collection_request, authorize_request,
+    create_agent_handoff_event_for_session, visible_session_ids_for_principal,
 };
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route("/api/agent-handoffs", get(list_agent_handoff_events))
         .route("/api/agent-handoffs/{id}", get(get_agent_handoff_event))
+        .route(
+            "/api/sessions/{id}/agent-handoffs",
+            get(list_session_agent_handoff_events).post(create_agent_handoff_event),
+        )
         .route(
             "/api/agent-handoff-assignments",
             get(list_agent_handoff_assignments),
@@ -66,6 +71,41 @@ async fn get_agent_handoff_event(
     )
     .await?;
     Ok(Json(event))
+}
+
+async fn list_session_agent_handoff_events(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<AgentHandoffEvent>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.list_agent_handoff_events(Some(id)).await?))
+}
+
+async fn create_agent_handoff_event(
+    State(state): State<AppState>,
+    Path(session_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateAgentHandoffEvent>,
+) -> Result<Json<AgentHandoffEvent>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRun,
+        "session",
+        Some(session_id),
+    )
+    .await?;
+    Ok(Json(
+        create_agent_handoff_event_for_session(&state, session_id, input).await?,
+    ))
 }
 
 async fn list_agent_handoff_assignments(
