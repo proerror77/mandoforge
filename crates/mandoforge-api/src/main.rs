@@ -3899,20 +3899,8 @@ fn build_router(state: AppState) -> Router {
             post(validate_agent_release_orchestration),
         )
         .route(
-            "/api/agents/{id}/release-requests",
-            post(request_agent_release_promotion),
-        )
-        .route(
             "/api/agents/releases/run-due",
             post(run_due_agent_release_promotions),
-        )
-        .route(
-            "/api/agents/{id}/releases/{release_id}/approve",
-            post(approve_agent_release_promotion),
-        )
-        .route(
-            "/api/agents/{id}/releases/{release_id}/reject",
-            post(reject_agent_release_promotion),
         )
         .route(
             "/api/agents/{id}/releases/{release_id}/rollback",
@@ -14444,56 +14432,6 @@ async fn validate_agent_release_orchestration(
     }))
 }
 
-async fn request_agent_release_promotion(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-    Json(input): Json<RequestAgentReleasePromotion>,
-) -> Result<Json<AgentRelease>, AppError> {
-    let principal = principal_from_request(&state, &headers).await?;
-    let request = AuthorizationRequest {
-        tenant_id: state.current_tenant_id(),
-        permission: Permission::Admin,
-        resource_type: "agent".to_string(),
-        resource_id: Some(id),
-    };
-    state.authorizer.authorize(&principal, &request).await?;
-    enforce_resource_scope(&state, &principal, &request).await?;
-    let release = state
-        .request_agent_release_promotion(
-            id,
-            input.release,
-            principal.subject_id.clone(),
-            optional_trimmed(input.approver_subject.as_deref()),
-            optional_trimmed(input.reason.as_deref()),
-            normalize_release_automation_policy(
-                input.auto_approve,
-                input.activate_after.as_deref(),
-                input.expires_at.as_deref(),
-            )?,
-        )
-        .await?;
-    state
-        .append_audit_log(new_audit_log(
-            None,
-            "user",
-            None,
-            "agent.release_promotion_requested",
-            "agent_release",
-            Some(release.id),
-            json!({
-                "subject": principal.subject_id,
-                "agent_id": id,
-                "environment": release.environment,
-                "eval_run_id": release.eval_run_id,
-                "min_score": release.min_score,
-                "approver_subject": release.approver_subject,
-            }),
-        ))
-        .await?;
-    Ok(Json(release))
-}
-
 async fn run_due_agent_release_promotions(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -15590,7 +15528,7 @@ enum ReleaseAutomationDecision {
     Skip(String),
 }
 
-fn normalize_release_automation_policy(
+pub(crate) fn normalize_release_automation_policy(
     auto_approve: Option<bool>,
     activate_after: Option<&str>,
     expires_at: Option<&str>,
@@ -15800,92 +15738,6 @@ fn attention_priority(reason: &str) -> usize {
     } else {
         5
     }
-}
-
-async fn approve_agent_release_promotion(
-    State(state): State<AppState>,
-    Path((id, release_id)): Path<(Uuid, Uuid)>,
-    headers: HeaderMap,
-) -> Result<Json<AgentRelease>, AppError> {
-    decide_agent_release_promotion(state, id, release_id, headers, "approve", None).await
-}
-
-async fn reject_agent_release_promotion(
-    State(state): State<AppState>,
-    Path((id, release_id)): Path<(Uuid, Uuid)>,
-    headers: HeaderMap,
-    Json(input): Json<RejectAgentReleasePromotion>,
-) -> Result<Json<AgentRelease>, AppError> {
-    decide_agent_release_promotion(
-        state,
-        id,
-        release_id,
-        headers,
-        "reject",
-        optional_trimmed(input.reason.as_deref()),
-    )
-    .await
-}
-
-async fn decide_agent_release_promotion(
-    state: AppState,
-    agent_id: Uuid,
-    release_id: Uuid,
-    headers: HeaderMap,
-    decision: &str,
-    reason: Option<String>,
-) -> Result<Json<AgentRelease>, AppError> {
-    let principal = principal_from_request(&state, &headers).await?;
-    let request = AuthorizationRequest {
-        tenant_id: state.current_tenant_id(),
-        permission: Permission::Admin,
-        resource_type: "agent".to_string(),
-        resource_id: Some(agent_id),
-    };
-    state.authorizer.authorize(&principal, &request).await?;
-    enforce_resource_scope(&state, &principal, &request).await?;
-    let release = match decision {
-        "approve" => {
-            state
-                .approve_agent_release_promotion(agent_id, release_id, principal.subject_id.clone())
-                .await?
-        }
-        "reject" => {
-            state
-                .reject_agent_release_promotion(
-                    agent_id,
-                    release_id,
-                    principal.subject_id.clone(),
-                    reason,
-                )
-                .await?
-        }
-        _ => return Err(AppError::bad_request("unsupported release decision")),
-    };
-    let action = if decision == "approve" {
-        "agent.release_promotion_approved"
-    } else {
-        "agent.release_promotion_rejected"
-    };
-    state
-        .append_audit_log(new_audit_log(
-            None,
-            "user",
-            None,
-            action,
-            "agent_release",
-            Some(release.id),
-            json!({
-                "subject": principal.subject_id,
-                "agent_id": agent_id,
-                "environment": release.environment,
-                "status": release.status,
-                "requested_by": release.requested_by,
-                "decision_by": release.decision_by,
-            }),
-        ))
-        .await?;
-    Ok(Json(release))
 }
 
 async fn rollback_agent_release(
@@ -16428,7 +16280,7 @@ fn session_thread_event_payload(thread: &SessionThread) -> Value {
     })
 }
 
-fn new_audit_log(
+pub(crate) fn new_audit_log(
     session_id: Option<Uuid>,
     actor_type: &str,
     actor_id: Option<Uuid>,
@@ -52116,7 +51968,7 @@ fn required_trimmed(value: &str, field_name: &str) -> Result<String, AppError> {
     Ok(value.to_string())
 }
 
-fn optional_trimmed(value: Option<&str>) -> Option<String> {
+pub(crate) fn optional_trimmed(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
         .filter(|value| !value.is_empty())
