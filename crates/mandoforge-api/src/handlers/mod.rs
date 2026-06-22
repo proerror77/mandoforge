@@ -1,5 +1,6 @@
 pub(crate) mod deployment;
 pub(crate) mod github;
+pub(crate) mod memory_governance;
 pub(crate) mod ontology;
 pub(crate) mod ontology_intelligence;
 pub(crate) mod ontology_onboarding;
