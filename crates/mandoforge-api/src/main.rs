@@ -343,6 +343,10 @@ struct AgentVersion {
     tool_names: Vec<String>,
     runtime_config: Value,
     approval_policy: Value,
+    mcp_server_ids: Vec<Uuid>,
+    skill_ids: Vec<String>,
+    workflow_pack_ids: Vec<String>,
+    semantic_scopes: Value,
     created_at: DateTime<Utc>,
 }
 
