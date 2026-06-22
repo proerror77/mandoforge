@@ -1,3 +1,4 @@
+pub(crate) mod agents;
 pub(crate) mod deployment;
 pub(crate) mod github;
 pub(crate) mod memory_governance;

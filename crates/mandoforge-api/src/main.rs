@@ -3882,7 +3882,7 @@ fn build_router(state: AppState) -> Router {
     let tenant_context_state = state.clone();
     Router::new()
         .merge(handlers::deployment::router())
-        .route("/api/agents", get(list_agents).post(create_agent))
+        .merge(handlers::agents::router())
         .route(
             "/api/agent-runtime-profiles",
             get(list_agent_runtime_profiles).post(create_agent_runtime_profile),
@@ -6477,30 +6477,6 @@ async fn seed_demo_tenant(pool: &PgPool, tenant_id: Uuid) -> Result<()> {
         sqlx::raw_sql(&seed_sql).execute(pool).await?;
     }
     Ok(())
-}
-
-async fn list_agents(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<Agent>>, AppError> {
-    let principal = principal_from_request(&state, &headers).await?;
-    let request = AuthorizationRequest {
-        tenant_id: state.current_tenant_id(),
-        permission: Permission::AgentsRead,
-        resource_type: "agents".to_string(),
-        resource_id: None,
-    };
-    state.authorizer.authorize(&principal, &request).await?;
-    Ok(Json(state.list_agents_visible_to(&principal).await?))
-}
-
-async fn create_agent(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(input): Json<CreateAgent>,
-) -> Result<Json<Agent>, AppError> {
-    authorize_request(&state, &headers, Permission::AgentsWrite, "agents", None).await?;
-    Ok(Json(state.create_agent(input).await?))
 }
 
 async fn list_agent_runtime_profiles(
