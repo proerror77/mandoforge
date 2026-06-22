@@ -3926,13 +3926,7 @@ fn build_router(state: AppState) -> Router {
         .route("/api/usage/alerts", get(get_cost_alerts))
         .route("/api/usage/alerts/ack", post(acknowledge_cost_alert))
         .route("/api/usage/alerts/deliver", post(deliver_cost_alerts))
-        .route("/api/scheduler/summary", get(get_scheduler_summary))
-        .route("/api/scheduler/due-plan", get(get_scheduler_due_plan))
-        .route(
-            "/api/scheduler/deployment/validate",
-            post(validate_scheduler_deployment),
-        )
-        .route("/api/scheduler/run-due", post(run_scheduler_due_tasks))
+        .merge(handlers::scheduler::router())
         .route(
             "/api/usage/alert-routes",
             get(list_cost_alert_routes).post(create_cost_alert_route),
@@ -46160,20 +46154,18 @@ fn usage_finance_export_webhook_url() -> Option<String> {
         })
 }
 
-async fn run_scheduler_due_tasks(
-    State(state): State<AppState>,
+pub(crate) async fn run_scheduler_due_tasks(
+    state: AppState,
     headers: HeaderMap,
-    input: Option<Json<SchedulerRunDueRequest>>,
+    input: Option<SchedulerRunDueRequest>,
 ) -> Result<Json<SchedulerDueRun>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "scheduler", None).await?;
     validate_scheduler_shared_token(&headers)?;
-    Ok(Json(
-        execute_scheduler_due_tasks(&state, input.map(|Json(input)| input)).await?,
-    ))
+    Ok(Json(execute_scheduler_due_tasks(&state, input).await?))
 }
 
-async fn validate_scheduler_deployment(
-    State(state): State<AppState>,
+pub(crate) async fn validate_scheduler_deployment(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<SchedulerDeploymentValidationRun>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
@@ -46271,16 +46263,16 @@ async fn validate_scheduler_deployment(
     }))
 }
 
-async fn get_scheduler_due_plan(
-    State(state): State<AppState>,
+pub(crate) async fn get_scheduler_due_plan(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<SchedulerDuePlan>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "scheduler", None).await?;
     Ok(Json(build_scheduler_due_plan(&state).await?))
 }
 
-async fn get_scheduler_summary(
-    State(state): State<AppState>,
+pub(crate) async fn get_scheduler_summary(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<SchedulerOrchestrationSummary>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "scheduler", None).await?;
