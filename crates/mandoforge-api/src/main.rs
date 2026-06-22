@@ -3897,32 +3897,7 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::workflows::router())
         .merge(handlers::tools::router())
         .merge(handlers::tenant::router())
-        .route(
-            "/api/work-items",
-            get(list_work_items).post(create_work_item),
-        )
-        .route(
-            "/api/agent-teammates",
-            get(list_agent_teammates).post(create_agent_teammate),
-        )
-        .route("/api/squads", get(list_squads).post(create_squad))
-        .route(
-            "/api/squads/{id}/members",
-            get(list_squad_members).post(add_squad_member),
-        )
-        .route(
-            "/api/work-items/{id}/assignments",
-            get(list_work_item_assignments).post(create_work_item_assignment),
-        )
-        .route(
-            "/api/work-items/{id}/reviews",
-            get(list_work_item_reviews).post(create_work_item_review),
-        )
-        .route(
-            "/api/work-items/{id}/activity",
-            get(list_work_item_activity),
-        )
-        .route("/api/capability-discovery", get(get_capability_discovery))
+        .merge(handlers::collaboration::router())
         .route(
             "/api/teams/{id}/provider-access",
             get(list_provider_access).post(create_provider_access),
@@ -16223,8 +16198,8 @@ pub(crate) async fn materialize_dynamic_workflow_plan(
     }))
 }
 
-async fn get_capability_discovery(
-    State(state): State<AppState>,
+pub(crate) async fn get_capability_discovery(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Value>, AppError> {
     authorize_request(
@@ -34380,8 +34355,8 @@ pub(crate) async fn delete_project(
     Ok(Json(project))
 }
 
-async fn list_agent_teammates(
-    State(state): State<AppState>,
+pub(crate) async fn list_agent_teammates(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Vec<AgentTeammate>>, AppError> {
     authorize_request(
@@ -34395,10 +34370,10 @@ async fn list_agent_teammates(
     Ok(Json(state.list_agent_teammates().await?))
 }
 
-async fn create_agent_teammate(
-    State(state): State<AppState>,
+pub(crate) async fn create_agent_teammate(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<CreateAgentTeammate>,
+    input: CreateAgentTeammate,
 ) -> Result<Json<AgentTeammate>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
@@ -34430,18 +34405,18 @@ async fn create_agent_teammate(
     Ok(Json(teammate))
 }
 
-async fn list_squads(
-    State(state): State<AppState>,
+pub(crate) async fn list_squads(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Vec<Squad>>, AppError> {
     authorize_request(&state, &headers, Permission::SessionsRead, "squads", None).await?;
     Ok(Json(state.list_squads().await?))
 }
 
-async fn create_squad(
-    State(state): State<AppState>,
+pub(crate) async fn create_squad(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<CreateSquad>,
+    input: CreateSquad,
 ) -> Result<Json<Squad>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
@@ -34470,9 +34445,9 @@ async fn create_squad(
     Ok(Json(squad))
 }
 
-async fn list_squad_members(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn list_squad_members(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<Vec<SquadMember>>, AppError> {
     authorize_request(
@@ -34486,11 +34461,11 @@ async fn list_squad_members(
     Ok(Json(state.list_squad_members(id).await?))
 }
 
-async fn add_squad_member(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn add_squad_member(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<CreateSquadMember>,
+    input: CreateSquadMember,
 ) -> Result<Json<SquadMember>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
@@ -34521,8 +34496,8 @@ async fn add_squad_member(
     Ok(Json(member))
 }
 
-async fn list_work_items(
-    State(state): State<AppState>,
+pub(crate) async fn list_work_items(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Vec<WorkItem>>, AppError> {
     authorize_request(
@@ -34536,10 +34511,10 @@ async fn list_work_items(
     Ok(Json(state.list_work_items().await?))
 }
 
-async fn create_work_item(
-    State(state): State<AppState>,
+pub(crate) async fn create_work_item(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<CreateWorkItem>,
+    input: CreateWorkItem,
 ) -> Result<Json<WorkItem>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
@@ -34683,9 +34658,9 @@ fn validate_work_item_semantic_scopes(metadata: &Value) -> Result<Option<Value>,
     Ok(Some(semantic_scopes.clone()))
 }
 
-async fn list_work_item_assignments(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn list_work_item_assignments(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<Vec<WorkItemAssignment>>, AppError> {
     authorize_request(
@@ -34699,11 +34674,11 @@ async fn list_work_item_assignments(
     Ok(Json(state.list_work_item_assignments(id).await?))
 }
 
-async fn create_work_item_assignment(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn create_work_item_assignment(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<CreateWorkItemAssignment>,
+    input: CreateWorkItemAssignment,
 ) -> Result<Json<WorkItemAssignment>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
@@ -34757,9 +34732,9 @@ async fn create_work_item_assignment(
     Ok(Json(assignment))
 }
 
-async fn list_work_item_reviews(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn list_work_item_reviews(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<Vec<WorkItemReview>>, AppError> {
     authorize_request(
@@ -34773,11 +34748,11 @@ async fn list_work_item_reviews(
     Ok(Json(state.list_work_item_reviews(id).await?))
 }
 
-async fn create_work_item_review(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn create_work_item_review(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<CreateWorkItemReview>,
+    input: CreateWorkItemReview,
 ) -> Result<Json<WorkItemReview>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
@@ -34829,9 +34804,9 @@ async fn create_work_item_review(
     Ok(Json(review))
 }
 
-async fn list_work_item_activity(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn list_work_item_activity(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<Vec<WorkItemActivityEntry>>, AppError> {
     authorize_request(
