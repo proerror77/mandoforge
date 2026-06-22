@@ -152,6 +152,10 @@ pub(crate) use types::eval::{
     EvalCase, EvalDataset, EvalDriftDecision, EvalGateDecision, EvalGateRequest, EvalRun,
     EvalSuiteBootstrap,
 };
+pub(crate) use types::session::{
+    AddMessage, CreateSession, IncomingSessionEvent, SendSessionEvents, Session, SessionEvent,
+    SessionLoopJob, SessionLoopJobStatus, SessionStatus, SessionThread, StreamEventsQuery,
+};
 use types::tools::{
     ApprovalRequestTool, ArtifactCreateTool, FileReadTool, McpCallTool, OntologyTypeLookupTool,
     SemanticLinkExpandTool, SemanticObjectFetchTool, SemanticObjectSearchTool, ShellExecTool,
@@ -334,178 +338,11 @@ enum ExecutionQueueBackendSelection {
     NatsJetstream,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Session {
-    id: Uuid,
-    agent_id: Uuid,
-    agent_version_id: Option<Uuid>,
-    environment_id: Option<Uuid>,
-    title: String,
-    status: SessionStatus,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum SessionStatus {
-    Idle,
-    Running,
-    RequiresAction,
-    Rescheduling,
-    Terminated,
-    Failed,
-}
-
-impl SessionStatus {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::Idle => "idle",
-            Self::Running => "running",
-            Self::RequiresAction => "requires_action",
-            Self::Rescheduling => "rescheduling",
-            Self::Terminated => "terminated",
-            Self::Failed => "failed",
-        }
-    }
-}
-
-impl From<String> for SessionStatus {
-    fn from(value: String) -> Self {
-        match value.as_str() {
-            "idle" | "created" => Self::Idle,
-            "running" => Self::Running,
-            "requires_action" | "waiting_approval" => Self::RequiresAction,
-            "rescheduling" => Self::Rescheduling,
-            "terminated" | "completed" => Self::Terminated,
-            "failed" => Self::Failed,
-            _ => Self::Idle,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateSession {
-    agent_id: Uuid,
-    #[serde(default)]
-    environment_id: Option<Uuid>,
-    #[serde(default = "default_session_title")]
-    title: String,
-    message: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AddMessage {
-    message: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct SendSessionEvents {
-    #[serde(default)]
-    events: Vec<IncomingSessionEvent>,
-}
-
-#[derive(Debug, Deserialize)]
-struct StreamEventsQuery {
-    after_seq: Option<i64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct IncomingSessionEvent {
-    #[serde(rename = "type")]
-    event_type: String,
-    #[serde(default = "empty_json_object")]
-    payload: Value,
-}
-
 #[derive(Debug, Deserialize)]
 struct ModifyApproval {
     args: Value,
     #[serde(default)]
     comment: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SessionEvent {
-    id: Uuid,
-    session_id: Uuid,
-    seq: i64,
-    parent_event_id: Option<Uuid>,
-    actor_type: String,
-    actor_id: Option<Uuid>,
-    event_type: String,
-    payload: Value,
-    created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum SessionLoopJobStatus {
-    Queued,
-    Running,
-    Completed,
-    Failed,
-}
-
-impl SessionLoopJobStatus {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::Queued => "queued",
-            Self::Running => "running",
-            Self::Completed => "completed",
-            Self::Failed => "failed",
-        }
-    }
-}
-
-impl From<String> for SessionLoopJobStatus {
-    fn from(value: String) -> Self {
-        match value.as_str() {
-            "running" => Self::Running,
-            "completed" => Self::Completed,
-            "failed" => Self::Failed,
-            _ => Self::Queued,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SessionLoopJob {
-    id: Uuid,
-    session_id: Uuid,
-    environment_id: Option<Uuid>,
-    status: SessionLoopJobStatus,
-    trigger_event_id: Option<Uuid>,
-    pending_event_seq_start: Option<i64>,
-    pending_event_seq_end: Option<i64>,
-    processed_event_seq: Option<i64>,
-    reason: String,
-    enqueued_at: DateTime<Utc>,
-    started_at: Option<DateTime<Utc>>,
-    completed_at: Option<DateTime<Utc>>,
-    worker_id: Option<String>,
-    lease_expires_at: Option<DateTime<Utc>>,
-    attempt_count: i32,
-    max_attempts: i32,
-    last_error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SessionThread {
-    id: Uuid,
-    session_id: Uuid,
-    parent_thread_id: Option<Uuid>,
-    thread_kind: String,
-    agent_id: Uuid,
-    agent_version_id: Option<Uuid>,
-    environment_id: Option<Uuid>,
-    source_handoff_id: Option<Uuid>,
-    specialist_session_id: Option<Uuid>,
-    status: String,
-    title: String,
-    context: Value,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
