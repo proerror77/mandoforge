@@ -157,10 +157,20 @@ pub(crate) use types::session::{
     SessionLoopJob, SessionLoopJobStatus, SessionStatus, SessionThread, StreamEventsQuery,
 };
 pub(crate) use types::ontology::{
-    BuildSemanticOntologyRequest, CreateOntologyReleaseCandidateRequest,
-    ExpandSemanticOntologyRequest, OntologyEngineReadiness, OntologyEngineReadinessCheck,
-    OntologyObjectType, OntologyRegistry, OntologyRelationType, OntologyRelease,
-    OntologyReleaseListQuery, ReviewOntologyProposalRequest,
+    BuildSemanticOntologyRequest, CreateOntologyOnboardingRunRequest,
+    CreateOntologyReleaseCandidateRequest, CuratedDatasetDraft, ExpandSemanticOntologyRequest,
+    OntologyActionTransactionProfile, OntologyBuilderDag, OntologyBuilderEdge,
+    OntologyBuilderExecutionLevel, OntologyBuilderNode, OntologyDatasetProfile,
+    OntologyEngineReadiness, OntologyEngineReadinessCheck, OntologyForeignKeyCandidate,
+    OntologyObjectType, OntologyOnboardingDataset, OntologyOnboardingField,
+    OntologyOnboardingMaterializationResult, OntologyOnboardingProposalDraft,
+    OntologyOnboardingRun, OntologyOnboardingToolSpec, OntologyOnboardingToolSpecResponse,
+    OntologyPromptPacket, OntologyRegistry, OntologyRelationType, OntologyRelease,
+    OntologyReleaseListQuery, OntologyReviewGraph, OntologyReviewGraphEdge,
+    OntologyReviewGraphNode, OntologySeedActionMapping, OntologySeedMetricMapping,
+    OntologySeedObjectMapping, OntologySeedPack, OntologySeedPackSummary,
+    OntologySeedRelationMapping, OntologySourceBundle, ReviewOntologyCuratedDatasetRequest,
+    ReviewOntologyOnboardingProposalRequest, ReviewOntologyProposalRequest,
 };
 pub(crate) use types::semantic::{
     ContextPacketSemanticObject, CreateMemoryWritebackCandidates, CreateSemanticIngestionBatch,
@@ -538,164 +548,6 @@ struct AttachAgentHandoffRemoteComputerAssignment {
     metadata: Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OntologyOnboardingField {
-    name: String,
-    field_type: String,
-    sample_values: Vec<Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OntologyOnboardingDataset {
-    table_name: String,
-    source_system: String,
-    source_object: String,
-    fields: Vec<OntologyOnboardingField>,
-    rows: Vec<Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OntologySourceBundle {
-    industry: String,
-    source_mode: String,
-    tool_namespace: String,
-    datasets: Vec<OntologyOnboardingDataset>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OntologySeedPack {
-    industry: String,
-    domain_scope: String,
-    source_mode: String,
-    tool_namespace: String,
-    objects: Vec<OntologySeedObjectMapping>,
-    relations: Vec<OntologySeedRelationMapping>,
-    metrics: Vec<OntologySeedMetricMapping>,
-    actions: Vec<OntologySeedActionMapping>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OntologySeedObjectMapping {
-    table_name: String,
-    object_name: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OntologySeedRelationMapping {
-    name: String,
-    from_object: String,
-    relation: String,
-    to_object: String,
-    source_table: String,
-    source_field: String,
-    reference_table: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OntologySeedMetricMapping {
-    name: String,
-    target_object: String,
-    expression: String,
-    evidence: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OntologySeedActionMapping {
-    name: String,
-    target_object: String,
-    approval_required: bool,
-    inputs: Value,
-    reads: Value,
-    effects: Value,
-    executor: Value,
-    transaction_profile: OntologyActionTransactionProfile,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum OntologyActionTransactionProfile {
-    ProposalOnly,
-    LocalSerializable,
-    EventSourced,
-    Saga,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OntologyForeignKeyCandidate {
-    field: String,
-    references_table: String,
-    references_field: String,
-    join_success_rate: f64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OntologyDatasetProfile {
-    table_name: String,
-    row_count: usize,
-    primary_key_candidates: Vec<String>,
-    foreign_key_candidates: Vec<OntologyForeignKeyCandidate>,
-    enum_candidates: Vec<String>,
-    time_dimensions: Vec<String>,
-    currency_fields: Vec<String>,
-    pii_candidates: Vec<String>,
-    field_null_rates: Value,
-    field_uniqueness: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OntologyOnboardingProposalDraft {
-    id: Uuid,
-    run_id: Uuid,
-    proposal_type: String,
-    name: String,
-    source_mapping: String,
-    confidence: f64,
-    evidence: Value,
-    recommendation: String,
-    review_status: String,
-    content: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OntologyOnboardingRun {
-    id: Uuid,
-    status: String,
-    source_mode: String,
-    dataset_count: usize,
-    profile_count: usize,
-    proposal_count: usize,
-    approved_count: usize,
-    materialized_count: usize,
-    datasets: Vec<OntologyOnboardingDataset>,
-    profiles: Vec<OntologyDatasetProfile>,
-    proposals: Vec<OntologyOnboardingProposalDraft>,
-    generated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ReviewOntologyOnboardingProposalRequest {
-    decision: String,
-    #[serde(default)]
-    reason: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ReviewOntologyCuratedDatasetRequest {
-    decision: String,
-    #[serde(default)]
-    reason: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateOntologyOnboardingRunRequest {
-    #[serde(default)]
-    industry: Option<String>,
-    #[serde(default)]
-    source_mode: Option<String>,
-    #[serde(default)]
-    source_payload: Option<ontology_source_adapters::OntologySourcePayload>,
-}
-
 #[derive(Debug, Deserialize)]
 struct SchemaUnderstandingRequest {
     #[serde(default)]
@@ -891,29 +743,6 @@ struct ConfidenceCalibrationResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct OntologySeedPackSummary {
-    industry: String,
-    domain_scope: String,
-    source_mode: String,
-    tool_namespace: String,
-    object_count: usize,
-    relation_count: usize,
-    metric_count: usize,
-    action_count: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OntologyOnboardingMaterializationResult {
-    run_id: Uuid,
-    status: String,
-    semantic_object_count: usize,
-    semantic_link_count: usize,
-    tool_spec_count: usize,
-    semantic_object_ids: Vec<Uuid>,
-    semantic_link_ids: Vec<Uuid>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProjectGitHubBinding {
     id: Uuid,
     repo_full_name: String,
@@ -932,132 +761,6 @@ struct UpsertProjectGitHubBinding {
     webhook_secret_ref: Option<String>,
     #[serde(default)]
     active: Option<bool>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OntologyOnboardingToolSpec {
-    id: Uuid,
-    run_id: Uuid,
-    name: String,
-    description: String,
-    tool_kind: String,
-    target_object: String,
-    read_only: bool,
-    approval_required: bool,
-    input_schema: Value,
-    effects: Value,
-    policy: Value,
-    transaction_profile: OntologyActionTransactionProfile,
-    execution_mode: String,
-    read_write_risk: String,
-    source_refs: Value,
-    audit_event: String,
-    source_proposal_id: Uuid,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OntologyOnboardingToolSpecResponse {
-    run_id: Uuid,
-    tool_specs: Vec<OntologyOnboardingToolSpec>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OntologyBuilderNode {
-    id: String,
-    label: String,
-    node_type: String,
-    status: String,
-    summary: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OntologyBuilderEdge {
-    from: String,
-    to: String,
-    edge_type: String,
-    reason: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OntologyBuilderExecutionLevel {
-    level: usize,
-    node_ids: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OntologyBuilderDag {
-    run_id: Option<Uuid>,
-    mode: String,
-    nodes: Vec<OntologyBuilderNode>,
-    edges: Vec<OntologyBuilderEdge>,
-    execution_levels: Vec<OntologyBuilderExecutionLevel>,
-    stale_node_ids: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CuratedDatasetDraft {
-    id: String,
-    table_name: String,
-    source_system: String,
-    object_candidate: Option<String>,
-    quality_score: f64,
-    review_status: String,
-    issues: Vec<String>,
-    schema_version: String,
-    reviewer_metadata: Value,
-    sample_rows: Vec<Value>,
-    profile: OntologyDatasetProfile,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OntologyPromptPacket {
-    run_id: Uuid,
-    industry: String,
-    source_mode: String,
-    domain_scope: String,
-    tool_namespace: String,
-    seed_pack: OntologySeedPack,
-    curated_datasets: Vec<CuratedDatasetDraft>,
-    profiles: Vec<OntologyDatasetProfile>,
-    allowed_ontology_triples: Vec<Value>,
-    evidence_rules: Vec<String>,
-    policy_reminders: Vec<String>,
-    proposal_count: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OntologyReviewGraphNode {
-    id: String,
-    node_type: String,
-    label: String,
-    status: String,
-    confidence: f64,
-    risk: String,
-    evidence: Value,
-    source_proposal_id: Option<Uuid>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OntologyReviewGraphEdge {
-    id: String,
-    from: String,
-    to: String,
-    edge_type: String,
-    status: String,
-    confidence: f64,
-    risk: String,
-    evidence: Value,
-    source_proposal_id: Option<Uuid>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OntologyReviewGraph {
-    run_id: Uuid,
-    nodes: Vec<OntologyReviewGraphNode>,
-    edges: Vec<OntologyReviewGraphEdge>,
-    truncated: bool,
-    omitted_node_count: usize,
-    omitted_edge_count: usize,
 }
 
 #[derive(Debug, Deserialize)]

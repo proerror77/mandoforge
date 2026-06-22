@@ -30,6 +30,164 @@ pub(crate) struct OntologyRelationType {
     pub(crate) governance_boundary: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OntologyOnboardingField {
+    pub(crate) name: String,
+    pub(crate) field_type: String,
+    pub(crate) sample_values: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OntologyOnboardingDataset {
+    pub(crate) table_name: String,
+    pub(crate) source_system: String,
+    pub(crate) source_object: String,
+    pub(crate) fields: Vec<OntologyOnboardingField>,
+    pub(crate) rows: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OntologySourceBundle {
+    pub(crate) industry: String,
+    pub(crate) source_mode: String,
+    pub(crate) tool_namespace: String,
+    pub(crate) datasets: Vec<OntologyOnboardingDataset>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OntologySeedPack {
+    pub(crate) industry: String,
+    pub(crate) domain_scope: String,
+    pub(crate) source_mode: String,
+    pub(crate) tool_namespace: String,
+    pub(crate) objects: Vec<OntologySeedObjectMapping>,
+    pub(crate) relations: Vec<OntologySeedRelationMapping>,
+    pub(crate) metrics: Vec<OntologySeedMetricMapping>,
+    pub(crate) actions: Vec<OntologySeedActionMapping>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OntologySeedObjectMapping {
+    pub(crate) table_name: String,
+    pub(crate) object_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OntologySeedRelationMapping {
+    pub(crate) name: String,
+    pub(crate) from_object: String,
+    pub(crate) relation: String,
+    pub(crate) to_object: String,
+    pub(crate) source_table: String,
+    pub(crate) source_field: String,
+    pub(crate) reference_table: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OntologySeedMetricMapping {
+    pub(crate) name: String,
+    pub(crate) target_object: String,
+    pub(crate) expression: String,
+    pub(crate) evidence: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OntologySeedActionMapping {
+    pub(crate) name: String,
+    pub(crate) target_object: String,
+    pub(crate) approval_required: bool,
+    pub(crate) inputs: Value,
+    pub(crate) reads: Value,
+    pub(crate) effects: Value,
+    pub(crate) executor: Value,
+    pub(crate) transaction_profile: OntologyActionTransactionProfile,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum OntologyActionTransactionProfile {
+    ProposalOnly,
+    LocalSerializable,
+    EventSourced,
+    Saga,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OntologyForeignKeyCandidate {
+    pub(crate) field: String,
+    pub(crate) references_table: String,
+    pub(crate) references_field: String,
+    pub(crate) join_success_rate: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OntologyDatasetProfile {
+    pub(crate) table_name: String,
+    pub(crate) row_count: usize,
+    pub(crate) primary_key_candidates: Vec<String>,
+    pub(crate) foreign_key_candidates: Vec<OntologyForeignKeyCandidate>,
+    pub(crate) enum_candidates: Vec<String>,
+    pub(crate) time_dimensions: Vec<String>,
+    pub(crate) currency_fields: Vec<String>,
+    pub(crate) pii_candidates: Vec<String>,
+    pub(crate) field_null_rates: Value,
+    pub(crate) field_uniqueness: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OntologyOnboardingProposalDraft {
+    pub(crate) id: Uuid,
+    pub(crate) run_id: Uuid,
+    pub(crate) proposal_type: String,
+    pub(crate) name: String,
+    pub(crate) source_mapping: String,
+    pub(crate) confidence: f64,
+    pub(crate) evidence: Value,
+    pub(crate) recommendation: String,
+    pub(crate) review_status: String,
+    pub(crate) content: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OntologyOnboardingRun {
+    pub(crate) id: Uuid,
+    pub(crate) status: String,
+    pub(crate) source_mode: String,
+    pub(crate) dataset_count: usize,
+    pub(crate) profile_count: usize,
+    pub(crate) proposal_count: usize,
+    pub(crate) approved_count: usize,
+    pub(crate) materialized_count: usize,
+    pub(crate) datasets: Vec<OntologyOnboardingDataset>,
+    pub(crate) profiles: Vec<OntologyDatasetProfile>,
+    pub(crate) proposals: Vec<OntologyOnboardingProposalDraft>,
+    pub(crate) generated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ReviewOntologyOnboardingProposalRequest {
+    pub(crate) decision: String,
+    #[serde(default)]
+    pub(crate) reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ReviewOntologyCuratedDatasetRequest {
+    pub(crate) decision: String,
+    #[serde(default)]
+    pub(crate) reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CreateOntologyOnboardingRunRequest {
+    #[serde(default)]
+    pub(crate) industry: Option<String>,
+    #[serde(default)]
+    pub(crate) source_mode: Option<String>,
+    #[serde(default)]
+    pub(crate) source_payload: Option<crate::ontology_source_adapters::OntologySourcePayload>,
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct ExpandSemanticOntologyRequest {
     pub(crate) domain_scope: String,
@@ -144,4 +302,153 @@ pub(crate) struct OntologyEngineReadinessCheck {
     pub(crate) evidence: Vec<String>,
     pub(crate) blockers: Vec<String>,
     pub(crate) next_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OntologySeedPackSummary {
+    pub(crate) industry: String,
+    pub(crate) domain_scope: String,
+    pub(crate) source_mode: String,
+    pub(crate) tool_namespace: String,
+    pub(crate) object_count: usize,
+    pub(crate) relation_count: usize,
+    pub(crate) metric_count: usize,
+    pub(crate) action_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OntologyOnboardingMaterializationResult {
+    pub(crate) run_id: Uuid,
+    pub(crate) status: String,
+    pub(crate) semantic_object_count: usize,
+    pub(crate) semantic_link_count: usize,
+    pub(crate) tool_spec_count: usize,
+    pub(crate) semantic_object_ids: Vec<Uuid>,
+    pub(crate) semantic_link_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OntologyOnboardingToolSpec {
+    pub(crate) id: Uuid,
+    pub(crate) run_id: Uuid,
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) tool_kind: String,
+    pub(crate) target_object: String,
+    pub(crate) read_only: bool,
+    pub(crate) approval_required: bool,
+    pub(crate) input_schema: Value,
+    pub(crate) effects: Value,
+    pub(crate) policy: Value,
+    pub(crate) transaction_profile: OntologyActionTransactionProfile,
+    pub(crate) execution_mode: String,
+    pub(crate) read_write_risk: String,
+    pub(crate) source_refs: Value,
+    pub(crate) audit_event: String,
+    pub(crate) source_proposal_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OntologyOnboardingToolSpecResponse {
+    pub(crate) run_id: Uuid,
+    pub(crate) tool_specs: Vec<OntologyOnboardingToolSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OntologyBuilderNode {
+    pub(crate) id: String,
+    pub(crate) label: String,
+    pub(crate) node_type: String,
+    pub(crate) status: String,
+    pub(crate) summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OntologyBuilderEdge {
+    pub(crate) from: String,
+    pub(crate) to: String,
+    pub(crate) edge_type: String,
+    pub(crate) reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OntologyBuilderExecutionLevel {
+    pub(crate) level: usize,
+    pub(crate) node_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OntologyBuilderDag {
+    pub(crate) run_id: Option<Uuid>,
+    pub(crate) mode: String,
+    pub(crate) nodes: Vec<OntologyBuilderNode>,
+    pub(crate) edges: Vec<OntologyBuilderEdge>,
+    pub(crate) execution_levels: Vec<OntologyBuilderExecutionLevel>,
+    pub(crate) stale_node_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CuratedDatasetDraft {
+    pub(crate) id: String,
+    pub(crate) table_name: String,
+    pub(crate) source_system: String,
+    pub(crate) object_candidate: Option<String>,
+    pub(crate) quality_score: f64,
+    pub(crate) review_status: String,
+    pub(crate) issues: Vec<String>,
+    pub(crate) schema_version: String,
+    pub(crate) reviewer_metadata: Value,
+    pub(crate) sample_rows: Vec<Value>,
+    pub(crate) profile: OntologyDatasetProfile,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OntologyPromptPacket {
+    pub(crate) run_id: Uuid,
+    pub(crate) industry: String,
+    pub(crate) source_mode: String,
+    pub(crate) domain_scope: String,
+    pub(crate) tool_namespace: String,
+    pub(crate) seed_pack: OntologySeedPack,
+    pub(crate) curated_datasets: Vec<CuratedDatasetDraft>,
+    pub(crate) profiles: Vec<OntologyDatasetProfile>,
+    pub(crate) allowed_ontology_triples: Vec<Value>,
+    pub(crate) evidence_rules: Vec<String>,
+    pub(crate) policy_reminders: Vec<String>,
+    pub(crate) proposal_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OntologyReviewGraphNode {
+    pub(crate) id: String,
+    pub(crate) node_type: String,
+    pub(crate) label: String,
+    pub(crate) status: String,
+    pub(crate) confidence: f64,
+    pub(crate) risk: String,
+    pub(crate) evidence: Value,
+    pub(crate) source_proposal_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OntologyReviewGraphEdge {
+    pub(crate) id: String,
+    pub(crate) from: String,
+    pub(crate) to: String,
+    pub(crate) edge_type: String,
+    pub(crate) status: String,
+    pub(crate) confidence: f64,
+    pub(crate) risk: String,
+    pub(crate) evidence: Value,
+    pub(crate) source_proposal_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OntologyReviewGraph {
+    pub(crate) run_id: Uuid,
+    pub(crate) nodes: Vec<OntologyReviewGraphNode>,
+    pub(crate) edges: Vec<OntologyReviewGraphEdge>,
+    pub(crate) truncated: bool,
+    pub(crate) omitted_node_count: usize,
+    pub(crate) omitted_edge_count: usize,
 }
