@@ -178,6 +178,17 @@ pub(crate) use types::mcp::{
     McpServerRolloutRunSummary, McpServerRolloutSummary, McpServerScheduledHealthRun,
     RequestMcpServerRollout, UpdateMcpServerRecord, UpdateMcpServerStatus,
 };
+pub(crate) use types::observability::{
+    ObservabilityBackpressure, ObservabilityCollectorAttentionItem,
+    ObservabilityCollectorClusterRolloutReadiness,
+    ObservabilityCollectorClusterRolloutValidationRun,
+    ObservabilityCollectorDeploymentReadiness, ObservabilityCollectorHealthCheck,
+    ObservabilityCollectorProductionOpsReadiness, ObservabilityCollectorReadiness,
+    ObservabilityCollectorSignalPath, ObservabilityErrorEvent, ObservabilityRemediationPlan,
+    ObservabilityRemediationPlanAction, ObservabilityRemediationRun,
+    ObservabilityRemediationSupervisionReadiness, ObservabilitySummary,
+    ObservabilityTelemetryStatus,
+};
 pub(crate) use types::session::{
     AddMessage, CreateSession, IncomingSessionEvent, SendSessionEvents, Session, SessionEvent,
     SessionLoopJob, SessionLoopJobStatus, SessionStatus, SessionThread, StreamEventsQuery,
@@ -1221,194 +1232,6 @@ fn default_codex_stale_after_seconds() -> u64 {
 
 fn default_codex_stale_poll_max_runs() -> usize {
     20
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ObservabilitySummary {
-    generated_at: DateTime<Utc>,
-    telemetry: ObservabilityTelemetryStatus,
-    sessions_by_status: HashMap<String, usize>,
-    tool_calls_by_status: HashMap<String, usize>,
-    approvals_by_status: HashMap<String, usize>,
-    execution_jobs_by_status: HashMap<String, usize>,
-    event_categories: HashMap<String, usize>,
-    recent_error_events: Vec<ObservabilityErrorEvent>,
-    backpressure: ObservabilityBackpressure,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ObservabilityTelemetryStatus {
-    service_name: String,
-    otlp_enabled: bool,
-    sample_ratio: f64,
-    endpoint_configured: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ObservabilityErrorEvent {
-    session_id: Uuid,
-    event_type: String,
-    seq: i64,
-    status: String,
-    created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ObservabilityBackpressure {
-    status: String,
-    queued_jobs: usize,
-    running_jobs: usize,
-    failed_jobs: usize,
-    retryable_jobs: usize,
-    pending_approvals: usize,
-    waiting_approval_sessions: usize,
-    failed_sessions: usize,
-    failed_tool_calls: usize,
-    oldest_queued_job_age_seconds: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ObservabilityRemediationRun {
-    status: String,
-    ran_at: DateTime<Utc>,
-    actions: Vec<String>,
-    before: ObservabilityBackpressure,
-    after: ObservabilityBackpressure,
-    approval_escalation_run: Option<ApprovalEscalationDueRun>,
-    codex_app_server_stale_polls: Option<CodexAppServerStalePollRun>,
-    controller_configured: bool,
-    controller_execution: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ObservabilityRemediationPlan {
-    status: String,
-    generated_at: DateTime<Utc>,
-    auto_action_count: usize,
-    manual_action_count: usize,
-    configuration_action_count: usize,
-    backpressure: ObservabilityBackpressure,
-    actions: Vec<ObservabilityRemediationPlanAction>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ObservabilityRemediationPlanAction {
-    action: String,
-    mode: String,
-    severity: String,
-    reason: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ObservabilityCollectorReadiness {
-    generated_at: DateTime<Utc>,
-    status: String,
-    service_name: String,
-    otlp_enabled: bool,
-    endpoint_configured: bool,
-    endpoint: Option<String>,
-    sample_ratio: f64,
-    health_check: ObservabilityCollectorHealthCheck,
-    signal_paths: Vec<ObservabilityCollectorSignalPath>,
-    production_ops: ObservabilityCollectorProductionOpsReadiness,
-    deployment_readiness: ObservabilityCollectorDeploymentReadiness,
-    cluster_rollout: ObservabilityCollectorClusterRolloutReadiness,
-    remediation_supervision: ObservabilityRemediationSupervisionReadiness,
-    attention_items: Vec<ObservabilityCollectorAttentionItem>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ObservabilityCollectorProductionOpsReadiness {
-    status: String,
-    production_blocked: bool,
-    signal_path_count: usize,
-    configured_signal_path_count: usize,
-    health_checked: bool,
-    health_status: String,
-    message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ObservabilityCollectorDeploymentReadiness {
-    status: String,
-    production_blocked: bool,
-    otlp_enabled: bool,
-    endpoint_configured: bool,
-    controller_required: bool,
-    controller_configured: bool,
-    deployment_validated: bool,
-    latest_validation_at: Option<DateTime<Utc>>,
-    latest_validation_age_hours: Option<i64>,
-    latest_validation_status: Option<String>,
-    latest_validation_healthy: bool,
-    latest_controller_status: Option<String>,
-    latest_controller_age_hours: Option<i64>,
-    latest_controller_validated: bool,
-    controller_evidence_fresh: bool,
-    blocking_reasons: Vec<String>,
-    message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ObservabilityCollectorClusterRolloutReadiness {
-    status: String,
-    production_blocked: bool,
-    controller_required: bool,
-    controller_configured: bool,
-    latest_rollout_at: Option<DateTime<Utc>>,
-    latest_rollout_status: Option<String>,
-    latest_controller_status: Option<String>,
-    latest_controller_age_hours: Option<i64>,
-    latest_controller_validated: bool,
-    controller_evidence_fresh: bool,
-    deployment_validated: bool,
-    blocking_reasons: Vec<String>,
-    message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ObservabilityCollectorClusterRolloutValidationRun {
-    status: String,
-    checked_at: DateTime<Utc>,
-    controller_required: bool,
-    controller_configured: bool,
-    controller_execution: Value,
-    issues: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ObservabilityRemediationSupervisionReadiness {
-    status: String,
-    production_blocked: bool,
-    required: bool,
-    controller_configured: bool,
-    latest_controller_run_at: Option<DateTime<Utc>>,
-    latest_controller_run_age_hours: Option<i64>,
-    latest_controller_status: Option<String>,
-    latest_controller_remediated: bool,
-    blocking_reasons: Vec<String>,
-    message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ObservabilityCollectorHealthCheck {
-    status: String,
-    checked: bool,
-    message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ObservabilityCollectorSignalPath {
-    signal: String,
-    url: Option<String>,
-    status: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ObservabilityCollectorAttentionItem {
-    kind: String,
-    severity: String,
-    message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
