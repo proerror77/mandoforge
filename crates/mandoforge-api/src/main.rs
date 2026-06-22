@@ -3896,14 +3896,6 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::dynamic_workflow_plans::router())
         .merge(handlers::workflows::router())
         .route(
-            "/api/workflow-runs/{id}/transitions",
-            get(list_workflow_transitions_route),
-        )
-        .route(
-            "/api/workflow-runs/{id}/graph",
-            get(get_workflow_run_graph_console_route),
-        )
-        .route(
             "/api/workflow-runs/{id}/scheduled-steps/run-due",
             post(run_due_workflow_steps_route),
         )
@@ -21266,10 +21258,10 @@ async fn list_workflow_step_runs_route(
     Ok(Json(state.list_workflow_step_runs(id).await?))
 }
 
-async fn list_workflow_transitions_route(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    Query(query): Query<WorkflowTransitionQuery>,
+pub(crate) async fn list_workflow_transitions_route(
+    state: AppState,
+    id: Uuid,
+    query: WorkflowTransitionQuery,
     headers: HeaderMap,
 ) -> Result<Json<Vec<WorkflowTransition>>, AppError> {
     let run = state.get_workflow_run(id).await?;
@@ -21315,9 +21307,9 @@ fn normalize_optional_filter(value: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-async fn get_workflow_run_graph_console_route(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn get_workflow_run_graph_console_route(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<WorkflowRunGraphConsole>, AppError> {
     let run = state.get_workflow_run(id).await?;
