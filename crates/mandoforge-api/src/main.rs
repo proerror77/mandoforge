@@ -178,6 +178,11 @@ pub(crate) use types::codex_app_server::{
     CodexAppServerTraceSummary, CodexTraceArtifactLineage, CodexTraceDashboard,
     CodexTraceEvidence, CodexTurnTrace, default_codex_stale_after_seconds,
 };
+pub(crate) use types::collaboration::{
+    AgentTeammate, CreateAgentTeammate, CreateSquad, CreateSquadMember, CreateWorkItem,
+    CreateWorkItemAssignment, CreateWorkItemReview, Squad, SquadMember, WorkItem,
+    WorkItemActivityEntry, WorkItemAssignment, WorkItemReview,
+};
 pub(crate) use types::deployment::{
     DeploymentVersion, EnterpriseProductCompletionLane, EnterpriseProductCompletionReadiness,
     EnterpriseSecurityAdminCheck, EnterpriseSecurityAdminReadiness, ProductionAutoDeployRequest,
@@ -553,195 +558,6 @@ pub(crate) struct RemoteComputerArtifactSyncResponse {
     assignment_id: Option<Uuid>,
     artifact_count: usize,
     artifacts: Vec<Artifact>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AgentTeammate {
-    id: Uuid,
-    agent_id: Option<Uuid>,
-    display_name: String,
-    handle: Option<String>,
-    role: String,
-    status: String,
-    metadata: Value,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-    archived_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateAgentTeammate {
-    #[serde(default)]
-    agent_id: Option<Uuid>,
-    display_name: String,
-    #[serde(default)]
-    handle: Option<String>,
-    #[serde(default = "default_agent_teammate_role")]
-    role: String,
-    #[serde(default = "default_collaboration_record_status")]
-    status: String,
-    #[serde(default = "empty_json_object")]
-    metadata: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Squad {
-    id: Uuid,
-    name: String,
-    purpose: Option<String>,
-    status: String,
-    metadata: Value,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-    archived_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateSquad {
-    name: String,
-    #[serde(default)]
-    purpose: Option<String>,
-    #[serde(default = "default_collaboration_record_status")]
-    status: String,
-    #[serde(default = "empty_json_object")]
-    metadata: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SquadMember {
-    id: Uuid,
-    squad_id: Uuid,
-    teammate_id: Uuid,
-    role: String,
-    status: String,
-    metadata: Value,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-    archived_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateSquadMember {
-    teammate_id: Uuid,
-    #[serde(default = "default_squad_member_role")]
-    role: String,
-    #[serde(default = "default_collaboration_record_status")]
-    status: String,
-    #[serde(default = "empty_json_object")]
-    metadata: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WorkItem {
-    id: Uuid,
-    organization_id: Option<Uuid>,
-    team_id: Option<Uuid>,
-    project_id: Option<Uuid>,
-    title: String,
-    description: Option<String>,
-    source: String,
-    source_url: Option<String>,
-    status: String,
-    priority: String,
-    assignee: Option<String>,
-    metadata: Value,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-    archived_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateWorkItem {
-    #[serde(default)]
-    organization_id: Option<Uuid>,
-    #[serde(default)]
-    team_id: Option<Uuid>,
-    #[serde(default)]
-    project_id: Option<Uuid>,
-    title: String,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default = "default_work_item_source")]
-    source: String,
-    #[serde(default)]
-    source_url: Option<String>,
-    #[serde(default = "default_work_item_status")]
-    status: String,
-    #[serde(default = "default_work_item_priority")]
-    priority: String,
-    #[serde(default)]
-    assignee: Option<String>,
-    #[serde(default = "empty_json_object")]
-    metadata: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WorkItemAssignment {
-    id: Uuid,
-    work_item_id: Uuid,
-    assignee_kind: String,
-    assignee_id: String,
-    role: String,
-    status: String,
-    assigned_by: Option<String>,
-    metadata: Value,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-    archived_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateWorkItemAssignment {
-    assignee_kind: String,
-    assignee_id: String,
-    #[serde(default = "default_work_item_assignment_role")]
-    role: String,
-    #[serde(default = "default_work_item_assignment_status")]
-    status: String,
-    #[serde(default = "empty_json_object")]
-    metadata: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WorkItemReview {
-    id: Uuid,
-    work_item_id: Uuid,
-    reviewer_kind: String,
-    reviewer_id: String,
-    status: String,
-    decision: Option<String>,
-    summary: Option<String>,
-    metadata: Value,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-    archived_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateWorkItemReview {
-    reviewer_kind: String,
-    reviewer_id: String,
-    #[serde(default = "default_work_item_review_status")]
-    status: String,
-    #[serde(default)]
-    decision: Option<String>,
-    #[serde(default)]
-    summary: Option<String>,
-    #[serde(default = "empty_json_object")]
-    metadata: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WorkItemActivityEntry {
-    id: Uuid,
-    work_item_id: Uuid,
-    event_type: String,
-    actor_subject: Option<String>,
-    subject_type: Option<String>,
-    subject_id: Option<Uuid>,
-    summary: String,
-    metadata: Value,
-    created_at: DateTime<Utc>,
 }
 
 #[async_trait]
@@ -54664,42 +54480,6 @@ fn default_agent_release_state() -> String {
 
 fn default_enabled_status() -> String {
     "enabled".to_string()
-}
-
-fn default_work_item_source() -> String {
-    "manual".to_string()
-}
-
-fn default_work_item_status() -> String {
-    "open".to_string()
-}
-
-fn default_work_item_priority() -> String {
-    "normal".to_string()
-}
-
-fn default_agent_teammate_role() -> String {
-    "teammate".to_string()
-}
-
-fn default_squad_member_role() -> String {
-    "member".to_string()
-}
-
-fn default_collaboration_record_status() -> String {
-    "active".to_string()
-}
-
-fn default_work_item_assignment_role() -> String {
-    "owner".to_string()
-}
-
-fn default_work_item_assignment_status() -> String {
-    "assigned".to_string()
-}
-
-fn default_work_item_review_status() -> String {
-    "requested".to_string()
 }
 
 fn default_semantic_source_status() -> String {
