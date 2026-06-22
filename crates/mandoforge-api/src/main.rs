@@ -3916,18 +3916,6 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::execution_jobs::router())
         .merge(handlers::remote_computers::router())
         .route(
-            "/api/remote-computers/runner/readiness",
-            get(get_remote_computer_runner_readiness),
-        )
-        .route(
-            "/api/remote-computers/runner/dry-run",
-            post(dry_run_remote_computer_runner),
-        )
-        .route(
-            "/api/remote-computers/runner/mutate",
-            post(mutate_remote_computer_runner),
-        )
-        .route(
             "/api/remote-computers/reclaim-stale",
             post(reclaim_stale_remote_computers),
         )
@@ -53544,8 +53532,8 @@ pub(crate) async fn validate_remote_computer_state_sync(
     }))
 }
 
-async fn get_remote_computer_runner_readiness(
-    State(state): State<AppState>,
+pub(crate) async fn get_remote_computer_runner_readiness(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<RemoteComputerRunnerReadiness>, AppError> {
     authorize_request(
@@ -53559,10 +53547,10 @@ async fn get_remote_computer_runner_readiness(
     Ok(Json(build_remote_computer_runner_readiness()))
 }
 
-async fn dry_run_remote_computer_runner(
-    State(state): State<AppState>,
+pub(crate) async fn dry_run_remote_computer_runner(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<RemoteComputerRunnerDryRunRequest>,
+    input: RemoteComputerRunnerDryRunRequest,
 ) -> Result<Json<RemoteComputerRunnerDryRunResponse>, AppError> {
     authorize_request(
         &state,
@@ -53595,10 +53583,10 @@ async fn dry_run_remote_computer_runner(
     Ok(Json(response))
 }
 
-async fn mutate_remote_computer_runner(
-    State(state): State<AppState>,
+pub(crate) async fn mutate_remote_computer_runner(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<RemoteComputerRunnerDryRunRequest>,
+    input: RemoteComputerRunnerDryRunRequest,
 ) -> Result<Json<RemoteComputerRunnerDryRunResponse>, AppError> {
     if remote_computer_runner_request_is_exec(&input) {
         return Err(AppError::bad_request(
