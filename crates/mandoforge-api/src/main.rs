@@ -3892,33 +3892,12 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::memory_governance::router())
         .merge(handlers::sessions::router())
         .route(
-            "/api/sessions/{id}/memory-writeback-candidates",
-            get(list_session_memory_writeback_candidates)
-                .post(create_session_memory_writeback_candidates),
-        )
-        .route(
             "/api/sessions/{id}/semantic-synthesis-runs",
             post(create_session_semantic_synthesis_run),
         )
         .route(
             "/api/semantic-retrieval/backends",
             get(get_semantic_retrieval_backends),
-        )
-        .route(
-            "/api/memory-writeback-candidates",
-            get(list_memory_writeback_candidates),
-        )
-        .route(
-            "/api/memory-writeback-candidates/{id}",
-            get(get_memory_writeback_candidate),
-        )
-        .route(
-            "/api/memory-writeback-candidates/{id}/approve",
-            post(approve_memory_writeback_candidate),
-        )
-        .route(
-            "/api/memory-writeback-candidates/{id}/reject",
-            post(reject_memory_writeback_candidate),
         )
         .route(
             "/api/sessions/{id}/agent-handoffs",
@@ -29511,43 +29490,6 @@ async fn get_semantic_retrieval_backends(
     Ok(Json(semantic_retrieval_backend_registry_from_env()))
 }
 
-async fn list_session_memory_writeback_candidates(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<MemoryWritebackCandidate>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "session",
-        Some(id),
-    )
-    .await?;
-    state.get_session(id).await?;
-    Ok(Json(
-        state.list_memory_writeback_candidates(Some(id)).await?,
-    ))
-}
-
-async fn create_session_memory_writeback_candidates(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-    Json(input): Json<CreateMemoryWritebackCandidates>,
-) -> Result<Json<Vec<MemoryWritebackCandidate>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRun,
-        "session",
-        Some(id),
-    )
-    .await?;
-    let candidates = generate_memory_writeback_candidates(&state, id, input).await?;
-    Ok(Json(candidates))
-}
-
 async fn create_session_semantic_synthesis_run(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -29566,150 +29508,6 @@ async fn create_session_semantic_synthesis_run(
     let result =
         materialize_semantic_synthesis_run(&state, id, principal.subject_id, input).await?;
     Ok(Json(result))
-}
-
-async fn list_memory_writeback_candidates(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<MemoryWritebackCandidate>>, AppError> {
-    let principal = authorize_collection_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "memory_writeback_candidates",
-    )
-    .await?;
-    let visible_session_ids = visible_session_ids_for_principal(&state, &principal).await?;
-    Ok(Json(
-        state
-            .list_memory_writeback_candidates(None)
-            .await?
-            .into_iter()
-            .filter(|candidate| visible_session_ids.contains(&candidate.session_id))
-            .collect(),
-    ))
-}
-
-async fn get_memory_writeback_candidate(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-) -> Result<Json<MemoryWritebackCandidate>, AppError> {
-    let candidate = state.get_memory_writeback_candidate(id).await?;
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "memory_writeback_candidate",
-        Some(candidate.session_id),
-    )
-    .await?;
-    Ok(Json(candidate))
-}
-
-async fn approve_memory_writeback_candidate(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-    Json(input): Json<ReviewMemoryWritebackCandidate>,
-) -> Result<Json<MemoryWritebackCandidate>, AppError> {
-    let candidate = state.get_memory_writeback_candidate(id).await?;
-    authorize_request(
-        &state,
-        &headers,
-        Permission::ApprovalsDecide,
-        "memory_writeback_candidate",
-        Some(candidate.session_id),
-    )
-    .await?;
-    if candidate.status != "pending" {
-        return Err(AppError::bad_request(
-            "only pending memory writeback candidates can be reviewed",
-        ));
-    }
-    let principal = principal_from_request(&state, &headers).await?;
-    let semantic_object = state
-        .create_semantic_object(CreateSemanticObject {
-            source_id: None,
-            object_type: candidate.proposed_object_type.clone(),
-            object_key: candidate.proposed_object_key.clone(),
-            title: candidate.title.clone(),
-            summary: candidate.summary.clone(),
-            content: candidate.content.clone(),
-            semantic_scopes: candidate.semantic_scopes.clone(),
-            source_uri: Some(format!(
-                "session://{}/memory-writeback-candidates/{}",
-                candidate.session_id, candidate.id
-            )),
-            provenance: candidate.provenance.clone(),
-            trust_level: "human_verified".to_string(),
-            freshness: candidate.freshness.clone(),
-            status: "active".to_string(),
-        })
-        .await?;
-    let updated = state
-        .decide_memory_writeback_candidate(
-            id,
-            "approved",
-            Some(principal.subject_id.clone()),
-            input.reason.clone(),
-            Some(semantic_object.id),
-        )
-        .await?;
-    record_memory_writeback_candidate_review(&state, &updated, "memory_writeback.approved").await?;
-    state
-        .append_audit_log(new_audit_log(
-            Some(updated.session_id),
-            "user",
-            Some(updated.id),
-            "memory_writeback.semantic_object_created",
-            "semantic_object",
-            Some(semantic_object.id),
-            json!({
-                "candidate_id": updated.id,
-                "session_id": updated.session_id,
-                "semantic_object_id": semantic_object.id,
-                "object_key": semantic_object.object_key,
-                "trust_level": semantic_object.trust_level,
-                "reviewer_subject": updated.reviewer_subject,
-            }),
-        ))
-        .await?;
-    Ok(Json(updated))
-}
-
-async fn reject_memory_writeback_candidate(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-    Json(input): Json<ReviewMemoryWritebackCandidate>,
-) -> Result<Json<MemoryWritebackCandidate>, AppError> {
-    let candidate = state.get_memory_writeback_candidate(id).await?;
-    authorize_request(
-        &state,
-        &headers,
-        Permission::ApprovalsDecide,
-        "memory_writeback_candidate",
-        Some(candidate.session_id),
-    )
-    .await?;
-    if candidate.status != "pending" {
-        return Err(AppError::bad_request(
-            "only pending memory writeback candidates can be reviewed",
-        ));
-    }
-    let principal = principal_from_request(&state, &headers).await?;
-    let updated = state
-        .decide_memory_writeback_candidate(
-            id,
-            "rejected",
-            Some(principal.subject_id),
-            input.reason,
-            None,
-        )
-        .await?;
-    record_memory_writeback_candidate_review(&state, &updated, "memory_writeback.rejected").await?;
-    Ok(Json(updated))
 }
 
 async fn materialize_semantic_synthesis_run(
@@ -30144,7 +29942,7 @@ pub(crate) async fn generate_and_persist_context_packet(
         .await
 }
 
-async fn generate_memory_writeback_candidates(
+pub(crate) async fn generate_memory_writeback_candidates(
     state: &AppState,
     session_id: Uuid,
     input: CreateMemoryWritebackCandidates,
@@ -30498,7 +30296,7 @@ async fn record_memory_writeback_candidate_created(
         .await
 }
 
-async fn record_memory_writeback_candidate_review(
+pub(crate) async fn record_memory_writeback_candidate_review(
     state: &AppState,
     candidate: &MemoryWritebackCandidate,
     action: &str,
