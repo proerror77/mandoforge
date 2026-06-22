@@ -3900,14 +3900,6 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::collaboration::router())
         .merge(handlers::providers::router())
         .merge(handlers::mcp::router())
-        .route(
-            "/api/providers/production-rollout/run",
-            post(run_provider_production_rollout),
-        )
-        .route(
-            "/api/providers/production-rollout/rollback",
-            post(run_provider_production_rollback),
-        )
         .route("/api/providers/{id}/status", patch(update_provider_status))
         .route(
             "/api/providers/{id}/status-approval",
@@ -35317,10 +35309,10 @@ pub(crate) async fn get_provider_policy_gate_runs(
     )))
 }
 
-async fn run_provider_production_rollout(
-    State(state): State<AppState>,
+pub(crate) async fn run_provider_production_rollout(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<RunProviderProductionRollout>,
+    input: RunProviderProductionRollout,
 ) -> Result<Json<ProviderProductionRolloutRun>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
@@ -35342,10 +35334,10 @@ async fn run_provider_production_rollout(
     ))
 }
 
-async fn run_provider_production_rollback(
-    State(state): State<AppState>,
+pub(crate) async fn run_provider_production_rollback(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<RunProviderProductionRollback>,
+    input: RunProviderProductionRollback,
 ) -> Result<Json<ProviderProductionRollbackRun>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {

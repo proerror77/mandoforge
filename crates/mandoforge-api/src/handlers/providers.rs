@@ -9,8 +9,9 @@ use uuid::Uuid;
 use crate::{
     AppError, AppState, CreateProviderAccess, CreateProviderRecord, ProviderAccess,
     ProviderDeploymentValidationRun, ProviderGovernanceSummary, ProviderPolicyGateReport,
-    ProviderPolicyGateRunResponse, ProviderPolicyGateRunSummary, ProviderRecord,
-    UpdateProviderAccess,
+    ProviderPolicyGateRunResponse, ProviderPolicyGateRunSummary, ProviderProductionRollbackRun,
+    ProviderProductionRolloutRun, ProviderRecord, RunProviderProductionRollback,
+    RunProviderProductionRollout, UpdateProviderAccess,
     archive_provider_access as archive_provider_access_impl,
     create_provider as create_provider_impl,
     create_provider_access as create_provider_access_impl,
@@ -20,6 +21,8 @@ use crate::{
     list_providers as list_providers_impl,
     list_provider_access as list_provider_access_impl,
     run_provider_policy_gate as run_provider_policy_gate_impl,
+    run_provider_production_rollback as run_provider_production_rollback_impl,
+    run_provider_production_rollout as run_provider_production_rollout_impl,
     update_provider as update_provider_impl,
     update_provider_access as update_provider_access_impl,
     validate_provider_deployment as validate_provider_deployment_impl,
@@ -42,6 +45,14 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/api/providers/policy-gate/runs",
             get(get_provider_policy_gate_runs),
+        )
+        .route(
+            "/api/providers/production-rollout/run",
+            post(run_provider_production_rollout),
+        )
+        .route(
+            "/api/providers/production-rollout/rollback",
+            post(run_provider_production_rollback),
         )
         .route(
             "/api/teams/{id}/provider-access",
@@ -111,6 +122,22 @@ async fn get_provider_policy_gate_runs(
     headers: HeaderMap,
 ) -> Result<Json<ProviderPolicyGateRunSummary>, AppError> {
     get_provider_policy_gate_runs_impl(state, headers).await
+}
+
+async fn run_provider_production_rollout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<RunProviderProductionRollout>,
+) -> Result<Json<ProviderProductionRolloutRun>, AppError> {
+    run_provider_production_rollout_impl(state, headers, input).await
+}
+
+async fn run_provider_production_rollback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<RunProviderProductionRollback>,
+) -> Result<Json<ProviderProductionRollbackRun>, AppError> {
+    run_provider_production_rollback_impl(state, headers, input).await
 }
 
 async fn list_provider_access(
