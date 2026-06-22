@@ -1155,7 +1155,7 @@ pub(crate) struct Artifact {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct CodexArtifactSyncRequest {
+pub(crate) struct CodexArtifactSyncRequest {
     session_id: Uuid,
     #[serde(default)]
     turn_id: Option<String>,
@@ -1178,7 +1178,7 @@ struct CodexArtifactInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct CodexArtifactSyncResponse {
+pub(crate) struct CodexArtifactSyncResponse {
     session_id: Uuid,
     turn_id: Option<String>,
     command_id: Option<String>,
@@ -3903,23 +3903,6 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::policy::router())
         .merge(handlers::vault::router())
         .merge(handlers::codex_app_server::router())
-        .route("/api/codex-app-server/threads", post(create_codex_thread))
-        .route(
-            "/api/codex-app-server/threads/{thread_id}/turns",
-            post(create_codex_turn),
-        )
-        .route(
-            "/api/codex-app-server/turns/{turn_id}/interrupt",
-            post(interrupt_codex_turn),
-        )
-        .route(
-            "/api/codex-app-server/turns/{turn_id}/commands",
-            post(execute_codex_command),
-        )
-        .route(
-            "/api/codex-app-server/artifacts/sync",
-            post(sync_codex_artifacts),
-        )
         .merge(handlers::packs::router())
         .merge(handlers::github::router())
         .route(
@@ -38704,10 +38687,10 @@ pub(crate) async fn validate_codex_app_server_ops(
     Ok(Json(run))
 }
 
-async fn create_codex_thread(
-    State(state): State<AppState>,
+pub(crate) async fn create_codex_thread(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<CodexThreadRequest>,
+    input: CodexThreadRequest,
 ) -> Result<Json<CodexThreadResponse>, AppError> {
     authorize_request(
         &state,
@@ -38735,11 +38718,11 @@ async fn create_codex_thread(
     Ok(Json(response))
 }
 
-async fn create_codex_turn(
-    State(state): State<AppState>,
-    Path(thread_id): Path<String>,
+pub(crate) async fn create_codex_turn(
+    state: AppState,
+    thread_id: String,
     headers: HeaderMap,
-    Json(input): Json<CodexTurnRequest>,
+    input: CodexTurnRequest,
 ) -> Result<Json<CodexTurnResponse>, AppError> {
     authorize_request(
         &state,
@@ -38767,9 +38750,9 @@ async fn create_codex_turn(
     Ok(Json(response))
 }
 
-async fn interrupt_codex_turn(
-    State(state): State<AppState>,
-    Path(turn_id): Path<String>,
+pub(crate) async fn interrupt_codex_turn(
+    state: AppState,
+    turn_id: String,
     headers: HeaderMap,
 ) -> Result<Json<CodexInterruptResponse>, AppError> {
     authorize_request(
@@ -38798,11 +38781,11 @@ async fn interrupt_codex_turn(
     Ok(Json(response))
 }
 
-async fn execute_codex_command(
-    State(state): State<AppState>,
-    Path(turn_id): Path<String>,
+pub(crate) async fn execute_codex_command(
+    state: AppState,
+    turn_id: String,
     headers: HeaderMap,
-    Json(input): Json<CodexCommandRequest>,
+    input: CodexCommandRequest,
 ) -> Result<Json<CodexCommandResponse>, AppError> {
     authorize_request(
         &state,
@@ -40235,10 +40218,10 @@ fn codex_run_status_failed(status: &str) -> bool {
     )
 }
 
-async fn sync_codex_artifacts(
-    State(state): State<AppState>,
+pub(crate) async fn sync_codex_artifacts(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<CodexArtifactSyncRequest>,
+    input: CodexArtifactSyncRequest,
 ) -> Result<Json<CodexArtifactSyncResponse>, AppError> {
     authorize_request(
         &state,
