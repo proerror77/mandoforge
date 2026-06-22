@@ -351,9 +351,9 @@ pub(crate) use types::workflow::{
     WorkflowTransitionFilter, WorkflowTransitionQuery,
 };
 use types::tools::{
-    ApprovalRequestTool, ArtifactCreateTool, FileReadTool, McpCallTool, OntologyTypeLookupTool,
-    SemanticLinkExpandTool, SemanticObjectFetchTool, SemanticObjectSearchTool, ShellExecTool,
-    SqlQueryTool, SqlSchemaTool, ToolDescriptor,
+    ApprovalRequestTool, ArtifactCreateTool, ExecuteTool, FileReadTool, McpCallTool,
+    OntologyTypeLookupTool, SemanticLinkExpandTool, SemanticObjectFetchTool,
+    SemanticObjectSearchTool, ShellExecTool, SqlQueryTool, SqlSchemaTool, ToolDescriptor,
 };
 pub(crate) use types::workflow_pack::{
     InstallWorkflowPack, ValidateWorkflowPack, WorkflowPackArchiveRequest, WorkflowPackBinding,
@@ -512,14 +512,6 @@ trait ToolExecutor: Send + Sync {
         input: &ExecuteTool,
         tool_call: &ToolCall,
     ) -> Result<Value, AppError>;
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct ExecuteTool {
-    session_id: Uuid,
-    #[serde(default)]
-    task_grant_id: Option<Uuid>,
-    args: Value,
 }
 
 #[tokio::main]
