@@ -3906,35 +3906,8 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::packs::router())
         .merge(handlers::github::router())
         .merge(handlers::eval::router())
-        .route("/api/usage", get(get_usage_summary))
-        .route("/api/usage/trends", get(get_usage_trends))
-        .route("/api/usage/finance-summary", get(get_usage_finance_summary))
-        .route(
-            "/api/usage/finance-operations/summary",
-            get(get_usage_finance_operations_summary),
-        )
-        .route(
-            "/api/usage/finance-operations/run",
-            post(run_usage_finance_operations),
-        )
-        .route(
-            "/api/usage/finance-operations/reconcile",
-            post(run_usage_finance_reconciliation),
-        )
-        .route("/api/usage/export.csv", get(export_usage_csv))
-        .route("/api/usage/export/deliver", post(deliver_usage_export))
-        .route("/api/usage/alerts", get(get_cost_alerts))
-        .route("/api/usage/alerts/ack", post(acknowledge_cost_alert))
-        .route("/api/usage/alerts/deliver", post(deliver_cost_alerts))
+        .merge(handlers::usage::router())
         .merge(handlers::scheduler::router())
-        .route(
-            "/api/usage/alert-routes",
-            get(list_cost_alert_routes).post(create_cost_alert_route),
-        )
-        .route(
-            "/api/usage/rollups",
-            get(list_usage_rollups).post(create_usage_rollup),
-        )
         .merge(handlers::observability::router())
         .route("/api/approvals", get(list_approvals))
         .route(
@@ -44880,32 +44853,32 @@ fn eval_run_detail_i64(run: &EvalRun, key: &str) -> i64 {
     run.details.get(key).and_then(Value::as_i64).unwrap_or(0)
 }
 
-async fn get_usage_summary(
-    State(state): State<AppState>,
+pub(crate) async fn get_usage_summary(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<UsageSummary>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "usage", None).await?;
     Ok(Json(build_usage_summary(&state).await?))
 }
 
-async fn get_usage_trends(
-    State(state): State<AppState>,
+pub(crate) async fn get_usage_trends(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<UsageTrendSummary>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "usage_trends", None).await?;
     Ok(Json(build_usage_trend_summary(&state).await?))
 }
 
-async fn get_usage_finance_summary(
-    State(state): State<AppState>,
+pub(crate) async fn get_usage_finance_summary(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<UsageFinanceDashboardSummary>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "usage_finance", None).await?;
     Ok(Json(build_usage_finance_dashboard_summary(&state).await?))
 }
 
-async fn get_usage_finance_operations_summary(
-    State(state): State<AppState>,
+pub(crate) async fn get_usage_finance_operations_summary(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<UsageFinanceOperationsSummary>, AppError> {
     authorize_request(
@@ -44919,8 +44892,8 @@ async fn get_usage_finance_operations_summary(
     Ok(Json(build_usage_finance_operations_summary(&state).await?))
 }
 
-async fn run_usage_finance_operations(
-    State(state): State<AppState>,
+pub(crate) async fn run_usage_finance_operations(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<UsageFinanceOperationsRun>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
@@ -44937,8 +44910,8 @@ async fn run_usage_finance_operations(
     ))
 }
 
-async fn run_usage_finance_reconciliation(
-    State(state): State<AppState>,
+pub(crate) async fn run_usage_finance_reconciliation(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Value>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
@@ -45929,8 +45902,8 @@ pub(crate) fn dedupe_strings(values: &mut Vec<String>) {
     values.retain(|value| seen.insert(value.clone()));
 }
 
-async fn export_usage_csv(
-    State(state): State<AppState>,
+pub(crate) async fn export_usage_csv(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
@@ -45974,8 +45947,8 @@ async fn export_usage_csv(
         .into_response())
 }
 
-async fn deliver_usage_export(
-    State(state): State<AppState>,
+pub(crate) async fn deliver_usage_export(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<UsageFinanceExportDelivery>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
@@ -48772,8 +48745,8 @@ fn build_observability_remediation_supervision_readiness(
     }
 }
 
-async fn get_cost_alerts(
-    State(state): State<AppState>,
+pub(crate) async fn get_cost_alerts(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<CostAlertSummary>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "usage_alerts", None).await?;
@@ -48785,10 +48758,10 @@ async fn get_cost_alerts(
     }))
 }
 
-async fn acknowledge_cost_alert(
-    State(state): State<AppState>,
+pub(crate) async fn acknowledge_cost_alert(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<AcknowledgeCostAlertRequest>,
+    input: AcknowledgeCostAlertRequest,
 ) -> Result<Json<CostAlertAcknowledgement>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
@@ -48834,8 +48807,8 @@ async fn acknowledge_cost_alert(
     Ok(Json(acknowledgement))
 }
 
-async fn list_cost_alert_routes(
-    State(state): State<AppState>,
+pub(crate) async fn list_cost_alert_routes(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Vec<CostAlertRoute>>, AppError> {
     authorize_request(
@@ -48849,10 +48822,10 @@ async fn list_cost_alert_routes(
     Ok(Json(state.list_cost_alert_routes().await?))
 }
 
-async fn create_cost_alert_route(
-    State(state): State<AppState>,
+pub(crate) async fn create_cost_alert_route(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<CreateCostAlertRoute>,
+    input: CreateCostAlertRoute,
 ) -> Result<Json<CostAlertRoute>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
@@ -48885,8 +48858,8 @@ async fn create_cost_alert_route(
     Ok(Json(route))
 }
 
-async fn deliver_cost_alerts(
-    State(state): State<AppState>,
+pub(crate) async fn deliver_cost_alerts(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<CostAlertDelivery>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "usage_alerts", None).await?;
@@ -49374,18 +49347,18 @@ fn severity_rank(severity: &str) -> i32 {
     }
 }
 
-async fn list_usage_rollups(
-    State(state): State<AppState>,
+pub(crate) async fn list_usage_rollups(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Vec<UsageRollup>>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "usage_rollups", None).await?;
     Ok(Json(state.list_usage_rollups().await?))
 }
 
-async fn create_usage_rollup(
-    State(state): State<AppState>,
+pub(crate) async fn create_usage_rollup(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<CreateUsageRollup>,
+    input: CreateUsageRollup,
 ) -> Result<Json<UsageRollup>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "usage_rollups", None).await?;
     let period_end = input.period_end.unwrap_or_else(Utc::now);
