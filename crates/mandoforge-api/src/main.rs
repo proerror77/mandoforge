@@ -3909,25 +3909,8 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::usage::router())
         .merge(handlers::scheduler::router())
         .merge(handlers::observability::router())
-        .route("/api/approvals", get(list_approvals))
+        .merge(handlers::approvals::router())
         .merge(handlers::approval_notifications::router())
-        .route("/api/approvals/{id}/approve", post(approve))
-        .route("/api/approvals/{id}/reject", post(reject))
-        .route("/api/approvals/{id}/expire", post(expire))
-        .route("/api/approvals/{id}/modify", post(modify_approval))
-        .route("/api/approvals/{id}/escalate", post(escalate_approval))
-        .route(
-            "/api/approvals/escalations/run-due",
-            post(run_due_approval_escalations),
-        )
-        .route(
-            "/api/approval-groups",
-            get(list_approval_groups).post(create_approval_group),
-        )
-        .route(
-            "/api/approval-escalation-rules",
-            get(list_approval_escalation_rules).post(create_approval_escalation_rule),
-        )
         .route("/api/execution-jobs", get(list_execution_jobs))
         .route("/api/queue/notify-wait", get(queue_notify_wait))
         .route("/api/session-loop-jobs", get(list_session_loop_jobs))
@@ -50397,8 +50380,8 @@ fn merge_approval_evidence(target: &mut Value, patch: Value) {
     }
 }
 
-async fn list_approvals(
-    State(state): State<AppState>,
+pub(crate) async fn list_approvals(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Vec<Approval>>, AppError> {
     let principal =
@@ -50415,18 +50398,18 @@ async fn list_approvals(
     ))
 }
 
-async fn list_approval_groups(
-    State(state): State<AppState>,
+pub(crate) async fn list_approval_groups(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Vec<ApprovalGroup>>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "approval_groups", None).await?;
     Ok(Json(state.list_approval_groups().await?))
 }
 
-async fn create_approval_group(
-    State(state): State<AppState>,
+pub(crate) async fn create_approval_group(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<CreateApprovalGroup>,
+    input: CreateApprovalGroup,
 ) -> Result<Json<ApprovalGroup>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
@@ -50458,8 +50441,8 @@ async fn create_approval_group(
     Ok(Json(group))
 }
 
-async fn list_approval_escalation_rules(
-    State(state): State<AppState>,
+pub(crate) async fn list_approval_escalation_rules(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Vec<ApprovalEscalationRule>>, AppError> {
     authorize_request(
@@ -50473,10 +50456,10 @@ async fn list_approval_escalation_rules(
     Ok(Json(state.list_approval_escalation_rules().await?))
 }
 
-async fn create_approval_escalation_rule(
-    State(state): State<AppState>,
+pub(crate) async fn create_approval_escalation_rule(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<CreateApprovalEscalationRule>,
+    input: CreateApprovalEscalationRule,
 ) -> Result<Json<ApprovalEscalationRule>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
@@ -50509,38 +50492,38 @@ async fn create_approval_escalation_rule(
     Ok(Json(rule))
 }
 
-async fn approve(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn approve(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<Approval>, AppError> {
     let principal = authorize_approval_decision(&state, &headers, id).await?;
     decide_approval(state, id, "approved", Some(principal.subject_id)).await
 }
 
-async fn reject(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn reject(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<Approval>, AppError> {
     authorize_approval_decision(&state, &headers, id).await?;
     decide_approval(state, id, "rejected", None).await
 }
 
-async fn expire(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn expire(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<Approval>, AppError> {
     authorize_approval_decision(&state, &headers, id).await?;
     Ok(Json(expire_approval_record(&state, id).await?))
 }
 
-async fn modify_approval(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn modify_approval(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<ModifyApproval>,
+    input: ModifyApproval,
 ) -> Result<Json<Approval>, AppError> {
     authorize_approval_decision(&state, &headers, id).await?;
     let approval = state.get_approval(id).await?;
@@ -50594,11 +50577,11 @@ async fn modify_approval(
     Ok(Json(updated))
 }
 
-async fn escalate_approval(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn escalate_approval(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<EscalateApproval>,
+    input: EscalateApproval,
 ) -> Result<Json<Approval>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
@@ -50650,8 +50633,8 @@ async fn escalate_approval(
     Ok(Json(updated))
 }
 
-async fn run_due_approval_escalations(
-    State(state): State<AppState>,
+pub(crate) async fn run_due_approval_escalations(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<ApprovalEscalationDueRun>, AppError> {
     authorize_request(
