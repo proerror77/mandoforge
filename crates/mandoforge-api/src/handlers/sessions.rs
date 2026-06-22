@@ -2,19 +2,26 @@ use axum::{
     Json, Router,
     extract::{Path, State},
     http::HeaderMap,
-    routing::get,
+    routing::{get, post},
 };
 use uuid::Uuid;
 
 use crate::{
-    AppError, AppState, AuthorizationRequest, CreateSession, Permission, Session,
-    enqueue_session_loop, ensure_primary_session_thread, authorize_request, principal_from_request,
+    AddMessage, AppError, AppState, AuthorizationRequest, CreateSession, Permission,
+    SendSessionEvents, Session, SessionEvent, append_incoming_session_event,
+    append_user_message_event, authorize_request, enqueue_session_loop,
+    ensure_primary_session_thread, principal_from_request, project_session_event_to_loop,
 };
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/{id}", get(get_session))
+        .route("/api/sessions/{id}/messages", post(add_message))
+        .route(
+            "/api/sessions/{id}/events",
+            get(list_events).post(send_session_events),
+        )
 }
 
 async fn list_sessions(
@@ -78,4 +85,62 @@ async fn get_session(
     )
     .await?;
     Ok(Json(state.get_session(id).await?))
+}
+
+async fn add_message(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<AddMessage>,
+) -> Result<Json<SessionEvent>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsWrite,
+        "session",
+        Some(id),
+    )
+    .await?;
+    let event = append_user_message_event(&state, id, input.message).await?;
+    project_session_event_to_loop(&state, &event).await?;
+    Ok(Json(event))
+}
+
+async fn list_events(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<SessionEvent>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.list_events(id).await?))
+}
+
+async fn send_session_events(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<SendSessionEvents>,
+) -> Result<Json<Vec<SessionEvent>>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsWrite,
+        "session",
+        Some(id),
+    )
+    .await?;
+    let mut stored_events = Vec::new();
+    for event in input.events {
+        let stored = append_incoming_session_event(&state, id, event).await?;
+        project_session_event_to_loop(&state, &stored).await?;
+        stored_events.push(stored);
+    }
+    Ok(Json(stored_events))
 }

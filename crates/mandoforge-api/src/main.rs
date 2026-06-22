@@ -3891,12 +3891,7 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::ontology::router())
         .merge(handlers::memory_governance::router())
         .merge(handlers::sessions::router())
-        .route("/api/sessions/{id}/messages", post(add_message))
         .route("/api/sessions/{id}/run", post(run_session))
-        .route(
-            "/api/sessions/{id}/events",
-            get(list_events).post(send_session_events),
-        )
         .route("/api/sessions/{id}/threads", get(list_session_threads))
         .route(
             "/api/sessions/{id}/context-packet",
@@ -15509,49 +15504,7 @@ async fn get_session_thread(
     Ok(Json(thread))
 }
 
-async fn add_message(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-    Json(input): Json<AddMessage>,
-) -> Result<Json<SessionEvent>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsWrite,
-        "session",
-        Some(id),
-    )
-    .await?;
-    let event = append_user_message_event(&state, id, input.message).await?;
-    project_session_event_to_loop(&state, &event).await?;
-    Ok(Json(event))
-}
-
-async fn send_session_events(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-    Json(input): Json<SendSessionEvents>,
-) -> Result<Json<Vec<SessionEvent>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsWrite,
-        "session",
-        Some(id),
-    )
-    .await?;
-    let mut stored_events = Vec::new();
-    for event in input.events {
-        let stored = append_incoming_session_event(&state, id, event).await?;
-        project_session_event_to_loop(&state, &stored).await?;
-        stored_events.push(stored);
-    }
-    Ok(Json(stored_events))
-}
-
-async fn append_incoming_session_event(
+pub(crate) async fn append_incoming_session_event(
     state: &AppState,
     session_id: Uuid,
     event: IncomingSessionEvent,
@@ -15687,7 +15640,7 @@ fn validate_session_goal_event_payload(event_type: &str, payload: &Value) -> Res
     Ok(())
 }
 
-async fn append_user_message_event(
+pub(crate) async fn append_user_message_event(
     state: &AppState,
     session_id: Uuid,
     message: String,
@@ -29630,22 +29583,6 @@ async fn enforce_resource_scope(
             principal.subject_id, request.resource_type
         )))
     }
-}
-
-async fn list_events(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<SessionEvent>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "session",
-        Some(id),
-    )
-    .await?;
-    Ok(Json(state.list_events(id).await?))
 }
 
 async fn get_session_context_packet(
