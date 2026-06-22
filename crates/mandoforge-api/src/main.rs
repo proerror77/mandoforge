@@ -3912,10 +3912,6 @@ fn build_router(state: AppState) -> Router {
                 .delete(archive_environment),
         )
         .merge(handlers::semantic::router())
-        .route(
-            "/api/semantic-objects",
-            get(list_semantic_objects).post(create_semantic_object),
-        )
         .route("/api/semantic-search", get(search_semantic_objects))
         .route("/api/semantic-graph", get(get_semantic_graph))
         .route("/api/semantic-workbench", get(get_semantic_workbench))
@@ -3949,16 +3945,6 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/semantic-reflection/queue",
             get(get_semantic_reflection_queue),
-        )
-        .route(
-            "/api/semantic-objects/{id}",
-            get(get_semantic_object)
-                .patch(update_semantic_object)
-                .delete(archive_semantic_object),
-        )
-        .route(
-            "/api/semantic-objects/{id}/fetch",
-            post(fetch_semantic_object),
         )
         .route("/api/ontology/registry", get(get_ontology_registry))
         .route(
@@ -7043,21 +7029,6 @@ fn agent_runtime_profile_command_allowlisted(command: &str, allowed_commands: &[
     allowed_commands
         .iter()
         .any(|allowed| allowed == command || allowed == basename)
-}
-
-async fn list_semantic_objects(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<SemanticObject>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::AgentsRead,
-        "semantic_objects",
-        None,
-    )
-    .await?;
-    Ok(Json(state.list_semantic_objects().await?))
 }
 
 async fn search_semantic_objects(
@@ -14602,102 +14573,6 @@ fn memory_governance_writeback_ref(
         updated_at: candidate.updated_at,
         decided_at: candidate.decided_at,
     }
-}
-
-async fn create_semantic_object(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(input): Json<CreateSemanticObject>,
-) -> Result<Json<SemanticObject>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::AgentsWrite,
-        "semantic_objects",
-        None,
-    )
-    .await?;
-    let object = state.create_semantic_object(input).await?;
-    record_semantic_object_audit(&state, &headers, &object, "semantic_object.created").await?;
-    Ok(Json(object))
-}
-
-async fn get_semantic_object(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-) -> Result<Json<SemanticObject>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::AgentsRead,
-        "semantic_object",
-        Some(id),
-    )
-    .await?;
-    Ok(Json(state.get_semantic_object(id).await?))
-}
-
-async fn fetch_semantic_object(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-    Json(input): Json<FetchSemanticObjectRequest>,
-) -> Result<Json<FetchSemanticObjectResponse>, AppError> {
-    let packet = state.get_context_packet(input.context_packet_id).await?;
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "context_packet",
-        Some(packet.session_id),
-    )
-    .await?;
-    let response = fetch_semantic_object_for_context(
-        &state,
-        &packet,
-        id,
-        input.include_content.unwrap_or(false),
-    )
-    .await?;
-    Ok(Json(response))
-}
-
-async fn update_semantic_object(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-    Json(input): Json<UpdateSemanticObject>,
-) -> Result<Json<SemanticObject>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::AgentsWrite,
-        "semantic_object",
-        Some(id),
-    )
-    .await?;
-    let object = state.update_semantic_object(id, input).await?;
-    record_semantic_object_audit(&state, &headers, &object, "semantic_object.updated").await?;
-    Ok(Json(object))
-}
-
-async fn archive_semantic_object(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-) -> Result<Json<SemanticObject>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::AgentsWrite,
-        "semantic_object",
-        Some(id),
-    )
-    .await?;
-    let object = state.archive_semantic_object(id).await?;
-    record_semantic_object_audit(&state, &headers, &object, "semantic_object.archived").await?;
-    Ok(Json(object))
 }
 
 async fn get_ontology_registry(
