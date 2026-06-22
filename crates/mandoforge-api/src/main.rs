@@ -157,17 +157,23 @@ pub(crate) use types::session::{
     SessionLoopJob, SessionLoopJobStatus, SessionStatus, SessionThread, StreamEventsQuery,
 };
 pub(crate) use types::semantic::{
-    ContextPacketSemanticObject, CreateSemanticIngestionBatch, CreateSemanticLink,
-    CreateSemanticObject, CreateSemanticSource, ExpandSemanticLinksRequest,
-    ExpandSemanticLinksResponse, FetchSemanticObjectRequest, FetchSemanticObjectResponse,
-    FetchableSemanticObject, RenderedSemanticObject, ResolveSemanticConflictRequest,
-    SearchSemanticObjectsRequest, SearchSemanticObjectsResponse, SemanticGovernanceRunRequest,
+    ContextPacketSemanticObject, CreateMemoryWritebackCandidates, CreateSemanticIngestionBatch,
+    CreateSemanticLink, CreateSemanticObject, CreateSemanticSource, CreateSemanticSynthesisRun,
+    ExpandSemanticLinksRequest, ExpandSemanticLinksResponse, FetchSemanticObjectRequest,
+    FetchSemanticObjectResponse, FetchableSemanticObject, MemoryGovernanceAttentionItem,
+    MemoryGovernanceObjectRef, MemoryGovernancePartition, MemoryGovernancePartitionDetail,
+    MemoryGovernancePartitionQuery, MemoryGovernanceSummary, MemoryGovernanceWritebackQueue,
+    MemoryGovernanceWritebackQuery, MemoryGovernanceWritebackRef,
+    MemoryGovernanceWritebackSummary, MemoryWritebackCandidate, RenderedSemanticObject,
+    ResolveSemanticConflictRequest, ReviewMemoryWritebackCandidate, SearchSemanticObjectsRequest,
+    SearchSemanticObjectsResponse, SemanticAgingPolicySweep, SemanticGovernanceRunRequest,
     SemanticGovernanceRunResult, SemanticGraphConflict, SemanticGraphEdge, SemanticGraphNode,
     SemanticGraphPartition, SemanticGraphSnapshot, SemanticIngestionBatchResult,
     SemanticIngestionObjectRef, SemanticLink, SemanticObject, SemanticProductQuery,
     SemanticRetrievalBackendRegistry, SemanticRetrievalBackendStatus, SemanticSearchResponse,
-    SemanticSearchResult, SemanticSource, UpdateSemanticLink, UpdateSemanticObject,
-    UpdateSemanticSource,
+    SemanticSearchResult, SemanticSource, SemanticSynthesisMemoryCandidateInput,
+    SemanticSynthesisRunResult, SemanticSynthesisScheduleSweep, SemanticSynthesisScheduledRun,
+    UpdateSemanticLink, UpdateSemanticObject, UpdateSemanticSource,
 };
 pub(crate) use types::tenant::{
     AcceptTenantInvitation, AcceptedTenantInvitation, BootstrapTenantProvisioning,
@@ -1274,218 +1280,6 @@ struct RenderedContextBudget {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct MemoryWritebackCandidate {
-    id: Uuid,
-    session_id: Uuid,
-    candidate_type: String,
-    source_event_id: Option<Uuid>,
-    source_artifact_id: Option<Uuid>,
-    source_approval_id: Option<Uuid>,
-    source_handoff_id: Option<Uuid>,
-    proposed_object_type: String,
-    proposed_object_key: String,
-    title: String,
-    summary: String,
-    content: Value,
-    semantic_scopes: Value,
-    source_refs: Value,
-    provenance: Value,
-    trust_level: String,
-    freshness: String,
-    status: String,
-    reviewer_subject: Option<String>,
-    review_reason: Option<String>,
-    semantic_object_id: Option<Uuid>,
-    audit_trace_id: Option<Uuid>,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-    decided_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct MemoryGovernanceSummary {
-    status: String,
-    generated_at: DateTime<Utc>,
-    isolation_policy: String,
-    semantic_object_count: usize,
-    memory_object_count: usize,
-    partition_count: usize,
-    partitions: Vec<MemoryGovernancePartition>,
-    trust_counts: BTreeMap<String, usize>,
-    freshness_counts: BTreeMap<String, usize>,
-    writeback: MemoryGovernanceWritebackSummary,
-    attention_items: Vec<MemoryGovernanceAttentionItem>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct MemoryGovernancePartition {
-    partition_key: String,
-    domain_scope: String,
-    workflow_scope: String,
-    memory_scope: String,
-    object_count: usize,
-    memory_object_count: usize,
-    human_verified_count: usize,
-    unverified_count: usize,
-    stale_count: usize,
-    shared: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct MemoryGovernanceWritebackSummary {
-    pending_count: usize,
-    approved_count: usize,
-    rejected_count: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct MemoryGovernanceAttentionItem {
-    severity: String,
-    kind: String,
-    message: String,
-    partition_key: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MemoryGovernancePartitionQuery {
-    partition_key: String,
-    #[serde(default)]
-    limit: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MemoryGovernanceWritebackQuery {
-    #[serde(default)]
-    status: Option<String>,
-    #[serde(default)]
-    limit: Option<usize>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct MemoryGovernancePartitionDetail {
-    generated_at: DateTime<Utc>,
-    partition: MemoryGovernancePartition,
-    object_count: usize,
-    pending_writeback_count: usize,
-    access_policy: String,
-    risk_items: Vec<MemoryGovernanceAttentionItem>,
-    objects: Vec<MemoryGovernanceObjectRef>,
-    writeback_candidates: Vec<MemoryGovernanceWritebackRef>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct MemoryGovernanceObjectRef {
-    id: Uuid,
-    object_key: String,
-    title: String,
-    summary: String,
-    trust_level: String,
-    freshness: String,
-    status: String,
-    source_uri: Option<String>,
-    semantic_scopes: Value,
-    provenance: Value,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct MemoryGovernanceWritebackQueue {
-    generated_at: DateTime<Utc>,
-    status_filter: Option<String>,
-    candidate_count: usize,
-    pending_count: usize,
-    candidates: Vec<MemoryGovernanceWritebackRef>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct MemoryGovernanceWritebackRef {
-    id: Uuid,
-    session_id: Uuid,
-    candidate_type: String,
-    proposed_object_type: String,
-    proposed_object_key: String,
-    title: String,
-    summary: String,
-    trust_level: String,
-    freshness: String,
-    status: String,
-    partition_key: String,
-    semantic_object_id: Option<Uuid>,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-    decided_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateMemoryWritebackCandidates {
-    #[serde(default)]
-    include_session_summary: Option<bool>,
-    #[serde(default)]
-    include_artifacts: Option<bool>,
-    #[serde(default)]
-    include_handoffs: Option<bool>,
-    #[serde(default)]
-    include_approvals: Option<bool>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct CreateSemanticSynthesisRun {
-    synthesis_type: String,
-    goal_attempted: String,
-    #[serde(default)]
-    context_used: Vec<String>,
-    #[serde(default)]
-    worked: Vec<String>,
-    #[serde(default)]
-    failed_or_corrected: Vec<String>,
-    #[serde(default)]
-    unsafe_assumptions: Vec<String>,
-    #[serde(default)]
-    durable_memory_candidates: Vec<SemanticSynthesisMemoryCandidateInput>,
-    #[serde(default = "empty_json_object")]
-    metadata: Value,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct SemanticSynthesisMemoryCandidateInput {
-    #[serde(default = "default_memory_object_type")]
-    proposed_object_type: String,
-    proposed_object_key: String,
-    title: String,
-    summary: String,
-    #[serde(default = "empty_json_object")]
-    content: Value,
-    #[serde(default = "empty_json_object")]
-    semantic_scopes: Value,
-    #[serde(default = "empty_json_object")]
-    source_refs: Value,
-    #[serde(default = "empty_json_object")]
-    provenance: Value,
-    #[serde(default = "default_semantic_trust_level")]
-    trust_level: String,
-    #[serde(default = "default_semantic_freshness")]
-    freshness: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SemanticSynthesisRunResult {
-    status: String,
-    synthesis_type: String,
-    session_id: Uuid,
-    checkpoint_event_id: Uuid,
-    artifact: Artifact,
-    candidates: Vec<MemoryWritebackCandidate>,
-    created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ReviewMemoryWritebackCandidate {
-    #[serde(default)]
-    reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Approval {
     id: Uuid,
     session_id: Uuid,
@@ -1812,45 +1606,6 @@ struct SchedulerDueRun {
     usage_finance_export: UsageFinanceExportDelivery,
     remote_computer_reclaim: RemoteComputerReclaimRun,
     remote_computer_sidecar_supervision: RemoteComputerSidecarSupervisionRun,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SemanticAgingPolicySweep {
-    status: String,
-    checked_at: DateTime<Utc>,
-    policy_count: usize,
-    due_count: usize,
-    archived_count: usize,
-    skipped_count: usize,
-    failed_count: usize,
-    archived_object_ids: Vec<Uuid>,
-    runs: Vec<Value>,
-    actions: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SemanticSynthesisScheduleSweep {
-    status: String,
-    checked_at: DateTime<Utc>,
-    scheduled_count: usize,
-    due_count: usize,
-    created_count: usize,
-    skipped_count: usize,
-    failed_count: usize,
-    runs: Vec<SemanticSynthesisScheduledRun>,
-    actions: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SemanticSynthesisScheduledRun {
-    runtime_object_id: Uuid,
-    object_key: String,
-    session_id: Option<Uuid>,
-    synthesis_type: Option<String>,
-    status: String,
-    artifact_id: Option<Uuid>,
-    candidate_count: usize,
-    reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,7 +1,11 @@
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
+
+use crate::Artifact;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct SemanticSource {
@@ -492,4 +496,255 @@ pub(crate) struct SemanticRetrievalBackendStatus {
     pub(crate) missing_env_vars: Vec<String>,
     pub(crate) object_link_context_packet_required: bool,
     pub(crate) blocking_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct MemoryWritebackCandidate {
+    pub(crate) id: Uuid,
+    pub(crate) session_id: Uuid,
+    pub(crate) candidate_type: String,
+    pub(crate) source_event_id: Option<Uuid>,
+    pub(crate) source_artifact_id: Option<Uuid>,
+    pub(crate) source_approval_id: Option<Uuid>,
+    pub(crate) source_handoff_id: Option<Uuid>,
+    pub(crate) proposed_object_type: String,
+    pub(crate) proposed_object_key: String,
+    pub(crate) title: String,
+    pub(crate) summary: String,
+    pub(crate) content: Value,
+    pub(crate) semantic_scopes: Value,
+    pub(crate) source_refs: Value,
+    pub(crate) provenance: Value,
+    pub(crate) trust_level: String,
+    pub(crate) freshness: String,
+    pub(crate) status: String,
+    pub(crate) reviewer_subject: Option<String>,
+    pub(crate) review_reason: Option<String>,
+    pub(crate) semantic_object_id: Option<Uuid>,
+    pub(crate) audit_trace_id: Option<Uuid>,
+    pub(crate) created_at: DateTime<Utc>,
+    pub(crate) updated_at: DateTime<Utc>,
+    pub(crate) decided_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct MemoryGovernanceSummary {
+    pub(crate) status: String,
+    pub(crate) generated_at: DateTime<Utc>,
+    pub(crate) isolation_policy: String,
+    pub(crate) semantic_object_count: usize,
+    pub(crate) memory_object_count: usize,
+    pub(crate) partition_count: usize,
+    pub(crate) partitions: Vec<MemoryGovernancePartition>,
+    pub(crate) trust_counts: BTreeMap<String, usize>,
+    pub(crate) freshness_counts: BTreeMap<String, usize>,
+    pub(crate) writeback: MemoryGovernanceWritebackSummary,
+    pub(crate) attention_items: Vec<MemoryGovernanceAttentionItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct MemoryGovernancePartition {
+    pub(crate) partition_key: String,
+    pub(crate) domain_scope: String,
+    pub(crate) workflow_scope: String,
+    pub(crate) memory_scope: String,
+    pub(crate) object_count: usize,
+    pub(crate) memory_object_count: usize,
+    pub(crate) human_verified_count: usize,
+    pub(crate) unverified_count: usize,
+    pub(crate) stale_count: usize,
+    pub(crate) shared: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct MemoryGovernanceWritebackSummary {
+    pub(crate) pending_count: usize,
+    pub(crate) approved_count: usize,
+    pub(crate) rejected_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct MemoryGovernanceAttentionItem {
+    pub(crate) severity: String,
+    pub(crate) kind: String,
+    pub(crate) message: String,
+    pub(crate) partition_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct MemoryGovernancePartitionQuery {
+    pub(crate) partition_key: String,
+    #[serde(default)]
+    pub(crate) limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct MemoryGovernanceWritebackQuery {
+    #[serde(default)]
+    pub(crate) status: Option<String>,
+    #[serde(default)]
+    pub(crate) limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct MemoryGovernancePartitionDetail {
+    pub(crate) generated_at: DateTime<Utc>,
+    pub(crate) partition: MemoryGovernancePartition,
+    pub(crate) object_count: usize,
+    pub(crate) pending_writeback_count: usize,
+    pub(crate) access_policy: String,
+    pub(crate) risk_items: Vec<MemoryGovernanceAttentionItem>,
+    pub(crate) objects: Vec<MemoryGovernanceObjectRef>,
+    pub(crate) writeback_candidates: Vec<MemoryGovernanceWritebackRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct MemoryGovernanceObjectRef {
+    pub(crate) id: Uuid,
+    pub(crate) object_key: String,
+    pub(crate) title: String,
+    pub(crate) summary: String,
+    pub(crate) trust_level: String,
+    pub(crate) freshness: String,
+    pub(crate) status: String,
+    pub(crate) source_uri: Option<String>,
+    pub(crate) semantic_scopes: Value,
+    pub(crate) provenance: Value,
+    pub(crate) created_at: DateTime<Utc>,
+    pub(crate) updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct MemoryGovernanceWritebackQueue {
+    pub(crate) generated_at: DateTime<Utc>,
+    pub(crate) status_filter: Option<String>,
+    pub(crate) candidate_count: usize,
+    pub(crate) pending_count: usize,
+    pub(crate) candidates: Vec<MemoryGovernanceWritebackRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct MemoryGovernanceWritebackRef {
+    pub(crate) id: Uuid,
+    pub(crate) session_id: Uuid,
+    pub(crate) candidate_type: String,
+    pub(crate) proposed_object_type: String,
+    pub(crate) proposed_object_key: String,
+    pub(crate) title: String,
+    pub(crate) summary: String,
+    pub(crate) trust_level: String,
+    pub(crate) freshness: String,
+    pub(crate) status: String,
+    pub(crate) partition_key: String,
+    pub(crate) semantic_object_id: Option<Uuid>,
+    pub(crate) created_at: DateTime<Utc>,
+    pub(crate) updated_at: DateTime<Utc>,
+    pub(crate) decided_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CreateMemoryWritebackCandidates {
+    #[serde(default)]
+    pub(crate) include_session_summary: Option<bool>,
+    #[serde(default)]
+    pub(crate) include_artifacts: Option<bool>,
+    #[serde(default)]
+    pub(crate) include_handoffs: Option<bool>,
+    #[serde(default)]
+    pub(crate) include_approvals: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct CreateSemanticSynthesisRun {
+    pub(crate) synthesis_type: String,
+    pub(crate) goal_attempted: String,
+    #[serde(default)]
+    pub(crate) context_used: Vec<String>,
+    #[serde(default)]
+    pub(crate) worked: Vec<String>,
+    #[serde(default)]
+    pub(crate) failed_or_corrected: Vec<String>,
+    #[serde(default)]
+    pub(crate) unsafe_assumptions: Vec<String>,
+    #[serde(default)]
+    pub(crate) durable_memory_candidates: Vec<SemanticSynthesisMemoryCandidateInput>,
+    #[serde(default = "crate::empty_json_object")]
+    pub(crate) metadata: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct SemanticSynthesisMemoryCandidateInput {
+    #[serde(default = "crate::default_memory_object_type")]
+    pub(crate) proposed_object_type: String,
+    pub(crate) proposed_object_key: String,
+    pub(crate) title: String,
+    pub(crate) summary: String,
+    #[serde(default = "crate::empty_json_object")]
+    pub(crate) content: Value,
+    #[serde(default = "crate::empty_json_object")]
+    pub(crate) semantic_scopes: Value,
+    #[serde(default = "crate::empty_json_object")]
+    pub(crate) source_refs: Value,
+    #[serde(default = "crate::empty_json_object")]
+    pub(crate) provenance: Value,
+    #[serde(default = "crate::default_semantic_trust_level")]
+    pub(crate) trust_level: String,
+    #[serde(default = "crate::default_semantic_freshness")]
+    pub(crate) freshness: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct SemanticSynthesisRunResult {
+    pub(crate) status: String,
+    pub(crate) synthesis_type: String,
+    pub(crate) session_id: Uuid,
+    pub(crate) checkpoint_event_id: Uuid,
+    pub(crate) artifact: Artifact,
+    pub(crate) candidates: Vec<MemoryWritebackCandidate>,
+    pub(crate) created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ReviewMemoryWritebackCandidate {
+    #[serde(default)]
+    pub(crate) reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct SemanticAgingPolicySweep {
+    pub(crate) status: String,
+    pub(crate) checked_at: DateTime<Utc>,
+    pub(crate) policy_count: usize,
+    pub(crate) due_count: usize,
+    pub(crate) archived_count: usize,
+    pub(crate) skipped_count: usize,
+    pub(crate) failed_count: usize,
+    pub(crate) archived_object_ids: Vec<Uuid>,
+    pub(crate) runs: Vec<Value>,
+    pub(crate) actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct SemanticSynthesisScheduleSweep {
+    pub(crate) status: String,
+    pub(crate) checked_at: DateTime<Utc>,
+    pub(crate) scheduled_count: usize,
+    pub(crate) due_count: usize,
+    pub(crate) created_count: usize,
+    pub(crate) skipped_count: usize,
+    pub(crate) failed_count: usize,
+    pub(crate) runs: Vec<SemanticSynthesisScheduledRun>,
+    pub(crate) actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct SemanticSynthesisScheduledRun {
+    pub(crate) runtime_object_id: Uuid,
+    pub(crate) object_key: String,
+    pub(crate) session_id: Option<Uuid>,
+    pub(crate) synthesis_type: Option<String>,
+    pub(crate) status: String,
+    pub(crate) artifact_id: Option<Uuid>,
+    pub(crate) candidate_count: usize,
+    pub(crate) reason: Option<String>,
 }
