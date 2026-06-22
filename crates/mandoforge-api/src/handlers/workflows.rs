@@ -18,8 +18,7 @@ use crate::{
     WorkflowTransition, WorkflowTransitionQuery, Permission, activate_due_workflow_steps_for_run,
     authorize_collection_request, authorize_request, build_agent_inbox_snapshot,
     build_task_board_snapshot, build_workflow_run_graph_console, ensure_primary_session_thread,
-    ensure_session_event_exists,
-    claim_workflow_step_run_route as claim_workflow_step_run_impl,
+    ensure_session_event_exists, claim_workflow_step_run as claim_workflow_step_run_inner,
     advance_workflow_graph_after_step_update, ensure_child_task_grant_within_parent,
     issue_root_task_grant_for_workflow_run, materialize_workflow_graph_start_steps,
     new_audit_log, normalize_event_ingestion_policy, normalize_optional_runtime_adapter,
@@ -820,7 +819,11 @@ async fn claim_workflow_step_run(
     headers: HeaderMap,
     Json(input): Json<ClaimWorkflowStepRun>,
 ) -> Result<Json<ClaimWorkflowStepRunResponse>, AppError> {
-    claim_workflow_step_run_impl(state, id, headers, input).await
+    let current = state.get_workflow_step_run(id).await?;
+    let run = state.get_workflow_run(current.workflow_run_id).await?;
+    Ok(Json(
+        claim_workflow_step_run_inner(&state, &headers, current, run, input).await?,
+    ))
 }
 
 async fn run_workflow_step_run(

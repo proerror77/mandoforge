@@ -16091,19 +16091,6 @@ fn workflow_graph_console_summary(value: &Value) -> Value {
     }
 }
 
-pub(crate) async fn claim_workflow_step_run_route(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-    input: ClaimWorkflowStepRun,
-) -> Result<Json<ClaimWorkflowStepRunResponse>, AppError> {
-    let current = state.get_workflow_step_run(id).await?;
-    let run = state.get_workflow_run(current.workflow_run_id).await?;
-    Ok(Json(
-        claim_workflow_step_run(&state, &headers, current, run, input).await?,
-    ))
-}
-
 async fn claim_workflow_step_run(
     state: &AppState,
     headers: &HeaderMap,
