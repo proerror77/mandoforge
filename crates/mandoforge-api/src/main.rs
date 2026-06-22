@@ -28487,7 +28487,7 @@ fn native_connector_target_binding(tool_name: &str, args: &Value) -> Result<Valu
     Ok(Value::Object(binding))
 }
 
-async fn refresh_tool_call_commit_binding_if_required(
+pub(crate) async fn refresh_tool_call_commit_binding_if_required(
     state: &AppState,
     tool_call: ToolCall,
 ) -> Result<ToolCall, AppError> {
@@ -45236,7 +45236,7 @@ fn approval_expires_at(
     Some(created_at + chrono::Duration::seconds(seconds))
 }
 
-fn validate_approval_group_input(
+pub(crate) fn validate_approval_group_input(
     mut input: CreateApprovalGroup,
 ) -> Result<CreateApprovalGroup, AppError> {
     input.name = input.name.trim().to_string();
@@ -45259,7 +45259,7 @@ fn validate_approval_group_input(
     Ok(input)
 }
 
-fn validate_approval_escalation_rule_input(
+pub(crate) fn validate_approval_escalation_rule_input(
     mut input: CreateApprovalEscalationRule,
 ) -> Result<CreateApprovalEscalationRule, AppError> {
     input.name = input.name.trim().to_string();
@@ -45375,234 +45375,7 @@ fn merge_approval_evidence(target: &mut Value, patch: Value) {
     }
 }
 
-pub(crate) async fn create_approval_group(
-    state: AppState,
-    headers: HeaderMap,
-    input: CreateApprovalGroup,
-) -> Result<Json<ApprovalGroup>, AppError> {
-    let principal = principal_from_request(&state, &headers).await?;
-    let request = AuthorizationRequest {
-        tenant_id: state.current_tenant_id(),
-        permission: Permission::Admin,
-        resource_type: "approval_groups".to_string(),
-        resource_id: None,
-    };
-    state.authorizer.authorize(&principal, &request).await?;
-    enforce_resource_scope(&state, &principal, &request).await?;
-    let group = state
-        .create_approval_group(validate_approval_group_input(input)?)
-        .await?;
-    state
-        .append_audit_log(new_audit_log(
-            None,
-            "user",
-            None,
-            "approval.group_created",
-            "approval_group",
-            Some(group.id),
-            json!({
-                "subject": principal.subject_id,
-                "name": group.name,
-                "subject_count": group.subjects.len()
-            }),
-        ))
-        .await?;
-    Ok(Json(group))
-}
-
-pub(crate) async fn create_approval_escalation_rule(
-    state: AppState,
-    headers: HeaderMap,
-    input: CreateApprovalEscalationRule,
-) -> Result<Json<ApprovalEscalationRule>, AppError> {
-    let principal = principal_from_request(&state, &headers).await?;
-    let request = AuthorizationRequest {
-        tenant_id: state.current_tenant_id(),
-        permission: Permission::Admin,
-        resource_type: "approval_escalation_rules".to_string(),
-        resource_id: None,
-    };
-    state.authorizer.authorize(&principal, &request).await?;
-    enforce_resource_scope(&state, &principal, &request).await?;
-    let rule = state
-        .create_approval_escalation_rule(validate_approval_escalation_rule_input(input)?)
-        .await?;
-    state
-        .append_audit_log(new_audit_log(
-            None,
-            "user",
-            None,
-            "approval.escalation_rule_created",
-            "approval_escalation_rule",
-            Some(rule.id),
-            json!({
-                "subject": principal.subject_id,
-                "name": rule.name,
-                "risk_level": rule.risk_level,
-                "group_id": rule.group_id
-            }),
-        ))
-        .await?;
-    Ok(Json(rule))
-}
-
-pub(crate) async fn approve(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-) -> Result<Json<Approval>, AppError> {
-    let principal = authorize_approval_decision(&state, &headers, id).await?;
-    decide_approval(state, id, "approved", Some(principal.subject_id)).await
-}
-
-pub(crate) async fn reject(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-) -> Result<Json<Approval>, AppError> {
-    authorize_approval_decision(&state, &headers, id).await?;
-    decide_approval(state, id, "rejected", None).await
-}
-
-pub(crate) async fn expire(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-) -> Result<Json<Approval>, AppError> {
-    authorize_approval_decision(&state, &headers, id).await?;
-    Ok(Json(expire_approval_record(&state, id).await?))
-}
-
-pub(crate) async fn modify_approval(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-    input: ModifyApproval,
-) -> Result<Json<Approval>, AppError> {
-    authorize_approval_decision(&state, &headers, id).await?;
-    let approval = state.get_approval(id).await?;
-    if approval.status != "pending" {
-        return Err(AppError::bad_request(
-            "only pending approvals can be modified",
-        ));
-    }
-    if approval_is_expired(&approval) {
-        expire_approval_record(&state, id).await?;
-        return Err(AppError::bad_request("approval expired"));
-    }
-    if let Some(tool_call_id) = approval.tool_call_id {
-        let tool_call = state
-            .update_tool_call_args(tool_call_id, input.args.clone())
-            .await?;
-        refresh_tool_call_commit_binding_if_required(&state, tool_call).await?;
-    }
-    let updated = state
-        .modify_approval(id, input.args.clone(), input.comment.clone())
-        .await?;
-    state
-        .append_event(
-            "user",
-            Some(id),
-            updated.session_id,
-            "approval.modified",
-            json!({
-                "approval_id": id,
-                "tool_call_id": updated.tool_call_id,
-                "modified_args": input.args,
-                "comment": input.comment,
-            }),
-        )
-        .await?;
-    state
-        .append_audit_log(new_audit_log(
-            Some(updated.session_id),
-            "user",
-            Some(id),
-            "approval.modified",
-            "approval",
-            Some(id),
-            json!({
-                "tool_call_id": updated.tool_call_id,
-                "action": updated.action,
-                "comment": updated.decision_payload.get("comment").cloned().unwrap_or(Value::Null),
-            }),
-        ))
-        .await?;
-    Ok(Json(updated))
-}
-
-pub(crate) async fn escalate_approval(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-    input: EscalateApproval,
-) -> Result<Json<Approval>, AppError> {
-    let principal = principal_from_request(&state, &headers).await?;
-    let request = AuthorizationRequest {
-        tenant_id: state.current_tenant_id(),
-        permission: Permission::Admin,
-        resource_type: "approval".to_string(),
-        resource_id: Some(id),
-    };
-    state.authorizer.authorize(&principal, &request).await?;
-    enforce_resource_scope(&state, &principal, &request).await?;
-    let approval = state.get_approval(id).await?;
-    if approval.status != "pending" {
-        return Err(AppError::bad_request(
-            "only pending approvals can be escalated",
-        ));
-    }
-    if approval_is_expired(&approval) {
-        expire_approval_record(&state, id).await?;
-        return Err(AppError::bad_request("approval expired"));
-    }
-    let (group, rule_id) = if let Some(group_id) = input.group_id {
-        (state.get_approval_group(group_id).await?, None)
-    } else {
-        let rule = state
-            .first_active_escalation_rule_for_risk(&approval.risk_level)
-            .await?
-            .ok_or_else(|| AppError::bad_request("no active escalation rule for approval risk"))?;
-        (
-            state.get_approval_group(rule.group_id).await?,
-            Some(rule.id),
-        )
-    };
-    if group.status != "active" {
-        return Err(AppError::bad_request("approval group is not active"));
-    }
-    let updated = escalate_approval_record(
-        &state,
-        &approval,
-        &group,
-        rule_id,
-        input
-            .reason
-            .unwrap_or_else(|| "Manual escalation".to_string()),
-        principal.subject_id,
-        "user",
-        Some(id),
-    )
-    .await?;
-    Ok(Json(updated))
-}
-
-pub(crate) async fn run_due_approval_escalations(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<ApprovalEscalationDueRun>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "approval_escalation_rules",
-        None,
-    )
-    .await?;
-    Ok(Json(execute_due_approval_escalations(&state).await?))
-}
-
-async fn execute_due_approval_escalations(
+pub(crate) async fn execute_due_approval_escalations(
     state: &AppState,
 ) -> Result<ApprovalEscalationDueRun, AppError> {
     let checked_at = Utc::now();
@@ -45668,7 +45441,7 @@ async fn execute_due_approval_escalations(
     Ok(run)
 }
 
-async fn escalate_approval_record(
+pub(crate) async fn escalate_approval_record(
     state: &AppState,
     approval: &Approval,
     group: &ApprovalGroup,
@@ -46971,7 +46744,7 @@ fn approval_notification_targets(
         .unwrap_or_default()
 }
 
-async fn authorize_approval_decision(
+pub(crate) async fn authorize_approval_decision(
     state: &AppState,
     headers: &HeaderMap,
     approval_id: Uuid,
@@ -51611,7 +51384,7 @@ fn wrap_read_only_sql_for_json(sql: &str, max_rows: i64) -> String {
     )
 }
 
-async fn decide_approval(
+pub(crate) async fn decide_approval(
     state: AppState,
     approval_id: Uuid,
     status: &str,
