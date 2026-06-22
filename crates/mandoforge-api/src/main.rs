@@ -21,7 +21,8 @@ use axum::extract::Query;
 use axum::routing::{get, post};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures_util::StreamExt as _;
-use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{Executor, PgPool, postgres::PgPoolOptions};
@@ -186,6 +187,11 @@ pub(crate) use types::collaboration::{
     AgentTeammate, CreateAgentTeammate, CreateSquad, CreateSquadMember, CreateWorkItem,
     CreateWorkItemAssignment, CreateWorkItemReview, Squad, SquadMember, WorkItem,
     WorkItemActivityEntry, WorkItemAssignment, WorkItemReview,
+};
+pub(crate) use types::context_packet::{
+    ContextPacket, ContextPacketAgent, ContextPacketRuntimeProfile, ContextPacketSourceRef,
+    RenderContextPacketRequest, RenderedContextBudget, RenderedContextOmissions,
+    RenderedExecutionContext,
 };
 pub(crate) use types::deployment::{
     DeploymentVersion, EnterpriseProductCompletionLane, EnterpriseProductCompletionReadiness,
@@ -397,109 +403,6 @@ enum ExecutionQueueBackendSelection {
     Redis,
     Nats,
     NatsJetstream,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ContextPacket {
-    id: Uuid,
-    session_id: Uuid,
-    agent_id: Uuid,
-    agent_version_id: Option<Uuid>,
-    version: i64,
-    generated_at: DateTime<Utc>,
-    task: Value,
-    agent: ContextPacketAgent,
-    runtime_profile: Option<ContextPacketRuntimeProfile>,
-    semantic_scopes: Value,
-    tool_policy: Value,
-    policy_reminders: Vec<String>,
-    freshness_warnings: Vec<String>,
-    source_refs: Vec<ContextPacketSourceRef>,
-    retrieved_objects: Vec<ContextPacketSemanticObject>,
-    replay_summary: Value,
-    audit_trace_id: Option<Uuid>,
-    created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ContextPacketAgent {
-    id: Uuid,
-    name: String,
-    kind: String,
-    agent_role: String,
-    release_state: String,
-    tools: Vec<String>,
-    mcp_server_ids: Vec<Uuid>,
-    skill_ids: Vec<String>,
-    workflow_pack_ids: Vec<String>,
-    remote_computer_profile: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ContextPacketRuntimeProfile {
-    id: Uuid,
-    name: String,
-    runtime_type: String,
-    remote_computer_required: bool,
-    status: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ContextPacketSourceRef {
-    source_type: String,
-    source_id: String,
-    freshness: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct RenderContextPacketRequest {
-    #[serde(default)]
-    max_prompt_tokens: Option<usize>,
-    #[serde(default)]
-    max_objects: Option<usize>,
-    #[serde(default)]
-    max_summary_chars: Option<usize>,
-    #[serde(default)]
-    max_policy_reminders: Option<usize>,
-    #[serde(default)]
-    allow_full_content: Option<bool>,
-    #[serde(default)]
-    allow_on_demand_fetch: Option<bool>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct RenderedExecutionContext {
-    context_packet_id: Uuid,
-    session_id: Uuid,
-    agent_id: Uuid,
-    context_packet_version: i64,
-    ontology_scope: Value,
-    role: String,
-    must_follow: Vec<String>,
-    relevant_objects: Vec<RenderedSemanticObject>,
-    fetchable_object_ids: Vec<Uuid>,
-    omitted: RenderedContextOmissions,
-    budget: RenderedContextBudget,
-    available_tools: Vec<String>,
-    full_content_included: bool,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct RenderedContextOmissions {
-    token_budget_exceeded: usize,
-    object_limit_exceeded: usize,
-    policy_reminders_omitted: usize,
-    source_refs_not_rendered: usize,
-    full_content_not_rendered: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RenderedContextBudget {
-    max_prompt_tokens: usize,
-    estimated_tokens_used: usize,
-    max_objects: usize,
-    max_summary_chars: usize,
-    max_policy_reminders: usize,
 }
 
 #[async_trait]
