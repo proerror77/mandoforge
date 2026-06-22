@@ -33653,228 +33653,9 @@ fn normalize_policy_gate_cases(
     Ok((source.to_string(), normalized))
 }
 
-pub(crate) async fn run_vault_kms_rotation(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<VaultKmsRotationRun>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "vault_kms_rotation",
-        None,
-    )
-    .await?;
-    Ok(Json(execute_vault_kms_rotation(&state).await?))
-}
-
-pub(crate) async fn validate_vault_kms_recovery(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<VaultKmsRecoveryValidationRun>, AppError> {
-    let principal = principal_from_request(&state, &headers).await?;
-    let request = AuthorizationRequest {
-        tenant_id: state.current_tenant_id(),
-        permission: Permission::Admin,
-        resource_type: "vault".to_string(),
-        resource_id: None,
-    };
-    state.authorizer.authorize(&principal, &request).await?;
-    enforce_resource_scope(&state, &principal, &request).await?;
-    let checked_at = Utc::now();
-    let lookup = |key: &str| std::env::var(key).ok();
-    let kms = kms_readiness_from_lookup(&lookup);
-    let secret_records = state.list_secret_records().await?;
-    let audit_logs = state.list_audit_logs(None).await?;
-    let controller_required = vault_kms_recovery_controller_required(&lookup);
-    let controller_configured = vault_kms_recovery_controller_configured(&lookup);
-    let readiness = build_vault_kms_recovery_readiness(
-        &kms,
-        &audit_logs,
-        checked_at,
-        controller_required,
-        controller_configured,
-    );
-    let mut issues = readiness.blocking_reasons.clone();
-    let mut controller_execution = json!({
-        "attempted": false,
-        "status": "skipped",
-        "reason": if controller_configured {
-            "vault_kms_recovery_not_ready"
-        } else {
-            "controller_not_configured"
-        }
-    });
-    if controller_configured {
-        match execute_vault_kms_recovery_controller(
-            &lookup,
-            &principal.subject_id,
-            checked_at,
-            &kms,
-            &secret_records,
-            &readiness,
-        )
-        .await
-        {
-            Ok(execution) => {
-                if execution.get("status").and_then(Value::as_str) != Some("validated") {
-                    issues.push("vault KMS recovery controller did not validate".to_string());
-                } else if kms_controller_execution_is_production_backend(&execution) {
-                    // The current drill is the evidence for these readiness blockers.
-                    issues.retain(|issue| {
-                        issue != "no validated KMS recovery drill evidence exists"
-                            && issue
-                                != "vault KMS recovery controller evidence is missing or not validated"
-                    });
-                } else {
-                    issues.push(
-                        "vault KMS recovery controller did not identify a real production KMS/HSM backend"
-                            .to_string(),
-                    );
-                }
-                controller_execution = execution;
-            }
-            Err(error) => {
-                issues.push("vault KMS recovery controller failed".to_string());
-                controller_execution = json!({
-                    "attempted": true,
-                    "status": "failed",
-                    "error": error.message
-                });
-            }
-        }
-    }
-    if controller_required
-        && controller_execution.get("status").and_then(Value::as_str) != Some("validated")
-    {
-        issues
-            .push("vault KMS recovery controller evidence is missing or not validated".to_string());
-    }
-    dedupe_strings(&mut issues);
-    let status = if issues.is_empty() {
-        "validated"
-    } else {
-        "blocked"
-    }
-    .to_string();
-    state
-        .append_audit_log(new_audit_log(
-            None,
-            "user",
-            None,
-            "vault.kms_recovery_validation",
-            "vault",
-            None,
-            json!({
-                "subject": principal.subject_id,
-                "status": status,
-                "kms_provider": kms.provider,
-                "secret_record_count": secret_records.len(),
-                "latest_rotation_validated": readiness.latest_rotation_validated,
-                "controller_required": controller_required,
-                "controller_configured": controller_configured,
-                "controller_execution": controller_execution,
-                "issues": issues,
-                "checked_at": checked_at,
-            }),
-        ))
-        .await?;
-    Ok(Json(VaultKmsRecoveryValidationRun {
-        status,
-        checked_at,
-        kms_provider: kms.provider,
-        secret_record_count: secret_records.len(),
-        latest_rotation_validated: readiness.latest_rotation_validated,
-        controller_required,
-        controller_configured,
-        controller_execution,
-        issues,
-    }))
-}
-
-pub(crate) async fn create_secret_record(
-    state: AppState,
-    headers: HeaderMap,
-    input: CreateSecretRecord,
-) -> Result<Json<SecretRecord>, AppError> {
-    let principal = principal_from_request(&state, &headers).await?;
-    let request = AuthorizationRequest {
-        tenant_id: state.current_tenant_id(),
-        permission: Permission::Admin,
-        resource_type: "vault".to_string(),
-        resource_id: None,
-    };
-    state.authorizer.authorize(&principal, &request).await?;
-    enforce_resource_scope(&state, &principal, &request).await?;
-    let input = validate_secret_record_input(input)?;
-    let secret_ref = SecretRef::new(input.path.as_str(), input.key.as_str())?;
-    let secret_value_written = write_secret_value_if_provided(&secret_ref, input.value.as_ref())
-        .await?
-        .is_some();
-    let record = state.create_secret_record(input).await?;
-    state
-        .append_audit_log(new_audit_log(
-            None,
-            "user",
-            None,
-            "secret.created",
-            "secret_record",
-            Some(record.id),
-            json!({
-                "subject": principal.subject_id,
-                "name": record.name,
-                "scope_type": record.scope_type,
-                "scope_id": record.scope_id,
-                "version": record.version,
-                "secret_value_written": secret_value_written
-            }),
-        ))
-        .await?;
-    Ok(Json(record))
-}
-
-pub(crate) async fn rotate_secret_record(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-    input: RotateSecretRecord,
-) -> Result<Json<SecretRecord>, AppError> {
-    let principal = principal_from_request(&state, &headers).await?;
-    let request = AuthorizationRequest {
-        tenant_id: state.current_tenant_id(),
-        permission: Permission::Admin,
-        resource_type: "secret_record".to_string(),
-        resource_id: Some(id),
-    };
-    state.authorizer.authorize(&principal, &request).await?;
-    enforce_resource_scope(&state, &principal, &request).await?;
-    let secret_ref = SecretRef::new(input.path.as_str(), input.key.as_str())?;
-    let secret_value_written = write_secret_value_if_provided(&secret_ref, input.value.as_ref())
-        .await?
-        .is_some();
-    let record = state.rotate_secret_record(id, input).await?;
-    state
-        .append_audit_log(new_audit_log(
-            None,
-            "user",
-            None,
-            "secret.rotated",
-            "secret_record",
-            Some(record.id),
-            json!({
-                "subject": principal.subject_id,
-                "name": record.name,
-                "scope_type": record.scope_type,
-                "scope_id": record.scope_id,
-                "version": record.version,
-                "secret_value_written": secret_value_written
-            }),
-        ))
-        .await?;
-    Ok(Json(record))
-}
-
-async fn execute_vault_kms_rotation(state: &AppState) -> Result<VaultKmsRotationRun, AppError> {
+pub(crate) async fn execute_vault_kms_rotation(
+    state: &AppState,
+) -> Result<VaultKmsRotationRun, AppError> {
     execute_vault_kms_rotation_with_lookup(state, |key| std::env::var(key).ok()).await
 }
 
@@ -34184,7 +33965,7 @@ where
     })
 }
 
-fn validate_secret_record_input(
+pub(crate) fn validate_secret_record_input(
     mut input: CreateSecretRecord,
 ) -> Result<CreateSecretRecord, AppError> {
     input.name = input.name.trim().to_string();
@@ -34203,7 +33984,7 @@ fn validate_secret_record_input(
     Ok(input)
 }
 
-async fn write_secret_value_if_provided(
+pub(crate) async fn write_secret_value_if_provided(
     secret_ref: &SecretRef,
     value: Option<&String>,
 ) -> Result<Option<()>, AppError> {
@@ -36960,7 +36741,7 @@ fn build_vault_production_rotation_readiness(
     }
 }
 
-fn build_vault_kms_recovery_readiness(
+pub(crate) fn build_vault_kms_recovery_readiness(
     kms: &VaultKmsReadiness,
     audit_logs: &[AuditLog],
     generated_at: DateTime<Utc>,
@@ -37094,7 +36875,7 @@ fn build_vault_kms_recovery_readiness(
     }
 }
 
-fn vault_kms_recovery_controller_required<F>(lookup: &F) -> bool
+pub(crate) fn vault_kms_recovery_controller_required<F>(lookup: &F) -> bool
 where
     F: Fn(&str) -> Option<String>,
 {
@@ -37108,7 +36889,7 @@ where
         .unwrap_or(false)
 }
 
-fn vault_kms_recovery_controller_configured<F>(lookup: &F) -> bool
+pub(crate) fn vault_kms_recovery_controller_configured<F>(lookup: &F) -> bool
 where
     F: Fn(&str) -> Option<String>,
 {
@@ -37117,7 +36898,7 @@ where
         .unwrap_or(false)
 }
 
-async fn execute_vault_kms_recovery_controller<F>(
+pub(crate) async fn execute_vault_kms_recovery_controller<F>(
     lookup: &F,
     subject: &str,
     checked_at: DateTime<Utc>,
@@ -37255,7 +37036,7 @@ fn is_production_kms_environment(value: Option<&str>) -> bool {
     matches!(value, Some("production" | "prod"))
 }
 
-fn kms_controller_execution_is_production_backend(execution: &Value) -> bool {
+pub(crate) fn kms_controller_execution_is_production_backend(execution: &Value) -> bool {
     let backend_id_present = execution
         .get("backend_id")
         .and_then(Value::as_str)
@@ -37270,7 +37051,7 @@ fn kms_controller_execution_is_production_backend(execution: &Value) -> bool {
         && key_id_present
 }
 
-fn kms_readiness_from_lookup<F>(lookup: &F) -> VaultKmsReadiness
+pub(crate) fn kms_readiness_from_lookup<F>(lookup: &F) -> VaultKmsReadiness
 where
     F: Fn(&str) -> Option<String>,
 {
