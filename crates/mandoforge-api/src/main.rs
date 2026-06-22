@@ -503,7 +503,7 @@ pub(crate) struct TransitionAgentHandoffEvent {
 }
 
 #[derive(Debug, Deserialize)]
-struct EscalateAgentHandoffEvent {
+pub(crate) struct EscalateAgentHandoffEvent {
     #[serde(default)]
     reason: Option<String>,
     #[serde(default)]
@@ -511,7 +511,7 @@ struct EscalateAgentHandoffEvent {
 }
 
 #[derive(Debug, Deserialize)]
-struct CreateAgentHandoffAssignment {
+pub(crate) struct CreateAgentHandoffAssignment {
     #[serde(default)]
     specialist_session_id: Option<Uuid>,
     #[serde(default)]
@@ -527,7 +527,7 @@ struct CreateAgentHandoffAssignment {
 }
 
 #[derive(Debug, Deserialize)]
-struct AttachAgentHandoffRemoteComputerAssignment {
+pub(crate) struct AttachAgentHandoffRemoteComputerAssignment {
     remote_computer_job_assignment_id: Uuid,
     #[serde(default = "empty_json_object")]
     metadata: Value,
@@ -4524,23 +4524,11 @@ fn build_router(state: AppState) -> Router {
             "/api/remote-computer-leases/{id}/fail",
             post(fail_remote_computer_lease),
         )
-        .route(
-            "/api/agent-handoffs/{id}/assignment",
-            get(get_agent_handoff_assignment_for_handoff).post(assign_agent_handoff_event),
-        )
-        .route(
-            "/api/agent-handoff-assignments/{id}/remote-computer-assignment",
-            post(attach_agent_handoff_remote_computer_assignment),
-        )
         .route("/api/manager-plans", get(list_manager_agent_plans))
         .route("/api/manager-plans/{id}", get(get_manager_agent_plan))
         .route(
             "/api/manager-plans/{id}/review",
             post(review_manager_agent_plan),
-        )
-        .route(
-            "/api/agent-handoffs/{id}/escalate",
-            post(escalate_agent_handoff_event),
         )
         .route(
             "/api/execution-jobs/{id}/run",
@@ -15692,9 +15680,9 @@ pub(crate) fn new_audit_log(
     }
 }
 
-async fn get_agent_handoff_assignment_for_handoff(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn get_agent_handoff_assignment_for_handoff(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<AgentHandoffAssignment>, AppError> {
     let handoff = state.get_agent_handoff_event(id).await?;
@@ -16785,11 +16773,11 @@ pub(crate) async fn create_agent_handoff_event_for_session(
     Ok(event)
 }
 
-async fn escalate_agent_handoff_event(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn escalate_agent_handoff_event(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<EscalateAgentHandoffEvent>,
+    input: EscalateAgentHandoffEvent,
 ) -> Result<Json<AgentHandoffEvent>, AppError> {
     let current = state.get_agent_handoff_event(id).await?;
     authorize_request(
@@ -16825,11 +16813,11 @@ async fn escalate_agent_handoff_event(
     Ok(Json(updated))
 }
 
-async fn assign_agent_handoff_event(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn assign_agent_handoff_event(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<CreateAgentHandoffAssignment>,
+    input: CreateAgentHandoffAssignment,
 ) -> Result<Json<AgentHandoffAssignment>, AppError> {
     let handoff = state.get_agent_handoff_event(id).await?;
     authorize_request(
@@ -17166,11 +17154,11 @@ fn child_tool_scope_for_agent(parent: &Value, agent: &Agent) -> Value {
     Value::Object(scope)
 }
 
-async fn attach_agent_handoff_remote_computer_assignment(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn attach_agent_handoff_remote_computer_assignment(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<AttachAgentHandoffRemoteComputerAssignment>,
+    input: AttachAgentHandoffRemoteComputerAssignment,
 ) -> Result<Json<AgentHandoffAssignment>, AppError> {
     let assignment = state.get_agent_handoff_assignment(id).await?;
     authorize_request(

@@ -7,10 +7,16 @@ use axum::{
 use uuid::Uuid;
 
 use crate::{
-    AgentHandoffAssignment, AgentHandoffEvent, AppError, AppState, CreateAgentHandoffEvent,
-    Permission, TransitionAgentHandoffEvent, authorize_collection_request, authorize_request,
-    create_agent_handoff_event_for_session, transition_agent_handoff_event,
-    visible_session_ids_for_principal,
+    AgentHandoffAssignment, AgentHandoffEvent, AppError, AppState,
+    AttachAgentHandoffRemoteComputerAssignment, CreateAgentHandoffAssignment,
+    CreateAgentHandoffEvent, EscalateAgentHandoffEvent, Permission, TransitionAgentHandoffEvent,
+    assign_agent_handoff_event as assign_agent_handoff_event_impl, authorize_collection_request,
+    authorize_request,
+    attach_agent_handoff_remote_computer_assignment as attach_agent_handoff_remote_computer_assignment_impl,
+    create_agent_handoff_event_for_session,
+    escalate_agent_handoff_event as escalate_agent_handoff_event_impl,
+    get_agent_handoff_assignment_for_handoff as get_agent_handoff_assignment_for_handoff_impl,
+    transition_agent_handoff_event, visible_session_ids_for_principal,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -36,6 +42,18 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/api/agent-handoffs/{id}/complete",
             post(complete_agent_handoff_event),
+        )
+        .route(
+            "/api/agent-handoffs/{id}/assignment",
+            get(get_agent_handoff_assignment_for_handoff).post(assign_agent_handoff_event),
+        )
+        .route(
+            "/api/agent-handoff-assignments/{id}/remote-computer-assignment",
+            post(attach_agent_handoff_remote_computer_assignment),
+        )
+        .route(
+            "/api/agent-handoffs/{id}/escalate",
+            post(escalate_agent_handoff_event),
         )
         .route(
             "/api/agent-handoff-assignments",
@@ -159,6 +177,41 @@ async fn complete_agent_handoff_event(
     Json(input): Json<TransitionAgentHandoffEvent>,
 ) -> Result<Json<AgentHandoffEvent>, AppError> {
     transition_agent_handoff_event(state, id, headers, input, "completed").await
+}
+
+async fn get_agent_handoff_assignment_for_handoff(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<AgentHandoffAssignment>, AppError> {
+    get_agent_handoff_assignment_for_handoff_impl(state, id, headers).await
+}
+
+async fn assign_agent_handoff_event(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateAgentHandoffAssignment>,
+) -> Result<Json<AgentHandoffAssignment>, AppError> {
+    assign_agent_handoff_event_impl(state, id, headers, input).await
+}
+
+async fn attach_agent_handoff_remote_computer_assignment(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<AttachAgentHandoffRemoteComputerAssignment>,
+) -> Result<Json<AgentHandoffAssignment>, AppError> {
+    attach_agent_handoff_remote_computer_assignment_impl(state, id, headers, input).await
+}
+
+async fn escalate_agent_handoff_event(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<EscalateAgentHandoffEvent>,
+) -> Result<Json<AgentHandoffEvent>, AppError> {
+    escalate_agent_handoff_event_impl(state, id, headers, input).await
 }
 
 async fn list_agent_handoff_assignments(
