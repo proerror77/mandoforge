@@ -4,6 +4,7 @@ pub(crate) mod agent;
 pub(crate) mod deployment;
 pub(crate) mod eval;
 pub(crate) mod ontology;
+pub(crate) mod remote_computer;
 pub(crate) mod semantic;
 pub(crate) mod session;
 pub(crate) mod tenant;

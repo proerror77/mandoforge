@@ -183,6 +183,14 @@ pub(crate) use types::ontology::{
     SubgraphProposalResponse, TaxonomyLayerCandidate, ConfidenceCalibrationBucket,
     ConfidenceCalibrationRecord, ConfidenceCalibrationResponse,
 };
+pub(crate) use types::remote_computer::{
+    CreateRemoteComputer, CreateRemoteComputerAttachment, CreateRemoteComputerJobAssignment,
+    CreateRemoteComputerLease, CreateRemoteComputerSidecarHeartbeat, CreateRemoteComputerStateLock,
+    ReleaseRemoteComputerStateLock, RemoteComputer, RemoteComputerAttachment,
+    RemoteComputerJobAssignment, RemoteComputerLease, RemoteComputerReclaimRun,
+    RemoteComputerSidecarHeartbeat, RemoteComputerStateLock, UpdateRemoteComputerAttachment,
+    UpdateRemoteComputerLease,
+};
 pub(crate) use types::semantic::{
     ContextPacketSemanticObject, CreateMemoryWritebackCandidates, CreateSemanticIngestionBatch,
     CreateSemanticLink, CreateSemanticObject, CreateSemanticSource, CreateSemanticSynthesisRun,
@@ -2217,179 +2225,6 @@ struct RemoteComputerAttentionItem {
     kind: String,
     severity: String,
     message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct RemoteComputer {
-    id: Uuid,
-    name: String,
-    profile: String,
-    status: String,
-    namespace: String,
-    pod_name: Option<String>,
-    workspace_path: String,
-    state_mount_path: String,
-    metadata: Value,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct RemoteComputerLease {
-    id: Uuid,
-    remote_computer_id: Uuid,
-    session_id: Option<Uuid>,
-    status: String,
-    worker_id: Option<String>,
-    lease_expires_at: Option<DateTime<Utc>>,
-    heartbeat_at: Option<DateTime<Utc>>,
-    metadata: Value,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct RemoteComputerAttachment {
-    id: Uuid,
-    remote_computer_id: Uuid,
-    lease_id: Uuid,
-    session_id: Uuid,
-    status: String,
-    attached_by: Option<String>,
-    stale_after: Option<DateTime<Utc>>,
-    released_at: Option<DateTime<Utc>>,
-    metadata: Value,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct RemoteComputerJobAssignment {
-    id: Uuid,
-    execution_job_id: Uuid,
-    remote_computer_id: Uuid,
-    lease_id: Uuid,
-    session_id: Uuid,
-    status: String,
-    assigned_by: Option<String>,
-    metadata: Value,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct RemoteComputerStateLock {
-    id: Uuid,
-    lock_key: String,
-    status: String,
-    remote_computer_id: Option<Uuid>,
-    lease_id: Option<Uuid>,
-    session_id: Option<Uuid>,
-    owner: Option<String>,
-    expires_at: Option<DateTime<Utc>>,
-    released_at: Option<DateTime<Utc>>,
-    metadata: Value,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct RemoteComputerSidecarHeartbeat {
-    id: Uuid,
-    remote_computer_id: Uuid,
-    session_id: Option<Uuid>,
-    assignment_id: Option<Uuid>,
-    sidecar_name: String,
-    status: String,
-    observed_at: DateTime<Utc>,
-    metadata: Value,
-    created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct CreateRemoteComputer {
-    name: String,
-    profile: Option<String>,
-    namespace: Option<String>,
-    pod_name: Option<String>,
-    workspace_path: Option<String>,
-    state_mount_path: Option<String>,
-    metadata: Option<Value>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct CreateRemoteComputerLease {
-    session_id: Option<Uuid>,
-    worker_id: Option<String>,
-    lease_seconds: Option<i64>,
-    metadata: Option<Value>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct UpdateRemoteComputerLease {
-    reason: Option<String>,
-    metadata: Option<Value>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct CreateRemoteComputerAttachment {
-    session_id: Uuid,
-    attached_by: Option<String>,
-    stale_after_seconds: Option<i64>,
-    metadata: Option<Value>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct CreateRemoteComputerJobAssignment {
-    lease_id: Uuid,
-    assigned_by: Option<String>,
-    metadata: Option<Value>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct CreateRemoteComputerStateLock {
-    lock_key: String,
-    remote_computer_id: Option<Uuid>,
-    lease_id: Option<Uuid>,
-    session_id: Option<Uuid>,
-    owner: Option<String>,
-    lease_seconds: Option<i64>,
-    metadata: Option<Value>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct ReleaseRemoteComputerStateLock {
-    reason: Option<String>,
-    metadata: Option<Value>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct CreateRemoteComputerSidecarHeartbeat {
-    remote_computer_id: Uuid,
-    session_id: Option<Uuid>,
-    assignment_id: Option<Uuid>,
-    sidecar_name: Option<String>,
-    status: Option<String>,
-    metadata: Option<Value>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct UpdateRemoteComputerAttachment {
-    reason: Option<String>,
-    metadata: Option<Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct RemoteComputerReclaimRun {
-    generated_at: DateTime<Utc>,
-    status: String,
-    stale_attachment_count: usize,
-    reclaimed_attachment_count: usize,
-    expired_lease_count: usize,
-    reclaimed_lease_count: usize,
-    attachments: Vec<RemoteComputerAttachment>,
-    leases: Vec<RemoteComputerLease>,
-    execution_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
