@@ -2380,7 +2380,7 @@ struct UpdateRemoteComputerAttachment {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct RemoteComputerReclaimRun {
+pub(crate) struct RemoteComputerReclaimRun {
     generated_at: DateTime<Utc>,
     status: String,
     stale_attachment_count: usize,
@@ -3915,10 +3915,6 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::approval_notifications::router())
         .merge(handlers::execution_jobs::router())
         .merge(handlers::remote_computers::router())
-        .route(
-            "/api/remote-computers/reclaim-stale",
-            post(reclaim_stale_remote_computers),
-        )
         .route(
             "/api/remote-computers",
             get(list_remote_computers).post(create_remote_computer),
@@ -53654,8 +53650,8 @@ async fn list_remote_computers(
     Ok(Json(state.list_remote_computers().await?))
 }
 
-async fn reclaim_stale_remote_computers(
-    State(state): State<AppState>,
+pub(crate) async fn reclaim_stale_remote_computers(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<RemoteComputerReclaimRun>, AppError> {
     authorize_request(

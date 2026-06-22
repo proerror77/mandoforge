@@ -11,7 +11,7 @@ use crate::{
     AppError, AppState, CreateRemoteComputerSidecarHeartbeat, CreateRemoteComputerStateLock,
     ReleaseRemoteComputerStateLock,
     RemoteComputerArtifactDiscoverRequest, RemoteComputerArtifactSyncRequest,
-    RemoteComputerArtifactSyncResponse, RemoteComputerReadinessReport,
+    RemoteComputerArtifactSyncResponse, RemoteComputerReadinessReport, RemoteComputerReclaimRun,
     RemoteComputerRunnerDryRunRequest, RemoteComputerRunnerDryRunResponse,
     RemoteComputerRunnerReadiness, RemoteComputerSidecarHeartbeat,
     RemoteComputerSidecarRecoveryRun, RemoteComputerStateLock,
@@ -26,6 +26,7 @@ use crate::{
     list_remote_computer_state_locks as list_remote_computer_state_locks_impl,
     mutate_remote_computer_runner as mutate_remote_computer_runner_impl,
     record_remote_computer_sidecar_heartbeat as record_remote_computer_sidecar_heartbeat_impl,
+    reclaim_stale_remote_computers as reclaim_stale_remote_computers_impl,
     release_remote_computer_state_lock as release_remote_computer_state_lock_impl,
     run_remote_computer_sidecar_recovery as run_remote_computer_sidecar_recovery_impl,
     sync_remote_computer_artifacts as sync_remote_computer_artifacts_impl,
@@ -82,6 +83,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/api/remote-computers/sidecars/recovery/run",
             post(run_remote_computer_sidecar_recovery),
+        )
+        .route(
+            "/api/remote-computers/reclaim-stale",
+            post(reclaim_stale_remote_computers),
         )
 }
 
@@ -189,4 +194,11 @@ async fn run_remote_computer_sidecar_recovery(
     headers: HeaderMap,
 ) -> Result<Json<RemoteComputerSidecarRecoveryRun>, AppError> {
     run_remote_computer_sidecar_recovery_impl(state, headers).await
+}
+
+async fn reclaim_stale_remote_computers(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<RemoteComputerReclaimRun>, AppError> {
+    reclaim_stale_remote_computers_impl(state, headers).await
 }
