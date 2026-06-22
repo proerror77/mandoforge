@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -224,4 +226,241 @@ pub(crate) struct CreateAgent {
     pub(crate) semantic_scopes: Value,
     #[serde(default = "crate::default_agent_release_state")]
     pub(crate) release_state: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AgentRelease {
+    pub(crate) id: Uuid,
+    pub(crate) agent_id: Uuid,
+    pub(crate) agent_version_id: Uuid,
+    pub(crate) environment: String,
+    pub(crate) status: String,
+    pub(crate) eval_run_id: Option<Uuid>,
+    pub(crate) eval_score: Option<f64>,
+    pub(crate) min_score: f64,
+    pub(crate) requested_by: Option<String>,
+    pub(crate) requested_at: Option<DateTime<Utc>>,
+    pub(crate) request_reason: Option<String>,
+    pub(crate) approver_subject: Option<String>,
+    pub(crate) decision_by: Option<String>,
+    pub(crate) decided_at: Option<DateTime<Utc>>,
+    pub(crate) decision_reason: Option<String>,
+    pub(crate) promoted_by: Option<String>,
+    pub(crate) promoted_at: Option<DateTime<Utc>>,
+    pub(crate) automation_policy: Value,
+    pub(crate) created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CreateAgentRelease {
+    #[serde(default)]
+    pub(crate) agent_version_id: Option<Uuid>,
+    pub(crate) eval_run_id: Uuid,
+    #[serde(default = "crate::default_release_environment")]
+    pub(crate) environment: String,
+    #[serde(default)]
+    pub(crate) min_score: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct RequestAgentReleasePromotion {
+    #[serde(flatten)]
+    pub(crate) release: CreateAgentRelease,
+    #[serde(default)]
+    pub(crate) approver_subject: Option<String>,
+    #[serde(default)]
+    pub(crate) reason: Option<String>,
+    #[serde(default)]
+    pub(crate) auto_approve: Option<bool>,
+    #[serde(default)]
+    pub(crate) activate_after: Option<String>,
+    #[serde(default)]
+    pub(crate) expires_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct RejectAgentReleasePromotion {
+    #[serde(default)]
+    pub(crate) reason: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct AgentReleaseAutomationRun {
+    pub(crate) checked_at: DateTime<Utc>,
+    pub(crate) pending_count: usize,
+    pub(crate) promoted_count: usize,
+    pub(crate) rejected_count: usize,
+    pub(crate) skipped_count: usize,
+    pub(crate) controller_required: bool,
+    pub(crate) controller_configured: bool,
+    pub(crate) controller_execution_count: usize,
+    pub(crate) controller_failed_count: usize,
+    pub(crate) results: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AgentReleaseAutomationRunSummary {
+    pub(crate) generated_at: DateTime<Utc>,
+    pub(crate) run_count: usize,
+    pub(crate) processed_run_count: usize,
+    pub(crate) skipped_run_count: usize,
+    pub(crate) latest_run: Option<AgentReleaseAutomationRunRecord>,
+    pub(crate) recent_runs: Vec<AgentReleaseAutomationRunRecord>,
+    pub(crate) production_ops: AgentReleaseProductionOpsReadiness,
+    pub(crate) production_orchestration: AgentReleaseProductionOrchestrationReadiness,
+    pub(crate) deployment_readiness: AgentReleaseDeploymentReadiness,
+    pub(crate) attention_items: Vec<AgentReleaseAutomationRunAttentionItem>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct AgentReleaseDeploymentValidationRun {
+    pub(crate) status: String,
+    pub(crate) release_count: usize,
+    pub(crate) pending_count: usize,
+    pub(crate) promoted_count: usize,
+    pub(crate) rejected_count: usize,
+    pub(crate) rolled_back_count: usize,
+    pub(crate) latest_automation_status: Option<String>,
+    pub(crate) controller_required: bool,
+    pub(crate) controller_configured: bool,
+    pub(crate) controller_execution: Value,
+    pub(crate) issues: Vec<String>,
+    pub(crate) checked_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct AgentReleaseOrchestrationValidationRun {
+    pub(crate) status: String,
+    pub(crate) release_count: usize,
+    pub(crate) latest_automation_status: Option<String>,
+    pub(crate) controller_required: bool,
+    pub(crate) controller_configured: bool,
+    pub(crate) controller_execution: Value,
+    pub(crate) issues: Vec<String>,
+    pub(crate) checked_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AgentReleaseDeploymentReadiness {
+    pub(crate) status: String,
+    pub(crate) production_blocked: bool,
+    pub(crate) latest_validation_at: Option<DateTime<Utc>>,
+    pub(crate) latest_validation_age_hours: Option<i64>,
+    pub(crate) latest_validation_status: Option<String>,
+    pub(crate) latest_validation_healthy: bool,
+    pub(crate) release_count: usize,
+    pub(crate) pending_count: usize,
+    pub(crate) promoted_count: usize,
+    pub(crate) rejected_count: usize,
+    pub(crate) rolled_back_count: usize,
+    pub(crate) controller_required: bool,
+    pub(crate) controller_configured: bool,
+    pub(crate) latest_controller_status: Option<String>,
+    pub(crate) latest_controller_age_hours: Option<i64>,
+    pub(crate) controller_evidence_fresh: bool,
+    pub(crate) latest_controller_validated: bool,
+    pub(crate) controller_execution_count: usize,
+    pub(crate) controller_failed_count: usize,
+    pub(crate) deployment_validated: bool,
+    pub(crate) blocking_reasons: Vec<String>,
+    pub(crate) message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AgentReleaseProductionOpsReadiness {
+    pub(crate) status: String,
+    pub(crate) production_blocked: bool,
+    pub(crate) pending_count: usize,
+    pub(crate) auto_pending_count: usize,
+    pub(crate) manual_pending_count: usize,
+    pub(crate) expired_pending_count: usize,
+    pub(crate) stale_pending_count: usize,
+    pub(crate) latest_run_status: Option<String>,
+    pub(crate) latest_run_age_hours: Option<i64>,
+    pub(crate) message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AgentReleaseProductionOrchestrationReadiness {
+    pub(crate) status: String,
+    pub(crate) production_blocked: bool,
+    pub(crate) automation_supervision_fresh: bool,
+    pub(crate) latest_run_status: Option<String>,
+    pub(crate) pending_clear: bool,
+    pub(crate) expired_clear: bool,
+    pub(crate) stale_clear: bool,
+    pub(crate) skipped_automation_clear: bool,
+    pub(crate) manual_approval_clear: bool,
+    pub(crate) controller_required: bool,
+    pub(crate) controller_configured: bool,
+    pub(crate) latest_controller_status: Option<String>,
+    pub(crate) latest_controller_age_hours: Option<i64>,
+    pub(crate) controller_evidence_fresh: bool,
+    pub(crate) latest_controller_validated: bool,
+    pub(crate) blocking_reasons: Vec<String>,
+    pub(crate) message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AgentReleaseAutomationRunRecord {
+    pub(crate) id: Uuid,
+    pub(crate) status: String,
+    pub(crate) pending_count: usize,
+    pub(crate) promoted_count: usize,
+    pub(crate) rejected_count: usize,
+    pub(crate) skipped_count: usize,
+    pub(crate) ran_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AgentReleaseAutomationRunAttentionItem {
+    pub(crate) kind: String,
+    pub(crate) severity: String,
+    pub(crate) message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AgentReleaseRolloutSummary {
+    pub(crate) generated_at: DateTime<Utc>,
+    pub(crate) release_count: usize,
+    pub(crate) by_status: BTreeMap<String, usize>,
+    pub(crate) by_environment: BTreeMap<String, usize>,
+    pub(crate) pending_count: usize,
+    pub(crate) promoted_count: usize,
+    pub(crate) rejected_count: usize,
+    pub(crate) rolled_back_count: usize,
+    pub(crate) auto_pending_count: usize,
+    pub(crate) manual_pending_count: usize,
+    pub(crate) expired_pending_count: usize,
+    pub(crate) expiring_soon_count: usize,
+    pub(crate) stale_pending_count: usize,
+    pub(crate) latest_promoted_by_environment: Vec<AgentReleaseLatestPromotion>,
+    pub(crate) attention_items: Vec<AgentReleaseAttentionItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AgentReleaseLatestPromotion {
+    pub(crate) environment: String,
+    pub(crate) release_id: Uuid,
+    pub(crate) agent_id: Uuid,
+    pub(crate) agent_version_id: Uuid,
+    pub(crate) promoted_at: DateTime<Utc>,
+    pub(crate) eval_score: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AgentReleaseAttentionItem {
+    pub(crate) release_id: Uuid,
+    pub(crate) agent_id: Uuid,
+    pub(crate) agent_version_id: Uuid,
+    pub(crate) environment: String,
+    pub(crate) status: String,
+    pub(crate) reason: String,
+    pub(crate) requested_by: Option<String>,
+    pub(crate) approver_subject: Option<String>,
+    pub(crate) requested_at: Option<DateTime<Utc>>,
+    pub(crate) activate_after: Option<DateTime<Utc>>,
+    pub(crate) expires_at: Option<DateTime<Utc>>,
+    pub(crate) eval_score: Option<f64>,
+    pub(crate) min_score: f64,
 }
