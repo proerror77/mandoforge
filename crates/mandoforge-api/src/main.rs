@@ -195,6 +195,17 @@ pub(crate) use types::ontology::{
     SubgraphProposalResponse, TaxonomyLayerCandidate, ConfidenceCalibrationBucket,
     ConfidenceCalibrationRecord, ConfidenceCalibrationResponse,
 };
+pub(crate) use types::provider::{
+    CreateProviderAccess, CreateProviderRecord, DecideProviderStatusApproval, ProviderAccess,
+    ProviderDeploymentReadiness, ProviderDeploymentValidationRun, ProviderGovernanceAttentionItem,
+    ProviderGovernanceSummary, ProviderHealth, ProviderPolicyGateCheck,
+    ProviderPolicyGateEnforcement, ProviderPolicyGateReport, ProviderPolicyGateRun,
+    ProviderPolicyGateRunAttentionItem, ProviderPolicyGateRunResponse,
+    ProviderPolicyGateRunSummary, ProviderProductionRollbackRun, ProviderProductionRolloutRun,
+    ProviderRecord, ProviderStatusApprovalResponse, RequestProviderStatusApproval,
+    RotateProviderApiKeyRef, RunProviderProductionRollback, RunProviderProductionRollout,
+    UpdateProviderAccess, UpdateProviderStatus,
+};
 pub(crate) use types::remote_computer::{
     CreateRemoteComputer, CreateRemoteComputerAttachment, CreateRemoteComputerJobAssignment,
     CreateRemoteComputerLease, CreateRemoteComputerSidecarHeartbeat, CreateRemoteComputerStateLock,
@@ -1846,272 +1857,6 @@ struct WorkItemActivityEntry {
     created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProviderAccess {
-    id: Uuid,
-    team_id: Uuid,
-    provider_name: String,
-    model_allowlist: Vec<String>,
-    status: String,
-    created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateProviderAccess {
-    provider_name: String,
-    #[serde(default)]
-    model_allowlist: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct UpdateProviderAccess {
-    provider_name: String,
-    #[serde(default)]
-    model_allowlist: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProviderRecord {
-    id: Uuid,
-    provider_type: String,
-    name: String,
-    base_url: Option<String>,
-    default_model: Option<String>,
-    config: Value,
-    status: String,
-    created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateProviderRecord {
-    provider_type: String,
-    name: String,
-    #[serde(default)]
-    base_url: Option<String>,
-    #[serde(default)]
-    default_model: Option<String>,
-    #[serde(default)]
-    config: Value,
-}
-
-#[derive(Debug, Deserialize)]
-struct UpdateProviderStatus {
-    status: String,
-    #[serde(default)]
-    emergency: bool,
-    #[serde(default)]
-    reason: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RequestProviderStatusApproval {
-    status: String,
-    #[serde(default)]
-    reason: Option<String>,
-    #[serde(default)]
-    approver_subject: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct DecideProviderStatusApproval {
-    #[serde(default)]
-    comment: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProviderStatusApprovalResponse {
-    provider: ProviderRecord,
-    approval: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProviderGovernanceSummary {
-    provider_count: usize,
-    by_status: BTreeMap<String, usize>,
-    by_type: BTreeMap<String, usize>,
-    pending_status_approval_count: usize,
-    last_status_approval_count: usize,
-    emergency_lifecycle_count: usize,
-    credential_ref_count: usize,
-    env_key_count: usize,
-    missing_credential_count: usize,
-    budgeted_provider_count: usize,
-    active_provider_count: usize,
-    inactive_provider_count: usize,
-    deployment_readiness: ProviderDeploymentReadiness,
-    attention_items: Vec<ProviderGovernanceAttentionItem>,
-    generated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProviderGovernanceAttentionItem {
-    provider_id: Uuid,
-    provider_name: String,
-    kind: String,
-    severity: String,
-    message: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct ProviderDeploymentValidationRun {
-    status: String,
-    provider_count: usize,
-    healthy_count: usize,
-    unhealthy_count: usize,
-    results: Vec<ProviderHealth>,
-    controller_required: bool,
-    controller_configured: bool,
-    controller_execution: Value,
-    ran_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProviderDeploymentReadiness {
-    status: String,
-    production_blocked: bool,
-    latest_validation_at: Option<DateTime<Utc>>,
-    latest_validation_age_hours: Option<i64>,
-    latest_validation_status: Option<String>,
-    provider_count: usize,
-    healthy_count: usize,
-    unhealthy_count: usize,
-    controller_required: bool,
-    controller_configured: bool,
-    latest_controller_status: Option<String>,
-    latest_controller_age_hours: Option<i64>,
-    controller_evidence_fresh: bool,
-    latest_controller_validated: bool,
-    controller_execution_count: usize,
-    controller_failed_count: usize,
-    deployment_validated: bool,
-    blocking_reasons: Vec<String>,
-    message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProviderPolicyGateReport {
-    generated_at: DateTime<Utc>,
-    status: String,
-    provider_count: usize,
-    passed_count: usize,
-    failed_count: usize,
-    warning_count: usize,
-    checks: Vec<ProviderPolicyGateCheck>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProviderPolicyGateRunResponse {
-    run: ProviderPolicyGateRun,
-    report: ProviderPolicyGateReport,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProviderPolicyGateRunSummary {
-    generated_at: DateTime<Utc>,
-    run_count: usize,
-    passed_run_count: usize,
-    failed_run_count: usize,
-    warning_run_count: usize,
-    latest_run: Option<ProviderPolicyGateRun>,
-    recent_runs: Vec<ProviderPolicyGateRun>,
-    production_enforcement: ProviderPolicyGateEnforcement,
-    attention_items: Vec<ProviderPolicyGateRunAttentionItem>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProviderPolicyGateEnforcement {
-    status: String,
-    production_blocked: bool,
-    required_fresh_hours: i64,
-    latest_run_status: Option<String>,
-    latest_run_age_hours: Option<i64>,
-    message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProviderPolicyGateRun {
-    id: Uuid,
-    status: String,
-    subject: Option<String>,
-    provider_count: usize,
-    passed_count: usize,
-    failed_count: usize,
-    warning_count: usize,
-    failed_provider_names: Vec<String>,
-    warning_provider_names: Vec<String>,
-    ran_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProviderPolicyGateRunAttentionItem {
-    kind: String,
-    severity: String,
-    message: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct RunProviderProductionRollout {
-    #[serde(default)]
-    environment: Option<String>,
-    #[serde(default)]
-    reason: Option<String>,
-    #[serde(default)]
-    provider_ids: Vec<Uuid>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RunProviderProductionRollback {
-    #[serde(default)]
-    reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProviderProductionRolloutRun {
-    id: Uuid,
-    status: String,
-    environment: String,
-    reason: Option<String>,
-    provider_count: usize,
-    provider_ids: Vec<Uuid>,
-    enforcement: ProviderPolicyGateEnforcement,
-    controller_configured: bool,
-    controller_execution: Value,
-    message: String,
-    ran_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProviderProductionRollbackRun {
-    id: Uuid,
-    status: String,
-    environment: String,
-    reason: Option<String>,
-    provider_count: usize,
-    provider_ids: Vec<Uuid>,
-    source_rollout_id: Option<Uuid>,
-    controller_configured: bool,
-    controller_execution: Value,
-    message: String,
-    ran_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProviderPolicyGateCheck {
-    provider_id: Uuid,
-    provider_name: String,
-    provider_type: String,
-    status: String,
-    gate_status: String,
-    blockers: Vec<String>,
-    warnings: Vec<String>,
-    recommendations: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RotateProviderApiKeyRef {
-    api_key_ref: String,
-}
-
 #[derive(Debug, Deserialize)]
 struct SimulatePolicy {
     tool_name: String,
@@ -2384,17 +2129,6 @@ struct RotateSecretRecord {
     key: String,
     #[serde(default)]
     value: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct ProviderHealth {
-    provider_id: Uuid,
-    name: String,
-    status: String,
-    healthy: bool,
-    issues: Vec<String>,
-    checks: Value,
-    checked_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
