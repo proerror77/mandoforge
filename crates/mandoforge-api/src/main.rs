@@ -3952,17 +3952,6 @@ fn build_router(state: AppState) -> Router {
             post(create_semantic_ingestion_batch),
         )
         .route(
-            "/api/semantic-links",
-            get(list_semantic_links).post(create_semantic_link),
-        )
-        .route("/api/semantic-links/expand", post(expand_semantic_links))
-        .route(
-            "/api/semantic-links/{id}",
-            get(get_semantic_link)
-                .patch(update_semantic_link)
-                .delete(archive_semantic_link),
-        )
-        .route(
             "/api/memory-governance/summary",
             get(get_memory_governance_summary),
         )
@@ -15575,111 +15564,6 @@ async fn record_semantic_ingestion_batch_audit(
         ))
         .await?;
     Ok(())
-}
-
-async fn list_semantic_links(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<SemanticLink>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::AgentsRead,
-        "semantic_links",
-        None,
-    )
-    .await?;
-    Ok(Json(state.list_semantic_links().await?))
-}
-
-async fn create_semantic_link(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(input): Json<CreateSemanticLink>,
-) -> Result<Json<SemanticLink>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::AgentsWrite,
-        "semantic_links",
-        None,
-    )
-    .await?;
-    validate_semantic_link_against_ontology(&input)?;
-    let link = state.create_semantic_link(input).await?;
-    record_semantic_link_audit(&state, &headers, &link, "semantic_link.created").await?;
-    Ok(Json(link))
-}
-
-async fn expand_semantic_links(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(input): Json<ExpandSemanticLinksRequest>,
-) -> Result<Json<ExpandSemanticLinksResponse>, AppError> {
-    let packet = state.get_context_packet(input.context_packet_id).await?;
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "context_packet",
-        Some(packet.session_id),
-    )
-    .await?;
-    let response = expand_semantic_links_for_context(&state, &packet, input).await?;
-    Ok(Json(response))
-}
-
-async fn get_semantic_link(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-) -> Result<Json<SemanticLink>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::AgentsRead,
-        "semantic_link",
-        Some(id),
-    )
-    .await?;
-    Ok(Json(state.get_semantic_link(id).await?))
-}
-
-async fn update_semantic_link(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-    Json(input): Json<UpdateSemanticLink>,
-) -> Result<Json<SemanticLink>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::AgentsWrite,
-        "semantic_link",
-        Some(id),
-    )
-    .await?;
-    let link = state.update_semantic_link(id, input).await?;
-    record_semantic_link_audit(&state, &headers, &link, "semantic_link.updated").await?;
-    Ok(Json(link))
-}
-
-async fn archive_semantic_link(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-) -> Result<Json<SemanticLink>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::AgentsWrite,
-        "semantic_link",
-        Some(id),
-    )
-    .await?;
-    let link = state.archive_semantic_link(id).await?;
-    record_semantic_link_audit(&state, &headers, &link, "semantic_link.archived").await?;
-    Ok(Json(link))
 }
 
 async fn record_semantic_source_audit(
