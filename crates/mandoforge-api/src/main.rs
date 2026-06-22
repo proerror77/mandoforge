@@ -133,6 +133,11 @@ use remote_computer_runner::{
     RemoteComputerRunnerDryRunResponse, RemoteComputerRunnerReadiness,
     remote_computer_runner_for_config,
 };
+pub(crate) use types::eval::{
+    BootstrapEvalSuite, CreateEvalCase, CreateEvalDataset, CreateEvalJudgeProfile, CreateEvalRun,
+    EvalCase, EvalDataset, EvalDriftDecision, EvalGateDecision, EvalGateRequest, EvalRun,
+    EvalSuiteBootstrap,
+};
 use types::tools::{
     ApprovalRequestTool, ArtifactCreateTool, FileReadTool, McpCallTool, OntologyTypeLookupTool,
     SemanticLinkExpandTool, SemanticObjectFetchTool, SemanticObjectSearchTool, ShellExecTool,
@@ -6813,114 +6818,6 @@ struct McpServerLatestRollout {
     requested_by: Option<String>,
     applied_by: Option<String>,
     rolled_back_by: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct EvalDataset {
-    id: Uuid,
-    name: String,
-    description: Option<String>,
-    created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateEvalDataset {
-    name: String,
-    #[serde(default)]
-    description: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct EvalCase {
-    id: Uuid,
-    dataset_id: Uuid,
-    input: Value,
-    expected: Option<Value>,
-    grading_policy: Value,
-    created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateEvalCase {
-    input: Value,
-    #[serde(default)]
-    expected: Option<Value>,
-    #[serde(default = "empty_json_object")]
-    grading_policy: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct EvalRun {
-    id: Uuid,
-    dataset_id: Uuid,
-    agent_id: Uuid,
-    agent_version_id: Uuid,
-    status: String,
-    score: Option<f64>,
-    details: Value,
-    created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateEvalRun {
-    agent_id: Uuid,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateEvalJudgeProfile {
-    name: String,
-    endpoint: String,
-    model: String,
-    #[serde(default)]
-    api_key_ref: Option<String>,
-    #[serde(default)]
-    timeout_seconds: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct BootstrapEvalSuite {
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
-    judge_profile: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct EvalSuiteBootstrap {
-    dataset: EvalDataset,
-    cases: Vec<EvalCase>,
-}
-
-#[derive(Debug, Deserialize)]
-struct EvalGateRequest {
-    #[serde(default)]
-    min_score: Option<f64>,
-    #[serde(default)]
-    require_completed: Option<bool>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct EvalGateDecision {
-    run_id: Uuid,
-    status: String,
-    score: Option<f64>,
-    min_score: f64,
-    failure_reasons: Vec<String>,
-    checked_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct EvalDriftDecision {
-    run_id: Uuid,
-    baseline_run_id: Option<Uuid>,
-    status: String,
-    score_delta: Option<f64>,
-    passed_count_delta: Option<i64>,
-    case_count_delta: Option<i64>,
-    messages: Vec<String>,
-    checked_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
