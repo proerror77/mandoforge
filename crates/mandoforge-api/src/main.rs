@@ -3899,10 +3899,6 @@ fn build_router(state: AppState) -> Router {
             post(validate_agent_release_orchestration),
         )
         .route(
-            "/api/agents/releases/run-due",
-            post(run_due_agent_release_promotions),
-        )
-        .route(
             "/api/agents/{id}/releases/{release_id}/rollback",
             post(rollback_agent_release),
         )
@@ -14432,15 +14428,7 @@ async fn validate_agent_release_orchestration(
     }))
 }
 
-async fn run_due_agent_release_promotions(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<AgentReleaseAutomationRun>, AppError> {
-    authorize_request(&state, &headers, Permission::Admin, "agent_release", None).await?;
-    Ok(Json(execute_due_agent_release_promotions(&state).await?))
-}
-
-async fn execute_due_agent_release_promotions(
+pub(crate) async fn execute_due_agent_release_promotions(
     state: &AppState,
 ) -> Result<AgentReleaseAutomationRun, AppError> {
     execute_due_agent_release_promotions_with_lookup(state, |key| std::env::var(key).ok()).await

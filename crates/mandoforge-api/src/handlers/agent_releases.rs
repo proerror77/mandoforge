@@ -9,10 +9,11 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
-    AgentRelease, AgentReleaseAutomationRunSummary, AgentReleaseRolloutSummary, AppError,
-    AppState, AuthorizationRequest, CreateAgentRelease, Permission, RejectAgentReleasePromotion,
-    RequestAgentReleasePromotion, authorize_request, build_agent_release_automation_run_summary,
-    build_agent_release_rollout_summary, enforce_resource_scope, new_audit_log,
+    AgentRelease, AgentReleaseAutomationRun, AgentReleaseAutomationRunSummary,
+    AgentReleaseRolloutSummary, AppError, AppState, AuthorizationRequest, CreateAgentRelease,
+    Permission, RejectAgentReleasePromotion, RequestAgentReleasePromotion, authorize_request,
+    build_agent_release_automation_run_summary, build_agent_release_rollout_summary,
+    enforce_resource_scope, execute_due_agent_release_promotions, new_audit_log,
     normalize_release_automation_policy, optional_trimmed, principal_from_request,
 };
 
@@ -25,6 +26,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/api/agents/releases/automation-runs",
             get(get_agent_release_automation_runs),
+        )
+        .route(
+            "/api/agents/releases/run-due",
+            post(run_due_agent_release_promotions),
         )
         .route(
             "/api/agents/{id}/releases",
@@ -77,6 +82,14 @@ async fn get_agent_release_automation_runs(
         &rollout_summary,
         Utc::now(),
     )))
+}
+
+async fn run_due_agent_release_promotions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<AgentReleaseAutomationRun>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "agent_release", None).await?;
+    Ok(Json(execute_due_agent_release_promotions(&state).await?))
 }
 
 async fn create_agent_release(
