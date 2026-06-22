@@ -4,6 +4,7 @@ pub(crate) mod agent;
 pub(crate) mod agent_handoff;
 pub(crate) mod artifact;
 pub(crate) mod audit;
+pub(crate) mod codex_app_server;
 pub(crate) mod approval;
 pub(crate) mod deployment;
 pub(crate) mod eval;
