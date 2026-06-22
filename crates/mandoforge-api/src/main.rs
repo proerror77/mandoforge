@@ -34202,41 +34202,6 @@ fn normalize_policy_gate_cases(
     Ok((source.to_string(), normalized))
 }
 
-pub(crate) async fn get_vault_health(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<SecretProviderHealth>, AppError> {
-    authorize_request(&state, &headers, Permission::Admin, "vault", None).await?;
-    Ok(Json(
-        secret_provider_health_from_lookup(|key| std::env::var(key).ok()).await,
-    ))
-}
-
-pub(crate) async fn get_vault_readiness(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<VaultReadinessReport>, AppError> {
-    authorize_request(&state, &headers, Permission::Admin, "vault", None).await?;
-    let secret_provider = secret_provider_health_from_lookup(|key| std::env::var(key).ok()).await;
-    let secret_records = state.list_secret_records().await?;
-    let providers = state.list_providers().await?;
-    let mut mcp_servers = Vec::new();
-    for organization in state.list_organizations().await? {
-        for team in state.list_teams(organization.id).await? {
-            mcp_servers.extend(state.list_mcp_servers(team.id).await?);
-        }
-    }
-    let audit_logs = state.list_audit_logs(None).await?;
-    Ok(Json(build_vault_readiness_report(
-        secret_provider,
-        &secret_records,
-        &providers,
-        &mcp_servers,
-        &audit_logs,
-        |key| std::env::var(key).ok(),
-    )))
-}
-
 pub(crate) async fn run_vault_kms_rotation(
     state: AppState,
     headers: HeaderMap,
@@ -34374,14 +34339,6 @@ pub(crate) async fn validate_vault_kms_recovery(
         controller_execution,
         issues,
     }))
-}
-
-pub(crate) async fn list_secret_records(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<Vec<SecretRecord>>, AppError> {
-    authorize_request(&state, &headers, Permission::Admin, "vault", None).await?;
-    Ok(Json(state.list_secret_records().await?))
 }
 
 pub(crate) async fn create_secret_record(
@@ -37089,7 +37046,7 @@ fn codex_app_server_config(state: &AppState) -> Result<&CodexAppServerConfig, Ap
         .ok_or_else(|| AppError::bad_request("Codex App Server is not configured"))
 }
 
-async fn secret_provider_health_from_lookup<F>(lookup: F) -> SecretProviderHealth
+pub(crate) async fn secret_provider_health_from_lookup<F>(lookup: F) -> SecretProviderHealth
 where
     F: Fn(&str) -> Option<String>,
 {
@@ -37170,7 +37127,7 @@ where
     }
 }
 
-fn build_vault_readiness_report<F>(
+pub(crate) fn build_vault_readiness_report<F>(
     secret_provider: SecretProviderHealth,
     secret_records: &[SecretRecord],
     providers: &[ProviderRecord],

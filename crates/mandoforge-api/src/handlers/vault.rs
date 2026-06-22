@@ -7,13 +7,13 @@ use axum::{
 use uuid::Uuid;
 
 use crate::{
-    AppError, AppState, CreateSecretRecord, RotateSecretRecord, SecretProviderHealth, SecretRecord,
-    VaultKmsRecoveryValidationRun, VaultKmsRotationRun, VaultReadinessReport,
-    create_secret_record as create_secret_record_impl, get_vault_health as get_vault_health_impl,
-    get_vault_readiness as get_vault_readiness_impl,
-    list_secret_records as list_secret_records_impl,
+    AppError, AppState, CreateSecretRecord, Permission, RotateSecretRecord, SecretProviderHealth,
+    SecretRecord, VaultKmsRecoveryValidationRun, VaultKmsRotationRun, VaultReadinessReport,
+    authorize_request, build_vault_readiness_report,
+    create_secret_record as create_secret_record_impl,
     rotate_secret_record as rotate_secret_record_impl,
     run_vault_kms_rotation as run_vault_kms_rotation_impl,
+    secret_provider_health_from_lookup,
     validate_vault_kms_recovery as validate_vault_kms_recovery_impl,
 };
 
@@ -37,14 +37,35 @@ async fn get_vault_health(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<SecretProviderHealth>, AppError> {
-    get_vault_health_impl(state, headers).await
+    authorize_request(&state, &headers, Permission::Admin, "vault", None).await?;
+    Ok(Json(
+        secret_provider_health_from_lookup(|key| std::env::var(key).ok()).await,
+    ))
 }
 
 async fn get_vault_readiness(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<VaultReadinessReport>, AppError> {
-    get_vault_readiness_impl(state, headers).await
+    authorize_request(&state, &headers, Permission::Admin, "vault", None).await?;
+    let secret_provider = secret_provider_health_from_lookup(|key| std::env::var(key).ok()).await;
+    let secret_records = state.list_secret_records().await?;
+    let providers = state.list_providers().await?;
+    let mut mcp_servers = Vec::new();
+    for organization in state.list_organizations().await? {
+        for team in state.list_teams(organization.id).await? {
+            mcp_servers.extend(state.list_mcp_servers(team.id).await?);
+        }
+    }
+    let audit_logs = state.list_audit_logs(None).await?;
+    Ok(Json(build_vault_readiness_report(
+        secret_provider,
+        &secret_records,
+        &providers,
+        &mcp_servers,
+        &audit_logs,
+        |key| std::env::var(key).ok(),
+    )))
 }
 
 async fn run_vault_kms_rotation(
@@ -65,7 +86,8 @@ async fn list_secret_records(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<SecretRecord>>, AppError> {
-    list_secret_records_impl(state, headers).await
+    authorize_request(&state, &headers, Permission::Admin, "vault", None).await?;
+    Ok(Json(state.list_secret_records().await?))
 }
 
 async fn create_secret_record(
