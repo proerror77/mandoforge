@@ -4,34 +4,26 @@ use axum::{
     http::HeaderMap,
     routing::{delete, get, patch, post},
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
+use crate::authorization::{AuthorizationRequest, Permission};
 use crate::{
     AcceptTenantInvitation, AcceptedTenantInvitation, AppError, AppState,
     BootstrapTenantProvisioning, CreateMembership, CreateOrganization, CreateProject,
     CreateTeam, CreateTenantInvitation, Membership, Organization, Project, Team,
     TenantInvitation, TenantIsolationReadinessReport, TenantProvisioningResult,
-    TransferOrganizationOwnership,
+    TransferOrganizationOwnership, authorize_request,
     accept_tenant_invitation as accept_tenant_invitation_impl,
-    archive_organization as archive_organization_impl,
-    archive_project as archive_project_impl, archive_team as archive_team_impl,
     bootstrap_tenant_provisioning as bootstrap_tenant_provisioning_impl,
     create_membership as create_membership_impl,
-    create_organization as create_organization_impl, create_project as create_project_impl,
-    create_team as create_team_impl,
     create_tenant_invitation as create_tenant_invitation_impl,
     delete_membership as delete_membership_impl,
-    delete_organization as delete_organization_impl, delete_project as delete_project_impl,
-    delete_team as delete_team_impl,
+    enforce_resource_scope,
     get_tenant_isolation_readiness as get_tenant_isolation_readiness_impl,
-    list_memberships as list_memberships_impl, list_organizations as list_organizations_impl,
-    list_projects as list_projects_impl, list_teams as list_teams_impl,
+    list_memberships as list_memberships_impl,
     list_tenant_invitations as list_tenant_invitations_impl,
-    revoke_tenant_invitation as revoke_tenant_invitation_impl,
-    transfer_organization_ownership as transfer_organization_ownership_impl,
-    update_organization as update_organization_impl, update_project as update_project_impl,
-    update_team as update_team_impl,
+    new_audit_log, principal_from_request, revoke_tenant_invitation as revoke_tenant_invitation_impl,
     validate_tenant_production_routing as validate_tenant_production_routing_impl,
 };
 
@@ -100,7 +92,8 @@ async fn list_organizations(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<Organization>>, AppError> {
-    list_organizations_impl(state, headers).await
+    authorize_request(&state, &headers, Permission::Admin, "organizations", None).await?;
+    Ok(Json(state.list_organizations().await?))
 }
 
 async fn create_organization(
@@ -108,7 +101,30 @@ async fn create_organization(
     headers: HeaderMap,
     Json(input): Json<CreateOrganization>,
 ) -> Result<Json<Organization>, AppError> {
-    create_organization_impl(state, headers, input).await
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.current_tenant_id(),
+        permission: Permission::Admin,
+        resource_type: "organizations".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let organization = state
+        .create_organization(input, Some(principal.subject_id.clone()))
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "organization.created",
+            "organization",
+            Some(organization.id),
+            json!({"subject": principal.subject_id, "owner_subject": organization.owner_subject}),
+        ))
+        .await?;
+    Ok(Json(organization))
 }
 
 async fn bootstrap_tenant_provisioning(
@@ -139,7 +155,32 @@ async fn update_organization(
     headers: HeaderMap,
     Json(input): Json<CreateOrganization>,
 ) -> Result<Json<Organization>, AppError> {
-    update_organization_impl(state, id, headers, input).await
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.current_tenant_id(),
+        permission: Permission::Admin,
+        resource_type: "organization".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let organization = state.update_organization(id, input).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "organization.updated",
+            "organization",
+            Some(id),
+            json!({
+                "subject": principal.subject_id,
+                "name": organization.name,
+                "slug": organization.slug
+            }),
+        ))
+        .await?;
+    Ok(Json(organization))
 }
 
 async fn archive_organization(
@@ -147,7 +188,28 @@ async fn archive_organization(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<Organization>, AppError> {
-    archive_organization_impl(state, id, headers).await
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.current_tenant_id(),
+        permission: Permission::Admin,
+        resource_type: "organization".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let organization = state.archive_organization(id).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "organization.archived",
+            "organization",
+            Some(id),
+            json!({"subject": principal.subject_id, "archived_at": organization.archived_at}),
+        ))
+        .await?;
+    Ok(Json(organization))
 }
 
 async fn delete_organization(
@@ -155,7 +217,32 @@ async fn delete_organization(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<Organization>, AppError> {
-    delete_organization_impl(state, id, headers).await
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.current_tenant_id(),
+        permission: Permission::Admin,
+        resource_type: "organization".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let organization = state.delete_organization(id).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "organization.deleted",
+            "organization",
+            Some(id),
+            json!({
+                "subject": principal.subject_id,
+                "slug": organization.slug,
+                "owner_subject": organization.owner_subject
+            }),
+        ))
+        .await?;
+    Ok(Json(organization))
 }
 
 async fn transfer_organization_ownership(
@@ -164,7 +251,46 @@ async fn transfer_organization_ownership(
     headers: HeaderMap,
     Json(input): Json<TransferOrganizationOwnership>,
 ) -> Result<Json<Organization>, AppError> {
-    transfer_organization_ownership_impl(state, id, headers, input).await
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.current_tenant_id(),
+        permission: Permission::Admin,
+        resource_type: "organization".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let previous = state
+        .list_organizations()
+        .await?
+        .into_iter()
+        .find(|organization| organization.id == id)
+        .ok_or_else(|| AppError::not_found("organization not found"))?;
+    let new_owner = input.owner_subject.trim();
+    if new_owner.is_empty() {
+        return Err(AppError::bad_request(
+            "organization owner_subject is required",
+        ));
+    }
+    let organization = state
+        .transfer_organization_ownership(id, new_owner.to_string())
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "organization.ownership_transferred",
+            "organization",
+            Some(id),
+            json!({
+                "subject": principal.subject_id,
+                "previous_owner_subject": previous.owner_subject,
+                "owner_subject": organization.owner_subject
+            }),
+        ))
+        .await?;
+    Ok(Json(organization))
 }
 
 async fn list_teams(
@@ -172,7 +298,15 @@ async fn list_teams(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<Team>>, AppError> {
-    list_teams_impl(state, id, headers).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "organization",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.list_teams(id).await?))
 }
 
 async fn create_team(
@@ -181,7 +315,15 @@ async fn create_team(
     headers: HeaderMap,
     Json(input): Json<CreateTeam>,
 ) -> Result<Json<Team>, AppError> {
-    create_team_impl(state, id, headers, input).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "organization",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.create_team(id, input).await?))
 }
 
 async fn update_team(
@@ -190,7 +332,33 @@ async fn update_team(
     headers: HeaderMap,
     Json(input): Json<CreateTeam>,
 ) -> Result<Json<Team>, AppError> {
-    update_team_impl(state, id, headers, input).await
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.current_tenant_id(),
+        permission: Permission::Admin,
+        resource_type: "team".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let team = state.update_team(id, input).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "team.updated",
+            "team",
+            Some(id),
+            json!({
+                "subject": principal.subject_id,
+                "organization_id": team.organization_id,
+                "name": team.name,
+                "slug": team.slug
+            }),
+        ))
+        .await?;
+    Ok(Json(team))
 }
 
 async fn archive_team(
@@ -198,7 +366,28 @@ async fn archive_team(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<Team>, AppError> {
-    archive_team_impl(state, id, headers).await
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.current_tenant_id(),
+        permission: Permission::Admin,
+        resource_type: "team".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let team = state.archive_team(id).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "team.archived",
+            "team",
+            Some(id),
+            json!({"subject": principal.subject_id, "archived_at": team.archived_at}),
+        ))
+        .await?;
+    Ok(Json(team))
 }
 
 async fn delete_team(
@@ -206,7 +395,32 @@ async fn delete_team(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<Team>, AppError> {
-    delete_team_impl(state, id, headers).await
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.current_tenant_id(),
+        permission: Permission::Admin,
+        resource_type: "team".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let team = state.delete_team(id).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "team.deleted",
+            "team",
+            Some(id),
+            json!({
+                "subject": principal.subject_id,
+                "organization_id": team.organization_id,
+                "slug": team.slug
+            }),
+        ))
+        .await?;
+    Ok(Json(team))
 }
 
 async fn list_projects(
@@ -214,7 +428,8 @@ async fn list_projects(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<Project>>, AppError> {
-    list_projects_impl(state, id, headers).await
+    authorize_request(&state, &headers, Permission::Admin, "team", Some(id)).await?;
+    Ok(Json(state.list_projects(id).await?))
 }
 
 async fn create_project(
@@ -223,7 +438,8 @@ async fn create_project(
     headers: HeaderMap,
     Json(input): Json<CreateProject>,
 ) -> Result<Json<Project>, AppError> {
-    create_project_impl(state, id, headers, input).await
+    authorize_request(&state, &headers, Permission::Admin, "team", Some(id)).await?;
+    Ok(Json(state.create_project(id, input).await?))
 }
 
 async fn update_project(
@@ -232,7 +448,33 @@ async fn update_project(
     headers: HeaderMap,
     Json(input): Json<CreateProject>,
 ) -> Result<Json<Project>, AppError> {
-    update_project_impl(state, id, headers, input).await
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.current_tenant_id(),
+        permission: Permission::Admin,
+        resource_type: "project".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let project = state.update_project(id, input).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "project.updated",
+            "project",
+            Some(id),
+            json!({
+                "subject": principal.subject_id,
+                "team_id": project.team_id,
+                "name": project.name,
+                "slug": project.slug
+            }),
+        ))
+        .await?;
+    Ok(Json(project))
 }
 
 async fn archive_project(
@@ -240,7 +482,28 @@ async fn archive_project(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<Project>, AppError> {
-    archive_project_impl(state, id, headers).await
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.current_tenant_id(),
+        permission: Permission::Admin,
+        resource_type: "project".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let project = state.archive_project(id).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "project.archived",
+            "project",
+            Some(id),
+            json!({"subject": principal.subject_id, "archived_at": project.archived_at}),
+        ))
+        .await?;
+    Ok(Json(project))
 }
 
 async fn delete_project(
@@ -248,7 +511,32 @@ async fn delete_project(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<Project>, AppError> {
-    delete_project_impl(state, id, headers).await
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.current_tenant_id(),
+        permission: Permission::Admin,
+        resource_type: "project".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+    let project = state.delete_project(id).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "project.deleted",
+            "project",
+            Some(id),
+            json!({
+                "subject": principal.subject_id,
+                "team_id": project.team_id,
+                "slug": project.slug
+            }),
+        ))
+        .await?;
+    Ok(Json(project))
 }
 
 async fn list_memberships(
