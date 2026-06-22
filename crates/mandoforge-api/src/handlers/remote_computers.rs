@@ -29,11 +29,10 @@ use crate::{
     get_remote_computer_runner_readiness as get_remote_computer_runner_readiness_impl,
     ensure_remote_computer_heartbeat_refs_match_session,
     ensure_remote_computer_lock_refs_match_session,
+    execute_remote_computer_sidecar_recovery, execute_remote_computer_stale_reclaim,
     mutate_remote_computer_runner as mutate_remote_computer_runner_impl, new_audit_log,
-    reclaim_stale_remote_computers as reclaim_stale_remote_computers_impl,
     record_remote_computer_attachment_event, record_remote_computer_lease_event,
     record_remote_computer_sidecar_heartbeat_event, record_remote_computer_state_lock_event,
-    run_remote_computer_sidecar_recovery as run_remote_computer_sidecar_recovery_impl,
     normalize_codex_artifact_path, normalize_remote_computer_artifact_dir,
     validate_remote_computer_state_sync as validate_remote_computer_state_sync_impl,
     UpdateRemoteComputerAttachment, UpdateRemoteComputerLease,
@@ -541,14 +540,32 @@ async fn run_remote_computer_sidecar_recovery(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<RemoteComputerSidecarRecoveryRun>, AppError> {
-    run_remote_computer_sidecar_recovery_impl(state, headers).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computer_sidecar_recovery",
+        None,
+    )
+    .await?;
+    Ok(Json(
+        execute_remote_computer_sidecar_recovery(&state).await?,
+    ))
 }
 
 async fn reclaim_stale_remote_computers(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<RemoteComputerReclaimRun>, AppError> {
-    reclaim_stale_remote_computers_impl(state, headers).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computers",
+        None,
+    )
+    .await?;
+    Ok(Json(execute_remote_computer_stale_reclaim(&state).await?))
 }
 
 async fn list_remote_computers(

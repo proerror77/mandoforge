@@ -41805,22 +41805,7 @@ fn remote_computer_runner_response_for_audit(
     value
 }
 
-pub(crate) async fn reclaim_stale_remote_computers(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<RemoteComputerReclaimRun>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "remote_computers",
-        None,
-    )
-    .await?;
-    Ok(Json(execute_remote_computer_stale_reclaim(&state).await?))
-}
-
-async fn execute_remote_computer_stale_reclaim(
+pub(crate) async fn execute_remote_computer_stale_reclaim(
     state: &AppState,
 ) -> Result<RemoteComputerReclaimRun, AppError> {
     let stale_attachments = state.list_stale_remote_computer_attachments().await?;
@@ -42032,23 +42017,6 @@ pub(crate) async fn ensure_remote_computer_heartbeat_refs_match_session(
     Ok(())
 }
 
-pub(crate) async fn run_remote_computer_sidecar_recovery(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<RemoteComputerSidecarRecoveryRun>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "remote_computer_sidecar_recovery",
-        None,
-    )
-    .await?;
-    Ok(Json(
-        execute_remote_computer_sidecar_recovery(&state).await?,
-    ))
-}
-
 pub(crate) async fn record_remote_computer_lease_event(
     state: &AppState,
     lease: &RemoteComputerLease,
@@ -42242,7 +42210,7 @@ pub(crate) async fn record_remote_computer_sidecar_heartbeat_event(
     Ok(())
 }
 
-async fn execute_remote_computer_sidecar_recovery(
+pub(crate) async fn execute_remote_computer_sidecar_recovery(
     state: &AppState,
 ) -> Result<RemoteComputerSidecarRecoveryRun, AppError> {
     execute_remote_computer_sidecar_recovery_with_lookup(state, |key| std::env::var(key).ok()).await
