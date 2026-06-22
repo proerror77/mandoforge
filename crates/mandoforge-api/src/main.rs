@@ -11,12 +11,14 @@ use async_trait::async_trait;
 use axum::{
     Json, Router,
     extract::Request,
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response, Sse, sse::Event, sse::KeepAlive},
     routing::{get, post},
 };
+#[cfg(test)]
+use axum::extract::Query;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures_util::StreamExt as _;
 use serde::{Deserialize, Serialize};
@@ -1765,7 +1767,7 @@ struct ObservabilityCollectorAttentionItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct WorkerReadinessReport {
+pub(crate) struct WorkerReadinessReport {
     generated_at: DateTime<Utc>,
     status: String,
     readiness_score: i64,
@@ -1815,7 +1817,7 @@ struct WorkerLoadValidationEvidence {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct WorkerLoadValidationRun {
+pub(crate) struct WorkerLoadValidationRun {
     status: String,
     checked_at: DateTime<Utc>,
     queue_backend: String,
@@ -3911,29 +3913,7 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::observability::router())
         .merge(handlers::approvals::router())
         .merge(handlers::approval_notifications::router())
-        .route("/api/execution-jobs", get(list_execution_jobs))
-        .route("/api/queue/notify-wait", get(queue_notify_wait))
-        .route("/api/session-loop-jobs", get(list_session_loop_jobs))
-        .route(
-            "/api/session-loop-jobs/{id}/run",
-            post(run_session_loop_job_route),
-        )
-        .route(
-            "/api/execution-jobs/{id}/cancel",
-            post(cancel_execution_job_route),
-        )
-        .route(
-            "/api/execution-jobs/{id}/remote-computer-lease",
-            post(assign_execution_job_remote_computer_lease),
-        )
-        .route(
-            "/api/execution-jobs/worker-readiness",
-            get(get_worker_readiness),
-        )
-        .route(
-            "/api/execution-jobs/worker-load-validation/run",
-            post(run_worker_load_validation),
-        )
+        .merge(handlers::execution_jobs::router())
         .route(
             "/api/remote-computers/readiness",
             get(get_remote_computer_readiness),
@@ -4030,10 +4010,6 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/remote-computer-leases/{id}/fail",
             post(fail_remote_computer_lease),
-        )
-        .route(
-            "/api/execution-jobs/{id}/run",
-            post(run_execution_job_route),
         )
         .merge(handlers::audit_logs::router())
         .fallback_service(ServeDir::new("web"))
@@ -52650,8 +52626,8 @@ pub(crate) async fn list_audit_logs(
     ))
 }
 
-async fn list_execution_jobs(
-    State(state): State<AppState>,
+pub(crate) async fn list_execution_jobs(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Vec<execution_queue::ExecutionJob>>, AppError> {
     let principal =
@@ -52695,10 +52671,10 @@ async fn list_execution_jobs(
 ///   timeout_ms — how long to wait (default 5000, max 29000)
 ///
 /// Returns 200 when a notification arrived, 204 on timeout.
-async fn queue_notify_wait(
-    State(state): State<AppState>,
+pub(crate) async fn queue_notify_wait(
+    state: AppState,
     headers: HeaderMap,
-    Query(params): Query<HashMap<String, String>>,
+    params: HashMap<String, String>,
 ) -> impl IntoResponse {
     // Require at least worker-level auth so this endpoint isn't publicly accessible.
     if let Err(e) = authorize_request(
@@ -52749,8 +52725,8 @@ async fn queue_notify_wait(
     }
 }
 
-async fn list_session_loop_jobs(
-    State(state): State<AppState>,
+pub(crate) async fn list_session_loop_jobs(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Vec<SessionLoopJob>>, AppError> {
     let principal = authorize_collection_request(
@@ -52886,11 +52862,11 @@ async fn enforce_worker_pool_binding(
     Err(AppError::not_found("job not claimable for worker pool"))
 }
 
-async fn assign_execution_job_remote_computer_lease(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn assign_execution_job_remote_computer_lease(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<CreateRemoteComputerJobAssignment>,
+    input: CreateRemoteComputerJobAssignment,
 ) -> Result<Json<RemoteComputerJobAssignment>, AppError> {
     let job = state.execution_queue.get(id).await?;
     authorize_request(
@@ -52919,16 +52895,16 @@ async fn assign_execution_job_remote_computer_lease(
     Ok(Json(assignment))
 }
 
-async fn get_worker_readiness(
-    State(state): State<AppState>,
+pub(crate) async fn get_worker_readiness(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<WorkerReadinessReport>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "execution_jobs", None).await?;
     Ok(Json(build_worker_readiness(&state).await?))
 }
 
-async fn run_worker_load_validation(
-    State(state): State<AppState>,
+pub(crate) async fn run_worker_load_validation(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<WorkerLoadValidationRun>, AppError> {
     authorize_request(
@@ -56799,9 +56775,9 @@ fn env_i64(key: &str) -> Option<i64> {
         .and_then(|value| value.trim().parse::<i64>().ok())
 }
 
-async fn run_execution_job_route(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn run_execution_job_route(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<execution_queue::ExecutionJob>, AppError> {
     authorize_execution_job_run(&state, &headers, id).await?;
@@ -56818,9 +56794,9 @@ async fn run_execution_job_route(
     Ok(Json(completed))
 }
 
-async fn run_session_loop_job_route(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn run_session_loop_job_route(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<SessionLoopJob>, AppError> {
     authorize_session_loop_job_run(&state, &headers, id).await?;
@@ -56945,9 +56921,9 @@ async fn run_session_loop_job_route(
     }
 }
 
-async fn cancel_execution_job_route(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn cancel_execution_job_route(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<execution_queue::ExecutionJob>, AppError> {
     let job = state.execution_queue.get(id).await?;
