@@ -3892,10 +3892,6 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::memory_governance::router())
         .merge(handlers::sessions::router())
         .route(
-            "/api/sessions/{id}/semantic-synthesis-runs",
-            post(create_session_semantic_synthesis_run),
-        )
-        .route(
             "/api/sessions/{id}/agent-handoffs",
             get(list_session_agent_handoff_events).post(create_agent_handoff_event),
         )
@@ -29471,27 +29467,7 @@ async fn enforce_resource_scope(
     }
 }
 
-async fn create_session_semantic_synthesis_run(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-    Json(input): Json<CreateSemanticSynthesisRun>,
-) -> Result<Json<SemanticSynthesisRunResult>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRun,
-        "session",
-        Some(id),
-    )
-    .await?;
-    let principal = principal_from_request(&state, &headers).await?;
-    let result =
-        materialize_semantic_synthesis_run(&state, id, principal.subject_id, input).await?;
-    Ok(Json(result))
-}
-
-async fn materialize_semantic_synthesis_run(
+pub(crate) async fn materialize_semantic_synthesis_run(
     state: &AppState,
     session_id: Uuid,
     subject_id: String,

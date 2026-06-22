@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::{
     AppError, AppState, BuildSemanticOntologyRequest, CreateMemoryWritebackCandidates,
     CreateSemanticIngestionBatch, CreateSemanticLink, CreateSemanticObject, CreateSemanticSource,
-    ExpandSemanticLinksRequest, ExpandSemanticLinksResponse,
+    CreateSemanticSynthesisRun, ExpandSemanticLinksRequest, ExpandSemanticLinksResponse,
     ExpandSemanticOntologyRequest, FetchSemanticObjectRequest, FetchSemanticObjectResponse,
     MemoryWritebackCandidate, Permission, ResolveSemanticConflictRequest,
     ReviewMemoryWritebackCandidate, ReviewOntologyProposalRequest, RunSemanticDreamingRequest, SemanticGraphSnapshot,
@@ -21,12 +21,12 @@ use crate::{
     UpdateSemanticObject, UpdateSemanticSource, authorize_collection_request, authorize_request,
     build_semantic_graph_snapshot, domain_ontology_object_type_suggestions, domain_ontology_relation_type_suggestions,
     expand_semantic_links_for_context, fetch_semantic_object_for_context,
-    generate_memory_writeback_candidates, memory_governance_object_partition_key, memory_governance_scope_value, new_audit_log,
+    generate_memory_writeback_candidates, materialize_semantic_synthesis_run, memory_governance_object_partition_key, memory_governance_scope_value, new_audit_log,
     normalize_ontology_builder_source_refs, normalize_ontology_builder_token,
     normalize_ontology_review_decision, normalize_optional_text, normalize_semantic_conflict_strategy,
     ontology_builder_candidate_types, ontology_builder_evidence_objects, principal_from_request,
     record_memory_writeback_candidate_review, record_semantic_link_audit, record_semantic_object_audit, record_semantic_source_audit,
-    semantic_object_matched_fields, semantic_object_matches_product_query,
+    SemanticSynthesisRunResult, semantic_object_matched_fields, semantic_object_matches_product_query,
     semantic_ontology_builder_prompt_packet, semantic_retrieval_backend_registry_from_env, validate_handoff_token,
     materialize_semantic_ingestion_batch, validate_semantic_ingestion_batch,
     validate_semantic_link_against_ontology, visible_session_ids_for_principal,
@@ -89,6 +89,10 @@ pub(crate) fn router() -> Router<AppState> {
             "/api/sessions/{id}/memory-writeback-candidates",
             get(list_session_memory_writeback_candidates)
                 .post(create_session_memory_writeback_candidates),
+        )
+        .route(
+            "/api/sessions/{id}/semantic-synthesis-runs",
+            post(create_session_semantic_synthesis_run),
         )
         .route(
             "/api/memory-writeback-candidates",
@@ -899,6 +903,26 @@ async fn create_session_memory_writeback_candidates(
     .await?;
     let candidates = generate_memory_writeback_candidates(&state, id, input).await?;
     Ok(Json(candidates))
+}
+
+async fn create_session_semantic_synthesis_run(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateSemanticSynthesisRun>,
+) -> Result<Json<SemanticSynthesisRunResult>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRun,
+        "session",
+        Some(id),
+    )
+    .await?;
+    let principal = principal_from_request(&state, &headers).await?;
+    let result =
+        materialize_semantic_synthesis_run(&state, id, principal.subject_id, input).await?;
+    Ok(Json(result))
 }
 
 async fn list_memory_writeback_candidates(
