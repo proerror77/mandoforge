@@ -3900,24 +3900,7 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::collaboration::router())
         .merge(handlers::providers::router())
         .merge(handlers::mcp::router())
-        .route("/api/policy", get(get_policy))
-        .route("/api/policy/runtime", get(get_policy_runtime))
-        .route("/api/policy/rollout/cancel", post(cancel_policy_rollout))
-        .route(
-            "/api/policy/rollout/orchestration/readiness",
-            get(get_policy_rollout_orchestration_readiness),
-        )
-        .route(
-            "/api/policy/rollout/orchestration/validate",
-            post(validate_policy_rollout_orchestration),
-        )
-        .route(
-            "/api/policy/rollout/rollback",
-            post(rollback_policy_rollout),
-        )
-        .route("/api/policy/rollout/run-due", post(run_due_policy_rollouts))
-        .route("/api/policy/simulate", post(simulate_policy))
-        .route("/api/policy/test", post(test_policy))
+        .merge(handlers::policy::router())
         .route(
             "/api/policy/revisions",
             get(list_policy_revisions).post(create_policy_revision),
@@ -36588,18 +36571,18 @@ fn provider_requires_base_url(provider_type: &str) -> bool {
     )
 }
 
-async fn get_policy(
-    State(state): State<AppState>,
+pub(crate) async fn get_policy(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Value>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "policy", None).await?;
     Ok(Json(serde_json::to_value(state.active_policy().await)?))
 }
 
-async fn simulate_policy(
-    State(state): State<AppState>,
+pub(crate) async fn simulate_policy(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<SimulatePolicy>,
+    input: SimulatePolicy,
 ) -> Result<Json<policy::ToolPolicyDecision>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
@@ -36636,10 +36619,10 @@ async fn simulate_policy(
     Ok(Json(decision))
 }
 
-async fn test_policy(
-    State(state): State<AppState>,
+pub(crate) async fn test_policy(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<TestPolicyRequest>,
+    input: TestPolicyRequest,
 ) -> Result<Json<PolicyTestResult>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
@@ -36701,16 +36684,16 @@ async fn list_policy_revisions(
     Ok(Json(state.list_policy_revisions().await?))
 }
 
-async fn get_policy_runtime(
-    State(state): State<AppState>,
+pub(crate) async fn get_policy_runtime(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<PolicyRuntimeStatus>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "policy", None).await?;
     Ok(Json(state.policy_runtime_status().await))
 }
 
-async fn cancel_policy_rollout(
-    State(state): State<AppState>,
+pub(crate) async fn cancel_policy_rollout(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<PolicyRuntimeStatus>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
@@ -36743,8 +36726,8 @@ async fn cancel_policy_rollout(
     Ok(Json(status))
 }
 
-async fn get_policy_rollout_orchestration_readiness(
-    State(state): State<AppState>,
+pub(crate) async fn get_policy_rollout_orchestration_readiness(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<PolicyRolloutOrchestrationReadiness>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "policy", None).await?;
@@ -36758,8 +36741,8 @@ async fn get_policy_rollout_orchestration_readiness(
     )))
 }
 
-async fn validate_policy_rollout_orchestration(
-    State(state): State<AppState>,
+pub(crate) async fn validate_policy_rollout_orchestration(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<PolicyRolloutOrchestrationValidationRun>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
@@ -36884,8 +36867,8 @@ async fn validate_policy_rollout_orchestration(
     }))
 }
 
-async fn rollback_policy_rollout(
-    State(state): State<AppState>,
+pub(crate) async fn rollback_policy_rollout(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<PolicyRollbackResult>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
@@ -36939,8 +36922,8 @@ async fn rollback_policy_rollout(
     Ok(Json(result))
 }
 
-async fn run_due_policy_rollouts(
-    State(state): State<AppState>,
+pub(crate) async fn run_due_policy_rollouts(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<PolicyScheduledRolloutRun>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
