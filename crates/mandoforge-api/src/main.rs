@@ -2033,7 +2033,7 @@ struct EnterpriseSecurityAdminCheck {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct RemoteComputerReadinessReport {
+pub(crate) struct RemoteComputerReadinessReport {
     generated_at: DateTime<Utc>,
     status: String,
     readiness_score: i64,
@@ -2078,7 +2078,7 @@ struct RemoteComputerProductionStateSyncReadiness {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct RemoteComputerStateSyncValidationRun {
+pub(crate) struct RemoteComputerStateSyncValidationRun {
     status: String,
     checked_at: DateTime<Utc>,
     controller_required: bool,
@@ -3914,18 +3914,7 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::approvals::router())
         .merge(handlers::approval_notifications::router())
         .merge(handlers::execution_jobs::router())
-        .route(
-            "/api/remote-computers/readiness",
-            get(get_remote_computer_readiness),
-        )
-        .route(
-            "/api/remote-computers/production-path",
-            get(get_remote_computer_production_path),
-        )
-        .route(
-            "/api/remote-computers/state-sync/validate",
-            post(validate_remote_computer_state_sync),
-        )
+        .merge(handlers::remote_computers::router())
         .route(
             "/api/remote-computers/artifacts/sync",
             post(sync_remote_computer_artifacts),
@@ -52918,8 +52907,8 @@ pub(crate) async fn run_worker_load_validation(
     Ok(Json(execute_worker_load_validation(&state).await?))
 }
 
-async fn get_remote_computer_readiness(
-    State(state): State<AppState>,
+pub(crate) async fn get_remote_computer_readiness(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<RemoteComputerReadinessReport>, AppError> {
     authorize_request(
@@ -52933,8 +52922,8 @@ async fn get_remote_computer_readiness(
     Ok(Json(build_remote_computer_readiness(&state).await?))
 }
 
-async fn get_remote_computer_production_path(
-    State(state): State<AppState>,
+pub(crate) async fn get_remote_computer_production_path(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Value>, AppError> {
     authorize_request(
@@ -53454,8 +53443,8 @@ fn remote_computer_checked_sidecar_pod_detail_count(validation_result: &Value) -
     checked_pods.len() as u64
 }
 
-async fn validate_remote_computer_state_sync(
-    State(state): State<AppState>,
+pub(crate) async fn validate_remote_computer_state_sync(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<RemoteComputerStateSyncValidationRun>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;

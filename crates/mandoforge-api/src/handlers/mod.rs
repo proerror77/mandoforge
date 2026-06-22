@@ -22,6 +22,7 @@ pub(crate) mod ontology_releases;
 pub(crate) mod packs;
 pub(crate) mod policy;
 pub(crate) mod providers;
+pub(crate) mod remote_computers;
 pub(crate) mod scheduler;
 pub(crate) mod semantic;
 pub(crate) mod sessions;
