@@ -11821,60 +11821,6 @@ pub(crate) async fn get_agent_handoff_assignment_for_handoff(
     Ok(Json(assignment))
 }
 
-pub(crate) async fn list_manager_agent_plans(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<Vec<ManagerAgentPlan>>, AppError> {
-    let principal = authorize_collection_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "manager_agent_plans",
-    )
-    .await?;
-    let visible_session_ids = visible_session_ids_for_principal(&state, &principal).await?;
-    Ok(Json(
-        state
-            .list_manager_agent_plans(None)
-            .await?
-            .into_iter()
-            .filter(|plan| visible_session_ids.contains(&plan.session_id))
-            .collect(),
-    ))
-}
-
-pub(crate) async fn list_session_manager_agent_plans(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-) -> Result<Json<Vec<ManagerAgentPlan>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "session",
-        Some(id),
-    )
-    .await?;
-    Ok(Json(state.list_manager_agent_plans(Some(id)).await?))
-}
-
-pub(crate) async fn list_work_item_manager_agent_plans(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-) -> Result<Json<Vec<ManagerAgentPlan>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "work_item",
-        Some(id),
-    )
-    .await?;
-    Ok(Json(state.list_work_item_manager_agent_plans(id).await?))
-}
-
 pub(crate) async fn list_dynamic_workflow_plans(
     state: AppState,
     headers: HeaderMap,
@@ -12641,23 +12587,6 @@ fn capability_sample_tasks(agent: &Agent) -> Vec<String> {
         ],
         _ => vec!["启动一个受治理的 managed session".to_string()],
     }
-}
-
-pub(crate) async fn get_manager_agent_plan(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-) -> Result<Json<ManagerAgentPlan>, AppError> {
-    let plan = state.get_manager_agent_plan(id).await?;
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "session",
-        Some(plan.session_id),
-    )
-    .await?;
-    Ok(Json(plan))
 }
 
 pub(crate) async fn create_manager_agent_plan(

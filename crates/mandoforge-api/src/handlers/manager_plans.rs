@@ -7,13 +7,11 @@ use axum::{
 use uuid::Uuid;
 
 use crate::{
-    AppError, AppState, CreateManagerAgentPlan, ManagerAgentPlan, ReviewManagerAgentPlan,
+    AppError, AppState, CreateManagerAgentPlan, ManagerAgentPlan, Permission,
+    ReviewManagerAgentPlan, authorize_collection_request, authorize_request,
     create_manager_agent_plan as create_manager_agent_plan_impl,
-    get_manager_agent_plan as get_manager_agent_plan_impl,
-    list_manager_agent_plans as list_manager_agent_plans_impl,
-    list_session_manager_agent_plans as list_session_manager_agent_plans_impl,
-    list_work_item_manager_agent_plans as list_work_item_manager_agent_plans_impl,
     review_manager_agent_plan as review_manager_agent_plan_impl,
+    visible_session_ids_for_principal,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -38,7 +36,22 @@ async fn list_manager_agent_plans(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<ManagerAgentPlan>>, AppError> {
-    list_manager_agent_plans_impl(state, headers).await
+    let principal = authorize_collection_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "manager_agent_plans",
+    )
+    .await?;
+    let visible_session_ids = visible_session_ids_for_principal(&state, &principal).await?;
+    Ok(Json(
+        state
+            .list_manager_agent_plans(None)
+            .await?
+            .into_iter()
+            .filter(|plan| visible_session_ids.contains(&plan.session_id))
+            .collect(),
+    ))
 }
 
 async fn list_session_manager_agent_plans(
@@ -46,7 +59,15 @@ async fn list_session_manager_agent_plans(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<ManagerAgentPlan>>, AppError> {
-    list_session_manager_agent_plans_impl(state, id, headers).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.list_manager_agent_plans(Some(id)).await?))
 }
 
 async fn list_work_item_manager_agent_plans(
@@ -54,7 +75,15 @@ async fn list_work_item_manager_agent_plans(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<ManagerAgentPlan>>, AppError> {
-    list_work_item_manager_agent_plans_impl(state, id, headers).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "work_item",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.list_work_item_manager_agent_plans(id).await?))
 }
 
 async fn get_manager_agent_plan(
@@ -62,7 +91,16 @@ async fn get_manager_agent_plan(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<ManagerAgentPlan>, AppError> {
-    get_manager_agent_plan_impl(state, id, headers).await
+    let plan = state.get_manager_agent_plan(id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(plan.session_id),
+    )
+    .await?;
+    Ok(Json(plan))
 }
 
 async fn create_manager_agent_plan(
