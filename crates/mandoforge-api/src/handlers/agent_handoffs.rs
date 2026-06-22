@@ -2,14 +2,15 @@ use axum::{
     Json, Router,
     extract::{Path, State},
     http::HeaderMap,
-    routing::get,
+    routing::{get, post},
 };
 use uuid::Uuid;
 
 use crate::{
     AgentHandoffAssignment, AgentHandoffEvent, AppError, AppState, CreateAgentHandoffEvent,
-    Permission, authorize_collection_request, authorize_request,
-    create_agent_handoff_event_for_session, visible_session_ids_for_principal,
+    Permission, TransitionAgentHandoffEvent, authorize_collection_request, authorize_request,
+    create_agent_handoff_event_for_session, transition_agent_handoff_event,
+    visible_session_ids_for_principal,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -19,6 +20,22 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/api/sessions/{id}/agent-handoffs",
             get(list_session_agent_handoff_events).post(create_agent_handoff_event),
+        )
+        .route(
+            "/api/agent-handoffs/{id}/accept",
+            post(accept_agent_handoff_event),
+        )
+        .route(
+            "/api/agent-handoffs/{id}/reject",
+            post(reject_agent_handoff_event),
+        )
+        .route(
+            "/api/agent-handoffs/{id}/fail",
+            post(fail_agent_handoff_event),
+        )
+        .route(
+            "/api/agent-handoffs/{id}/complete",
+            post(complete_agent_handoff_event),
         )
         .route(
             "/api/agent-handoff-assignments",
@@ -106,6 +123,42 @@ async fn create_agent_handoff_event(
     Ok(Json(
         create_agent_handoff_event_for_session(&state, session_id, input).await?,
     ))
+}
+
+async fn accept_agent_handoff_event(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<TransitionAgentHandoffEvent>,
+) -> Result<Json<AgentHandoffEvent>, AppError> {
+    transition_agent_handoff_event(state, id, headers, input, "accepted").await
+}
+
+async fn reject_agent_handoff_event(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<TransitionAgentHandoffEvent>,
+) -> Result<Json<AgentHandoffEvent>, AppError> {
+    transition_agent_handoff_event(state, id, headers, input, "rejected").await
+}
+
+async fn fail_agent_handoff_event(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<TransitionAgentHandoffEvent>,
+) -> Result<Json<AgentHandoffEvent>, AppError> {
+    transition_agent_handoff_event(state, id, headers, input, "failed").await
+}
+
+async fn complete_agent_handoff_event(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<TransitionAgentHandoffEvent>,
+) -> Result<Json<AgentHandoffEvent>, AppError> {
+    transition_agent_handoff_event(state, id, headers, input, "completed").await
 }
 
 async fn list_agent_handoff_assignments(

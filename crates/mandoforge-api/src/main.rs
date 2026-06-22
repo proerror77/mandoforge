@@ -497,7 +497,7 @@ pub(crate) struct CreateAgentHandoffEvent {
 }
 
 #[derive(Debug, Deserialize)]
-struct TransitionAgentHandoffEvent {
+pub(crate) struct TransitionAgentHandoffEvent {
     #[serde(default)]
     reason: Option<String>,
 }
@@ -4539,24 +4539,8 @@ fn build_router(state: AppState) -> Router {
             post(review_manager_agent_plan),
         )
         .route(
-            "/api/agent-handoffs/{id}/accept",
-            post(accept_agent_handoff_event),
-        )
-        .route(
-            "/api/agent-handoffs/{id}/reject",
-            post(reject_agent_handoff_event),
-        )
-        .route(
-            "/api/agent-handoffs/{id}/fail",
-            post(fail_agent_handoff_event),
-        )
-        .route(
             "/api/agent-handoffs/{id}/escalate",
             post(escalate_agent_handoff_event),
-        )
-        .route(
-            "/api/agent-handoffs/{id}/complete",
-            post(complete_agent_handoff_event),
         )
         .route(
             "/api/execution-jobs/{id}/run",
@@ -16801,33 +16785,6 @@ pub(crate) async fn create_agent_handoff_event_for_session(
     Ok(event)
 }
 
-async fn accept_agent_handoff_event(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-    Json(input): Json<TransitionAgentHandoffEvent>,
-) -> Result<Json<AgentHandoffEvent>, AppError> {
-    transition_agent_handoff_event(state, id, headers, input, "accepted").await
-}
-
-async fn reject_agent_handoff_event(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-    Json(input): Json<TransitionAgentHandoffEvent>,
-) -> Result<Json<AgentHandoffEvent>, AppError> {
-    transition_agent_handoff_event(state, id, headers, input, "rejected").await
-}
-
-async fn fail_agent_handoff_event(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-    Json(input): Json<TransitionAgentHandoffEvent>,
-) -> Result<Json<AgentHandoffEvent>, AppError> {
-    transition_agent_handoff_event(state, id, headers, input, "failed").await
-}
-
 async fn escalate_agent_handoff_event(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -16866,15 +16823,6 @@ async fn escalate_agent_handoff_event(
         .update_agent_handoff_event_escalation(current.id, &next_status, Some(audit.id))
         .await?;
     Ok(Json(updated))
-}
-
-async fn complete_agent_handoff_event(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-    Json(input): Json<TransitionAgentHandoffEvent>,
-) -> Result<Json<AgentHandoffEvent>, AppError> {
-    transition_agent_handoff_event(state, id, headers, input, "completed").await
 }
 
 async fn assign_agent_handoff_event(
@@ -17292,7 +17240,7 @@ async fn attach_agent_handoff_remote_computer_assignment(
     Ok(Json(updated))
 }
 
-async fn transition_agent_handoff_event(
+pub(crate) async fn transition_agent_handoff_event(
     state: AppState,
     id: Uuid,
     headers: HeaderMap,
