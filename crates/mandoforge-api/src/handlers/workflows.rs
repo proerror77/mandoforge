@@ -5,26 +5,32 @@ use axum::{
     routing::{get, patch, post},
 };
 use chrono::Utc;
+use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
     AgentInboxSnapshot, AppError, AppState, ClaimWorkflowStepRun, ClaimWorkflowStepRunResponse,
+    CreateSession,
     CreateTaskGrant, CreateWorkflowDefinition, CreateWorkflowRun, CreateWorkflowStepRun,
     RunDueWorkflowSteps, RunWorkflowStepRun, RunWorkflowStepRunResponse, TaskBoardSnapshot,
     TaskGrant, UpdateWorkflowDefinition, UpdateWorkflowStepRun, WorkflowDefinition, WorkflowRun,
     WorkflowRunGraphConsole, WorkflowScheduledStepActivationRun, WorkflowStepRun,
     WorkflowTransition, WorkflowTransitionQuery, Permission, activate_due_workflow_steps_for_run,
     authorize_collection_request, authorize_request, build_agent_inbox_snapshot,
-    build_task_board_snapshot, build_workflow_run_graph_console,
+    build_task_board_snapshot, build_workflow_run_graph_console, ensure_primary_session_thread,
+    ensure_session_event_exists,
     claim_workflow_step_run_route as claim_workflow_step_run_impl,
     create_workflow_task_grant_route as create_workflow_task_grant_impl,
-    create_workflow_definition_route as create_workflow_definition_impl,
-    create_workflow_run_route as create_workflow_run_impl,
     create_workflow_step_run_route as create_workflow_step_run_impl,
+    issue_root_task_grant_for_workflow_run, materialize_workflow_graph_start_steps,
+    new_audit_log, normalize_event_ingestion_policy, normalize_optional_runtime_adapter,
+    normalize_optional_runtime_mode, normalize_optional_text, normalize_workflow_execution_strategy,
+    normalize_workflow_release_state, normalize_workflow_trigger_type, require_non_empty,
     run_workflow_step_run_route as run_workflow_step_run_impl,
-    update_workflow_definition_route as update_workflow_definition_impl,
     update_workflow_step_run_route as update_workflow_step_run_impl,
-    visible_session_ids_for_principal, workflow_transition_filter_from_query,
+    validate_workflow_execution_binding, validate_workflow_graph_definition,
+    visible_session_ids_for_principal, workflow_definition_step_graph_for_execution,
+    workflow_input_digest, workflow_run_runtime_envelope, workflow_transition_filter_from_query,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -115,7 +121,103 @@ async fn create_workflow_definition(
     headers: HeaderMap,
     Json(input): Json<CreateWorkflowDefinition>,
 ) -> Result<Json<WorkflowDefinition>, AppError> {
-    create_workflow_definition_impl(state, headers, input).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "workflow_definitions",
+        None,
+    )
+    .await?;
+    let name = require_non_empty(input.name, "workflow definition name")?;
+    let entrypoint = require_non_empty(input.entrypoint, "workflow definition entrypoint")?;
+    let trigger_type = normalize_workflow_trigger_type(&input.trigger_type)?;
+    let release_state = normalize_workflow_release_state(&input.release_state)?;
+    state.get_agent(input.default_agent_id).await?;
+    if let Some(environment_id) = input.default_environment_id {
+        state.get_environment(environment_id).await?;
+    }
+    if !input.step_graph.is_object() {
+        return Err(AppError::bad_request(
+            "workflow definition step_graph must be a JSON object",
+        ));
+    }
+    validate_workflow_graph_definition(&input.step_graph)?;
+    if !input.handoff_rules.is_object() {
+        return Err(AppError::bad_request(
+            "workflow definition handoff_rules must be a JSON object",
+        ));
+    }
+    let execution_strategy = normalize_workflow_execution_strategy(&input.execution_strategy)?;
+    let runtime_adapter = normalize_optional_runtime_adapter(input.runtime_adapter)?;
+    let runtime_mode = normalize_optional_runtime_mode(input.runtime_mode)?;
+    let event_ingestion_policy = normalize_event_ingestion_policy(&input.event_ingestion_policy)?;
+    validate_workflow_execution_binding(
+        &execution_strategy,
+        runtime_adapter.as_deref(),
+        &input.runtime_capability_contract,
+    )?;
+    let step_graph =
+        workflow_definition_step_graph_for_execution(&execution_strategy, &input.step_graph);
+    let (pack_id, pack_version) = if let Some(installation_id) = input.pack_installation_id {
+        let installation = state
+            .get_workflow_pack_installation(installation_id)
+            .await?;
+        (Some(installation.pack_id), Some(installation.version))
+    } else {
+        (None, None)
+    };
+    let now = Utc::now();
+    let definition = state
+        .create_workflow_definition(WorkflowDefinition {
+            id: Uuid::new_v4(),
+            pack_installation_id: input.pack_installation_id,
+            pack_id,
+            pack_version,
+            name,
+            entrypoint,
+            trigger_type,
+            default_agent_id: input.default_agent_id,
+            default_environment_id: input.default_environment_id,
+            input_schema_ref: input.input_schema_ref,
+            output_schema_ref: input.output_schema_ref,
+            step_graph,
+            handoff_rules: input.handoff_rules,
+            execution_strategy,
+            runtime_adapter,
+            runtime_mode,
+            runtime_capability_contract: input.runtime_capability_contract,
+            event_ingestion_policy,
+            approval_policy_ref: input.approval_policy_ref,
+            eval_gate_refs: input.eval_gate_refs,
+            release_state,
+            created_at: now,
+            updated_at: now,
+            archived_at: None,
+        })
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "workflow_definition.created",
+            "workflow_definition",
+            Some(definition.id),
+            json!({
+                "name": definition.name,
+                "entrypoint": definition.entrypoint,
+                "default_agent_id": definition.default_agent_id,
+                "pack_installation_id": definition.pack_installation_id,
+                "execution_strategy": definition.execution_strategy,
+                "runtime_adapter": definition.runtime_adapter,
+                "runtime_mode": definition.runtime_mode,
+                "event_ingestion_policy": definition.event_ingestion_policy,
+                "release_state": definition.release_state
+            }),
+        ))
+        .await?;
+    Ok(Json(definition))
 }
 
 async fn update_workflow_definition(
@@ -124,7 +226,152 @@ async fn update_workflow_definition(
     headers: HeaderMap,
     Json(input): Json<UpdateWorkflowDefinition>,
 ) -> Result<Json<WorkflowDefinition>, AppError> {
-    update_workflow_definition_impl(state, id, headers, input).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "workflow_definition",
+        Some(id),
+    )
+    .await?;
+    let mut definition = state.get_workflow_definition(id).await?;
+    let mut changed_fields = Vec::new();
+
+    if let Some(name) = input.name {
+        definition.name = require_non_empty(name, "workflow definition name")?;
+        changed_fields.push("name");
+    }
+    if let Some(entrypoint) = input.entrypoint {
+        definition.entrypoint = require_non_empty(entrypoint, "workflow definition entrypoint")?;
+        changed_fields.push("entrypoint");
+    }
+    if let Some(trigger_type) = input.trigger_type {
+        definition.trigger_type = normalize_workflow_trigger_type(&trigger_type)?;
+        changed_fields.push("trigger_type");
+    }
+    if let Some(default_agent_id) = input.default_agent_id {
+        state.get_agent(default_agent_id).await?;
+        definition.default_agent_id = default_agent_id;
+        changed_fields.push("default_agent_id");
+    }
+    if let Some(default_environment_id) = input.default_environment_id {
+        if let Some(environment_id) = default_environment_id {
+            state.get_environment(environment_id).await?;
+        }
+        definition.default_environment_id = default_environment_id;
+        changed_fields.push("default_environment_id");
+    }
+    if let Some(input_schema_ref) = input.input_schema_ref {
+        definition.input_schema_ref = input_schema_ref.and_then(normalize_optional_text);
+        changed_fields.push("input_schema_ref");
+    }
+    if let Some(output_schema_ref) = input.output_schema_ref {
+        definition.output_schema_ref = output_schema_ref.and_then(normalize_optional_text);
+        changed_fields.push("output_schema_ref");
+    }
+    if let Some(step_graph) = input.step_graph {
+        if !step_graph.is_object() {
+            return Err(AppError::bad_request(
+                "workflow definition step_graph must be a JSON object",
+            ));
+        }
+        validate_workflow_graph_definition(&step_graph)?;
+        definition.step_graph = step_graph;
+        changed_fields.push("step_graph");
+    }
+    if let Some(handoff_rules) = input.handoff_rules {
+        if !handoff_rules.is_object() {
+            return Err(AppError::bad_request(
+                "workflow definition handoff_rules must be a JSON object",
+            ));
+        }
+        definition.handoff_rules = handoff_rules;
+        changed_fields.push("handoff_rules");
+    }
+    if let Some(execution_strategy) = input.execution_strategy {
+        definition.execution_strategy = normalize_workflow_execution_strategy(&execution_strategy)?;
+        changed_fields.push("execution_strategy");
+    }
+    if let Some(runtime_adapter) = input.runtime_adapter {
+        definition.runtime_adapter = normalize_optional_runtime_adapter(runtime_adapter)?;
+        changed_fields.push("runtime_adapter");
+    }
+    if let Some(runtime_mode) = input.runtime_mode {
+        definition.runtime_mode = normalize_optional_runtime_mode(runtime_mode)?;
+        changed_fields.push("runtime_mode");
+    }
+    if let Some(runtime_capability_contract) = input.runtime_capability_contract {
+        if !runtime_capability_contract.is_object() {
+            return Err(AppError::bad_request(
+                "runtime_capability_contract must be a JSON object",
+            ));
+        }
+        definition.runtime_capability_contract = runtime_capability_contract;
+        changed_fields.push("runtime_capability_contract");
+    }
+    if let Some(event_ingestion_policy) = input.event_ingestion_policy {
+        definition.event_ingestion_policy =
+            normalize_event_ingestion_policy(&event_ingestion_policy)?;
+        changed_fields.push("event_ingestion_policy");
+    }
+    validate_workflow_execution_binding(
+        &definition.execution_strategy,
+        definition.runtime_adapter.as_deref(),
+        &definition.runtime_capability_contract,
+    )?;
+    definition.step_graph = workflow_definition_step_graph_for_execution(
+        &definition.execution_strategy,
+        &definition.step_graph,
+    );
+    if let Some(approval_policy_ref) = input.approval_policy_ref {
+        definition.approval_policy_ref = approval_policy_ref.and_then(normalize_optional_text);
+        changed_fields.push("approval_policy_ref");
+    }
+    if let Some(eval_gate_refs) = input.eval_gate_refs {
+        definition.eval_gate_refs = eval_gate_refs
+            .into_iter()
+            .filter_map(normalize_optional_text)
+            .collect();
+        changed_fields.push("eval_gate_refs");
+    }
+    if let Some(release_state) = input.release_state {
+        definition.release_state = normalize_workflow_release_state(&release_state)?;
+        changed_fields.push("release_state");
+    }
+
+    if changed_fields.is_empty() {
+        return Ok(Json(definition));
+    }
+
+    let now = Utc::now();
+    definition.updated_at = now;
+    if definition.release_state == "archived" {
+        definition.archived_at = Some(now);
+    }
+    let updated = state.update_workflow_definition(definition).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "workflow_definition.updated",
+            "workflow_definition",
+            Some(updated.id),
+            json!({
+                "changed_fields": changed_fields,
+                "name": updated.name,
+                "entrypoint": updated.entrypoint,
+                "default_agent_id": updated.default_agent_id,
+                "pack_installation_id": updated.pack_installation_id,
+                "execution_strategy": updated.execution_strategy,
+                "runtime_adapter": updated.runtime_adapter,
+                "runtime_mode": updated.runtime_mode,
+                "event_ingestion_policy": updated.event_ingestion_policy,
+                "release_state": updated.release_state
+            }),
+        ))
+        .await?;
+    Ok(Json(updated))
 }
 
 async fn list_workflow_runs(
@@ -167,7 +414,156 @@ async fn create_workflow_run(
     headers: HeaderMap,
     Json(input): Json<CreateWorkflowRun>,
 ) -> Result<Json<WorkflowRun>, AppError> {
-    create_workflow_run_impl(state, headers, input).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsWrite,
+        "workflow_runs",
+        None,
+    )
+    .await?;
+    let definition = state
+        .get_workflow_definition(input.workflow_definition_id)
+        .await?;
+    if definition.release_state != "released" {
+        return Err(AppError::bad_request(
+            "workflow run requires a released workflow definition",
+        ));
+    }
+    if let Some(work_item_id) = input.source_work_item_id {
+        state.ensure_work_item_exists(work_item_id).await?;
+    }
+    if let Some(source_event_id) = input.source_event_id {
+        ensure_session_event_exists(&state, source_event_id).await?;
+    }
+    let environment_id = input.environment_id.or(definition.default_environment_id);
+    if let Some(environment_id) = environment_id {
+        state.get_environment(environment_id).await?;
+    }
+    let title = input
+        .title
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or_else(|| format!("Workflow: {}", definition.name));
+    let session = state
+        .create_session(CreateSession {
+            agent_id: definition.default_agent_id,
+            environment_id,
+            title,
+            message: None,
+        })
+        .await?;
+    ensure_primary_session_thread(&state, session.id).await?;
+    let now = Utc::now();
+    let input_digest = workflow_input_digest(&input.input_payload);
+    let execution_strategy = input
+        .execution_strategy
+        .as_deref()
+        .map(normalize_workflow_execution_strategy)
+        .transpose()?
+        .unwrap_or_else(|| definition.execution_strategy.clone());
+    let runtime_adapter = match input.runtime_adapter {
+        Some(runtime_adapter) => normalize_optional_runtime_adapter(Some(runtime_adapter))?,
+        None => definition.runtime_adapter.clone(),
+    };
+    let runtime_mode = match input.runtime_mode {
+        Some(runtime_mode) => normalize_optional_runtime_mode(Some(runtime_mode))?,
+        None => definition.runtime_mode.clone(),
+    };
+    validate_workflow_execution_binding(
+        &execution_strategy,
+        runtime_adapter.as_deref(),
+        &definition.runtime_capability_contract,
+    )?;
+    let external_run_ref = input.external_run_ref.and_then(normalize_optional_text);
+    let runtime_event_cursor = input.runtime_event_cursor.and_then(normalize_optional_text);
+    let delegation_status =
+        (execution_strategy == "delegated_runtime").then_some("submitted".to_string());
+    let runtime_envelope = workflow_run_runtime_envelope(
+        &definition,
+        &execution_strategy,
+        runtime_adapter.as_deref(),
+        runtime_mode.as_deref(),
+        external_run_ref.as_deref(),
+        &input.runtime_envelope,
+    );
+    let run = state
+        .create_workflow_run(WorkflowRun {
+            id: Uuid::new_v4(),
+            workflow_definition_id: definition.id,
+            pack_installation_id: definition.pack_installation_id,
+            source_event_id: input.source_event_id,
+            source_work_item_id: input.source_work_item_id,
+            source_schedule_id: input.source_schedule_id,
+            status: "queued".to_string(),
+            primary_session_id: session.id,
+            root_task_grant_id: None,
+            input_payload: input.input_payload,
+            input_digest,
+            execution_strategy,
+            runtime_adapter,
+            runtime_mode,
+            delegation_status,
+            external_run_ref,
+            runtime_event_cursor,
+            runtime_envelope,
+            started_at: None,
+            completed_at: None,
+            audit_trace_id: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .await?;
+    let root_grant =
+        issue_root_task_grant_for_workflow_run(&state, &run, &definition, &session).await?;
+    let run = state
+        .update_workflow_run_root_task_grant(run.id, root_grant.id)
+        .await?;
+    materialize_workflow_graph_start_steps(&state, &definition, &run, &session, &root_grant)
+        .await?;
+    state
+        .append_event(
+            "system",
+            Some(run.id),
+            session.id,
+            "workflow.run.created",
+            json!({
+                "workflow_run_id": run.id,
+                "workflow_definition_id": run.workflow_definition_id,
+                "pack_installation_id": run.pack_installation_id,
+                "root_task_grant_id": run.root_task_grant_id,
+                "input_digest": run.input_digest,
+                "execution_strategy": run.execution_strategy,
+                "runtime_adapter": run.runtime_adapter,
+                "runtime_mode": run.runtime_mode,
+                "delegation_status": run.delegation_status,
+                "external_run_ref": run.external_run_ref,
+                "status": run.status
+            }),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(session.id),
+            "system",
+            Some(run.id),
+            "workflow_run.created",
+            "workflow_run",
+            Some(run.id),
+            json!({
+                "workflow_definition_id": run.workflow_definition_id,
+                "pack_installation_id": run.pack_installation_id,
+                "primary_session_id": run.primary_session_id,
+                "root_task_grant_id": run.root_task_grant_id,
+                "input_digest": run.input_digest,
+                "execution_strategy": run.execution_strategy,
+                "runtime_adapter": run.runtime_adapter,
+                "runtime_mode": run.runtime_mode,
+                "delegation_status": run.delegation_status,
+                "external_run_ref": run.external_run_ref
+            }),
+        ))
+        .await?;
+    Ok(Json(run))
 }
 
 async fn list_workflow_transitions(
