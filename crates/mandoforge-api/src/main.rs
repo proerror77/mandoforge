@@ -3935,27 +3935,7 @@ fn build_router(state: AppState) -> Router {
             "/api/usage/rollups",
             get(list_usage_rollups).post(create_usage_rollup),
         )
-        .route("/api/observability", get(get_observability_summary))
-        .route(
-            "/api/observability/collector-readiness",
-            get(get_observability_collector_readiness),
-        )
-        .route(
-            "/api/observability/collector/deployment/validate",
-            post(validate_observability_collector_deployment),
-        )
-        .route(
-            "/api/observability/collector/cluster/validate",
-            post(validate_observability_collector_cluster_rollout),
-        )
-        .route(
-            "/api/observability/remediation/plan",
-            get(get_observability_remediation_plan),
-        )
-        .route(
-            "/api/observability/remediation/run",
-            post(run_observability_remediation),
-        )
+        .merge(handlers::observability::router())
         .route("/api/approvals", get(list_approvals))
         .route(
             "/api/approvals/notifications/run",
@@ -47493,24 +47473,24 @@ async fn execute_remote_computer_sidecar_supervision(
     Ok(run)
 }
 
-async fn get_observability_summary(
-    State(state): State<AppState>,
+pub(crate) async fn get_observability_summary(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<ObservabilitySummary>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "observability", None).await?;
     Ok(Json(build_observability_summary(&state).await?))
 }
 
-async fn get_observability_collector_readiness(
-    State(state): State<AppState>,
+pub(crate) async fn get_observability_collector_readiness(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<ObservabilityCollectorReadiness>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "observability", None).await?;
     Ok(Json(build_observability_collector_readiness(&state).await))
 }
 
-async fn validate_observability_collector_deployment(
-    State(state): State<AppState>,
+pub(crate) async fn validate_observability_collector_deployment(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Value>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
@@ -47625,8 +47605,8 @@ async fn validate_observability_collector_deployment(
     Ok(Json(result))
 }
 
-async fn validate_observability_collector_cluster_rollout(
-    State(state): State<AppState>,
+pub(crate) async fn validate_observability_collector_cluster_rollout(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<ObservabilityCollectorClusterRolloutValidationRun>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
@@ -47945,8 +47925,8 @@ where
     }))
 }
 
-async fn get_observability_remediation_plan(
-    State(state): State<AppState>,
+pub(crate) async fn get_observability_remediation_plan(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<ObservabilityRemediationPlan>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "observability", None).await?;
@@ -48068,8 +48048,8 @@ fn build_observability_remediation_plan(
     }
 }
 
-async fn run_observability_remediation(
-    State(state): State<AppState>,
+pub(crate) async fn run_observability_remediation(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<ObservabilityRemediationRun>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "observability", None).await?;

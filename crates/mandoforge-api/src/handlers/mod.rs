@@ -11,6 +11,7 @@ pub(crate) mod github;
 pub(crate) mod manager_plans;
 pub(crate) mod memory_governance;
 pub(crate) mod mcp;
+pub(crate) mod observability;
 pub(crate) mod ontology;
 pub(crate) mod ontology_intelligence;
 pub(crate) mod ontology_onboarding;
