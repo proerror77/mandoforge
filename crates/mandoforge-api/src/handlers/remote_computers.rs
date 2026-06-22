@@ -8,20 +8,26 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{
-    AppError, AppState, CreateRemoteComputerStateLock, ReleaseRemoteComputerStateLock,
+    AppError, AppState, CreateRemoteComputerSidecarHeartbeat, CreateRemoteComputerStateLock,
+    ReleaseRemoteComputerStateLock,
     RemoteComputerArtifactDiscoverRequest, RemoteComputerArtifactSyncRequest,
     RemoteComputerArtifactSyncResponse, RemoteComputerReadinessReport,
     RemoteComputerRunnerDryRunRequest, RemoteComputerRunnerDryRunResponse,
-    RemoteComputerRunnerReadiness, RemoteComputerStateLock, RemoteComputerStateSyncValidationRun,
+    RemoteComputerRunnerReadiness, RemoteComputerSidecarHeartbeat,
+    RemoteComputerSidecarRecoveryRun, RemoteComputerStateLock,
+    RemoteComputerStateSyncValidationRun,
     acquire_remote_computer_state_lock as acquire_remote_computer_state_lock_impl,
     discover_remote_computer_artifacts as discover_remote_computer_artifacts_impl,
     dry_run_remote_computer_runner as dry_run_remote_computer_runner_impl,
     get_remote_computer_production_path as get_remote_computer_production_path_impl,
     get_remote_computer_readiness as get_remote_computer_readiness_impl,
     get_remote_computer_runner_readiness as get_remote_computer_runner_readiness_impl,
+    list_remote_computer_sidecar_heartbeats as list_remote_computer_sidecar_heartbeats_impl,
     list_remote_computer_state_locks as list_remote_computer_state_locks_impl,
     mutate_remote_computer_runner as mutate_remote_computer_runner_impl,
+    record_remote_computer_sidecar_heartbeat as record_remote_computer_sidecar_heartbeat_impl,
     release_remote_computer_state_lock as release_remote_computer_state_lock_impl,
+    run_remote_computer_sidecar_recovery as run_remote_computer_sidecar_recovery_impl,
     sync_remote_computer_artifacts as sync_remote_computer_artifacts_impl,
     validate_remote_computer_state_sync as validate_remote_computer_state_sync_impl,
 };
@@ -67,6 +73,15 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/api/remote-computers/state-locks/{id}/release",
             post(release_remote_computer_state_lock),
+        )
+        .route(
+            "/api/remote-computers/sidecars/heartbeats",
+            get(list_remote_computer_sidecar_heartbeats)
+                .post(record_remote_computer_sidecar_heartbeat),
+        )
+        .route(
+            "/api/remote-computers/sidecars/recovery/run",
+            post(run_remote_computer_sidecar_recovery),
         )
 }
 
@@ -152,4 +167,26 @@ async fn release_remote_computer_state_lock(
     Json(input): Json<ReleaseRemoteComputerStateLock>,
 ) -> Result<Json<RemoteComputerStateLock>, AppError> {
     release_remote_computer_state_lock_impl(state, id, headers, input).await
+}
+
+async fn list_remote_computer_sidecar_heartbeats(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<RemoteComputerSidecarHeartbeat>>, AppError> {
+    list_remote_computer_sidecar_heartbeats_impl(state, headers).await
+}
+
+async fn record_remote_computer_sidecar_heartbeat(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateRemoteComputerSidecarHeartbeat>,
+) -> Result<Json<RemoteComputerSidecarHeartbeat>, AppError> {
+    record_remote_computer_sidecar_heartbeat_impl(state, headers, input).await
+}
+
+async fn run_remote_computer_sidecar_recovery(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<RemoteComputerSidecarRecoveryRun>, AppError> {
+    run_remote_computer_sidecar_recovery_impl(state, headers).await
 }

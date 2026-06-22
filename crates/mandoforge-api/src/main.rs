@@ -2181,7 +2181,7 @@ struct RemoteComputerSidecarRecoveryTarget {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct RemoteComputerSidecarRecoveryRun {
+pub(crate) struct RemoteComputerSidecarRecoveryRun {
     generated_at: DateTime<Utc>,
     status: String,
     replacement_enabled: bool,
@@ -2294,7 +2294,7 @@ pub(crate) struct RemoteComputerStateLock {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct RemoteComputerSidecarHeartbeat {
+pub(crate) struct RemoteComputerSidecarHeartbeat {
     id: Uuid,
     remote_computer_id: Uuid,
     session_id: Option<Uuid>,
@@ -2364,7 +2364,7 @@ pub(crate) struct ReleaseRemoteComputerStateLock {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct CreateRemoteComputerSidecarHeartbeat {
+pub(crate) struct CreateRemoteComputerSidecarHeartbeat {
     remote_computer_id: Uuid,
     session_id: Option<Uuid>,
     assignment_id: Option<Uuid>,
@@ -3918,15 +3918,6 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/remote-computers/reclaim-stale",
             post(reclaim_stale_remote_computers),
-        )
-        .route(
-            "/api/remote-computers/sidecars/heartbeats",
-            get(list_remote_computer_sidecar_heartbeats)
-                .post(record_remote_computer_sidecar_heartbeat),
-        )
-        .route(
-            "/api/remote-computers/sidecars/recovery/run",
-            post(run_remote_computer_sidecar_recovery),
         )
         .route(
             "/api/remote-computers",
@@ -54081,8 +54072,8 @@ pub(crate) async fn release_remote_computer_state_lock(
     Ok(Json(lock))
 }
 
-async fn list_remote_computer_sidecar_heartbeats(
-    State(state): State<AppState>,
+pub(crate) async fn list_remote_computer_sidecar_heartbeats(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Vec<RemoteComputerSidecarHeartbeat>>, AppError> {
     authorize_request(
@@ -54096,10 +54087,10 @@ async fn list_remote_computer_sidecar_heartbeats(
     Ok(Json(state.list_remote_computer_sidecar_heartbeats().await?))
 }
 
-async fn record_remote_computer_sidecar_heartbeat(
-    State(state): State<AppState>,
+pub(crate) async fn record_remote_computer_sidecar_heartbeat(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<CreateRemoteComputerSidecarHeartbeat>,
+    input: CreateRemoteComputerSidecarHeartbeat,
 ) -> Result<Json<RemoteComputerSidecarHeartbeat>, AppError> {
     let session_id = input.session_id.ok_or_else(|| {
         AppError::bad_request("Remote Computer sidecar heartbeat requires session_id")
@@ -54146,8 +54137,8 @@ async fn ensure_remote_computer_heartbeat_refs_match_session(
     Ok(())
 }
 
-async fn run_remote_computer_sidecar_recovery(
-    State(state): State<AppState>,
+pub(crate) async fn run_remote_computer_sidecar_recovery(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<RemoteComputerSidecarRecoveryRun>, AppError> {
     authorize_request(
