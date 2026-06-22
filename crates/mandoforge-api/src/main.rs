@@ -3900,34 +3900,6 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::collaboration::router())
         .merge(handlers::providers::router())
         .merge(handlers::mcp::router())
-        .route(
-            "/api/teams/{team_id}/mcp-servers/rollouts/run-due",
-            post(run_due_mcp_server_rollouts),
-        )
-        .route(
-            "/api/teams/{team_id}/mcp-servers/rollouts/summary",
-            get(get_mcp_server_rollout_summary),
-        )
-        .route(
-            "/api/teams/{team_id}/mcp-servers/rollouts/runs",
-            get(get_mcp_server_rollout_runs),
-        )
-        .route(
-            "/api/teams/{team_id}/mcp-servers/{server_id}/rollouts",
-            post(request_mcp_server_rollout),
-        )
-        .route(
-            "/api/teams/{team_id}/mcp-servers/{server_id}/rollouts/{rollout_id}/apply",
-            post(apply_mcp_server_rollout),
-        )
-        .route(
-            "/api/teams/{team_id}/mcp-servers/{server_id}/rollouts/{rollout_id}/rollback",
-            post(rollback_mcp_server_rollout),
-        )
-        .route(
-            "/api/teams/{team_id}/mcp-servers/{server_id}/discover",
-            post(discover_mcp_server_tools),
-        )
         .route("/api/providers", get(list_providers).post(create_provider))
         .route("/api/providers/{id}", patch(update_provider))
         .route("/api/providers/summary", get(get_provider_summary))
@@ -42773,11 +42745,12 @@ async fn execute_due_mcp_server_health_checks(
     Ok(run)
 }
 
-async fn request_mcp_server_rollout(
-    State(state): State<AppState>,
-    Path((team_id, server_id)): Path<(Uuid, Uuid)>,
+pub(crate) async fn request_mcp_server_rollout(
+    state: AppState,
+    team_id: Uuid,
+    server_id: Uuid,
     headers: HeaderMap,
-    Json(mut input): Json<RequestMcpServerRollout>,
+    mut input: RequestMcpServerRollout,
 ) -> Result<Json<McpServerRolloutResponse>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
@@ -42832,9 +42805,11 @@ async fn request_mcp_server_rollout(
     }))
 }
 
-async fn apply_mcp_server_rollout(
-    State(state): State<AppState>,
-    Path((team_id, server_id, rollout_id)): Path<(Uuid, Uuid, Uuid)>,
+pub(crate) async fn apply_mcp_server_rollout(
+    state: AppState,
+    team_id: Uuid,
+    server_id: Uuid,
+    rollout_id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<McpServerRolloutResponse>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
@@ -42858,9 +42833,11 @@ async fn apply_mcp_server_rollout(
     ))
 }
 
-async fn rollback_mcp_server_rollout(
-    State(state): State<AppState>,
-    Path((team_id, server_id, rollout_id)): Path<(Uuid, Uuid, Uuid)>,
+pub(crate) async fn rollback_mcp_server_rollout(
+    state: AppState,
+    team_id: Uuid,
+    server_id: Uuid,
+    rollout_id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<McpServerRolloutResponse>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
@@ -42990,9 +42967,9 @@ async fn rollback_mcp_server_rollout(
     }))
 }
 
-async fn run_due_mcp_server_rollouts(
-    State(state): State<AppState>,
-    Path(team_id): Path<Uuid>,
+pub(crate) async fn run_due_mcp_server_rollouts(
+    state: AppState,
+    team_id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<McpServerRolloutDueRun>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "team", Some(team_id)).await?;
@@ -43001,9 +42978,9 @@ async fn run_due_mcp_server_rollouts(
     ))
 }
 
-async fn get_mcp_server_rollout_summary(
-    State(state): State<AppState>,
-    Path(team_id): Path<Uuid>,
+pub(crate) async fn get_mcp_server_rollout_summary(
+    state: AppState,
+    team_id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<McpServerRolloutSummary>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "team", Some(team_id)).await?;
@@ -43014,9 +42991,9 @@ async fn get_mcp_server_rollout_summary(
     )))
 }
 
-async fn get_mcp_server_rollout_runs(
-    State(state): State<AppState>,
-    Path(team_id): Path<Uuid>,
+pub(crate) async fn get_mcp_server_rollout_runs(
+    state: AppState,
+    team_id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<McpServerRolloutRunSummary>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "team", Some(team_id)).await?;
@@ -44622,9 +44599,10 @@ async fn mcp_server_health(state: &AppState, server: &McpServerRecord) -> McpSer
     }
 }
 
-async fn discover_mcp_server_tools(
-    State(state): State<AppState>,
-    Path((team_id, server_id)): Path<(Uuid, Uuid)>,
+pub(crate) async fn discover_mcp_server_tools(
+    state: AppState,
+    team_id: Uuid,
+    server_id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<McpServerRecord>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "team", Some(team_id)).await?;
