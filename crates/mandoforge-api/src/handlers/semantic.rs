@@ -13,14 +13,16 @@ use crate::{
     AppError, AppState, CreateSemanticLink, CreateSemanticObject, CreateSemanticSource,
     ExpandSemanticLinksRequest, ExpandSemanticLinksResponse, FetchSemanticObjectRequest,
     FetchSemanticObjectResponse, Permission, SemanticGraphSnapshot, SemanticLink, SemanticObject,
-    SemanticProductQuery, SemanticSearchResponse, SemanticSearchResult, SemanticSource,
-    UpdateSemanticLink, UpdateSemanticObject, UpdateSemanticSource, authorize_request,
-    build_semantic_graph_snapshot, domain_ontology_object_type_suggestions,
-    domain_ontology_relation_type_suggestions, expand_semantic_links_for_context,
-    fetch_semantic_object_for_context, memory_governance_object_partition_key,
-    memory_governance_scope_value, normalize_optional_text, record_semantic_link_audit,
-    record_semantic_object_audit, record_semantic_source_audit, semantic_object_matched_fields,
-    semantic_object_matches_product_query, validate_semantic_link_against_ontology,
+    SemanticGovernanceRunRequest, SemanticGovernanceRunResult, SemanticProductQuery,
+    SemanticSearchResponse, SemanticSearchResult, SemanticSource, UpdateSemanticLink,
+    UpdateSemanticObject, UpdateSemanticSource, authorize_request, build_semantic_graph_snapshot,
+    domain_ontology_object_type_suggestions, domain_ontology_relation_type_suggestions,
+    expand_semantic_links_for_context, fetch_semantic_object_for_context,
+    memory_governance_object_partition_key, memory_governance_scope_value, new_audit_log,
+    normalize_optional_text, normalize_semantic_conflict_strategy, principal_from_request,
+    record_semantic_link_audit, record_semantic_object_audit, record_semantic_source_audit,
+    semantic_object_matched_fields, semantic_object_matches_product_query,
+    validate_semantic_link_against_ontology,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -56,6 +58,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/api/semantic-search", get(search_semantic_objects))
         .route("/api/semantic-graph", get(get_semantic_graph))
         .route("/api/semantic-workbench", get(get_semantic_workbench))
+        .route(
+            "/api/semantic-governance/run",
+            post(run_semantic_governance),
+        )
         .route(
             "/api/semantic-links",
             get(list_semantic_links).post(create_semantic_link),
@@ -498,6 +504,103 @@ async fn get_semantic_workbench(
         "ontology_expansion_suggestions": ontology_expansion_suggestions,
         "graph": graph,
     })))
+}
+
+async fn run_semantic_governance(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<SemanticGovernanceRunRequest>,
+) -> Result<Json<SemanticGovernanceRunResult>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsWrite,
+        "semantic_governance",
+        None,
+    )
+    .await?;
+    let conflict_strategy = normalize_semantic_conflict_strategy(&input.conflict_strategy)?;
+    let query = SemanticProductQuery {
+        q: None,
+        object_type: None,
+        domain_scope: input.domain_scope.clone(),
+        workflow_scope: input.workflow_scope.clone(),
+        memory_scope: input.memory_scope.clone(),
+        status: Some("active".to_string()),
+        trust_level: None,
+        freshness: None,
+        limit: None,
+    };
+    let objects = state
+        .list_semantic_objects()
+        .await?
+        .into_iter()
+        .filter(|object| semantic_object_matches_product_query(object, &query))
+        .collect::<Vec<_>>();
+    let links = state.list_semantic_links().await?;
+    let graph = build_semantic_graph_snapshot(objects.clone(), links, Utc::now());
+    let stale_objects = objects
+        .iter()
+        .filter(|object| object.freshness != "current")
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut archived_object_ids = Vec::new();
+    if input.archive_stale && !input.dry_run {
+        for object in stale_objects
+            .iter()
+            .filter(|object| object.status == "active")
+        {
+            let archived = state.archive_semantic_object(object.id).await?;
+            record_semantic_object_audit(&state, &headers, &archived, "semantic_object.archived")
+                .await?;
+            archived_object_ids.push(archived.id);
+        }
+    }
+    let result = SemanticGovernanceRunResult {
+        status: if input.dry_run {
+            "dry_run".to_string()
+        } else {
+            "applied".to_string()
+        },
+        generated_at: Utc::now(),
+        dry_run: input.dry_run,
+        archive_stale: input.archive_stale,
+        conflict_strategy,
+        archived_count: archived_object_ids.len(),
+        conflict_count: graph.conflicts.len(),
+        stale_count: stale_objects.len(),
+        archived_object_ids,
+        conflicts: graph.conflicts.clone(),
+        graph,
+    };
+    let principal = principal_from_request(&state, &headers).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "semantic_governance.run",
+            "semantic_governance",
+            None,
+            json!({
+                "subject": principal.subject_id,
+                "status": result.status,
+                "dry_run": result.dry_run,
+                "archive_stale": result.archive_stale,
+                "conflict_strategy": result.conflict_strategy,
+                "archived_count": result.archived_count,
+                "conflict_count": result.conflict_count,
+                "stale_count": result.stale_count,
+                "archived_object_ids": result.archived_object_ids,
+                "filters": {
+                    "domain_scope": input.domain_scope,
+                    "workflow_scope": input.workflow_scope,
+                    "memory_scope": input.memory_scope,
+                }
+            }),
+        ))
+        .await?;
+    Ok(Json(result))
 }
 
 async fn list_semantic_links(
