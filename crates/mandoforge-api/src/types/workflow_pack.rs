@@ -1,9 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
+
+use crate::SemanticObject;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WorkflowPackInstallation {
@@ -341,4 +343,80 @@ pub(crate) struct WorkflowPackRollbackRequest {
     pub(crate) gate_evidence: Value,
     #[serde(default)]
     pub(crate) reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct WorkflowPackWorkflowFile {
+    #[serde(default)]
+    pub(crate) id: Option<String>,
+    #[serde(default)]
+    pub(crate) name: Option<String>,
+    #[serde(default)]
+    pub(crate) entry_agent: Option<String>,
+    #[serde(default)]
+    pub(crate) trigger_type: Option<String>,
+    #[serde(default)]
+    pub(crate) input_schema_ref: Option<String>,
+    #[serde(default)]
+    pub(crate) output_schema_ref: Option<String>,
+    #[serde(default)]
+    pub(crate) approval_policy_ref: Option<String>,
+    #[serde(default)]
+    pub(crate) eval_gate_refs: Vec<String>,
+    #[serde(default)]
+    pub(crate) step_graph: Option<Value>,
+    #[serde(default)]
+    pub(crate) execution: Value,
+    #[serde(default = "crate::default_workflow_execution_strategy")]
+    pub(crate) execution_strategy: String,
+    #[serde(default)]
+    pub(crate) runtime_adapter: Option<String>,
+    #[serde(default)]
+    pub(crate) runtime_mode: Option<String>,
+    #[serde(default = "crate::empty_json_object")]
+    pub(crate) runtime_capability_contract: Value,
+    #[serde(default = "crate::default_event_ingestion_policy")]
+    pub(crate) event_ingestion_policy: String,
+    #[serde(default)]
+    pub(crate) steps: Vec<Value>,
+    #[serde(default)]
+    pub(crate) approval: Value,
+    #[serde(default)]
+    pub(crate) output: Value,
+    #[serde(default)]
+    pub(crate) outputs: Vec<String>,
+    #[serde(default)]
+    pub(crate) handoff_rules: Value,
+    #[serde(default = "crate::empty_json_object")]
+    pub(crate) semantic_scopes: Value,
+    #[serde(default = "crate::empty_json_object")]
+    pub(crate) semantic_synthesis_schedule: Value,
+}
+
+pub(crate) struct WorkflowPackOntologyProjection {
+    pub(crate) object_count: usize,
+    pub(crate) link_count: usize,
+    pub(crate) relation_type_count: usize,
+    pub(crate) object_type_objects: BTreeMap<String, SemanticObject>,
+}
+
+pub(crate) struct WorkflowPackActionProjection {
+    pub(crate) object_count: usize,
+    pub(crate) link_count: usize,
+    pub(crate) action_type_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct WorkflowPackConnectorOperationContract {
+    pub(crate) api_name: Option<String>,
+    pub(crate) permission: Option<String>,
+    pub(crate) operation_type: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct WorkflowPackConnectorLaneRequirement {
+    pub(crate) lane_id: String,
+    pub(crate) required_operations: BTreeSet<String>,
+    pub(crate) optional_operations: BTreeSet<String>,
+    pub(crate) controlled_write_operations: BTreeSet<String>,
 }

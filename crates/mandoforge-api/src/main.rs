@@ -172,15 +172,17 @@ use types::tools::{
 pub(crate) use types::workflow_pack::{
     InstallWorkflowPack, ValidateWorkflowPack, WorkflowPackArchiveRequest, WorkflowPackBinding,
     WorkflowPackConfigWizardPlanRequest, WorkflowPackConnectorAssessment,
-    WorkflowPackConnectorLaneImpact, WorkflowPackConnectorOperationStatus,
+    WorkflowPackConnectorLaneImpact, WorkflowPackConnectorLaneRequirement,
+    WorkflowPackConnectorOperationContract, WorkflowPackConnectorOperationStatus,
     WorkflowPackConnectorOperationStatusInput,
     WorkflowPackConnectorQualityAssessment, WorkflowPackConnectorQualityAssessmentRequest,
     WorkflowPackConnectorQualityResult, WorkflowPackConnectorSecretRefStatus,
     WorkflowPackConnectorTenantBindingInput, WorkflowPackInstallation,
-    WorkflowPackOnboardingAssessment, WorkflowPackOnboardingAssessmentRequest,
-    WorkflowPackOnboardingProfileInput, WorkflowPackProfileAsset,
-    WorkflowPackProfileAssetSaveRequest, WorkflowPackReleaseRequest, WorkflowPackRollbackRequest,
-    WorkflowPackRuntimeObject, WorkflowPackStageRequest, WorkflowPackUpdateRequest,
+    WorkflowPackOntologyProjection, WorkflowPackOnboardingAssessment,
+    WorkflowPackOnboardingAssessmentRequest, WorkflowPackOnboardingProfileInput,
+    WorkflowPackProfileAsset, WorkflowPackProfileAssetSaveRequest, WorkflowPackReleaseRequest,
+    WorkflowPackRollbackRequest, WorkflowPackRuntimeObject, WorkflowPackStageRequest,
+    WorkflowPackUpdateRequest, WorkflowPackWorkflowFile, WorkflowPackActionProjection,
 };
 use secrets::{
     SecretProvider, SecretProviderConfig, SecretProviderKind, SecretRef, SecretValue,
@@ -31102,54 +31104,6 @@ fn workflow_pack_default_profile_assets(
         .collect()
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct WorkflowPackWorkflowFile {
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    entry_agent: Option<String>,
-    #[serde(default)]
-    trigger_type: Option<String>,
-    #[serde(default)]
-    input_schema_ref: Option<String>,
-    #[serde(default)]
-    output_schema_ref: Option<String>,
-    #[serde(default)]
-    approval_policy_ref: Option<String>,
-    #[serde(default)]
-    eval_gate_refs: Vec<String>,
-    #[serde(default)]
-    step_graph: Option<Value>,
-    #[serde(default)]
-    execution: Value,
-    #[serde(default = "default_workflow_execution_strategy")]
-    execution_strategy: String,
-    #[serde(default)]
-    runtime_adapter: Option<String>,
-    #[serde(default)]
-    runtime_mode: Option<String>,
-    #[serde(default = "empty_json_object")]
-    runtime_capability_contract: Value,
-    #[serde(default = "default_event_ingestion_policy")]
-    event_ingestion_policy: String,
-    #[serde(default)]
-    steps: Vec<Value>,
-    #[serde(default)]
-    approval: Value,
-    #[serde(default)]
-    output: Value,
-    #[serde(default)]
-    outputs: Vec<String>,
-    #[serde(default)]
-    handoff_rules: Value,
-    #[serde(default = "empty_json_object")]
-    semantic_scopes: Value,
-    #[serde(default = "empty_json_object")]
-    semantic_synthesis_schedule: Value,
-}
-
 async fn workflow_pack_materialized_bindings_with_runtime_targets(
     state: &AppState,
     installation: &WorkflowPackInstallation,
@@ -32310,19 +32264,6 @@ async fn project_workflow_pack_semantic_layer(
     }))
 }
 
-struct WorkflowPackOntologyProjection {
-    object_count: usize,
-    link_count: usize,
-    relation_type_count: usize,
-    object_type_objects: BTreeMap<String, SemanticObject>,
-}
-
-struct WorkflowPackActionProjection {
-    object_count: usize,
-    link_count: usize,
-    action_type_count: usize,
-}
-
 async fn workflow_pack_project_ontology_seed(
     state: &AppState,
     source: &SemanticSource,
@@ -33427,21 +33368,6 @@ async fn assess_workflow_pack_connector_quality(
         blockers,
         checked_at,
     })
-}
-
-#[derive(Debug, Clone)]
-struct WorkflowPackConnectorOperationContract {
-    api_name: Option<String>,
-    permission: Option<String>,
-    operation_type: String,
-}
-
-#[derive(Debug, Clone, Default)]
-struct WorkflowPackConnectorLaneRequirement {
-    lane_id: String,
-    required_operations: BTreeSet<String>,
-    optional_operations: BTreeSet<String>,
-    controlled_write_operations: BTreeSet<String>,
 }
 
 fn workflow_pack_connector_required_secret_refs(
