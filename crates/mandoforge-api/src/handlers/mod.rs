@@ -9,3 +9,4 @@ pub(crate) mod ontology_onboarding;
 pub(crate) mod ontology_releases;
 pub(crate) mod packs;
 pub(crate) mod semantic;
+pub(crate) mod sessions;
