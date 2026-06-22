@@ -3898,10 +3898,6 @@ fn build_router(state: AppState) -> Router {
             "/api/agents/releases/orchestration/validate",
             post(validate_agent_release_orchestration),
         )
-        .route(
-            "/api/agents/{id}/releases/{release_id}/rollback",
-            post(rollback_agent_release),
-        )
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/{id}", get(get_session))
         .route("/api/sessions/{id}/messages", post(add_message))
@@ -14944,7 +14940,7 @@ where
     }))
 }
 
-fn agent_release_rollback_controller_required<F>(lookup: &F) -> bool
+pub(crate) fn agent_release_rollback_controller_required<F>(lookup: &F) -> bool
 where
     F: Fn(&str) -> Option<String>,
 {
@@ -14958,7 +14954,7 @@ where
         .unwrap_or(false)
 }
 
-fn agent_release_rollback_controller_configured<F>(lookup: &F) -> bool
+pub(crate) fn agent_release_rollback_controller_configured<F>(lookup: &F) -> bool
 where
     F: Fn(&str) -> Option<String>,
 {
@@ -14967,7 +14963,7 @@ where
         .unwrap_or(false)
 }
 
-async fn execute_agent_release_rollback_controller<F>(
+pub(crate) async fn execute_agent_release_rollback_controller<F>(
     lookup: &F,
     subject: &str,
     requested_at: DateTime<Utc>,
@@ -15726,84 +15722,6 @@ fn attention_priority(reason: &str) -> usize {
     } else {
         5
     }
-}
-
-async fn rollback_agent_release(
-    State(state): State<AppState>,
-    Path((id, release_id)): Path<(Uuid, Uuid)>,
-    headers: HeaderMap,
-) -> Result<Json<AgentRelease>, AppError> {
-    let principal = principal_from_request(&state, &headers).await?;
-    let request = AuthorizationRequest {
-        tenant_id: state.current_tenant_id(),
-        permission: Permission::Admin,
-        resource_type: "agent".to_string(),
-        resource_id: Some(id),
-    };
-    state.authorizer.authorize(&principal, &request).await?;
-    enforce_resource_scope(&state, &principal, &request).await?;
-
-    let release = state
-        .list_agent_releases(id)
-        .await?
-        .into_iter()
-        .find(|release| release.id == release_id)
-        .ok_or_else(|| AppError::not_found("agent release not found"))?;
-    if release.status != "promoted" {
-        return Err(AppError::bad_request("agent release is not promoted"));
-    }
-
-    let lookup = |key: &str| std::env::var(key).ok();
-    let controller_required = agent_release_rollback_controller_required(&lookup);
-    let controller_configured = agent_release_rollback_controller_configured(&lookup);
-    let mut controller_execution = json!({
-        "attempted": false,
-        "status": "skipped",
-        "reason": "controller_not_configured"
-    });
-    if controller_required && !controller_configured {
-        return Err(AppError::bad_request(
-            "agent release rollback controller is required but not configured",
-        ));
-    }
-    if controller_configured {
-        controller_execution = execute_agent_release_rollback_controller(
-            &lookup,
-            &principal.subject_id,
-            Utc::now(),
-            &release,
-        )
-        .await?;
-        if controller_execution.get("status").and_then(Value::as_str) != Some("rolled_back") {
-            return Err(AppError::bad_request(
-                "agent release rollback controller did not confirm rollback",
-            ));
-        }
-    }
-
-    let rolled_back = state.rollback_agent_release(id, release_id).await?;
-    state
-        .append_audit_log(new_audit_log(
-            None,
-            "user",
-            None,
-            "agent.release_rolled_back",
-            "agent_release",
-            Some(rolled_back.id),
-            json!({
-                "subject": principal.subject_id,
-                "agent_id": id,
-                "agent_version_id": rolled_back.agent_version_id,
-                "environment": rolled_back.environment,
-                "eval_run_id": rolled_back.eval_run_id,
-                "eval_score": rolled_back.eval_score,
-                "controller_required": controller_required,
-                "controller_configured": controller_configured,
-                "controller_execution": controller_execution,
-            }),
-        ))
-        .await?;
-    Ok(Json(rolled_back))
 }
 
 async fn list_sessions(

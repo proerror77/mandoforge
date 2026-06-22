@@ -5,16 +5,18 @@ use axum::{
     routing::{get, post},
 };
 use chrono::Utc;
-use serde_json::json;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
     AgentRelease, AgentReleaseAutomationRun, AgentReleaseAutomationRunSummary,
     AgentReleaseRolloutSummary, AppError, AppState, AuthorizationRequest, CreateAgentRelease,
-    Permission, RejectAgentReleasePromotion, RequestAgentReleasePromotion, authorize_request,
-    build_agent_release_automation_run_summary, build_agent_release_rollout_summary,
-    enforce_resource_scope, execute_due_agent_release_promotions, new_audit_log,
-    normalize_release_automation_policy, optional_trimmed, principal_from_request,
+    Permission, RejectAgentReleasePromotion, RequestAgentReleasePromotion,
+    agent_release_rollback_controller_configured, agent_release_rollback_controller_required,
+    authorize_request, build_agent_release_automation_run_summary,
+    build_agent_release_rollout_summary, enforce_resource_scope,
+    execute_agent_release_rollback_controller, execute_due_agent_release_promotions,
+    new_audit_log, normalize_release_automation_policy, optional_trimmed, principal_from_request,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -46,6 +48,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/api/agents/{id}/releases/{release_id}/reject",
             post(reject_agent_release_promotion),
+        )
+        .route(
+            "/api/agents/{id}/releases/{release_id}/rollback",
+            post(rollback_agent_release),
         )
 }
 
@@ -248,4 +254,82 @@ async fn decide_agent_release_promotion(
         ))
         .await?;
     Ok(Json(release))
+}
+
+async fn rollback_agent_release(
+    State(state): State<AppState>,
+    Path((id, release_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Json<AgentRelease>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.current_tenant_id(),
+        permission: Permission::Admin,
+        resource_type: "agent".to_string(),
+        resource_id: Some(id),
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    enforce_resource_scope(&state, &principal, &request).await?;
+
+    let release = state
+        .list_agent_releases(id)
+        .await?
+        .into_iter()
+        .find(|release| release.id == release_id)
+        .ok_or_else(|| AppError::not_found("agent release not found"))?;
+    if release.status != "promoted" {
+        return Err(AppError::bad_request("agent release is not promoted"));
+    }
+
+    let lookup = |key: &str| std::env::var(key).ok();
+    let controller_required = agent_release_rollback_controller_required(&lookup);
+    let controller_configured = agent_release_rollback_controller_configured(&lookup);
+    let mut controller_execution = json!({
+        "attempted": false,
+        "status": "skipped",
+        "reason": "controller_not_configured"
+    });
+    if controller_required && !controller_configured {
+        return Err(AppError::bad_request(
+            "agent release rollback controller is required but not configured",
+        ));
+    }
+    if controller_configured {
+        controller_execution = execute_agent_release_rollback_controller(
+            &lookup,
+            &principal.subject_id,
+            Utc::now(),
+            &release,
+        )
+        .await?;
+        if controller_execution.get("status").and_then(Value::as_str) != Some("rolled_back") {
+            return Err(AppError::bad_request(
+                "agent release rollback controller did not confirm rollback",
+            ));
+        }
+    }
+
+    let rolled_back = state.rollback_agent_release(id, release_id).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "agent.release_rolled_back",
+            "agent_release",
+            Some(rolled_back.id),
+            json!({
+                "subject": principal.subject_id,
+                "agent_id": id,
+                "agent_version_id": rolled_back.agent_version_id,
+                "environment": rolled_back.environment,
+                "eval_run_id": rolled_back.eval_run_id,
+                "eval_score": rolled_back.eval_score,
+                "controller_required": controller_required,
+                "controller_configured": controller_configured,
+                "controller_execution": controller_execution,
+            }),
+        ))
+        .await?;
+    Ok(Json(rolled_back))
 }
