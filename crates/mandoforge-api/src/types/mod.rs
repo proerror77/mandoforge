@@ -23,5 +23,6 @@ pub(crate) mod tool_call;
 pub(crate) mod tools;
 pub(crate) mod usage;
 pub(crate) mod vault;
+pub(crate) mod worker;
 pub(crate) mod workflow;
 pub(crate) mod workflow_pack;

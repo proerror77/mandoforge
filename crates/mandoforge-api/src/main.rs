@@ -316,6 +316,12 @@ pub(crate) use types::vault::{
     VaultKmsRotationDetail, VaultKmsRotationRun, VaultProductionRotationReadiness,
     VaultReadinessAttentionItem, VaultReadinessCheck, VaultReadinessReport,
 };
+pub(crate) use types::worker::{
+    K8sAutoscalingManifest, WorkerAutoscalingReadiness, WorkerJobSummary, WorkerK8sReadiness,
+    WorkerLeaseSummary, WorkerLoadValidationEvidence, WorkerLoadValidationRun,
+    WorkerModeReadiness, WorkerProductionOpsReadiness, WorkerQueueBackendReadiness,
+    WorkerReadinessAttentionItem, WorkerReadinessReport,
+};
 pub(crate) use types::workflow::{
     CompileDynamicWorkflowPlan, CreateDynamicWorkflowPlan, CreateTaskGrant,
     CreateWorkflowDefinition, CreateWorkflowRun, CreateWorkflowStepRun,
@@ -545,179 +551,6 @@ pub(crate) struct RemoteComputerArtifactSyncResponse {
     assignment_id: Option<Uuid>,
     artifact_count: usize,
     artifacts: Vec<Artifact>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct WorkerReadinessReport {
-    generated_at: DateTime<Utc>,
-    status: String,
-    readiness_score: i64,
-    queue_backend: WorkerQueueBackendReadiness,
-    worker_mode: WorkerModeReadiness,
-    job_summary: WorkerJobSummary,
-    lease_summary: WorkerLeaseSummary,
-    k8s: WorkerK8sReadiness,
-    autoscaling: WorkerAutoscalingReadiness,
-    load_validation: WorkerLoadValidationEvidence,
-    production_ops: WorkerProductionOpsReadiness,
-    attention_items: Vec<WorkerReadinessAttentionItem>,
-    runbook_actions: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WorkerProductionOpsReadiness {
-    status: String,
-    production_blocked: bool,
-    durable_queue: bool,
-    queue_worker_mode: bool,
-    hardened_worker_pod: bool,
-    queue_depth_autoscaling: bool,
-    load_validated: bool,
-    isolated_worker_pool_configured: bool,
-    no_failed_jobs: bool,
-    no_stale_leases: bool,
-    blocking_reasons: Vec<String>,
-    message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WorkerLoadValidationEvidence {
-    status: String,
-    latest_run_at: Option<DateTime<Utc>>,
-    latest_run_status: Option<String>,
-    load_validated: bool,
-    isolated_worker_pool_configured: bool,
-    controller_required: bool,
-    controller_configured: bool,
-    latest_controller_status: Option<String>,
-    latest_controller_age_hours: Option<i64>,
-    controller_evidence_fresh: bool,
-    latest_controller_validated: bool,
-    required_profile: String,
-    message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct WorkerLoadValidationRun {
-    status: String,
-    checked_at: DateTime<Utc>,
-    queue_backend: String,
-    worker_mode: String,
-    autoscaling_status: String,
-    autoscaling: WorkerAutoscalingReadiness,
-    load_validated: bool,
-    isolated_worker_pool_configured: bool,
-    controller_configured: bool,
-    controller_execution: Value,
-    actions: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WorkerQueueBackendReadiness {
-    kind: String,
-    durable: bool,
-    broker_handoff: bool,
-    jetstream_enabled: bool,
-    semantics: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WorkerModeReadiness {
-    mode: String,
-    external_worker_required: bool,
-    api_inline_execution: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WorkerJobSummary {
-    total_jobs: usize,
-    queued_jobs: usize,
-    running_jobs: usize,
-    completed_jobs: usize,
-    failed_jobs: usize,
-    retryable_jobs: usize,
-    oldest_queued_job_age_seconds: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WorkerLeaseSummary {
-    running_jobs: usize,
-    leased_jobs: usize,
-    stale_leases: usize,
-    oldest_stale_lease_age_seconds: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WorkerK8sReadiness {
-    worker_manifest_present: bool,
-    worker_manifest_path: String,
-    service_account_name: Option<String>,
-    service_account_manifest_present: bool,
-    service_account_manifest_path: String,
-    automount_service_account_token_disabled: bool,
-    pod_run_as_non_root: bool,
-    seccomp_runtime_default: bool,
-    container_allow_privilege_escalation_disabled: bool,
-    container_read_only_root_filesystem: bool,
-    container_drops_all_capabilities: bool,
-    resources_requests_configured: bool,
-    resources_limits_configured: bool,
-    network_policy_present: bool,
-    network_policy_path: String,
-    hardening_status: String,
-    scheduler_manifest_present: bool,
-    scheduler_manifest_path: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WorkerAutoscalingReadiness {
-    autoscaling_manifest_present: bool,
-    autoscaling_manifest_paths: Vec<String>,
-    configured_min_replicas: Option<i64>,
-    configured_max_replicas: Option<i64>,
-    scale_target_refs: Vec<String>,
-    trigger_types: Vec<String>,
-    queue_depth_scaling_present: bool,
-    validation_status: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct K8sAutoscalingManifest {
-    kind: Option<String>,
-    spec: Option<K8sAutoscalingSpec>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct K8sAutoscalingSpec {
-    scale_target_ref: Option<K8sScaleTargetRef>,
-    min_replicas: Option<i64>,
-    max_replicas: Option<i64>,
-    min_replica_count: Option<i64>,
-    max_replica_count: Option<i64>,
-    triggers: Option<Vec<K8sAutoscalingTrigger>>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct K8sScaleTargetRef {
-    kind: Option<String>,
-    name: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct K8sAutoscalingTrigger {
-    #[serde(rename = "type")]
-    trigger_type: Option<String>,
-    metadata: Option<Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WorkerReadinessAttentionItem {
-    kind: String,
-    severity: String,
-    message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
