@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use axum::{
     Json, Router,
     extract::{Request, State},
-    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
+    http::{HeaderMap, HeaderName, HeaderValue, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
 };
@@ -11731,7 +11731,7 @@ pub(crate) async fn session_accepts_worker_execution(
     ))
 }
 
-async fn set_managed_session_status(
+pub(crate) async fn set_managed_session_status(
     state: &AppState,
     session_id: Uuid,
     status: SessionStatus,
@@ -18829,7 +18829,7 @@ async fn record_workflow_step_worker_completed(
     Ok(())
 }
 
-async fn reconcile_workflow_steps_after_session_loop_job(
+pub(crate) async fn reconcile_workflow_steps_after_session_loop_job(
     state: &AppState,
     session: &Session,
     session_loop_job: &SessionLoopJob,
@@ -24526,7 +24526,10 @@ pub(crate) async fn project_session_event_to_loop(
         .map(Some)
 }
 
-async fn run_session_loop(state: &AppState, job: &SessionLoopJob) -> Result<Session, AppError> {
+pub(crate) async fn run_session_loop(
+    state: &AppState,
+    job: &SessionLoopJob,
+) -> Result<Session, AppError> {
     let id = job.session_id;
     if !session_accepts_worker_execution(state, id).await? {
         return Err(AppError::bad_request(
@@ -28305,7 +28308,7 @@ fn subject_from_headers(headers: &HeaderMap) -> Result<String, AppError> {
     Ok(subject.to_string())
 }
 
-fn header_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+pub(crate) fn header_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name).and_then(|value| value.to_str().ok())
 }
 
@@ -46850,143 +46853,6 @@ fn delegated_approver_group_id(approval: &Approval) -> Option<Uuid> {
         .and_then(|value| Uuid::parse_str(value.trim()).ok())
 }
 
-pub(crate) async fn list_execution_jobs(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<Vec<execution_queue::ExecutionJob>>, AppError> {
-    let principal =
-        authorize_collection_request(&state, &headers, Permission::SessionsRead, "execution_jobs")
-            .await?;
-    let worker_environment_id = worker_environment_id_from_headers(&headers)?;
-    let worker_pool = worker_pool_from_headers(&headers);
-    let worker_pool_environment_ids =
-        worker_pool_environment_ids(&state, worker_pool.as_deref()).await?;
-    let visible_sessions = state.list_sessions_visible_to(&principal).await?;
-    let visible_session_ids: HashSet<_> =
-        visible_sessions.iter().map(|session| session.id).collect();
-    Ok(Json(
-        state
-            .execution_queue
-            .list()
-            .await?
-            .into_iter()
-            .filter(|job| visible_session_ids.contains(&job.session_id))
-            .filter(|job| {
-                worker_environment_id.map_or(true, |environment_id| {
-                    job.environment_id == Some(environment_id)
-                })
-            })
-            .filter(|job| {
-                worker_pool.as_ref().is_none_or(|_| {
-                    job.environment_id.is_some_and(|environment_id| {
-                        worker_pool_environment_ids.contains(&environment_id)
-                    })
-                })
-            })
-            .collect(),
-    ))
-}
-
-/// Long-poll endpoint for workers. Blocks until the Postgres queue channel fires
-/// (a new job was enqueued) or the timeout elapses. Workers call this instead of
-/// sleeping between poll cycles, cutting reaction time from O(poll_interval) to ~0ms.
-///
-/// Query params:
-///   timeout_ms — how long to wait (default 5000, max 29000)
-///
-/// Returns 200 when a notification arrived, 204 on timeout.
-pub(crate) async fn queue_notify_wait(
-    state: AppState,
-    headers: HeaderMap,
-    params: HashMap<String, String>,
-) -> impl IntoResponse {
-    // Require at least worker-level auth so this endpoint isn't publicly accessible.
-    if let Err(e) = authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "queue_notify_wait",
-        None,
-    )
-    .await
-    {
-        return e.into_response();
-    }
-
-    let timeout_ms = params
-        .get("timeout_ms")
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(5_000)
-        .min(29_000);
-
-    let Some(channel) = state.execution_queue.notify_channel() else {
-        // Memory backend — just sleep and return, no Postgres to listen on.
-        tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
-        return StatusCode::NO_CONTENT.into_response();
-    };
-
-    let StoreBackend::Postgres(pool) = &state.store else {
-        tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
-        return StatusCode::NO_CONTENT.into_response();
-    };
-
-    let mut listener = match sqlx::postgres::PgListener::connect_with(pool).await {
-        Ok(l) => l,
-        Err(_) => {
-            tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
-            return StatusCode::NO_CONTENT.into_response();
-        }
-    };
-
-    if listener.listen(&channel).await.is_err() {
-        return StatusCode::NO_CONTENT.into_response();
-    }
-
-    let deadline = tokio::time::sleep(Duration::from_millis(timeout_ms));
-    tokio::select! {
-        _ = listener.recv() => StatusCode::OK.into_response(),
-        _ = deadline => StatusCode::NO_CONTENT.into_response(),
-    }
-}
-
-pub(crate) async fn list_session_loop_jobs(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<Vec<SessionLoopJob>>, AppError> {
-    let principal = authorize_collection_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "session_loop_jobs",
-    )
-    .await?;
-    let worker_environment_id = worker_environment_id_from_headers(&headers)?;
-    let worker_pool = worker_pool_from_headers(&headers);
-    let worker_pool_environment_ids =
-        worker_pool_environment_ids(&state, worker_pool.as_deref()).await?;
-    let visible_session_ids = visible_session_ids_for_principal(&state, &principal).await?;
-    Ok(Json(
-        state
-            .list_session_loop_jobs()
-            .await?
-            .into_iter()
-            .filter(|job| visible_session_ids.contains(&job.session_id))
-            .filter(|job| {
-                worker_environment_id.map_or(true, |environment_id| {
-                    job.environment_id == Some(environment_id)
-                })
-            })
-            .filter(|job| {
-                worker_pool.as_ref().is_none_or(|_| {
-                    job.environment_id.is_some_and(|environment_id| {
-                        worker_pool_environment_ids.contains(&environment_id)
-                    })
-                })
-            })
-            .collect(),
-    ))
-}
-
 fn worker_environment_id_from_headers(headers: &HeaderMap) -> Result<Option<Uuid>, AppError> {
     let Some(value) = header_value(headers, "x-mandoforge-environment-id")
         .map(str::trim)
@@ -47006,27 +46872,7 @@ fn worker_pool_from_headers(headers: &HeaderMap) -> Option<String> {
         .map(ToString::to_string)
 }
 
-async fn worker_pool_environment_ids(
-    state: &AppState,
-    worker_pool: Option<&str>,
-) -> Result<HashSet<Uuid>, AppError> {
-    let Some(worker_pool) = worker_pool.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Ok(HashSet::new());
-    };
-    Ok(state
-        .list_environments()
-        .await?
-        .into_iter()
-        .filter(|environment| environment.archived_at.is_none())
-        .filter(|environment| {
-            environment_worker_pool(&environment.worker_queue_binding).as_deref()
-                == Some(worker_pool)
-        })
-        .map(|environment| environment.id)
-        .collect())
-}
-
-fn environment_worker_pool(worker_queue_binding: &Value) -> Option<String> {
+pub(crate) fn environment_worker_pool(worker_queue_binding: &Value) -> Option<String> {
     for key in ["queue", "worker_pool", "pool"] {
         if let Some(value) = worker_queue_binding
             .get(key)
@@ -47040,7 +46886,7 @@ fn environment_worker_pool(worker_queue_binding: &Value) -> Option<String> {
     None
 }
 
-async fn enforce_worker_environment_binding(
+pub(crate) async fn enforce_worker_environment_binding(
     state: &AppState,
     headers: &HeaderMap,
     session_id: Uuid,
@@ -47061,7 +46907,7 @@ async fn enforce_worker_environment_binding(
     ))
 }
 
-async fn enforce_worker_pool_binding(
+pub(crate) async fn enforce_worker_pool_binding(
     state: &AppState,
     headers: &HeaderMap,
     session_id: Uuid,
@@ -47084,54 +46930,6 @@ async fn enforce_worker_pool_binding(
         return Ok(());
     }
     Err(AppError::not_found("job not claimable for worker pool"))
-}
-
-pub(crate) async fn assign_execution_job_remote_computer_lease(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-    input: CreateRemoteComputerJobAssignment,
-) -> Result<Json<RemoteComputerJobAssignment>, AppError> {
-    let job = state.execution_queue.get(id).await?;
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRun,
-        "session",
-        Some(job.session_id),
-    )
-    .await?;
-    if job.status != ExecutionJobStatus::Queued && job.status != ExecutionJobStatus::Running {
-        return Err(AppError::bad_request(
-            "only queued or running execution jobs can be assigned to remote computer leases",
-        ));
-    }
-    let assignment = state
-        .create_remote_computer_job_assignment(id, job.session_id, input)
-        .await?;
-    record_remote_computer_job_assignment_event(
-        &state,
-        &assignment,
-        &job,
-        "remote_computer.execution_handoff_planned",
-    )
-    .await?;
-    Ok(Json(assignment))
-}
-
-pub(crate) async fn run_worker_load_validation(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<WorkerLoadValidationRun>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "worker_load_validation",
-        None,
-    )
-    .await?;
-    Ok(Json(execute_worker_load_validation(&state).await?))
 }
 
 pub(crate) async fn get_remote_computer_readiness(
@@ -50321,7 +50119,7 @@ fn build_worker_production_ops_readiness(
     }
 }
 
-async fn execute_worker_load_validation(
+pub(crate) async fn execute_worker_load_validation(
     state: &AppState,
 ) -> Result<WorkerLoadValidationRun, AppError> {
     execute_worker_load_validation_with_lookup(state, |key| std::env::var(key).ok()).await
@@ -50993,293 +50791,7 @@ fn env_i64(key: &str) -> Option<i64> {
         .and_then(|value| value.trim().parse::<i64>().ok())
 }
 
-pub(crate) async fn run_execution_job_route(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-) -> Result<Json<execution_queue::ExecutionJob>, AppError> {
-    authorize_execution_job_run(&state, &headers, id).await?;
-    let job = state.execution_queue.get(id).await?;
-    enforce_worker_environment_binding(&state, &headers, job.session_id, job.environment_id)
-        .await?;
-    enforce_worker_pool_binding(&state, &headers, job.session_id, job.environment_id).await?;
-    let worker_id = headers
-        .get("x-mandoforge-worker-id")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or("api");
-    let completed = run_execution_job(&state, id, worker_id).await?;
-    Ok(Json(completed))
-}
-
-pub(crate) async fn run_session_loop_job_route(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-) -> Result<Json<SessionLoopJob>, AppError> {
-    authorize_session_loop_job_run(&state, &headers, id).await?;
-    let job = state.get_session_loop_job(id).await?;
-    enforce_worker_environment_binding(&state, &headers, job.session_id, job.environment_id)
-        .await?;
-    enforce_worker_pool_binding(&state, &headers, job.session_id, job.environment_id).await?;
-    if !session_accepts_worker_execution(&state, job.session_id).await? {
-        let skipped = state
-            .discard_session_loop_job(
-                job.id,
-                "session is terminal and cannot run session loop work",
-            )
-            .await?;
-        state
-            .append_event(
-                "worker",
-                Some(skipped.id),
-                skipped.session_id,
-                "session.loop.skipped",
-                json!({
-                    "session_loop_job_id": skipped.id,
-                    "status": skipped.status,
-                    "reason": "session is terminal",
-                }),
-            )
-            .await?;
-        return Ok(Json(skipped));
-    }
-    let worker_id = headers
-        .get("x-mandoforge-worker-id")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or("session-loop-worker");
-    let running = state.start_session_loop_job(id, worker_id).await?;
-    state
-        .append_event(
-            "worker",
-            Some(running.id),
-            running.session_id,
-            "session.loop.started",
-            json!({
-                "session_loop_job_id": running.id,
-                "environment_id": running.environment_id,
-                "worker_id": worker_id,
-                "attempt_count": running.attempt_count
-            }),
-        )
-        .await?;
-    match run_session_loop(&state, &running).await {
-        Ok(session) => {
-            let completed = state
-                .complete_session_loop_job(running.id, worker_id)
-                .await?;
-            state
-                .append_event(
-                    "worker",
-                    Some(completed.id),
-                    completed.session_id,
-                    "session.loop.completed",
-                    json!({
-                        "session_loop_job_id": completed.id,
-                        "status": completed.status,
-                        "session_status": session.status,
-                        "worker_id": worker_id
-                    }),
-                )
-                .await?;
-            reconcile_workflow_steps_after_session_loop_job(
-                &state, &session, &completed, worker_id,
-            )
-            .await?;
-            Ok(Json(completed))
-        }
-        Err(error) => {
-            let failed = state
-                .fail_session_loop_job(running.id, worker_id, &error.message)
-                .await?;
-            let session_is_terminal =
-                error.message == "session is terminal and cannot run session loop work";
-            if !session_is_terminal {
-                set_managed_session_status(
-                    &state,
-                    failed.session_id,
-                    SessionStatus::Failed,
-                    "session loop failed",
-                )
-                .await?;
-                state
-                    .append_event(
-                        "system",
-                        Some(failed.id),
-                        failed.session_id,
-                        "session.failed",
-                        json!({
-                            "session_loop_job_id": failed.id,
-                            "reason": "session loop failed",
-                            "error": error.message
-                        }),
-                    )
-                    .await?;
-            }
-            state
-                .append_event(
-                    "worker",
-                    Some(failed.id),
-                    failed.session_id,
-                    "session.loop.failed",
-                    json!({
-                        "session_loop_job_id": failed.id,
-                        "status": failed.status,
-                        "error": error.message,
-                        "worker_id": worker_id
-                    }),
-                )
-                .await?;
-            if session_is_terminal {
-                return Err(error);
-            }
-            Err(error)
-        }
-    }
-}
-
-pub(crate) async fn cancel_execution_job_route(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-) -> Result<Json<execution_queue::ExecutionJob>, AppError> {
-    let job = state.execution_queue.get(id).await?;
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRun,
-        "session",
-        Some(job.session_id),
-    )
-    .await?;
-    if matches!(
-        job.status,
-        ExecutionJobStatus::Completed | ExecutionJobStatus::Failed | ExecutionJobStatus::Canceled
-    ) {
-        return Ok(Json(job));
-    }
-    let propagation = propagate_remote_computer_execution_cancel(&state, &job).await?;
-    let canceled = state.execution_queue.cancel(id).await?;
-    state
-        .append_event(
-            "worker",
-            Some(canceled.id),
-            canceled.session_id,
-            "execution.canceled",
-            json!({
-                "execution_job_id": canceled.id,
-                "approval_id": canceled.approval_id,
-                "tool_call_id": canceled.tool_call_id,
-                "tool": canceled.tool_name,
-                "previous_status": job.status,
-                "remote_computer": propagation,
-            }),
-        )
-        .await?;
-    state
-        .append_audit_log(new_audit_log(
-            Some(canceled.session_id),
-            "worker",
-            Some(canceled.id),
-            "execution.canceled",
-            "execution_job",
-            Some(canceled.id),
-            json!({
-                "tool": canceled.tool_name,
-                "previous_status": job.status,
-                "remote_computer": propagation,
-            }),
-        ))
-        .await?;
-    Ok(Json(canceled))
-}
-
-async fn propagate_remote_computer_execution_cancel(
-    state: &AppState,
-    job: &execution_queue::ExecutionJob,
-) -> Result<Value, AppError> {
-    let Some(assignment) = state
-        .list_remote_computer_job_assignments()
-        .await?
-        .into_iter()
-        .find(|assignment| {
-            assignment.execution_job_id == job.id && assignment.status == "assigned"
-        })
-    else {
-        return Ok(json!({"assigned": false, "pod_delete_attempted": false}));
-    };
-    let mut metadata = json!({
-        "execution_job_status": "canceled",
-        "canceled_at": Utc::now(),
-    });
-    let mut pod_delete_attempted = false;
-    let mut pod_delete_status = None;
-    let mut pod_delete_message = None;
-    if remote_computer_pod_execution_requested_from_env() {
-        let remote_computer = state
-            .list_remote_computers()
-            .await?
-            .into_iter()
-            .find(|computer| computer.id == assignment.remote_computer_id)
-            .ok_or_else(|| AppError::not_found("Remote computer not found"))?;
-        if let Some(pod_name) = remote_computer.pod_name.clone() {
-            let config = RemoteComputerRunnerConfig::from_env();
-            let response = remote_computer_runner_for_config(&config)
-                .mutate(
-                    &config,
-                    RemoteComputerRunnerDryRunRequest {
-                        operation: Some("live_delete".to_string()),
-                        remote_computer_id: Some(remote_computer.id),
-                        session_id: Some(job.session_id),
-                        pod_name: Some(pod_name.clone()),
-                        metadata: Some(json!({
-                            "execution_job_id": job.id,
-                            "tool_call_id": job.tool_call_id,
-                            "cancel_reason": "execution_job_cancel",
-                        })),
-                    },
-                )
-                .await;
-            pod_delete_attempted = response.live_mutation_attempted;
-            pod_delete_status = Some(response.status.clone());
-            pod_delete_message = Some(response.message.clone());
-            metadata["pod_delete"] = json!({
-                "attempted": response.live_mutation_attempted,
-                "status": response.status,
-                "message": response.message,
-                "pod_name": pod_name,
-            });
-            if response.status != "mutation_ok" {
-                return Err(AppError::bad_request(format!(
-                    "Remote Computer Pod cancellation failed: {}",
-                    response.message
-                )));
-            }
-        }
-    }
-    let updated = state
-        .update_remote_computer_job_assignment_status(assignment.id, "canceled", metadata)
-        .await?;
-    record_remote_computer_job_assignment_event(
-        state,
-        &updated,
-        job,
-        "remote_computer.execution_handoff_canceled",
-    )
-    .await?;
-    Ok(json!({
-        "assigned": true,
-        "assignment_id": updated.id,
-        "remote_computer_id": updated.remote_computer_id,
-        "lease_id": updated.lease_id,
-        "pod_delete_attempted": pod_delete_attempted,
-        "pod_delete_status": pod_delete_status,
-        "pod_delete_message": pod_delete_message,
-    }))
-}
-
-fn remote_computer_pod_execution_requested_from_env() -> bool {
+pub(crate) fn remote_computer_pod_execution_requested_from_env() -> bool {
     let mode = std::env::var("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT")
         .ok()
         .map(|value| value.trim().to_ascii_lowercase())
@@ -51288,7 +50800,7 @@ fn remote_computer_pod_execution_requested_from_env() -> bool {
         && matches!(mode.as_str(), "kubernetes" | "k8s")
 }
 
-async fn authorize_execution_job_run(
+pub(crate) async fn authorize_execution_job_run(
     state: &AppState,
     headers: &HeaderMap,
     job_id: Uuid,
@@ -51316,7 +50828,7 @@ async fn authorize_execution_job_run(
     enforce_resource_scope(state, &principal, &session_request).await
 }
 
-async fn authorize_session_loop_job_run(
+pub(crate) async fn authorize_session_loop_job_run(
     state: &AppState,
     headers: &HeaderMap,
     job_id: Uuid,
