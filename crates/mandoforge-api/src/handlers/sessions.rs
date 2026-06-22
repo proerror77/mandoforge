@@ -13,9 +13,7 @@ use crate::{
     SendSessionEvents, Session, SessionEvent, SessionThread, StreamEventsQuery, ToolCall,
     append_incoming_session_event, append_user_message_event, authorize_collection_request,
     authorize_request, authorize_session_run, enqueue_session_loop, ensure_primary_session_thread,
-    generate_and_persist_context_packet, list_artifacts as list_artifacts_impl,
-    list_session_audit_logs as list_session_audit_logs_impl,
-    list_session_tool_calls as list_session_tool_calls_impl, principal_from_request,
+    generate_and_persist_context_packet, principal_from_request,
     project_session_event_to_loop, render_execution_context_for_packet,
     stream_events as stream_events_impl, visible_session_ids_for_principal,
 };
@@ -75,7 +73,15 @@ async fn list_artifacts(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<Artifact>>, AppError> {
-    list_artifacts_impl(state, id, headers).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.list_artifacts(id).await?))
 }
 
 async fn list_session_tool_calls(
@@ -83,7 +89,15 @@ async fn list_session_tool_calls(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<ToolCall>>, AppError> {
-    list_session_tool_calls_impl(state, id, headers).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(id),
+    )
+    .await?;
+    Ok(Json(state.list_tool_calls(Some(id)).await?))
 }
 
 async fn list_session_audit_logs(
@@ -91,7 +105,8 @@ async fn list_session_audit_logs(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<AuditLog>>, AppError> {
-    list_session_audit_logs_impl(state, id, headers).await
+    authorize_request(&state, &headers, Permission::AuditRead, "session", Some(id)).await?;
+    Ok(Json(state.list_audit_logs(Some(id)).await?))
 }
 
 async fn list_sessions(

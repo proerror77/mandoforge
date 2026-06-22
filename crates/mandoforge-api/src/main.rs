@@ -48804,38 +48804,6 @@ fn delegated_approver_group_id(approval: &Approval) -> Option<Uuid> {
         .and_then(|value| Uuid::parse_str(value.trim()).ok())
 }
 
-pub(crate) async fn list_artifacts(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-) -> Result<Json<Vec<Artifact>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "session",
-        Some(id),
-    )
-    .await?;
-    Ok(Json(state.list_artifacts(id).await?))
-}
-
-pub(crate) async fn list_session_tool_calls(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-) -> Result<Json<Vec<ToolCall>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "session",
-        Some(id),
-    )
-    .await?;
-    Ok(Json(state.list_tool_calls(Some(id)).await?))
-}
-
 pub(crate) async fn list_execution_jobs(
     state: AppState,
     headers: HeaderMap,
@@ -53354,15 +53322,6 @@ fn ensure_worker_execution_principal(
         ));
     }
     Ok(insecure_dev_override)
-}
-
-pub(crate) async fn list_session_audit_logs(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-) -> Result<Json<Vec<AuditLog>>, AppError> {
-    authorize_request(&state, &headers, Permission::AuditRead, "session", Some(id)).await?;
-    Ok(Json(state.list_audit_logs(Some(id)).await?))
 }
 
 async fn execute_postgres_sql_query(
