@@ -3905,29 +3905,7 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::codex_app_server::router())
         .merge(handlers::packs::router())
         .merge(handlers::github::router())
-        .route(
-            "/api/eval/datasets",
-            get(list_eval_datasets).post(create_eval_dataset),
-        )
-        .route(
-            "/api/eval/datasets/{id}/cases",
-            get(list_eval_cases).post(create_eval_case),
-        )
-        .route(
-            "/api/eval/datasets/{id}/runs",
-            get(list_dataset_eval_runs).post(create_eval_run),
-        )
-        .route(
-            "/api/eval/judge-profiles",
-            get(list_eval_judge_profiles).post(create_eval_judge_profile),
-        )
-        .route(
-            "/api/eval/suites/stage2-regression",
-            post(bootstrap_stage2_eval_suite),
-        )
-        .route("/api/eval/runs", get(list_eval_runs))
-        .route("/api/eval/runs/{id}/gate", post(gate_eval_run))
-        .route("/api/eval/runs/{id}/drift", get(get_eval_run_drift))
+        .merge(handlers::eval::router())
         .route("/api/usage", get(get_usage_summary))
         .route("/api/usage/trends", get(get_usage_trends))
         .route("/api/usage/finance-summary", get(get_usage_finance_summary))
@@ -44494,26 +44472,26 @@ pub(crate) async fn discover_mcp_server_tools(
     ))
 }
 
-async fn list_eval_datasets(
-    State(state): State<AppState>,
+pub(crate) async fn list_eval_datasets(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Vec<EvalDataset>>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "eval_datasets", None).await?;
     Ok(Json(state.list_eval_datasets().await?))
 }
 
-async fn create_eval_dataset(
-    State(state): State<AppState>,
+pub(crate) async fn create_eval_dataset(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<CreateEvalDataset>,
+    input: CreateEvalDataset,
 ) -> Result<Json<EvalDataset>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "eval_datasets", None).await?;
     Ok(Json(state.create_eval_dataset(input).await?))
 }
 
-async fn list_eval_cases(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn list_eval_cases(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<Vec<EvalCase>>, AppError> {
     authorize_request(
@@ -44527,11 +44505,11 @@ async fn list_eval_cases(
     Ok(Json(state.list_eval_cases(id).await?))
 }
 
-async fn create_eval_case(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn create_eval_case(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<CreateEvalCase>,
+    input: CreateEvalCase,
 ) -> Result<Json<EvalCase>, AppError> {
     authorize_request(
         &state,
@@ -44544,8 +44522,8 @@ async fn create_eval_case(
     Ok(Json(state.create_eval_case(id, input).await?))
 }
 
-async fn list_eval_judge_profiles(
-    State(state): State<AppState>,
+pub(crate) async fn list_eval_judge_profiles(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Vec<ProviderRecord>>, AppError> {
     authorize_request(
@@ -44567,10 +44545,10 @@ async fn list_eval_judge_profiles(
     Ok(Json(profiles))
 }
 
-async fn create_eval_judge_profile(
-    State(state): State<AppState>,
+pub(crate) async fn create_eval_judge_profile(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<CreateEvalJudgeProfile>,
+    input: CreateEvalJudgeProfile,
 ) -> Result<Json<ProviderRecord>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
@@ -44624,10 +44602,10 @@ async fn create_eval_judge_profile(
     Ok(Json(profile))
 }
 
-async fn bootstrap_stage2_eval_suite(
-    State(state): State<AppState>,
+pub(crate) async fn bootstrap_stage2_eval_suite(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<BootstrapEvalSuite>,
+    input: BootstrapEvalSuite,
 ) -> Result<Json<EvalSuiteBootstrap>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
@@ -44745,9 +44723,9 @@ fn stage2_regression_suite_cases(judge_profile: Option<&str>) -> Vec<CreateEvalC
     cases
 }
 
-async fn list_dataset_eval_runs(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn list_dataset_eval_runs(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<Vec<EvalRun>>, AppError> {
     authorize_request(
@@ -44761,19 +44739,19 @@ async fn list_dataset_eval_runs(
     Ok(Json(state.list_eval_runs(Some(id)).await?))
 }
 
-async fn list_eval_runs(
-    State(state): State<AppState>,
+pub(crate) async fn list_eval_runs(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Vec<EvalRun>>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "eval_runs", None).await?;
     Ok(Json(state.list_eval_runs(None).await?))
 }
 
-async fn create_eval_run(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn create_eval_run(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<CreateEvalRun>,
+    input: CreateEvalRun,
 ) -> Result<Json<EvalRun>, AppError> {
     authorize_request(
         &state,
@@ -44786,11 +44764,11 @@ async fn create_eval_run(
     Ok(Json(state.create_eval_run(id, input).await?))
 }
 
-async fn gate_eval_run(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn gate_eval_run(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<EvalGateRequest>,
+    input: EvalGateRequest,
 ) -> Result<Json<EvalGateDecision>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "eval_run", Some(id)).await?;
     let min_score = input.min_score.unwrap_or(1.0);
@@ -44813,9 +44791,9 @@ async fn gate_eval_run(
     )))
 }
 
-async fn get_eval_run_drift(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn get_eval_run_drift(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<EvalDriftDecision>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "eval_run", Some(id)).await?;
