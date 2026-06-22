@@ -3899,34 +3899,7 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::tenant::router())
         .merge(handlers::collaboration::router())
         .merge(handlers::providers::router())
-        .route(
-            "/api/teams/{id}/mcp-servers",
-            get(list_mcp_servers).post(create_mcp_server),
-        )
-        .route(
-            "/api/teams/{team_id}/mcp-servers/{server_id}",
-            patch(update_mcp_server),
-        )
-        .route(
-            "/api/teams/{team_id}/mcp-servers/{server_id}/status",
-            patch(update_mcp_server_status),
-        )
-        .route(
-            "/api/teams/{team_id}/mcp-servers/{server_id}/health",
-            get(get_mcp_server_health),
-        )
-        .route(
-            "/api/teams/{team_id}/mcp-servers/health/run",
-            post(run_mcp_server_health_checks),
-        )
-        .route(
-            "/api/teams/{team_id}/mcp-servers/health/run-due",
-            post(run_due_mcp_server_health_checks),
-        )
-        .route(
-            "/api/teams/{team_id}/mcp-servers/deployment/validate",
-            post(validate_mcp_server_deployment),
-        )
+        .merge(handlers::mcp::router())
         .route(
             "/api/teams/{team_id}/mcp-servers/rollouts/run-due",
             post(run_due_mcp_server_rollouts),
@@ -42436,20 +42409,20 @@ async fn probe_openai_compatible_provider(
     }
 }
 
-async fn list_mcp_servers(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn list_mcp_servers(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<Vec<McpServerRecord>>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "team", Some(id)).await?;
     Ok(Json(state.list_mcp_servers(id).await?))
 }
 
-async fn create_mcp_server(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn create_mcp_server(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(mut input): Json<CreateMcpServerRecord>,
+    mut input: CreateMcpServerRecord,
 ) -> Result<Json<McpServerRecord>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "team", Some(id)).await?;
     input.name = normalize_mcp_name(&input.name)?;
@@ -42477,11 +42450,12 @@ async fn create_mcp_server(
     Ok(Json(server))
 }
 
-async fn update_mcp_server(
-    State(state): State<AppState>,
-    Path((team_id, server_id)): Path<(Uuid, Uuid)>,
+pub(crate) async fn update_mcp_server(
+    state: AppState,
+    team_id: Uuid,
+    server_id: Uuid,
     headers: HeaderMap,
-    Json(mut input): Json<UpdateMcpServerRecord>,
+    mut input: UpdateMcpServerRecord,
 ) -> Result<Json<McpServerRecord>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "team", Some(team_id)).await?;
     if let Some(transport) = input.transport.as_deref() {
@@ -42514,11 +42488,12 @@ async fn update_mcp_server(
     Ok(Json(server))
 }
 
-async fn update_mcp_server_status(
-    State(state): State<AppState>,
-    Path((team_id, server_id)): Path<(Uuid, Uuid)>,
+pub(crate) async fn update_mcp_server_status(
+    state: AppState,
+    team_id: Uuid,
+    server_id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<UpdateMcpServerStatus>,
+    input: UpdateMcpServerStatus,
 ) -> Result<Json<McpServerRecord>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "team", Some(team_id)).await?;
     let status = normalize_mcp_status(&input.status)?;
@@ -42543,9 +42518,10 @@ async fn update_mcp_server_status(
     Ok(Json(server))
 }
 
-async fn get_mcp_server_health(
-    State(state): State<AppState>,
-    Path((team_id, server_id)): Path<(Uuid, Uuid)>,
+pub(crate) async fn get_mcp_server_health(
+    state: AppState,
+    team_id: Uuid,
+    server_id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<McpServerHealth>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "team", Some(team_id)).await?;
@@ -42570,9 +42546,9 @@ async fn get_mcp_server_health(
     Ok(Json(health))
 }
 
-async fn run_mcp_server_health_checks(
-    State(state): State<AppState>,
-    Path(team_id): Path<Uuid>,
+pub(crate) async fn run_mcp_server_health_checks(
+    state: AppState,
+    team_id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<McpServerHealthRun>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "team", Some(team_id)).await?;
@@ -42610,9 +42586,9 @@ async fn run_mcp_server_health_checks(
     Ok(Json(run))
 }
 
-async fn run_due_mcp_server_health_checks(
-    State(state): State<AppState>,
-    Path(team_id): Path<Uuid>,
+pub(crate) async fn run_due_mcp_server_health_checks(
+    state: AppState,
+    team_id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<McpServerScheduledHealthRun>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "team", Some(team_id)).await?;
@@ -42621,9 +42597,9 @@ async fn run_due_mcp_server_health_checks(
     ))
 }
 
-async fn validate_mcp_server_deployment(
-    State(state): State<AppState>,
-    Path(team_id): Path<Uuid>,
+pub(crate) async fn validate_mcp_server_deployment(
+    state: AppState,
+    team_id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<McpServerDeploymentValidationRun>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
