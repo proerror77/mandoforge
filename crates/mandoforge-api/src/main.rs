@@ -49242,27 +49242,6 @@ pub(crate) async fn list_session_tool_calls(
     Ok(Json(state.list_tool_calls(Some(id)).await?))
 }
 
-pub(crate) async fn list_audit_logs(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<Vec<AuditLog>>, AppError> {
-    let principal =
-        authorize_collection_request(&state, &headers, Permission::AuditRead, "audit_logs").await?;
-    let visible_session_ids = visible_session_ids_for_principal(&state, &principal).await?;
-    Ok(Json(
-        state
-            .list_audit_logs(None)
-            .await?
-            .into_iter()
-            .filter(|log| {
-                log.session_id
-                    .map(|session_id| visible_session_ids.contains(&session_id))
-                    .unwrap_or_else(|| principal.roles.contains(&Role::Admin))
-            })
-            .collect(),
-    ))
-}
-
 pub(crate) async fn list_execution_jobs(
     state: AppState,
     headers: HeaderMap,

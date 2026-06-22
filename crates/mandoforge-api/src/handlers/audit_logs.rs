@@ -1,7 +1,8 @@
 use axum::{Json, Router, extract::State, http::HeaderMap, routing::get};
 
 use crate::{
-    AppError, AppState, AuditLog, list_audit_logs as list_audit_logs_impl,
+    AppError, AppState, AuditLog, Permission, Role, authorize_collection_request,
+    visible_session_ids_for_principal,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -12,5 +13,19 @@ async fn list_audit_logs(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<AuditLog>>, AppError> {
-    list_audit_logs_impl(state, headers).await
+    let principal =
+        authorize_collection_request(&state, &headers, Permission::AuditRead, "audit_logs").await?;
+    let visible_session_ids = visible_session_ids_for_principal(&state, &principal).await?;
+    Ok(Json(
+        state
+            .list_audit_logs(None)
+            .await?
+            .into_iter()
+            .filter(|log| {
+                log.session_id
+                    .map(|session_id| visible_session_ids.contains(&session_id))
+                    .unwrap_or_else(|| principal.roles.contains(&Role::Admin))
+            })
+            .collect(),
+    ))
 }
