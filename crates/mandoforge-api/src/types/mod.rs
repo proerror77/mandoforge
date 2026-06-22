@@ -4,6 +4,7 @@ pub(crate) mod agent;
 pub(crate) mod approval;
 pub(crate) mod deployment;
 pub(crate) mod eval;
+pub(crate) mod mcp;
 pub(crate) mod ontology;
 pub(crate) mod provider;
 pub(crate) mod remote_computer;
