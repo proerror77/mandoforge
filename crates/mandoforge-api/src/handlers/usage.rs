@@ -5,6 +5,7 @@ use axum::{
     response::Response,
     routing::{get, post},
 };
+use chrono::Utc;
 use serde_json::Value;
 
 use crate::{
@@ -13,16 +14,14 @@ use crate::{
     UsageFinanceDashboardSummary, UsageFinanceExportDelivery, UsageFinanceOperationsRun,
     UsageFinanceOperationsSummary, UsageRollup, UsageSummary, UsageTrendSummary,
     acknowledge_cost_alert as acknowledge_cost_alert_impl,
+    authorize_request, build_cost_alerts, build_usage_finance_dashboard_summary,
+    build_usage_summary, build_usage_trend_summary,
     create_cost_alert_route as create_cost_alert_route_impl,
     create_usage_rollup as create_usage_rollup_impl,
     deliver_cost_alerts as deliver_cost_alerts_impl,
     deliver_usage_export as deliver_usage_export_impl, export_usage_csv as export_usage_csv_impl,
-    get_cost_alerts as get_cost_alerts_impl,
     get_usage_finance_operations_summary as get_usage_finance_operations_summary_impl,
-    get_usage_finance_summary as get_usage_finance_summary_impl,
-    get_usage_summary as get_usage_summary_impl, get_usage_trends as get_usage_trends_impl,
-    list_cost_alert_routes as list_cost_alert_routes_impl,
-    list_usage_rollups as list_usage_rollups_impl,
+    Permission,
     run_usage_finance_operations as run_usage_finance_operations_impl,
     run_usage_finance_reconciliation as run_usage_finance_reconciliation_impl,
 };
@@ -63,21 +62,24 @@ async fn get_usage_summary(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<UsageSummary>, AppError> {
-    get_usage_summary_impl(state, headers).await
+    authorize_request(&state, &headers, Permission::Admin, "usage", None).await?;
+    Ok(Json(build_usage_summary(&state).await?))
 }
 
 async fn get_usage_trends(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<UsageTrendSummary>, AppError> {
-    get_usage_trends_impl(state, headers).await
+    authorize_request(&state, &headers, Permission::Admin, "usage_trends", None).await?;
+    Ok(Json(build_usage_trend_summary(&state).await?))
 }
 
 async fn get_usage_finance_summary(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<UsageFinanceDashboardSummary>, AppError> {
-    get_usage_finance_summary_impl(state, headers).await
+    authorize_request(&state, &headers, Permission::Admin, "usage_finance", None).await?;
+    Ok(Json(build_usage_finance_dashboard_summary(&state).await?))
 }
 
 async fn get_usage_finance_operations_summary(
@@ -119,7 +121,13 @@ async fn get_cost_alerts(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<CostAlertSummary>, AppError> {
-    get_cost_alerts_impl(state, headers).await
+    authorize_request(&state, &headers, Permission::Admin, "usage_alerts", None).await?;
+    let summary = build_usage_summary(&state).await?;
+    Ok(Json(CostAlertSummary {
+        webhook_configured: state.cost_alert_webhook_url.is_some(),
+        min_status: "warning".to_string(),
+        alerts: build_cost_alerts(&summary.provider_budgets, Utc::now()),
+    }))
 }
 
 async fn acknowledge_cost_alert(
@@ -141,7 +149,15 @@ async fn list_cost_alert_routes(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<CostAlertRoute>>, AppError> {
-    list_cost_alert_routes_impl(state, headers).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "usage_alert_routes",
+        None,
+    )
+    .await?;
+    Ok(Json(state.list_cost_alert_routes().await?))
 }
 
 async fn create_cost_alert_route(
@@ -156,7 +172,8 @@ async fn list_usage_rollups(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<UsageRollup>>, AppError> {
-    list_usage_rollups_impl(state, headers).await
+    authorize_request(&state, &headers, Permission::Admin, "usage_rollups", None).await?;
+    Ok(Json(state.list_usage_rollups().await?))
 }
 
 async fn create_usage_rollup(

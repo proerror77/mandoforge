@@ -41298,30 +41298,6 @@ fn eval_run_detail_i64(run: &EvalRun, key: &str) -> i64 {
     run.details.get(key).and_then(Value::as_i64).unwrap_or(0)
 }
 
-pub(crate) async fn get_usage_summary(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<UsageSummary>, AppError> {
-    authorize_request(&state, &headers, Permission::Admin, "usage", None).await?;
-    Ok(Json(build_usage_summary(&state).await?))
-}
-
-pub(crate) async fn get_usage_trends(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<UsageTrendSummary>, AppError> {
-    authorize_request(&state, &headers, Permission::Admin, "usage_trends", None).await?;
-    Ok(Json(build_usage_trend_summary(&state).await?))
-}
-
-pub(crate) async fn get_usage_finance_summary(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<UsageFinanceDashboardSummary>, AppError> {
-    authorize_request(&state, &headers, Permission::Admin, "usage_finance", None).await?;
-    Ok(Json(build_usage_finance_dashboard_summary(&state).await?))
-}
-
 pub(crate) async fn get_usage_finance_operations_summary(
     state: AppState,
     headers: HeaderMap,
@@ -41410,7 +41386,7 @@ pub(crate) async fn run_usage_finance_reconciliation(
     })))
 }
 
-async fn build_usage_finance_dashboard_summary(
+pub(crate) async fn build_usage_finance_dashboard_summary(
     state: &AppState,
 ) -> Result<UsageFinanceDashboardSummary, AppError> {
     let generated_at = Utc::now();
@@ -45165,19 +45141,6 @@ fn build_observability_remediation_supervision_readiness(
     }
 }
 
-pub(crate) async fn get_cost_alerts(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<CostAlertSummary>, AppError> {
-    authorize_request(&state, &headers, Permission::Admin, "usage_alerts", None).await?;
-    let summary = build_usage_summary(&state).await?;
-    Ok(Json(CostAlertSummary {
-        webhook_configured: state.cost_alert_webhook_url.is_some(),
-        min_status: "warning".to_string(),
-        alerts: build_cost_alerts(&summary.provider_budgets, Utc::now()),
-    }))
-}
-
 pub(crate) async fn acknowledge_cost_alert(
     state: AppState,
     headers: HeaderMap,
@@ -45225,21 +45188,6 @@ pub(crate) async fn acknowledge_cost_alert(
         ))
         .await?;
     Ok(Json(acknowledgement))
-}
-
-pub(crate) async fn list_cost_alert_routes(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<Vec<CostAlertRoute>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "usage_alert_routes",
-        None,
-    )
-    .await?;
-    Ok(Json(state.list_cost_alert_routes().await?))
 }
 
 pub(crate) async fn create_cost_alert_route(
@@ -45767,14 +45715,6 @@ fn severity_rank(severity: &str) -> i32 {
     }
 }
 
-pub(crate) async fn list_usage_rollups(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<Vec<UsageRollup>>, AppError> {
-    authorize_request(&state, &headers, Permission::Admin, "usage_rollups", None).await?;
-    Ok(Json(state.list_usage_rollups().await?))
-}
-
 pub(crate) async fn create_usage_rollup(
     state: AppState,
     headers: HeaderMap,
@@ -45944,7 +45884,7 @@ fn execution_job_status_label(status: &ExecutionJobStatus) -> &'static str {
     }
 }
 
-async fn build_usage_summary(state: &AppState) -> Result<UsageSummary, AppError> {
+pub(crate) async fn build_usage_summary(state: &AppState) -> Result<UsageSummary, AppError> {
     let sessions = state.list_sessions().await?;
     let tool_calls = state.list_tool_calls(None).await?;
     let approvals = state.list_approvals().await?;
@@ -46102,7 +46042,9 @@ async fn build_usage_summary(state: &AppState) -> Result<UsageSummary, AppError>
     })
 }
 
-async fn build_usage_trend_summary(state: &AppState) -> Result<UsageTrendSummary, AppError> {
+pub(crate) async fn build_usage_trend_summary(
+    state: &AppState,
+) -> Result<UsageTrendSummary, AppError> {
     let generated_at = Utc::now();
     let current = build_usage_summary(state).await?;
     let rollups = state.list_usage_rollups().await?;
@@ -46659,7 +46601,7 @@ fn percent_used(used: f64, limit: f64) -> f64 {
     }
 }
 
-fn build_cost_alerts(
+pub(crate) fn build_cost_alerts(
     budgets: &[ProviderBudgetStatus],
     created_at: DateTime<Utc>,
 ) -> Vec<CostAlert> {
