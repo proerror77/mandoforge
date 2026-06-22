@@ -11799,27 +11799,6 @@ pub(crate) fn new_audit_log(
     }
 }
 
-pub(crate) async fn get_agent_handoff_assignment_for_handoff(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-) -> Result<Json<AgentHandoffAssignment>, AppError> {
-    let handoff = state.get_agent_handoff_event(id).await?;
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "session",
-        Some(handoff.source_session_id),
-    )
-    .await?;
-    let assignment = state
-        .get_agent_handoff_assignment_for_handoff(id)
-        .await?
-        .ok_or_else(|| AppError::not_found("agent handoff assignment not found"))?;
-    Ok(Json(assignment))
-}
-
 pub(crate) async fn list_dynamic_workflow_plans(
     state: AppState,
     headers: HeaderMap,
@@ -12703,232 +12682,7 @@ pub(crate) async fn create_agent_handoff_event_for_session(
     Ok(event)
 }
 
-pub(crate) async fn escalate_agent_handoff_event(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-    input: EscalateAgentHandoffEvent,
-) -> Result<Json<AgentHandoffEvent>, AppError> {
-    let current = state.get_agent_handoff_event(id).await?;
-    authorize_request(
-        &state,
-        &headers,
-        Permission::ApprovalsDecide,
-        "session",
-        Some(current.source_session_id),
-    )
-    .await?;
-    if matches!(current.status.as_str(), "completed" | "rejected") {
-        return Err(AppError::bad_request(
-            "completed or rejected handoffs cannot be escalated",
-        ));
-    }
-    let next_status =
-        normalize_handoff_human_escalation_status(input.status.as_deref().unwrap_or("requested"))?;
-    if next_status == "none" {
-        return Err(AppError::bad_request(
-            "handoff escalation status must be required, requested, or resolved",
-        ));
-    }
-    let audit = record_agent_handoff_audit_and_event(
-        &state,
-        &current,
-        "agent_handoff.escalated",
-        input.reason,
-    )
-    .await?;
-    let updated = state
-        .update_agent_handoff_event_escalation(current.id, &next_status, Some(audit.id))
-        .await?;
-    Ok(Json(updated))
-}
-
-pub(crate) async fn assign_agent_handoff_event(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-    input: CreateAgentHandoffAssignment,
-) -> Result<Json<AgentHandoffAssignment>, AppError> {
-    let handoff = state.get_agent_handoff_event(id).await?;
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRun,
-        "session",
-        Some(handoff.source_session_id),
-    )
-    .await?;
-    if handoff.status != "accepted" {
-        return Err(AppError::bad_request(
-            "agent handoff must be accepted before assignment",
-        ));
-    }
-    let manager_plan_id = handoff.manager_plan_id.ok_or_else(|| {
-        AppError::bad_request("agent handoff assignment requires manager_plan_id")
-    })?;
-    let manager_plan = state.get_manager_agent_plan(manager_plan_id).await?;
-    if manager_plan.status != "approved" && manager_plan.status != "reviewed" {
-        return Err(AppError::bad_request(
-            "manager plan must be reviewed or approved before handoff assignment",
-        ));
-    }
-    if manager_plan.session_id != handoff.source_session_id
-        || manager_plan.manager_agent_id != handoff.source_agent_id
-    {
-        return Err(AppError::bad_request(
-            "manager plan does not match handoff source session and agent",
-        ));
-    }
-    if let Some(specialist_agent_id) = manager_plan.specialist_agent_id
-        && specialist_agent_id != handoff.target_agent_id
-    {
-        return Err(AppError::bad_request(
-            "manager plan specialist does not match handoff target agent",
-        ));
-    }
-    let target_agent = state.get_agent(handoff.target_agent_id).await?;
-    if target_agent.agent_role != "specialist" {
-        return Err(AppError::bad_request(
-            "agent handoff assignment target must be a specialist agent",
-        ));
-    }
-    if state
-        .get_agent_handoff_assignment_for_handoff(handoff.id)
-        .await?
-        .is_some()
-    {
-        return Err(AppError::bad_request(
-            "agent handoff already has an assignment",
-        ));
-    }
-    if let Some(profile_id) = handoff.runtime_profile_id {
-        let profile = state.get_agent_runtime_profile(profile_id).await?;
-        if profile.status != "enabled" {
-            return Err(AppError::bad_request(
-                "agent handoff runtime profile must be enabled",
-            ));
-        }
-    }
-    if let Some(remote_assignment_id) = input.remote_computer_job_assignment_id {
-        let remote_assignment = state
-            .list_remote_computer_job_assignments()
-            .await?
-            .into_iter()
-            .find(|assignment| assignment.id == remote_assignment_id)
-            .ok_or_else(|| AppError::not_found("remote computer job assignment not found"))?;
-        if remote_assignment.session_id != handoff.source_session_id {
-            return Err(AppError::bad_request(
-                "remote computer job assignment must belong to the source session until the specialist execution job exists",
-            ));
-        }
-    }
-    let source_session = state.get_session(handoff.source_session_id).await?;
-    let parent_thread = ensure_primary_session_thread(&state, source_session.id).await?;
-
-    let specialist_session = match input.specialist_session_id {
-        Some(session_id) => {
-            let session = state.get_session(session_id).await?;
-            if session.agent_id != handoff.target_agent_id {
-                return Err(AppError::bad_request(
-                    "specialist_session_id must belong to the handoff target agent",
-                ));
-            }
-            session
-        }
-        None => {
-            let message = input.message.or_else(|| {
-                Some(default_handoff_assignment_message(
-                    &handoff,
-                    &manager_plan,
-                    &target_agent,
-                ))
-            });
-            state
-                .create_session(CreateSession {
-                    agent_id: handoff.target_agent_id,
-                    environment_id: source_session.environment_id,
-                    title: input.title.unwrap_or_else(|| {
-                        format!("Handoff {} for {}", handoff.intent, target_agent.name)
-                    }),
-                    message,
-                })
-                .await?
-        }
-    };
-    ensure_primary_session_thread(&state, specialist_session.id).await?;
-    let now = Utc::now();
-    let assignment = state
-        .create_agent_handoff_assignment(AgentHandoffAssignment {
-            id: Uuid::new_v4(),
-            agent_handoff_event_id: handoff.id,
-            manager_plan_id,
-            source_session_id: handoff.source_session_id,
-            specialist_session_id: specialist_session.id,
-            source_agent_id: handoff.source_agent_id,
-            target_agent_id: handoff.target_agent_id,
-            semantic_scopes: handoff.semantic_scopes.clone(),
-            runtime_profile_id: handoff.runtime_profile_id,
-            remote_computer_required: handoff.remote_computer_required,
-            remote_computer_job_assignment_id: input.remote_computer_job_assignment_id,
-            status: if handoff.remote_computer_required
-                && input.remote_computer_job_assignment_id.is_none()
-            {
-                "waiting_remote_computer".to_string()
-            } else {
-                "assigned".to_string()
-            },
-            assigned_by: input.assigned_by.and_then(normalize_optional_text),
-            metadata: input.metadata,
-            audit_trace_id: None,
-            created_at: now,
-            updated_at: now,
-        })
-        .await?;
-    let audit =
-        record_agent_handoff_assignment_audit_and_events(&state, &assignment, &handoff).await?;
-    let assignment = state
-        .update_agent_handoff_assignment_audit_trace(assignment.id, audit.id)
-        .await?;
-    let child_thread = create_handoff_session_thread(
-        &state,
-        &assignment,
-        &handoff,
-        &specialist_session,
-        Some(parent_thread.id),
-    )
-    .await?;
-    materialize_workflow_handoff_assignment(
-        &state,
-        &handoff,
-        &assignment,
-        &manager_plan,
-        &target_agent,
-        &specialist_session,
-        &child_thread,
-    )
-    .await?;
-    state
-        .append_event(
-            "system",
-            Some(child_thread.id),
-            handoff.source_session_id,
-            "thread.started",
-            session_thread_event_payload(&child_thread),
-        )
-        .await?;
-    state
-        .append_event(
-            "system",
-            Some(child_thread.id),
-            specialist_session.id,
-            "thread.started",
-            session_thread_event_payload(&child_thread),
-        )
-        .await?;
-    Ok(Json(assignment))
-}
-
-async fn materialize_workflow_handoff_assignment(
+pub(crate) async fn materialize_workflow_handoff_assignment(
     state: &AppState,
     handoff: &AgentHandoffEvent,
     assignment: &AgentHandoffAssignment,
@@ -13084,80 +12838,6 @@ fn child_tool_scope_for_agent(parent: &Value, agent: &Agent) -> Value {
     Value::Object(scope)
 }
 
-pub(crate) async fn attach_agent_handoff_remote_computer_assignment(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-    input: AttachAgentHandoffRemoteComputerAssignment,
-) -> Result<Json<AgentHandoffAssignment>, AppError> {
-    let assignment = state.get_agent_handoff_assignment(id).await?;
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRun,
-        "session",
-        Some(assignment.specialist_session_id),
-    )
-    .await?;
-    if !assignment.remote_computer_required {
-        return Err(AppError::bad_request(
-            "agent handoff assignment does not require Remote Computer",
-        ));
-    }
-    let remote_assignment = state
-        .list_remote_computer_job_assignments()
-        .await?
-        .into_iter()
-        .find(|candidate| candidate.id == input.remote_computer_job_assignment_id)
-        .ok_or_else(|| AppError::not_found("remote computer job assignment not found"))?;
-    if remote_assignment.session_id != assignment.specialist_session_id {
-        return Err(AppError::bad_request(
-            "remote computer job assignment must belong to the specialist session",
-        ));
-    }
-    if remote_assignment.status != "assigned" {
-        return Err(AppError::bad_request(
-            "remote computer job assignment must be assigned",
-        ));
-    }
-    let updated = state
-        .attach_agent_handoff_assignment_remote_computer_job(
-            assignment.id,
-            remote_assignment.id,
-            input.metadata,
-        )
-        .await?;
-    record_agent_handoff_assignment_remote_computer_event(&state, &updated, &remote_assignment)
-        .await?;
-    if let Some(thread) = state
-        .session_thread_for_handoff(updated.agent_handoff_event_id)
-        .await?
-    {
-        let thread = state
-            .update_session_thread_status(thread.id, "running")
-            .await?;
-        state
-            .append_event(
-                "system",
-                Some(thread.id),
-                updated.source_session_id,
-                "thread.status_changed",
-                session_thread_event_payload(&thread),
-            )
-            .await?;
-        state
-            .append_event(
-                "system",
-                Some(thread.id),
-                updated.specialist_session_id,
-                "thread.status_changed",
-                session_thread_event_payload(&thread),
-            )
-            .await?;
-    }
-    Ok(Json(updated))
-}
-
 pub(crate) async fn transition_agent_handoff_event(
     state: AppState,
     id: Uuid,
@@ -13223,7 +12903,7 @@ pub(crate) async fn transition_agent_handoff_event(
     Ok(Json(updated))
 }
 
-async fn record_agent_handoff_audit_and_event(
+pub(crate) async fn record_agent_handoff_audit_and_event(
     state: &AppState,
     handoff: &AgentHandoffEvent,
     action: &str,
@@ -13269,7 +12949,7 @@ async fn record_agent_handoff_audit_and_event(
         .await
 }
 
-async fn record_agent_handoff_assignment_audit_and_events(
+pub(crate) async fn record_agent_handoff_assignment_audit_and_events(
     state: &AppState,
     assignment: &AgentHandoffAssignment,
     handoff: &AgentHandoffEvent,
@@ -13324,7 +13004,7 @@ async fn record_agent_handoff_assignment_audit_and_events(
         .await
 }
 
-async fn record_agent_handoff_assignment_remote_computer_event(
+pub(crate) async fn record_agent_handoff_assignment_remote_computer_event(
     state: &AppState,
     assignment: &AgentHandoffAssignment,
     remote_assignment: &RemoteComputerJobAssignment,
@@ -13374,7 +13054,7 @@ async fn record_agent_handoff_assignment_remote_computer_event(
     Ok(())
 }
 
-async fn create_handoff_session_thread(
+pub(crate) async fn create_handoff_session_thread(
     state: &AppState,
     assignment: &AgentHandoffAssignment,
     handoff: &AgentHandoffEvent,
@@ -14822,7 +14502,7 @@ fn normalize_handoff_review_status(value: &str) -> Result<String, AppError> {
     }
 }
 
-fn normalize_handoff_human_escalation_status(value: &str) -> Result<String, AppError> {
+pub(crate) fn normalize_handoff_human_escalation_status(value: &str) -> Result<String, AppError> {
     let normalized = value.trim().to_ascii_lowercase();
     match normalized.as_str() {
         "none" | "required" | "requested" | "resolved" => Ok(normalized),
@@ -14841,7 +14521,7 @@ fn normalize_optional_text(value: String) -> Option<String> {
     }
 }
 
-fn default_handoff_assignment_message(
+pub(crate) fn default_handoff_assignment_message(
     handoff: &AgentHandoffEvent,
     plan: &ManagerAgentPlan,
     target_agent: &Agent,
