@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -401,6 +403,82 @@ pub(crate) struct UpdateWorkflowStepRun {
     pub(crate) approval_ids: Option<Vec<Uuid>>,
     #[serde(default)]
     pub(crate) tool_call_ids: Option<Vec<Uuid>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct RunDueWorkflowSteps {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct WorkflowScheduledStepActivationRun {
+    pub(crate) workflow_run_id: Uuid,
+    pub(crate) checked_at: DateTime<Utc>,
+    pub(crate) activated_count: usize,
+    pub(crate) activated_step_ids: Vec<Uuid>,
+    pub(crate) remaining_scheduled_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct WorkflowScheduledStepActivationSweep {
+    pub(crate) status: String,
+    pub(crate) checked_at: DateTime<Utc>,
+    pub(crate) workflow_run_count: usize,
+    pub(crate) scheduled_step_count: usize,
+    pub(crate) due_step_count: usize,
+    pub(crate) activated_count: usize,
+    pub(crate) activated_step_ids: Vec<Uuid>,
+    pub(crate) remaining_scheduled_count: usize,
+    pub(crate) actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct WorkflowRunGraphConsole {
+    pub(crate) workflow_run_id: Uuid,
+    pub(crate) workflow_definition_id: Uuid,
+    pub(crate) pack_installation_id: Option<Uuid>,
+    pub(crate) generated_at: DateTime<Utc>,
+    pub(crate) status: String,
+    pub(crate) node_count: usize,
+    pub(crate) edge_count: usize,
+    pub(crate) due_scheduled_count: usize,
+    pub(crate) status_counts: BTreeMap<String, usize>,
+    pub(crate) nodes: Vec<WorkflowGraphConsoleNode>,
+    pub(crate) edges: Vec<WorkflowGraphConsoleEdge>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct WorkflowGraphConsoleNode {
+    pub(crate) id: Uuid,
+    pub(crate) step_run_id: Option<Uuid>,
+    pub(crate) step_key: String,
+    pub(crate) step_type: String,
+    pub(crate) status: String,
+    pub(crate) declared: bool,
+    pub(crate) dependencies: Vec<String>,
+    pub(crate) agent_id: Option<Uuid>,
+    pub(crate) task_grant_id: Option<Uuid>,
+    pub(crate) context_packet_id: Option<Uuid>,
+    pub(crate) claimed_by_worker: Option<String>,
+    pub(crate) lease_expires_at: Option<DateTime<Utc>>,
+    pub(crate) scheduled_at: Option<DateTime<Utc>>,
+    pub(crate) due: bool,
+    pub(crate) started_at: Option<DateTime<Utc>>,
+    pub(crate) completed_at: Option<DateTime<Utc>>,
+    pub(crate) definition_summary: Value,
+    pub(crate) input_summary: Value,
+    pub(crate) output_summary: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct WorkflowGraphConsoleEdge {
+    pub(crate) id: Uuid,
+    pub(crate) from_step_key: Option<String>,
+    pub(crate) to_step_key: Option<String>,
+    pub(crate) transition_type: String,
+    pub(crate) status: String,
+    pub(crate) declared: bool,
+    pub(crate) condition_summary: Value,
+    pub(crate) result_summary: Value,
+    pub(crate) created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

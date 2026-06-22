@@ -170,9 +170,11 @@ pub(crate) use types::workflow::{
     DynamicWorkflowAdjudicationRequest, DynamicWorkflowAdjudicationResponse, DynamicWorkflowPlan,
     DynamicWorkflowPlanCompilationResponse, DynamicWorkflowPlanMaterializationResponse,
     DynamicWorkflowPressureTestRequest, DynamicWorkflowPressureTestResponse,
-    MaterializeDynamicWorkflowPlan, ReviewDynamicWorkflowPlan, TaskGrant, UpdateWorkflowDefinition,
-    UpdateWorkflowStepRun, WorkflowDefinition, WorkflowRun, WorkflowStepRun, WorkflowTransition,
-    WorkflowTransitionFilter, WorkflowTransitionQuery,
+    MaterializeDynamicWorkflowPlan, ReviewDynamicWorkflowPlan, RunDueWorkflowSteps, TaskGrant,
+    UpdateWorkflowDefinition, UpdateWorkflowStepRun, WorkflowDefinition,
+    WorkflowGraphConsoleEdge, WorkflowGraphConsoleNode, WorkflowRun, WorkflowRunGraphConsole,
+    WorkflowScheduledStepActivationRun, WorkflowScheduledStepActivationSweep, WorkflowStepRun,
+    WorkflowTransition, WorkflowTransitionFilter, WorkflowTransitionQuery,
 };
 use types::tools::{
     ApprovalRequestTool, ArtifactCreateTool, FileReadTool, McpCallTool, OntologyTypeLookupTool,
@@ -504,82 +506,6 @@ struct AttachAgentHandoffRemoteComputerAssignment {
     remote_computer_job_assignment_id: Uuid,
     #[serde(default = "empty_json_object")]
     metadata: Value,
-}
-
-#[derive(Debug, Deserialize)]
-struct RunDueWorkflowSteps {}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WorkflowScheduledStepActivationRun {
-    workflow_run_id: Uuid,
-    checked_at: DateTime<Utc>,
-    activated_count: usize,
-    activated_step_ids: Vec<Uuid>,
-    remaining_scheduled_count: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WorkflowScheduledStepActivationSweep {
-    status: String,
-    checked_at: DateTime<Utc>,
-    workflow_run_count: usize,
-    scheduled_step_count: usize,
-    due_step_count: usize,
-    activated_count: usize,
-    activated_step_ids: Vec<Uuid>,
-    remaining_scheduled_count: usize,
-    actions: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WorkflowRunGraphConsole {
-    workflow_run_id: Uuid,
-    workflow_definition_id: Uuid,
-    pack_installation_id: Option<Uuid>,
-    generated_at: DateTime<Utc>,
-    status: String,
-    node_count: usize,
-    edge_count: usize,
-    due_scheduled_count: usize,
-    status_counts: BTreeMap<String, usize>,
-    nodes: Vec<WorkflowGraphConsoleNode>,
-    edges: Vec<WorkflowGraphConsoleEdge>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WorkflowGraphConsoleNode {
-    id: Uuid,
-    step_run_id: Option<Uuid>,
-    step_key: String,
-    step_type: String,
-    status: String,
-    declared: bool,
-    dependencies: Vec<String>,
-    agent_id: Option<Uuid>,
-    task_grant_id: Option<Uuid>,
-    context_packet_id: Option<Uuid>,
-    claimed_by_worker: Option<String>,
-    lease_expires_at: Option<DateTime<Utc>>,
-    scheduled_at: Option<DateTime<Utc>>,
-    due: bool,
-    started_at: Option<DateTime<Utc>>,
-    completed_at: Option<DateTime<Utc>>,
-    definition_summary: Value,
-    input_summary: Value,
-    output_summary: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WorkflowGraphConsoleEdge {
-    id: Uuid,
-    from_step_key: Option<String>,
-    to_step_key: Option<String>,
-    transition_type: String,
-    status: String,
-    declared: bool,
-    condition_summary: Value,
-    result_summary: Value,
-    created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
