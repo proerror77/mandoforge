@@ -43891,22 +43891,6 @@ async fn execute_remote_computer_sidecar_supervision(
     Ok(run)
 }
 
-pub(crate) async fn get_observability_summary(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<ObservabilitySummary>, AppError> {
-    authorize_request(&state, &headers, Permission::Admin, "observability", None).await?;
-    Ok(Json(build_observability_summary(&state).await?))
-}
-
-pub(crate) async fn get_observability_collector_readiness(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<ObservabilityCollectorReadiness>, AppError> {
-    authorize_request(&state, &headers, Permission::Admin, "observability", None).await?;
-    Ok(Json(build_observability_collector_readiness(&state).await))
-}
-
 pub(crate) async fn validate_observability_collector_deployment(
     state: AppState,
     headers: HeaderMap,
@@ -44343,16 +44327,7 @@ where
     }))
 }
 
-pub(crate) async fn get_observability_remediation_plan(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<ObservabilityRemediationPlan>, AppError> {
-    authorize_request(&state, &headers, Permission::Admin, "observability", None).await?;
-    let summary = build_observability_summary(&state).await?;
-    Ok(Json(build_observability_remediation_plan(summary)))
-}
-
-fn build_observability_remediation_plan(
+pub(crate) fn build_observability_remediation_plan(
     summary: ObservabilitySummary,
 ) -> ObservabilityRemediationPlan {
     let mut actions = Vec::new();
@@ -44655,7 +44630,7 @@ where
     }))
 }
 
-async fn build_observability_collector_readiness(
+pub(crate) async fn build_observability_collector_readiness(
     state: &AppState,
 ) -> ObservabilityCollectorReadiness {
     let generated_at = Utc::now();
@@ -45823,7 +45798,9 @@ pub(crate) async fn create_usage_rollup(
     ))
 }
 
-async fn build_observability_summary(state: &AppState) -> Result<ObservabilitySummary, AppError> {
+pub(crate) async fn build_observability_summary(
+    state: &AppState,
+) -> Result<ObservabilitySummary, AppError> {
     let sessions = state.list_sessions().await?;
     let tool_calls = state.list_tool_calls(None).await?;
     let approvals = state.list_approvals().await?;

@@ -9,10 +9,9 @@ use serde_json::Value;
 use crate::{
     AppError, AppState, ObservabilityCollectorClusterRolloutValidationRun,
     ObservabilityCollectorReadiness, ObservabilityRemediationPlan, ObservabilityRemediationRun,
-    ObservabilitySummary,
-    get_observability_collector_readiness as get_observability_collector_readiness_impl,
-    get_observability_remediation_plan as get_observability_remediation_plan_impl,
-    get_observability_summary as get_observability_summary_impl,
+    ObservabilitySummary, Permission, authorize_request,
+    build_observability_collector_readiness, build_observability_remediation_plan,
+    build_observability_summary,
     run_observability_remediation as run_observability_remediation_impl,
     validate_observability_collector_cluster_rollout as validate_observability_collector_cluster_rollout_impl,
     validate_observability_collector_deployment as validate_observability_collector_deployment_impl,
@@ -47,14 +46,16 @@ async fn get_observability_summary(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<ObservabilitySummary>, AppError> {
-    get_observability_summary_impl(state, headers).await
+    authorize_request(&state, &headers, Permission::Admin, "observability", None).await?;
+    Ok(Json(build_observability_summary(&state).await?))
 }
 
 async fn get_observability_collector_readiness(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<ObservabilityCollectorReadiness>, AppError> {
-    get_observability_collector_readiness_impl(state, headers).await
+    authorize_request(&state, &headers, Permission::Admin, "observability", None).await?;
+    Ok(Json(build_observability_collector_readiness(&state).await))
 }
 
 async fn validate_observability_collector_deployment(
@@ -75,7 +76,9 @@ async fn get_observability_remediation_plan(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<ObservabilityRemediationPlan>, AppError> {
-    get_observability_remediation_plan_impl(state, headers).await
+    authorize_request(&state, &headers, Permission::Admin, "observability", None).await?;
+    let summary = build_observability_summary(&state).await?;
+    Ok(Json(build_observability_remediation_plan(summary)))
 }
 
 async fn run_observability_remediation(
