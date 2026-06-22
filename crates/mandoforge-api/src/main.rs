@@ -52,6 +52,7 @@ mod provider;
 mod remote_computer_runner;
 mod secrets;
 mod shell_runner;
+mod types;
 mod store_agent_handoffs;
 mod store_approval_groups;
 mod store_approval_notification_channels;
