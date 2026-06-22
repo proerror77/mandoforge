@@ -13,11 +13,12 @@ use crate::{
     AppError, AppState, BuildSemanticOntologyRequest, CreateSemanticLink, CreateSemanticObject,
     CreateSemanticSource, ExpandSemanticLinksRequest, ExpandSemanticLinksResponse,
     ExpandSemanticOntologyRequest, FetchSemanticObjectRequest, FetchSemanticObjectResponse,
-    Permission, ResolveSemanticConflictRequest, ReviewOntologyProposalRequest, SemanticGraphSnapshot,
+    MemoryWritebackCandidate, Permission, ResolveSemanticConflictRequest,
+    ReviewOntologyProposalRequest, RunSemanticDreamingRequest, SemanticGraphSnapshot,
     SemanticLink, SemanticObject, SemanticGovernanceRunRequest, SemanticGovernanceRunResult, SemanticProductQuery,
     SemanticSearchResponse, SemanticSearchResult, SemanticSource, UpdateSemanticLink,
-    UpdateSemanticObject, UpdateSemanticSource, authorize_request, build_semantic_graph_snapshot,
-    domain_ontology_object_type_suggestions, domain_ontology_relation_type_suggestions,
+    UpdateSemanticObject, UpdateSemanticSource, authorize_collection_request, authorize_request,
+    build_semantic_graph_snapshot, domain_ontology_object_type_suggestions, domain_ontology_relation_type_suggestions,
     expand_semantic_links_for_context, fetch_semantic_object_for_context,
     memory_governance_object_partition_key, memory_governance_scope_value, new_audit_log,
     normalize_ontology_builder_source_refs, normalize_ontology_builder_token,
@@ -26,7 +27,7 @@ use crate::{
     record_semantic_link_audit, record_semantic_object_audit, record_semantic_source_audit,
     semantic_object_matched_fields, semantic_object_matches_product_query,
     semantic_ontology_builder_prompt_packet, validate_handoff_token,
-    validate_semantic_link_against_ontology,
+    validate_semantic_link_against_ontology, visible_session_ids_for_principal,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -69,6 +70,14 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/api/semantic-conflicts/resolve",
             post(resolve_semantic_conflict),
+        )
+        .route(
+            "/api/semantic-reflection/dreaming/run",
+            post(run_semantic_dreaming),
+        )
+        .route(
+            "/api/semantic-reflection/queue",
+            get(get_semantic_reflection_queue),
         )
         .route(
             "/api/semantic-ontology/expand",
@@ -682,6 +691,130 @@ async fn resolve_semantic_conflict(
         "status": "resolved",
         "preferred_object_id": preferred.id,
         "archived_object_ids": archived_object_ids,
+    })))
+}
+
+async fn run_semantic_dreaming(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<RunSemanticDreamingRequest>,
+) -> Result<Json<Value>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRun,
+        "session",
+        Some(input.session_id),
+    )
+    .await?;
+    let session = state.get_session(input.session_id).await?;
+    let now = Utc::now();
+    let candidate = state
+        .create_memory_writeback_candidate(MemoryWritebackCandidate {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            candidate_type: "dreaming_synthesis".to_string(),
+            source_event_id: None,
+            source_artifact_id: None,
+            source_approval_id: None,
+            source_handoff_id: None,
+            proposed_object_type: "memory".to_string(),
+            proposed_object_key: format!(
+                "memory:dreaming:{}:{}:{}",
+                input.domain_scope,
+                input.workflow_scope,
+                Uuid::new_v4()
+            ),
+            title: format!("Dreaming synthesis: {}", input.goal),
+            summary: "Queued reflection/dreaming synthesis for human review.".to_string(),
+            content: json!({
+                "goal": input.goal,
+                "session_id": session.id,
+                "domain_scope": input.domain_scope,
+                "workflow_scope": input.workflow_scope,
+                "memory_scope": input.memory_scope,
+                "review_required": true,
+            }),
+            semantic_scopes: json!({
+                "domain_scope": input.domain_scope,
+                "workflow_scope": input.workflow_scope,
+                "memory_scope": input.memory_scope,
+                "share_policy": "review_required",
+            }),
+            source_refs: json!([{
+                "source_type": "session",
+                "source_id": session.id,
+                "freshness": "current",
+            }]),
+            provenance: json!({
+                "source": "semantic_reflection.dreaming.run",
+                "session_id": session.id,
+                "queued_at": now,
+            }),
+            trust_level: "source_attested".to_string(),
+            freshness: "current".to_string(),
+            status: "pending".to_string(),
+            reviewer_subject: None,
+            review_reason: None,
+            semantic_object_id: None,
+            audit_trace_id: None,
+            created_at: now,
+            updated_at: now,
+            decided_at: None,
+        })
+        .await?;
+    let principal = principal_from_request(&state, &headers).await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(session.id),
+            "user",
+            None,
+            "semantic_reflection.dreaming_queued",
+            "memory_writeback_candidate",
+            Some(candidate.id),
+            json!({
+                "subject": principal.subject_id,
+                "candidate_id": candidate.id,
+                "session_id": session.id,
+            }),
+        ))
+        .await?;
+    Ok(Json(json!({
+        "status": "queued_for_review",
+        "candidate": candidate,
+    })))
+}
+
+async fn get_semantic_reflection_queue(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, AppError> {
+    let principal = authorize_collection_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "semantic_reflection_queue",
+    )
+    .await?;
+    let visible_session_ids = visible_session_ids_for_principal(&state, &principal).await?;
+    let items = state
+        .list_memory_writeback_candidates(None)
+        .await?
+        .into_iter()
+        .filter(|candidate| visible_session_ids.contains(&candidate.session_id))
+        .filter(|candidate| candidate.status == "pending")
+        .filter(|candidate| {
+            matches!(
+                candidate.candidate_type.as_str(),
+                "session_reflection" | "semantic_synthesis" | "dreaming_synthesis"
+            )
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(json!({
+        "status": "ready",
+        "generated_at": Utc::now(),
+        "item_count": items.len(),
+        "items": items,
     })))
 }
 
