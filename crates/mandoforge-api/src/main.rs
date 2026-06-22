@@ -3943,7 +3943,7 @@ fn build_router(state: AppState) -> Router {
             "/api/semantic-reflection/queue",
             get(get_semantic_reflection_queue),
         )
-        .route("/api/ontology/registry", get(get_ontology_registry))
+        .merge(handlers::ontology::router())
         .route(
             "/api/semantic-ingestion/batches",
             post(create_semantic_ingestion_batch),
@@ -3951,10 +3951,6 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/memory-governance/summary",
             get(get_memory_governance_summary),
-        )
-        .route(
-            "/api/ontology/engine-readiness",
-            get(get_ontology_engine_readiness),
         )
         .route(
             "/api/memory-governance/partitions",
@@ -14341,36 +14337,6 @@ fn memory_governance_writeback_ref(
         updated_at: candidate.updated_at,
         decided_at: candidate.decided_at,
     }
-}
-
-async fn get_ontology_registry(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<OntologyRegistry>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::AgentsRead,
-        "ontology_registry",
-        None,
-    )
-    .await?;
-    Ok(Json(ontology_registry()))
-}
-
-async fn get_ontology_engine_readiness(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<OntologyEngineReadiness>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "ontology_engine_readiness",
-        None,
-    )
-    .await?;
-    Ok(Json(build_ontology_engine_readiness(&state).await?))
 }
 
 async fn build_ontology_engine_readiness(
