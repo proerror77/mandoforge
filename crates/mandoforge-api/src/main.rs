@@ -187,13 +187,13 @@ pub(crate) use types::semantic::{
     MemoryGovernancePartitionQuery, MemoryGovernanceSummary, MemoryGovernanceWritebackQueue,
     MemoryGovernanceWritebackQuery, MemoryGovernanceWritebackRef,
     MemoryGovernanceWritebackSummary, MemoryWritebackCandidate, RenderedSemanticObject,
-    ResolveSemanticConflictRequest, ReviewMemoryWritebackCandidate, SearchSemanticObjectsRequest,
-    SearchSemanticObjectsResponse, SemanticAgingPolicySweep, SemanticGovernanceRunRequest,
-    SemanticGovernanceRunResult, SemanticGraphConflict, SemanticGraphEdge, SemanticGraphNode,
-    SemanticGraphPartition, SemanticGraphSnapshot, SemanticIngestionBatchResult,
-    SemanticIngestionObjectRef, SemanticLink, SemanticObject, SemanticProductQuery,
-    SemanticRetrievalBackendRegistry, SemanticRetrievalBackendStatus, SemanticSearchResponse,
-    SemanticSearchResult, SemanticSource, SemanticSynthesisMemoryCandidateInput,
+    ResolveSemanticConflictRequest, ReviewMemoryWritebackCandidate, RunSemanticDreamingRequest,
+    SearchSemanticObjectsRequest, SearchSemanticObjectsResponse, SemanticAgingPolicySweep,
+    SemanticGovernanceRunRequest, SemanticGovernanceRunResult, SemanticGraphConflict,
+    SemanticGraphEdge, SemanticGraphNode, SemanticGraphPartition, SemanticGraphSnapshot,
+    SemanticIngestionBatchResult, SemanticIngestionObjectRef, SemanticLink, SemanticObject,
+    SemanticProductQuery, SemanticRetrievalBackendRegistry, SemanticRetrievalBackendStatus,
+    SemanticSearchResponse, SemanticSearchResult, SemanticSource, SemanticSynthesisMemoryCandidateInput,
     SemanticSynthesisRunResult, SemanticSynthesisScheduleSweep, SemanticSynthesisScheduledRun,
     UpdateSemanticLink, UpdateSemanticObject, UpdateSemanticSource,
 };
@@ -573,15 +573,6 @@ struct UpsertProjectGitHubBinding {
     webhook_secret_ref: Option<String>,
     #[serde(default)]
     active: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RunSemanticDreamingRequest {
-    session_id: Uuid,
-    domain_scope: String,
-    workflow_scope: String,
-    memory_scope: String,
-    goal: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

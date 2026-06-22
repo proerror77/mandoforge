@@ -179,6 +179,15 @@ pub(crate) struct UpdateSemanticLink {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct RunSemanticDreamingRequest {
+    pub(crate) session_id: Uuid,
+    pub(crate) domain_scope: String,
+    pub(crate) workflow_scope: String,
+    pub(crate) memory_scope: String,
+    pub(crate) goal: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct CreateSemanticIngestionBatch {
     pub(crate) source: CreateSemanticSource,
     pub(crate) objects: Vec<SemanticIngestionObjectInput>,
