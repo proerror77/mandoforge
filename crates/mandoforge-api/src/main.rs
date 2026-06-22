@@ -3891,7 +3891,6 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::ontology::router())
         .merge(handlers::memory_governance::router())
         .merge(handlers::sessions::router())
-        .route("/api/sessions/{id}/run", post(run_session))
         .route(
             "/api/sessions/{id}/context-packet",
             get(get_session_context_packet).post(create_session_context_packet),
@@ -29104,22 +29103,6 @@ async fn provider_client_from_env() -> Result<Box<dyn ProviderClient>, AppError>
     }
 }
 
-async fn run_session(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-) -> Result<Json<Session>, AppError> {
-    authorize_session_run(&state, &headers, id).await?;
-    let event = append_user_message_event(
-        &state,
-        id,
-        "Compatibility run request from POST /api/sessions/:id/run".to_string(),
-    )
-    .await?;
-    enqueue_session_loop(&state, id, Some(event.id), "compat.run").await?;
-    Ok(Json(state.get_session(id).await?))
-}
-
 pub(crate) async fn enqueue_session_loop(
     state: &AppState,
     id: Uuid,
@@ -29335,7 +29318,7 @@ async fn run_session_loop(state: &AppState, job: &SessionLoopJob) -> Result<Sess
     Ok(session)
 }
 
-async fn authorize_session_run(
+pub(crate) async fn authorize_session_run(
     state: &AppState,
     headers: &HeaderMap,
     session_id: Uuid,

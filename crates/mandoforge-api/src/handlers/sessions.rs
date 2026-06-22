@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::{
     AddMessage, AppError, AppState, AuthorizationRequest, CreateSession, Permission,
     SendSessionEvents, Session, SessionEvent, SessionThread, append_incoming_session_event,
-    append_user_message_event, authorize_collection_request, authorize_request,
+    append_user_message_event, authorize_collection_request, authorize_request, authorize_session_run,
     enqueue_session_loop, ensure_primary_session_thread, principal_from_request,
     project_session_event_to_loop, visible_session_ids_for_principal,
 };
@@ -18,6 +18,7 @@ pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/{id}", get(get_session))
+        .route("/api/sessions/{id}/run", post(run_session))
         .route("/api/sessions/{id}/messages", post(add_message))
         .route(
             "/api/sessions/{id}/events",
@@ -88,6 +89,22 @@ async fn get_session(
         Some(id),
     )
     .await?;
+    Ok(Json(state.get_session(id).await?))
+}
+
+async fn run_session(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Session>, AppError> {
+    authorize_session_run(&state, &headers, id).await?;
+    let event = append_user_message_event(
+        &state,
+        id,
+        "Compatibility run request from POST /api/sessions/:id/run".to_string(),
+    )
+    .await?;
+    enqueue_session_loop(&state, id, Some(event.id), "compat.run").await?;
     Ok(Json(state.get_session(id).await?))
 }
 
