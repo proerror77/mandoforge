@@ -8,8 +8,9 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{
-    AppError, AppState, CreateRemoteComputerSidecarHeartbeat, CreateRemoteComputerStateLock,
-    ReleaseRemoteComputerStateLock,
+    AppError, AppState, CreateRemoteComputer, CreateRemoteComputerLease,
+    CreateRemoteComputerSidecarHeartbeat, CreateRemoteComputerStateLock,
+    ReleaseRemoteComputerStateLock, RemoteComputer, RemoteComputerLease,
     RemoteComputerArtifactDiscoverRequest, RemoteComputerArtifactSyncRequest,
     RemoteComputerArtifactSyncResponse, RemoteComputerReadinessReport, RemoteComputerReclaimRun,
     RemoteComputerRunnerDryRunRequest, RemoteComputerRunnerDryRunResponse,
@@ -17,11 +18,14 @@ use crate::{
     RemoteComputerSidecarRecoveryRun, RemoteComputerStateLock,
     RemoteComputerStateSyncValidationRun,
     acquire_remote_computer_state_lock as acquire_remote_computer_state_lock_impl,
+    create_remote_computer as create_remote_computer_impl,
+    create_remote_computer_lease as create_remote_computer_lease_impl,
     discover_remote_computer_artifacts as discover_remote_computer_artifacts_impl,
     dry_run_remote_computer_runner as dry_run_remote_computer_runner_impl,
     get_remote_computer_production_path as get_remote_computer_production_path_impl,
     get_remote_computer_readiness as get_remote_computer_readiness_impl,
     get_remote_computer_runner_readiness as get_remote_computer_runner_readiness_impl,
+    list_remote_computers as list_remote_computers_impl,
     list_remote_computer_sidecar_heartbeats as list_remote_computer_sidecar_heartbeats_impl,
     list_remote_computer_state_locks as list_remote_computer_state_locks_impl,
     mutate_remote_computer_runner as mutate_remote_computer_runner_impl,
@@ -87,6 +91,14 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/api/remote-computers/reclaim-stale",
             post(reclaim_stale_remote_computers),
+        )
+        .route(
+            "/api/remote-computers",
+            get(list_remote_computers).post(create_remote_computer),
+        )
+        .route(
+            "/api/remote-computers/{id}/leases",
+            post(create_remote_computer_lease),
         )
 }
 
@@ -201,4 +213,28 @@ async fn reclaim_stale_remote_computers(
     headers: HeaderMap,
 ) -> Result<Json<RemoteComputerReclaimRun>, AppError> {
     reclaim_stale_remote_computers_impl(state, headers).await
+}
+
+async fn list_remote_computers(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<RemoteComputer>>, AppError> {
+    list_remote_computers_impl(state, headers).await
+}
+
+async fn create_remote_computer(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateRemoteComputer>,
+) -> Result<Json<RemoteComputer>, AppError> {
+    create_remote_computer_impl(state, headers, input).await
+}
+
+async fn create_remote_computer_lease(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateRemoteComputerLease>,
+) -> Result<Json<RemoteComputerLease>, AppError> {
+    create_remote_computer_lease_impl(state, id, headers, input).await
 }

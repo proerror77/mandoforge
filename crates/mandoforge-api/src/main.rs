@@ -2220,7 +2220,7 @@ struct RemoteComputerAttentionItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct RemoteComputer {
+pub(crate) struct RemoteComputer {
     id: Uuid,
     name: String,
     profile: String,
@@ -2235,7 +2235,7 @@ struct RemoteComputer {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct RemoteComputerLease {
+pub(crate) struct RemoteComputerLease {
     id: Uuid,
     remote_computer_id: Uuid,
     session_id: Option<Uuid>,
@@ -2307,7 +2307,7 @@ pub(crate) struct RemoteComputerSidecarHeartbeat {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct CreateRemoteComputer {
+pub(crate) struct CreateRemoteComputer {
     name: String,
     profile: Option<String>,
     namespace: Option<String>,
@@ -2318,7 +2318,7 @@ struct CreateRemoteComputer {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct CreateRemoteComputerLease {
+pub(crate) struct CreateRemoteComputerLease {
     session_id: Option<Uuid>,
     worker_id: Option<String>,
     lease_seconds: Option<i64>,
@@ -3915,14 +3915,6 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::approval_notifications::router())
         .merge(handlers::execution_jobs::router())
         .merge(handlers::remote_computers::router())
-        .route(
-            "/api/remote-computers",
-            get(list_remote_computers).post(create_remote_computer),
-        )
-        .route(
-            "/api/remote-computers/{id}/leases",
-            post(create_remote_computer_lease),
-        )
         .route(
             "/api/remote-computer-leases/{id}/attach",
             post(attach_remote_computer_lease),
@@ -53635,8 +53627,8 @@ fn remote_computer_runner_response_for_audit(
     value
 }
 
-async fn list_remote_computers(
-    State(state): State<AppState>,
+pub(crate) async fn list_remote_computers(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Vec<RemoteComputer>>, AppError> {
     authorize_request(
@@ -53791,10 +53783,10 @@ async fn execute_remote_computer_stale_reclaim(
     Ok(run)
 }
 
-async fn create_remote_computer(
-    State(state): State<AppState>,
+pub(crate) async fn create_remote_computer(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<CreateRemoteComputer>,
+    input: CreateRemoteComputer,
 ) -> Result<Json<RemoteComputer>, AppError> {
     authorize_request(
         &state,
@@ -53840,11 +53832,11 @@ async fn list_remote_computer_leases(
     Ok(Json(state.list_remote_computer_leases().await?))
 }
 
-async fn create_remote_computer_lease(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn create_remote_computer_lease(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<CreateRemoteComputerLease>,
+    input: CreateRemoteComputerLease,
 ) -> Result<Json<RemoteComputerLease>, AppError> {
     authorize_request(
         &state,
