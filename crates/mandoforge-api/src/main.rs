@@ -41036,48 +41036,7 @@ pub(crate) async fn enforce_worker_pool_binding(
     Err(AppError::not_found("job not claimable for worker pool"))
 }
 
-pub(crate) async fn get_remote_computer_readiness(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<RemoteComputerReadinessReport>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "remote_computers",
-        None,
-    )
-    .await?;
-    Ok(Json(build_remote_computer_readiness(&state).await?))
-}
-
-pub(crate) async fn get_remote_computer_production_path(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<Value>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "remote_computer_production_path",
-        None,
-    )
-    .await?;
-    let generated_at = Utc::now();
-    let readiness = build_remote_computer_readiness(&state).await?;
-    let execution_transport = build_remote_computer_execution_transport_readiness(&state).await?;
-    let worker_readiness = build_worker_readiness(&state).await?;
-    let audit_logs = state.list_audit_logs(None).await?;
-    Ok(Json(build_remote_computer_production_path_payload(
-        generated_at,
-        readiness,
-        execution_transport,
-        worker_readiness,
-        &audit_logs,
-    )))
-}
-
-fn build_remote_computer_production_path_payload(
+pub(crate) fn build_remote_computer_production_path_payload(
     generated_at: DateTime<Utc>,
     readiness: RemoteComputerReadinessReport,
     execution_transport: RemoteComputerExecutionTransportReadiness,
@@ -41572,208 +41531,7 @@ fn remote_computer_checked_sidecar_pod_detail_count(validation_result: &Value) -
     checked_pods.len() as u64
 }
 
-pub(crate) async fn validate_remote_computer_state_sync(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<RemoteComputerStateSyncValidationRun>, AppError> {
-    let principal = principal_from_request(&state, &headers).await?;
-    let request = AuthorizationRequest {
-        tenant_id: state.current_tenant_id(),
-        permission: Permission::Admin,
-        resource_type: "remote_computer_state_sync".to_string(),
-        resource_id: None,
-    };
-    state.authorizer.authorize(&principal, &request).await?;
-    enforce_resource_scope(&state, &principal, &request).await?;
-
-    let checked_at = Utc::now();
-    let lookup = |key: &str| std::env::var(key).ok();
-    let readiness = build_remote_computer_readiness(&state).await?;
-    let state_filesystem = readiness.state_filesystem;
-    let controller_required = remote_computer_state_sync_controller_required(&lookup);
-    let controller_configured = remote_computer_state_sync_controller_configured(&lookup);
-    let mut issues = remote_computer_state_sync_base_issues(&state_filesystem);
-    if controller_required && !controller_configured {
-        issues.push("state sync controller is required but not configured".to_string());
-    }
-    let mut controller_execution = json!({
-        "attempted": false,
-        "status": "skipped",
-        "reason": if controller_configured {
-            if issues.is_empty() {
-                "controller_not_required"
-            } else {
-                "state_sync_not_ready"
-            }
-        } else {
-            "controller_not_configured"
-        }
-    });
-    if controller_configured && issues.is_empty() {
-        match execute_remote_computer_state_sync_controller(
-            &lookup,
-            &principal.subject_id,
-            checked_at,
-            &state_filesystem,
-        )
-        .await
-        {
-            Ok(execution) => {
-                if execution.get("status").and_then(Value::as_str) != Some("validated") {
-                    issues.push("state sync controller did not validate".to_string());
-                }
-                controller_execution = execution;
-            }
-            Err(error) => {
-                issues.push("state sync controller failed".to_string());
-                controller_execution = json!({
-                    "attempted": true,
-                    "status": "failed",
-                    "error": error.message
-                });
-            }
-        }
-    }
-    if controller_required
-        && controller_execution.get("status").and_then(Value::as_str) != Some("validated")
-    {
-        issues.push("state sync controller evidence is missing or not validated".to_string());
-    }
-    dedupe_strings(&mut issues);
-    let status = if issues.is_empty() {
-        "validated"
-    } else {
-        "blocked"
-    }
-    .to_string();
-    state
-        .append_audit_log(new_audit_log(
-            None,
-            "user",
-            None,
-            "remote_computer.production_state_sync_validation",
-            "remote_computer_state_sync",
-            None,
-            json!({
-                "subject": principal.subject_id,
-                "status": status,
-                "controller_required": controller_required,
-                "controller_configured": controller_configured,
-                "controller_execution": controller_execution,
-                "provider": state_filesystem.provider,
-                "distributed_filesystem_configured": state_filesystem.distributed_filesystem_configured,
-                "production_profile_present": state_filesystem.production_profile_present,
-                "state_contract_present": state_filesystem.state_contract_present,
-                "lock_manager_configured": state_filesystem.lock_manager_configured,
-                "conflict_policy": state_filesystem.conflict_policy,
-                "issues": issues,
-                "checked_at": checked_at,
-            }),
-        ))
-        .await?;
-    Ok(Json(RemoteComputerStateSyncValidationRun {
-        status,
-        checked_at,
-        controller_required,
-        controller_configured,
-        controller_execution,
-        issues,
-    }))
-}
-
-pub(crate) async fn get_remote_computer_runner_readiness(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<RemoteComputerRunnerReadiness>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "remote_computer_runner",
-        None,
-    )
-    .await?;
-    Ok(Json(build_remote_computer_runner_readiness()))
-}
-
-pub(crate) async fn dry_run_remote_computer_runner(
-    state: AppState,
-    headers: HeaderMap,
-    input: RemoteComputerRunnerDryRunRequest,
-) -> Result<Json<RemoteComputerRunnerDryRunResponse>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "remote_computer_runner",
-        input.remote_computer_id,
-    )
-    .await?;
-    let config = RemoteComputerRunnerConfig::from_env();
-    let runner = remote_computer_runner_for_config(&config);
-    let session_id = input.session_id;
-    let remote_computer_id = input.remote_computer_id;
-    let response = runner.dry_run(&config, input).await;
-    state
-        .append_audit_log(new_audit_log(
-            session_id,
-            "system",
-            None,
-            "remote_computer.runner_dry_run",
-            "remote_computer_runner",
-            remote_computer_id,
-            json!({
-                "config": config,
-                "response": remote_computer_runner_response_for_audit(&response),
-                "execution_enabled": response.execution_enabled
-            }),
-        ))
-        .await?;
-    Ok(Json(response))
-}
-
-pub(crate) async fn mutate_remote_computer_runner(
-    state: AppState,
-    headers: HeaderMap,
-    input: RemoteComputerRunnerDryRunRequest,
-) -> Result<Json<RemoteComputerRunnerDryRunResponse>, AppError> {
-    if remote_computer_runner_request_is_exec(&input) {
-        return Err(AppError::bad_request(
-            "remote computer runner mutate does not accept direct exec operations; use an approved execution job",
-        ));
-    }
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "remote_computer_runner",
-        input.remote_computer_id,
-    )
-    .await?;
-    let config = RemoteComputerRunnerConfig::from_env();
-    let runner = remote_computer_runner_for_config(&config);
-    let session_id = input.session_id;
-    let remote_computer_id = input.remote_computer_id;
-    let response = runner.mutate(&config, input).await;
-    state
-        .append_audit_log(new_audit_log(
-            session_id,
-            "system",
-            None,
-            "remote_computer.runner_mutate",
-            "remote_computer_runner",
-            remote_computer_id,
-            json!({
-                "config": config,
-                "response": remote_computer_runner_response_for_audit(&response),
-                "execution_enabled": response.execution_enabled
-            }),
-        ))
-        .await?;
-    Ok(Json(response))
-}
-
-fn remote_computer_runner_request_is_exec(input: &RemoteComputerRunnerDryRunRequest) -> bool {
+pub(crate) fn remote_computer_runner_request_is_exec(input: &RemoteComputerRunnerDryRunRequest) -> bool {
     input
         .operation
         .as_deref()
@@ -41782,7 +41540,7 @@ fn remote_computer_runner_request_is_exec(input: &RemoteComputerRunnerDryRunRequ
         .is_some_and(|operation| matches!(operation.as_str(), "exec" | "live_exec"))
 }
 
-fn remote_computer_runner_response_for_audit(
+pub(crate) fn remote_computer_runner_response_for_audit(
     response: &RemoteComputerRunnerDryRunResponse,
 ) -> Value {
     let mut value = json!(response);
@@ -42490,7 +42248,7 @@ where
     }))
 }
 
-async fn build_remote_computer_readiness(
+pub(crate) async fn build_remote_computer_readiness(
     state: &AppState,
 ) -> Result<RemoteComputerReadinessReport, AppError> {
     let pod_template =
@@ -42903,7 +42661,7 @@ async fn build_remote_computer_readiness(
     })
 }
 
-fn remote_computer_state_sync_base_issues(
+pub(crate) fn remote_computer_state_sync_base_issues(
     state_filesystem: &RemoteComputerStateFilesystemReadiness,
 ) -> Vec<String> {
     let mut blocking_reasons = Vec::new();
@@ -42933,7 +42691,7 @@ fn remote_computer_state_sync_base_issues(
     blocking_reasons
 }
 
-fn remote_computer_state_sync_controller_required<F>(lookup: &F) -> bool
+pub(crate) fn remote_computer_state_sync_controller_required<F>(lookup: &F) -> bool
 where
     F: Fn(&str) -> Option<String>,
 {
@@ -42947,7 +42705,7 @@ where
         .unwrap_or(false)
 }
 
-fn remote_computer_state_sync_controller_configured<F>(lookup: &F) -> bool
+pub(crate) fn remote_computer_state_sync_controller_configured<F>(lookup: &F) -> bool
 where
     F: Fn(&str) -> Option<String>,
 {
@@ -42956,7 +42714,7 @@ where
         .unwrap_or(false)
 }
 
-async fn execute_remote_computer_state_sync_controller<F>(
+pub(crate) async fn execute_remote_computer_state_sync_controller<F>(
     lookup: &F,
     subject: &str,
     checked_at: DateTime<Utc>,
@@ -43125,7 +42883,7 @@ fn build_remote_computer_production_state_sync_readiness(
     }
 }
 
-async fn build_remote_computer_execution_transport_readiness(
+pub(crate) async fn build_remote_computer_execution_transport_readiness(
     state: &AppState,
 ) -> Result<RemoteComputerExecutionTransportReadiness, AppError> {
     let assignments = state.list_remote_computer_job_assignments().await?;
@@ -43406,7 +43164,7 @@ where
         .unwrap_or(false)
 }
 
-fn build_remote_computer_runner_readiness() -> RemoteComputerRunnerReadiness {
+pub(crate) fn build_remote_computer_runner_readiness() -> RemoteComputerRunnerReadiness {
     let config = RemoteComputerRunnerConfig::from_env();
     let runner = remote_computer_runner_for_config(&config);
     runner.readiness(&config)
