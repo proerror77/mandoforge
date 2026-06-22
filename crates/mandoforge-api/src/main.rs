@@ -133,6 +133,9 @@ use remote_computer_runner::{
     RemoteComputerRunnerDryRunResponse, RemoteComputerRunnerReadiness,
     remote_computer_runner_for_config,
 };
+pub(crate) use types::deployment::{
+    DeploymentVersion, ProductionAutoDeployRequest, ProductionDeploymentVerifyRequest,
+};
 pub(crate) use types::eval::{
     BootstrapEvalSuite, CreateEvalCase, CreateEvalDataset, CreateEvalJudgeProfile, CreateEvalRun,
     EvalCase, EvalDataset, EvalDriftDecision, EvalGateDecision, EvalGateRequest, EvalRun,
@@ -8262,39 +8265,6 @@ async fn healthz() -> Json<Value> {
         payload["desktop_health_nonce"] = json!(nonce);
     }
     Json(payload)
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct DeploymentVersion {
-    service: String,
-    cargo_package_version: String,
-    image_tag: Option<String>,
-    git_sha: Option<String>,
-    build_time: Option<String>,
-    source: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ProductionDeploymentVerifyRequest {
-    #[serde(default)]
-    expected_git_sha: Option<String>,
-    #[serde(default)]
-    expected_image_tag: Option<String>,
-    #[serde(default)]
-    target: Option<String>,
-    #[serde(default)]
-    require_match: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct ProductionAutoDeployRequest {
-    target: String,
-    #[serde(default)]
-    git_sha: Option<String>,
-    #[serde(default)]
-    image_tag: Option<String>,
-    #[serde(default)]
-    dry_run: bool,
 }
 
 async fn get_deployment_version() -> Json<DeploymentVersion> {
