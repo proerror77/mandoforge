@@ -17,7 +17,7 @@ use crate::{
     MemoryWritebackCandidate, Permission, ResolveSemanticConflictRequest,
     ReviewMemoryWritebackCandidate, ReviewOntologyProposalRequest, RunSemanticDreamingRequest, SemanticGraphSnapshot,
     SemanticLink, SemanticObject, SemanticGovernanceRunRequest, SemanticGovernanceRunResult, SemanticProductQuery,
-    SemanticIngestionBatchResult, SemanticSearchResponse, SemanticSearchResult, SemanticSource, UpdateSemanticLink,
+    SemanticIngestionBatchResult, SemanticRetrievalBackendRegistry, SemanticSearchResponse, SemanticSearchResult, SemanticSource, UpdateSemanticLink,
     UpdateSemanticObject, UpdateSemanticSource, authorize_collection_request, authorize_request,
     build_semantic_graph_snapshot, domain_ontology_object_type_suggestions, domain_ontology_relation_type_suggestions,
     expand_semantic_links_for_context, fetch_semantic_object_for_context,
@@ -27,7 +27,7 @@ use crate::{
     ontology_builder_candidate_types, ontology_builder_evidence_objects, principal_from_request,
     record_memory_writeback_candidate_review, record_semantic_link_audit, record_semantic_object_audit, record_semantic_source_audit,
     semantic_object_matched_fields, semantic_object_matches_product_query,
-    semantic_ontology_builder_prompt_packet, validate_handoff_token,
+    semantic_ontology_builder_prompt_packet, semantic_retrieval_backend_registry_from_env, validate_handoff_token,
     materialize_semantic_ingestion_batch, validate_semantic_ingestion_batch,
     validate_semantic_link_against_ontology, visible_session_ids_for_principal,
 };
@@ -80,6 +80,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/api/semantic-reflection/queue",
             get(get_semantic_reflection_queue),
+        )
+        .route(
+            "/api/semantic-retrieval/backends",
+            get(get_semantic_retrieval_backends),
         )
         .route(
             "/api/sessions/{id}/memory-writeback-candidates",
@@ -843,6 +847,21 @@ async fn get_semantic_reflection_queue(
         "item_count": items.len(),
         "items": items,
     })))
+}
+
+async fn get_semantic_retrieval_backends(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<SemanticRetrievalBackendRegistry>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "semantic_retrieval_backends",
+        None,
+    )
+    .await?;
+    Ok(Json(semantic_retrieval_backend_registry_from_env()))
 }
 
 async fn list_session_memory_writeback_candidates(

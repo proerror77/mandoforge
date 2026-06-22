@@ -3896,10 +3896,6 @@ fn build_router(state: AppState) -> Router {
             post(create_session_semantic_synthesis_run),
         )
         .route(
-            "/api/semantic-retrieval/backends",
-            get(get_semantic_retrieval_backends),
-        )
-        .route(
             "/api/sessions/{id}/agent-handoffs",
             get(list_session_agent_handoff_events).post(create_agent_handoff_event),
         )
@@ -29475,21 +29471,6 @@ async fn enforce_resource_scope(
     }
 }
 
-async fn get_semantic_retrieval_backends(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<SemanticRetrievalBackendRegistry>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::AgentsRead,
-        "semantic_retrieval_backends",
-        None,
-    )
-    .await?;
-    Ok(Json(semantic_retrieval_backend_registry_from_env()))
-}
-
 async fn create_session_semantic_synthesis_run(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -30856,7 +30837,7 @@ fn context_packet_semantic_object_from_store_object(
     }
 }
 
-fn semantic_retrieval_backend_registry_from_env() -> SemanticRetrievalBackendRegistry {
+pub(crate) fn semantic_retrieval_backend_registry_from_env() -> SemanticRetrievalBackendRegistry {
     semantic_retrieval_backend_registry_from_lookup(|key| std::env::var(key).ok())
 }
 
