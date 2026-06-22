@@ -13,8 +13,8 @@ use crate::{
     AppError, AppState, BuildSemanticOntologyRequest, CreateSemanticLink, CreateSemanticObject,
     CreateSemanticSource, ExpandSemanticLinksRequest, ExpandSemanticLinksResponse,
     ExpandSemanticOntologyRequest, FetchSemanticObjectRequest, FetchSemanticObjectResponse,
-    Permission, ReviewOntologyProposalRequest, SemanticGraphSnapshot, SemanticLink, SemanticObject,
-    SemanticGovernanceRunRequest, SemanticGovernanceRunResult, SemanticProductQuery,
+    Permission, ResolveSemanticConflictRequest, ReviewOntologyProposalRequest, SemanticGraphSnapshot,
+    SemanticLink, SemanticObject, SemanticGovernanceRunRequest, SemanticGovernanceRunResult, SemanticProductQuery,
     SemanticSearchResponse, SemanticSearchResult, SemanticSource, UpdateSemanticLink,
     UpdateSemanticObject, UpdateSemanticSource, authorize_request, build_semantic_graph_snapshot,
     domain_ontology_object_type_suggestions, domain_ontology_relation_type_suggestions,
@@ -65,6 +65,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/api/semantic-governance/run",
             post(run_semantic_governance),
+        )
+        .route(
+            "/api/semantic-conflicts/resolve",
+            post(resolve_semantic_conflict),
         )
         .route(
             "/api/semantic-ontology/expand",
@@ -617,6 +621,68 @@ async fn run_semantic_governance(
         ))
         .await?;
     Ok(Json(result))
+}
+
+async fn resolve_semantic_conflict(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<ResolveSemanticConflictRequest>,
+) -> Result<Json<Value>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsWrite,
+        "semantic_conflicts",
+        None,
+    )
+    .await?;
+    let preferred = state.get_semantic_object(input.preferred_object_id).await?;
+    let mut archived_object_ids = Vec::new();
+    for object_id in input.archive_object_ids {
+        let archived = state.archive_semantic_object(object_id).await?;
+        let _ = state
+            .create_semantic_link(CreateSemanticLink {
+                from_entity_type: "semantic_object".to_string(),
+                from_entity_id: preferred.id.to_string(),
+                relation_type: "supersedes".to_string(),
+                to_entity_type: "semantic_object".to_string(),
+                to_entity_id: archived.id.to_string(),
+                metadata: json!({
+                    "reason": input.reason,
+                    "resolution": "preferred_object_selected",
+                }),
+                provenance: json!({
+                    "source": "semantic_conflicts.resolve",
+                    "resolved_at": Utc::now(),
+                }),
+                confidence: 1.0,
+                status: "active".to_string(),
+            })
+            .await?;
+        archived_object_ids.push(archived.id);
+    }
+    let principal = principal_from_request(&state, &headers).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "semantic_conflict.resolved",
+            "semantic_object",
+            Some(preferred.id),
+            json!({
+                "subject": principal.subject_id,
+                "preferred_object_id": preferred.id,
+                "archived_object_ids": archived_object_ids,
+                "reason": input.reason,
+            }),
+        ))
+        .await?;
+    Ok(Json(json!({
+        "status": "resolved",
+        "preferred_object_id": preferred.id,
+        "archived_object_ids": archived_object_ids,
+    })))
 }
 
 async fn expand_semantic_ontology(
