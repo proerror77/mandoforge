@@ -43,6 +43,12 @@ pub(crate) struct ApprovalCommitToken {
     pub(crate) created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ApprovalCommitBinding {
+    pub(crate) normalized_args_hash: String,
+    pub(crate) target_binding: Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ApprovalGroup {
     pub(crate) id: Uuid,

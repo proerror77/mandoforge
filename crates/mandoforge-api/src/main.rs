@@ -162,9 +162,9 @@ pub(crate) use types::artifact::{
     RemoteComputerArtifactSyncResponse,
 };
 pub(crate) use types::approval::{
-    Approval, ApprovalCommitToken, ApprovalEscalationDueRun, ApprovalEscalationRule,
-    ApprovalGroup, ApprovalNotificationChannelDelivery, ApprovalNotificationChannelPolicy,
-    ApprovalNotificationDelivery, ApprovalNotificationDeliveryFailure,
+    Approval, ApprovalCommitBinding, ApprovalCommitToken, ApprovalEscalationDueRun,
+    ApprovalEscalationRule, ApprovalGroup, ApprovalNotificationChannelDelivery,
+    ApprovalNotificationChannelPolicy, ApprovalNotificationDelivery, ApprovalNotificationDeliveryFailure,
     ApprovalNotificationDeliveryRun, ApprovalNotificationDeliveryRunAttentionItem,
     ApprovalNotificationDeliveryRunRecord, ApprovalNotificationDeliveryRunSummary,
     ApprovalNotificationDeploymentReadiness, ApprovalNotificationDeploymentValidationRun,
@@ -28959,12 +28959,6 @@ fn parse_roles_header(value: &str) -> Result<Vec<Role>, AppError> {
 enum ToolInvocationOrigin {
     ManualRoute,
     SessionLoop,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct ApprovalCommitBinding {
-    pub(crate) normalized_args_hash: String,
-    pub(crate) target_binding: Value,
 }
 
 pub(crate) fn task_grant_requires_approval_commit_token(
