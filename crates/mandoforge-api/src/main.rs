@@ -165,9 +165,14 @@ pub(crate) use types::tenant::{
     TenantRuntimeMode, TransferOrganizationOwnership,
 };
 pub(crate) use types::workflow::{
-    CreateTaskGrant, CreateWorkflowDefinition, CreateWorkflowRun, CreateWorkflowStepRun,
-    TaskGrant, UpdateWorkflowDefinition, UpdateWorkflowStepRun, WorkflowDefinition, WorkflowRun,
-    WorkflowStepRun, WorkflowTransition, WorkflowTransitionFilter, WorkflowTransitionQuery,
+    CompileDynamicWorkflowPlan, CreateDynamicWorkflowPlan, CreateTaskGrant,
+    CreateWorkflowDefinition, CreateWorkflowRun, CreateWorkflowStepRun,
+    DynamicWorkflowAdjudicationRequest, DynamicWorkflowAdjudicationResponse, DynamicWorkflowPlan,
+    DynamicWorkflowPlanCompilationResponse, DynamicWorkflowPlanMaterializationResponse,
+    DynamicWorkflowPressureTestRequest, DynamicWorkflowPressureTestResponse,
+    MaterializeDynamicWorkflowPlan, ReviewDynamicWorkflowPlan, TaskGrant, UpdateWorkflowDefinition,
+    UpdateWorkflowStepRun, WorkflowDefinition, WorkflowRun, WorkflowStepRun, WorkflowTransition,
+    WorkflowTransitionFilter, WorkflowTransitionQuery,
 };
 use types::tools::{
     ApprovalRequestTool, ArtifactCreateTool, FileReadTool, McpCallTool, OntologyTypeLookupTool,
@@ -439,134 +444,6 @@ struct ReviewManagerAgentPlan {
     review: Value,
     #[serde(default)]
     status: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct DynamicWorkflowPlan {
-    id: Uuid,
-    source_work_item_id: Option<Uuid>,
-    source_session_id: Option<Uuid>,
-    objective: String,
-    status: String,
-    phases: Value,
-    agent_fleet_policy: Value,
-    governance: Value,
-    validation: Value,
-    materialization: Value,
-    analysis: Value,
-    review: Value,
-    workflow_definition_id: Option<Uuid>,
-    workflow_run_id: Option<Uuid>,
-    audit_trace_id: Option<Uuid>,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-    reviewed_at: Option<DateTime<Utc>>,
-    materialized_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CreateDynamicWorkflowPlan {
-    #[serde(default)]
-    source_work_item_id: Option<Uuid>,
-    #[serde(default)]
-    source_session_id: Option<Uuid>,
-    objective: String,
-    #[serde(default = "empty_json_array")]
-    phases: Value,
-    #[serde(default = "default_dynamic_workflow_agent_fleet_policy")]
-    agent_fleet_policy: Value,
-    #[serde(default = "default_dynamic_workflow_governance")]
-    governance: Value,
-    #[serde(default = "default_dynamic_workflow_validation")]
-    validation: Value,
-    #[serde(default = "default_dynamic_workflow_materialization")]
-    materialization: Value,
-}
-
-#[derive(Debug, Deserialize)]
-struct CompileDynamicWorkflowPlan {
-    objective: String,
-    #[serde(default)]
-    runtime_adapter: Option<String>,
-    #[serde(default)]
-    execution_strategy: Option<String>,
-    #[serde(default)]
-    max_total_agents: Option<u64>,
-    #[serde(default)]
-    max_parallel_agents: Option<u64>,
-    #[serde(default)]
-    source_work_item_id: Option<Uuid>,
-    #[serde(default)]
-    source_session_id: Option<Uuid>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct DynamicWorkflowPlanCompilationResponse {
-    request: CreateDynamicWorkflowPlan,
-    compiler: Value,
-}
-
-#[derive(Debug, Deserialize)]
-struct ReviewDynamicWorkflowPlan {
-    review: Value,
-    #[serde(default)]
-    status: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct DynamicWorkflowPressureTestRequest {
-    #[serde(default)]
-    target_agents: Option<u64>,
-    #[serde(default)]
-    max_parallel_agents: Option<u64>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct DynamicWorkflowPressureTestResponse {
-    status: String,
-    plan_id: Uuid,
-    target_agents: u64,
-    max_parallel_agents: u64,
-    simulated_batches: u64,
-    estimated_worker_claims: u64,
-    evidence: Value,
-}
-
-#[derive(Debug, Deserialize)]
-struct DynamicWorkflowAdjudicationRequest {
-    #[serde(default)]
-    vote_threshold: Option<f64>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct DynamicWorkflowAdjudicationResponse {
-    status: String,
-    plan_id: Uuid,
-    workflow_run_id: Uuid,
-    threshold: f64,
-    completed_votes: usize,
-    positive_votes: usize,
-    negative_votes: usize,
-    score: f64,
-    decision: String,
-    evidence: Value,
-}
-
-#[derive(Debug, Deserialize)]
-struct MaterializeDynamicWorkflowPlan {
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    environment_id: Option<Uuid>,
-    #[serde(default = "empty_json_object")]
-    input_payload: Value,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct DynamicWorkflowPlanMaterializationResponse {
-    plan: DynamicWorkflowPlan,
-    workflow_definition: WorkflowDefinition,
-    workflow_run: WorkflowRun,
 }
 
 #[derive(Debug, Deserialize)]
