@@ -3917,10 +3917,6 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::ontology_intelligence::router())
         .merge(handlers::ontology::router())
         .route(
-            "/api/semantic-ingestion/batches",
-            post(create_semantic_ingestion_batch),
-        )
-        .route(
             "/api/memory-governance/summary",
             get(get_memory_governance_summary),
         )
@@ -14452,24 +14448,6 @@ fn validate_semantic_link_against_ontology(input: &CreateSemanticLink) -> Result
 
 fn normalized_ontology_token(value: &str) -> String {
     value.trim().to_ascii_lowercase().replace('-', "_")
-}
-
-async fn create_semantic_ingestion_batch(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(input): Json<CreateSemanticIngestionBatch>,
-) -> Result<Json<SemanticIngestionBatchResult>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::AgentsWrite,
-        "semantic_ingestion_batch",
-        None,
-    )
-    .await?;
-    validate_semantic_ingestion_batch(&input)?;
-    let result = materialize_semantic_ingestion_batch(&state, &headers, input).await?;
-    Ok(Json(result))
 }
 
 fn validate_semantic_ingestion_batch(input: &CreateSemanticIngestionBatch) -> Result<(), AppError> {

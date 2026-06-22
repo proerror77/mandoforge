@@ -10,13 +10,13 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 use crate::{
-    AppError, AppState, BuildSemanticOntologyRequest, CreateSemanticLink, CreateSemanticObject,
-    CreateSemanticSource, ExpandSemanticLinksRequest, ExpandSemanticLinksResponse,
+    AppError, AppState, BuildSemanticOntologyRequest, CreateSemanticIngestionBatch,
+    CreateSemanticLink, CreateSemanticObject, CreateSemanticSource, ExpandSemanticLinksRequest, ExpandSemanticLinksResponse,
     ExpandSemanticOntologyRequest, FetchSemanticObjectRequest, FetchSemanticObjectResponse,
     MemoryWritebackCandidate, Permission, ResolveSemanticConflictRequest,
     ReviewOntologyProposalRequest, RunSemanticDreamingRequest, SemanticGraphSnapshot,
     SemanticLink, SemanticObject, SemanticGovernanceRunRequest, SemanticGovernanceRunResult, SemanticProductQuery,
-    SemanticSearchResponse, SemanticSearchResult, SemanticSource, UpdateSemanticLink,
+    SemanticIngestionBatchResult, SemanticSearchResponse, SemanticSearchResult, SemanticSource, UpdateSemanticLink,
     UpdateSemanticObject, UpdateSemanticSource, authorize_collection_request, authorize_request,
     build_semantic_graph_snapshot, domain_ontology_object_type_suggestions, domain_ontology_relation_type_suggestions,
     expand_semantic_links_for_context, fetch_semantic_object_for_context,
@@ -27,6 +27,7 @@ use crate::{
     record_semantic_link_audit, record_semantic_object_audit, record_semantic_source_audit,
     semantic_object_matched_fields, semantic_object_matches_product_query,
     semantic_ontology_builder_prompt_packet, validate_handoff_token,
+    materialize_semantic_ingestion_batch, validate_semantic_ingestion_batch,
     validate_semantic_link_against_ontology, visible_session_ids_for_principal,
 };
 
@@ -78,6 +79,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/api/semantic-reflection/queue",
             get(get_semantic_reflection_queue),
+        )
+        .route(
+            "/api/semantic-ingestion/batches",
+            post(create_semantic_ingestion_batch),
         )
         .route(
             "/api/semantic-ontology/expand",
@@ -816,6 +821,24 @@ async fn get_semantic_reflection_queue(
         "item_count": items.len(),
         "items": items,
     })))
+}
+
+async fn create_semantic_ingestion_batch(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateSemanticIngestionBatch>,
+) -> Result<Json<SemanticIngestionBatchResult>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsWrite,
+        "semantic_ingestion_batch",
+        None,
+    )
+    .await?;
+    validate_semantic_ingestion_batch(&input)?;
+    let result = materialize_semantic_ingestion_batch(&state, &headers, input).await?;
+    Ok(Json(result))
 }
 
 async fn expand_semantic_ontology(
