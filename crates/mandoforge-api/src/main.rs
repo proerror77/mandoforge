@@ -11,10 +11,12 @@ use async_trait::async_trait;
 use axum::{
     Json, Router,
     extract::{Request, State},
-    http::{HeaderMap, HeaderName, HeaderValue, header},
+    http::{HeaderMap, HeaderName, HeaderValue},
     middleware::{self, Next},
-    response::{IntoResponse, Response},
+    response::Response,
 };
+#[cfg(test)]
+use axum::http::header;
 #[cfg(test)]
 use axum::extract::Query;
 #[cfg(test)]
@@ -40255,94 +40257,6 @@ fn eval_run_detail_i64(run: &EvalRun, key: &str) -> i64 {
     run.details.get(key).and_then(Value::as_i64).unwrap_or(0)
 }
 
-pub(crate) async fn get_usage_finance_operations_summary(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<UsageFinanceOperationsSummary>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "usage_finance_operations",
-        None,
-    )
-    .await?;
-    Ok(Json(build_usage_finance_operations_summary(&state).await?))
-}
-
-pub(crate) async fn run_usage_finance_operations(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<UsageFinanceOperationsRun>, AppError> {
-    let principal = principal_from_request(&state, &headers).await?;
-    let request = AuthorizationRequest {
-        tenant_id: state.current_tenant_id(),
-        permission: Permission::Admin,
-        resource_type: "usage_finance_operations".to_string(),
-        resource_id: None,
-    };
-    state.authorizer.authorize(&principal, &request).await?;
-    enforce_resource_scope(&state, &principal, &request).await?;
-    Ok(Json(
-        execute_usage_finance_operations(&state, Some(principal.subject_id.as_str())).await?,
-    ))
-}
-
-pub(crate) async fn run_usage_finance_reconciliation(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<Value>, AppError> {
-    let principal = principal_from_request(&state, &headers).await?;
-    let request = AuthorizationRequest {
-        tenant_id: state.current_tenant_id(),
-        permission: Permission::Admin,
-        resource_type: "usage_finance_operations".to_string(),
-        resource_id: None,
-    };
-    state.authorizer.authorize(&principal, &request).await?;
-    enforce_resource_scope(&state, &principal, &request).await?;
-    let ran_at = Utc::now();
-    let before = build_usage_finance_operations_summary(&state).await?;
-    let execution = execute_usage_finance_reconciliation_controller(
-        &|key| std::env::var(key).ok(),
-        Some(principal.subject_id.as_str()),
-        ran_at,
-        &before,
-    )
-    .await?;
-    let status = execution
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("failed")
-        .to_string();
-    state
-        .append_audit_log(new_audit_log(
-            None,
-            "user",
-            None,
-            "usage.finance_reconciliation_run",
-            "usage_finance_operations",
-            None,
-            json!({
-                "subject": principal.subject_id,
-                "status": status,
-                "reconciliation_controller_configured": true,
-                "reconciliation_controller_execution": execution,
-                "before_status": before.status,
-                "before_production_close_status": before.production_close.status,
-                "ran_at": ran_at,
-            }),
-        ))
-        .await?;
-    Ok(Json(json!({
-        "status": status,
-        "ran_at": ran_at,
-        "before": before,
-        "reconciliation_controller_configured": true,
-        "reconciliation_controller_execution": execution,
-    })))
-}
-
 pub(crate) async fn build_usage_finance_dashboard_summary(
     state: &AppState,
 ) -> Result<UsageFinanceDashboardSummary, AppError> {
@@ -40363,7 +40277,7 @@ pub(crate) async fn build_usage_finance_dashboard_summary(
     ))
 }
 
-async fn build_usage_finance_operations_summary(
+pub(crate) async fn build_usage_finance_operations_summary(
     state: &AppState,
 ) -> Result<UsageFinanceOperationsSummary, AppError> {
     let generated_at = Utc::now();
@@ -40390,7 +40304,7 @@ async fn build_usage_finance_operations_summary(
     ))
 }
 
-async fn execute_usage_finance_operations(
+pub(crate) async fn execute_usage_finance_operations(
     state: &AppState,
     subject: Option<&str>,
 ) -> Result<UsageFinanceOperationsRun, AppError> {
@@ -40696,7 +40610,7 @@ where
     }))
 }
 
-async fn execute_usage_finance_reconciliation_controller<F>(
+pub(crate) async fn execute_usage_finance_reconciliation_controller<F>(
     lookup: &F,
     subject: Option<&str>,
     ran_at: DateTime<Utc>,
@@ -41280,76 +41194,7 @@ pub(crate) fn dedupe_strings(values: &mut Vec<String>) {
     values.retain(|value| seen.insert(value.clone()));
 }
 
-pub(crate) async fn export_usage_csv(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Response, AppError> {
-    let principal = principal_from_request(&state, &headers).await?;
-    let request = AuthorizationRequest {
-        tenant_id: state.current_tenant_id(),
-        permission: Permission::Admin,
-        resource_type: "usage_export".to_string(),
-        resource_id: None,
-    };
-    state.authorizer.authorize(&principal, &request).await?;
-    enforce_resource_scope(&state, &principal, &request).await?;
-    let summary = build_usage_summary(&state).await?;
-    let trend = build_usage_trend_summary(&state).await?;
-    let csv = build_usage_finance_csv(&summary, &trend);
-    state
-        .append_audit_log(new_audit_log(
-            None,
-            "user",
-            None,
-            "usage.finance_exported",
-            "usage_export",
-            None,
-            json!({
-                "subject": principal.subject_id,
-                "provider_count": summary.by_provider.len(),
-                "budget_pressure_count": trend.budget_pressure.pressure_count,
-                "rollup_count": trend.rollup_count
-            }),
-        ))
-        .await?;
-    Ok((
-        [
-            (header::CONTENT_TYPE, "text/csv; charset=utf-8"),
-            (
-                header::CONTENT_DISPOSITION,
-                "attachment; filename=\"mandoforge-usage-export.csv\"",
-            ),
-        ],
-        csv,
-    )
-        .into_response())
-}
-
-pub(crate) async fn deliver_usage_export(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<UsageFinanceExportDelivery>, AppError> {
-    let principal = principal_from_request(&state, &headers).await?;
-    let request = AuthorizationRequest {
-        tenant_id: state.current_tenant_id(),
-        permission: Permission::Admin,
-        resource_type: "usage_export".to_string(),
-        resource_id: None,
-    };
-    state.authorizer.authorize(&principal, &request).await?;
-    enforce_resource_scope(&state, &principal, &request).await?;
-    Ok(Json(
-        execute_usage_finance_export_delivery(
-            &state,
-            false,
-            "user",
-            Some(principal.subject_id.as_str()),
-        )
-        .await?,
-    ))
-}
-
-async fn execute_usage_finance_export_delivery(
+pub(crate) async fn execute_usage_finance_export_delivery(
     state: &AppState,
     scheduled: bool,
     actor_type: &str,
@@ -43729,100 +43574,7 @@ fn build_observability_remediation_supervision_readiness(
     }
 }
 
-pub(crate) async fn acknowledge_cost_alert(
-    state: AppState,
-    headers: HeaderMap,
-    input: AcknowledgeCostAlertRequest,
-) -> Result<Json<CostAlertAcknowledgement>, AppError> {
-    let principal = principal_from_request(&state, &headers).await?;
-    let request = AuthorizationRequest {
-        tenant_id: state.current_tenant_id(),
-        permission: Permission::Admin,
-        resource_type: "usage_alerts".to_string(),
-        resource_id: None,
-    };
-    state.authorizer.authorize(&principal, &request).await?;
-    enforce_resource_scope(&state, &principal, &request).await?;
-    let provider_name = input.provider_name.trim();
-    let severity = input.severity.trim();
-    if provider_name.is_empty() {
-        return Err(AppError::bad_request("provider_name is required"));
-    }
-    if !matches!(severity, "warning" | "critical") {
-        return Err(AppError::bad_request(
-            "severity must be warning or critical",
-        ));
-    }
-    let acknowledged_at = Utc::now();
-    let acknowledgement = CostAlertAcknowledgement {
-        provider_name: provider_name.to_string(),
-        severity: severity.to_string(),
-        acknowledged_by: principal.subject_id.clone(),
-        comment: input.comment.and_then(|comment| {
-            let trimmed = comment.trim();
-            (!trimmed.is_empty()).then(|| trimmed.to_string())
-        }),
-        acknowledged_at,
-    };
-    state
-        .append_audit_log(new_audit_log(
-            None,
-            "user",
-            None,
-            "usage.alert_acknowledged",
-            "usage_alert",
-            None,
-            serde_json::to_value(&acknowledgement)?,
-        ))
-        .await?;
-    Ok(Json(acknowledgement))
-}
-
-pub(crate) async fn create_cost_alert_route(
-    state: AppState,
-    headers: HeaderMap,
-    input: CreateCostAlertRoute,
-) -> Result<Json<CostAlertRoute>, AppError> {
-    let principal = principal_from_request(&state, &headers).await?;
-    let request = AuthorizationRequest {
-        tenant_id: state.current_tenant_id(),
-        permission: Permission::Admin,
-        resource_type: "usage_alert_routes".to_string(),
-        resource_id: None,
-    };
-    state.authorizer.authorize(&principal, &request).await?;
-    enforce_resource_scope(&state, &principal, &request).await?;
-    let route = state
-        .create_cost_alert_route(validate_cost_alert_route_input(input)?)
-        .await?;
-    state
-        .append_audit_log(new_audit_log(
-            None,
-            "user",
-            None,
-            "usage.alert_route_created",
-            "usage_alert_route",
-            Some(route.id),
-            json!({
-                "subject": principal.subject_id,
-                "name": route.name,
-                "channel": route.channel,
-                "severity_filter": route.severity_filter
-            }),
-        ))
-        .await?;
-    Ok(Json(route))
-}
-
-pub(crate) async fn deliver_cost_alerts(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<CostAlertDelivery>, AppError> {
-    authorize_request(&state, &headers, Permission::Admin, "usage_alerts", None).await?;
-    Ok(Json(execute_cost_alert_delivery(&state, Utc::now()).await?))
-}
-
-async fn execute_cost_alert_delivery(
+pub(crate) async fn execute_cost_alert_delivery(
     state: &AppState,
     delivered_at: DateTime<Utc>,
 ) -> Result<CostAlertDelivery, AppError> {
@@ -44301,29 +44053,6 @@ fn severity_rank(severity: &str) -> i32 {
         "warning" => 1,
         _ => 0,
     }
-}
-
-pub(crate) async fn create_usage_rollup(
-    state: AppState,
-    headers: HeaderMap,
-    input: CreateUsageRollup,
-) -> Result<Json<UsageRollup>, AppError> {
-    authorize_request(&state, &headers, Permission::Admin, "usage_rollups", None).await?;
-    let period_end = input.period_end.unwrap_or_else(Utc::now);
-    let period_start = input
-        .period_start
-        .unwrap_or_else(|| period_end - chrono::Duration::hours(24));
-    if period_start >= period_end {
-        return Err(AppError::bad_request(
-            "usage rollup period_start must be before period_end",
-        ));
-    }
-    let summary = serde_json::to_value(build_usage_summary(&state).await?)?;
-    Ok(Json(
-        state
-            .create_usage_rollup(period_start, period_end, summary)
-            .await?,
-    ))
 }
 
 pub(crate) async fn build_observability_summary(
@@ -44880,7 +44609,7 @@ fn percent_delta(current: f64, previous: f64) -> Option<f64> {
     Some(((current - previous) / previous) * 100.0)
 }
 
-fn build_usage_finance_csv(summary: &UsageSummary, trend: &UsageTrendSummary) -> String {
+pub(crate) fn build_usage_finance_csv(summary: &UsageSummary, trend: &UsageTrendSummary) -> String {
     let mut csv = String::new();
     push_csv_row(
         &mut csv,
@@ -45323,7 +45052,7 @@ pub(crate) fn validate_approval_notification_channel_policy_input(
     Ok(input)
 }
 
-fn validate_cost_alert_route_input(
+pub(crate) fn validate_cost_alert_route_input(
     mut input: CreateCostAlertRoute,
 ) -> Result<CreateCostAlertRoute, AppError> {
     input.name = input.name.trim().to_string();
