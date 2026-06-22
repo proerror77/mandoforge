@@ -483,6 +483,76 @@ pub(crate) struct WorkflowGraphConsoleEdge {
     pub(crate) created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WorkflowGraphRetryPolicy {
+    pub(crate) max_attempts: usize,
+    pub(crate) delay_seconds: i64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct WorkflowGraphConditionEvaluation {
+    pub(crate) condition: Value,
+    pub(crate) source_step: Option<WorkflowStepRun>,
+    pub(crate) path: Option<String>,
+    pub(crate) actual: Value,
+    pub(crate) expected: Value,
+    pub(crate) matched: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum WorkflowGraphNumericComparator {
+    GreaterThan,
+    GreaterThanOrEquals,
+    LessThan,
+    LessThanOrEquals,
+}
+
+impl WorkflowGraphNumericComparator {
+    pub(crate) fn matches(self, actual: f64, expected: f64) -> bool {
+        match self {
+            Self::GreaterThan => actual > expected,
+            Self::GreaterThanOrEquals => actual >= expected,
+            Self::LessThan => actual < expected,
+            Self::LessThanOrEquals => actual <= expected,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum WorkflowGraphTimeComparator {
+    After,
+    OnOrAfter,
+    Before,
+    OnOrBefore,
+}
+
+impl WorkflowGraphTimeComparator {
+    pub(crate) fn matches(self, actual: DateTime<Utc>, expected: DateTime<Utc>) -> bool {
+        match self {
+            Self::After => actual > expected,
+            Self::OnOrAfter => actual >= expected,
+            Self::Before => actual < expected,
+            Self::OnOrBefore => actual <= expected,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct WorkflowGraphReadyStep<'a> {
+    pub(crate) graph_step: &'a Value,
+    pub(crate) fan_in: WorkflowGraphFanInReadiness,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct WorkflowGraphFanInReadiness {
+    pub(crate) mode: String,
+    pub(crate) min_success: usize,
+    pub(crate) dependencies: Vec<String>,
+    pub(crate) successful_dependencies: Vec<String>,
+    pub(crate) failed_dependencies: Vec<String>,
+    pub(crate) pending_dependencies: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct TaskBoardSnapshot {
     pub(crate) generated_at: DateTime<Utc>,

@@ -174,7 +174,9 @@ pub(crate) use types::workflow::{
     MaterializeDynamicWorkflowPlan, ReviewDynamicWorkflowPlan, RunDueWorkflowSteps,
     RunWorkflowStepRun, RunWorkflowStepRunResponse, SessionRuntimeRefs, TaskBoardItem,
     TaskBoardSnapshot, TaskGrant, UpdateWorkflowDefinition, UpdateWorkflowStepRun,
-    WorkflowDefinition, WorkflowGraphConsoleEdge, WorkflowGraphConsoleNode, WorkflowRun,
+    WorkflowDefinition, WorkflowGraphConditionEvaluation, WorkflowGraphConsoleEdge,
+    WorkflowGraphConsoleNode, WorkflowGraphFanInReadiness, WorkflowGraphNumericComparator,
+    WorkflowGraphReadyStep, WorkflowGraphRetryPolicy, WorkflowGraphTimeComparator, WorkflowRun,
     WorkflowRunGraphConsole, WorkflowScheduledStepActivationRun,
     WorkflowScheduledStepActivationSweep, WorkflowStepRun, WorkflowTransition,
     WorkflowTransitionFilter, WorkflowTransitionQuery,
@@ -25095,12 +25097,6 @@ fn workflow_graph_string_or_string_array(
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct WorkflowGraphRetryPolicy {
-    max_attempts: usize,
-    delay_seconds: i64,
-}
-
 fn workflow_graph_step_retry_policy(step: &Value) -> Result<WorkflowGraphRetryPolicy, AppError> {
     let Some(policy) = step.get("retry").or_else(|| step.get("retry_policy")) else {
         return Ok(WorkflowGraphRetryPolicy {
@@ -25149,16 +25145,6 @@ fn workflow_graph_retry_delay_seconds(policy: &Value) -> Result<i64, AppError> {
         ));
     }
     Ok(delay_seconds)
-}
-
-#[derive(Debug, Clone)]
-struct WorkflowGraphConditionEvaluation {
-    condition: Value,
-    source_step: Option<WorkflowStepRun>,
-    path: Option<String>,
-    actual: Value,
-    expected: Value,
-    matched: bool,
 }
 
 fn workflow_graph_step_condition_evaluation(
@@ -25371,44 +25357,6 @@ fn workflow_graph_leaf_condition_result(
     Ok((expected.clone(), actual == &expected))
 }
 
-#[derive(Clone, Copy, Debug)]
-enum WorkflowGraphNumericComparator {
-    GreaterThan,
-    GreaterThanOrEquals,
-    LessThan,
-    LessThanOrEquals,
-}
-
-impl WorkflowGraphNumericComparator {
-    fn matches(self, actual: f64, expected: f64) -> bool {
-        match self {
-            Self::GreaterThan => actual > expected,
-            Self::GreaterThanOrEquals => actual >= expected,
-            Self::LessThan => actual < expected,
-            Self::LessThanOrEquals => actual <= expected,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-enum WorkflowGraphTimeComparator {
-    After,
-    OnOrAfter,
-    Before,
-    OnOrBefore,
-}
-
-impl WorkflowGraphTimeComparator {
-    fn matches(self, actual: DateTime<Utc>, expected: DateTime<Utc>) -> bool {
-        match self {
-            Self::After => actual > expected,
-            Self::OnOrAfter => actual >= expected,
-            Self::Before => actual < expected,
-            Self::OnOrBefore => actual <= expected,
-        }
-    }
-}
-
 fn workflow_graph_condition_number(value: &Value, key: &str) -> Result<f64, AppError> {
     let Some(number) = value.as_f64() else {
         return Err(AppError::bad_request(format!(
@@ -25463,22 +25411,6 @@ fn workflow_graph_step_keys(step_graph: &Value) -> Result<BTreeSet<String>, AppE
         keys.insert(workflow_graph_step_key(step)?);
     }
     Ok(keys)
-}
-
-#[derive(Debug, Clone)]
-struct WorkflowGraphReadyStep<'a> {
-    graph_step: &'a Value,
-    fan_in: WorkflowGraphFanInReadiness,
-}
-
-#[derive(Debug, Clone)]
-struct WorkflowGraphFanInReadiness {
-    mode: String,
-    min_success: usize,
-    dependencies: Vec<String>,
-    successful_dependencies: Vec<String>,
-    failed_dependencies: Vec<String>,
-    pending_dependencies: Vec<String>,
 }
 
 fn workflow_graph_ready_steps<'a>(
