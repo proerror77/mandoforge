@@ -18,6 +18,7 @@ pub(crate) mod scheduler;
 pub(crate) mod semantic;
 pub(crate) mod session;
 pub(crate) mod tenant;
+pub(crate) mod tool_call;
 pub(crate) mod tools;
 pub(crate) mod usage;
 pub(crate) mod vault;

@@ -290,6 +290,7 @@ pub(crate) use types::tenant::{
     TenantIsolationTableCoverage, TenantProductionRoutingReadiness, TenantProvisioningResult,
     TenantRuntimeMode, TransferOrganizationOwnership,
 };
+pub(crate) use types::tool_call::ToolCall;
 pub(crate) use types::usage::{
     AcknowledgeCostAlertRequest, CostAlert, CostAlertAcknowledgement, CostAlertDelivery,
     CostAlertRoute, CostAlertRouteDelivery, CostAlertSmtpConfig, CostAlertSummary,
@@ -473,26 +474,6 @@ struct RenderedContextBudget {
     max_objects: usize,
     max_summary_chars: usize,
     max_policy_reminders: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ToolCall {
-    id: Uuid,
-    session_id: Uuid,
-    event_id: Option<Uuid>,
-    tool_name: String,
-    args: Value,
-    task_grant_id: Option<Uuid>,
-    normalized_args_hash: Option<String>,
-    target_binding: Value,
-    status: String,
-    risk_level: String,
-    policy_decision: Value,
-    result: Option<Value>,
-    error: Option<Value>,
-    started_at: Option<DateTime<Utc>>,
-    completed_at: Option<DateTime<Utc>>,
-    created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
