@@ -13,3 +13,4 @@ pub(crate) mod ontology_releases;
 pub(crate) mod packs;
 pub(crate) mod semantic;
 pub(crate) mod sessions;
+pub(crate) mod tools;

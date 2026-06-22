@@ -3669,7 +3669,7 @@ trait ToolExecutor: Send + Sync {
 }
 
 #[derive(Debug, Deserialize)]
-struct ExecuteTool {
+pub(crate) struct ExecuteTool {
     session_id: Uuid,
     #[serde(default)]
     task_grant_id: Option<Uuid>,
@@ -3940,9 +3940,7 @@ fn build_router(state: AppState) -> Router {
             get(list_workflow_task_grants_route).post(create_workflow_task_grant_route),
         )
         .route("/api/task-grants/{id}", get(get_task_grant_route))
-        .route("/api/tools", get(list_tools))
-        .route("/api/tools/{name}/execute", post(execute_tool))
-        .route("/api/tool-calls", get(list_tool_calls))
+        .merge(handlers::tools::router())
         .route(
             "/api/organizations",
             get(list_organizations).post(create_organization),
@@ -32495,19 +32493,19 @@ fn tool_descriptors() -> Vec<ToolDescriptor> {
     descriptors
 }
 
-async fn list_tools(
-    State(state): State<AppState>,
+pub(crate) async fn list_tools(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Vec<ToolDescriptor>>, AppError> {
     authorize_request(&state, &headers, Permission::AgentsRead, "tools", None).await?;
     Ok(Json(tool_descriptors()))
 }
 
-async fn execute_tool(
-    State(state): State<AppState>,
-    Path(name): Path<String>,
+pub(crate) async fn execute_tool(
+    state: AppState,
+    name: String,
     headers: HeaderMap,
-    Json(input): Json<ExecuteTool>,
+    input: ExecuteTool,
 ) -> Result<Json<Value>, AppError> {
     authorize_tool_execution(&state, &headers, &name).await?;
     authorize_request(
@@ -53037,8 +53035,8 @@ pub(crate) async fn list_artifacts(
     Ok(Json(state.list_artifacts(id).await?))
 }
 
-async fn list_tool_calls(
-    State(state): State<AppState>,
+pub(crate) async fn list_tool_calls(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Vec<ToolCall>>, AppError> {
     let principal =
