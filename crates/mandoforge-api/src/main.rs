@@ -3893,34 +3893,7 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::memory_governance::router())
         .merge(handlers::sessions::router())
         .merge(handlers::manager_plans::router())
-        .route(
-            "/api/dynamic-workflow-plans",
-            get(list_dynamic_workflow_plans).post(create_dynamic_workflow_plan),
-        )
-        .route(
-            "/api/dynamic-workflow-plans/compile",
-            post(compile_dynamic_workflow_plan),
-        )
-        .route(
-            "/api/dynamic-workflow-plans/{id}",
-            get(get_dynamic_workflow_plan),
-        )
-        .route(
-            "/api/dynamic-workflow-plans/{id}/review",
-            post(review_dynamic_workflow_plan),
-        )
-        .route(
-            "/api/dynamic-workflow-plans/{id}/adjudicate",
-            post(adjudicate_dynamic_workflow_plan),
-        )
-        .route(
-            "/api/dynamic-workflow-plans/{id}/pressure-test",
-            post(pressure_test_dynamic_workflow_plan),
-        )
-        .route(
-            "/api/dynamic-workflow-plans/{id}/materialize",
-            post(materialize_dynamic_workflow_plan),
-        )
+        .merge(handlers::dynamic_workflow_plans::router())
         .route("/api/sessions/{id}/stream", get(stream_events))
         .route("/api/sessions/{id}/artifacts", get(list_artifacts))
         .route(
@@ -15742,8 +15715,8 @@ pub(crate) async fn list_work_item_manager_agent_plans(
     Ok(Json(state.list_work_item_manager_agent_plans(id).await?))
 }
 
-async fn list_dynamic_workflow_plans(
-    State(state): State<AppState>,
+pub(crate) async fn list_dynamic_workflow_plans(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Vec<DynamicWorkflowPlan>>, AppError> {
     let principal = authorize_collection_request(
@@ -15770,9 +15743,9 @@ async fn list_dynamic_workflow_plans(
     Ok(Json(visible_plans))
 }
 
-async fn get_dynamic_workflow_plan(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn get_dynamic_workflow_plan(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<DynamicWorkflowPlan>, AppError> {
     let plan = state.get_dynamic_workflow_plan(id).await?;
@@ -15780,10 +15753,10 @@ async fn get_dynamic_workflow_plan(
     Ok(Json(plan))
 }
 
-async fn create_dynamic_workflow_plan(
-    State(state): State<AppState>,
+pub(crate) async fn create_dynamic_workflow_plan(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<CreateDynamicWorkflowPlan>,
+    input: CreateDynamicWorkflowPlan,
 ) -> Result<Json<DynamicWorkflowPlan>, AppError> {
     authorize_request(
         &state,
@@ -15865,10 +15838,10 @@ async fn create_dynamic_workflow_plan(
     Ok(Json(plan))
 }
 
-async fn compile_dynamic_workflow_plan(
-    State(state): State<AppState>,
+pub(crate) async fn compile_dynamic_workflow_plan(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<CompileDynamicWorkflowPlan>,
+    input: CompileDynamicWorkflowPlan,
 ) -> Result<Json<DynamicWorkflowPlanCompilationResponse>, AppError> {
     authorize_request(
         &state,
@@ -15980,11 +15953,11 @@ async fn compile_dynamic_workflow_plan(
     }))
 }
 
-async fn review_dynamic_workflow_plan(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn review_dynamic_workflow_plan(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<ReviewDynamicWorkflowPlan>,
+    input: ReviewDynamicWorkflowPlan,
 ) -> Result<Json<DynamicWorkflowPlan>, AppError> {
     let current = state.get_dynamic_workflow_plan(id).await?;
     authorize_dynamic_workflow_plan_run(&state, &headers, &current).await?;
@@ -16031,11 +16004,11 @@ async fn review_dynamic_workflow_plan(
     Ok(Json(reviewed))
 }
 
-async fn adjudicate_dynamic_workflow_plan(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn adjudicate_dynamic_workflow_plan(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<DynamicWorkflowAdjudicationRequest>,
+    input: DynamicWorkflowAdjudicationRequest,
 ) -> Result<Json<DynamicWorkflowAdjudicationResponse>, AppError> {
     let plan = state.get_dynamic_workflow_plan(id).await?;
     authorize_dynamic_workflow_plan_run(&state, &headers, &plan).await?;
@@ -16123,11 +16096,11 @@ async fn adjudicate_dynamic_workflow_plan(
     Ok(Json(response))
 }
 
-async fn pressure_test_dynamic_workflow_plan(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn pressure_test_dynamic_workflow_plan(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<DynamicWorkflowPressureTestRequest>,
+    input: DynamicWorkflowPressureTestRequest,
 ) -> Result<Json<DynamicWorkflowPressureTestResponse>, AppError> {
     let plan = state.get_dynamic_workflow_plan(id).await?;
     authorize_dynamic_workflow_plan_run(&state, &headers, &plan).await?;
@@ -16175,11 +16148,11 @@ async fn pressure_test_dynamic_workflow_plan(
     Ok(Json(response))
 }
 
-async fn materialize_dynamic_workflow_plan(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn materialize_dynamic_workflow_plan(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<MaterializeDynamicWorkflowPlan>,
+    input: MaterializeDynamicWorkflowPlan,
 ) -> Result<Json<DynamicWorkflowPlanMaterializationResponse>, AppError> {
     let plan = state.get_dynamic_workflow_plan(id).await?;
     authorize_dynamic_workflow_plan_run(&state, &headers, &plan).await?;
