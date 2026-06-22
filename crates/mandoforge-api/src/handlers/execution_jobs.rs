@@ -10,10 +10,10 @@ use uuid::Uuid;
 
 use crate::{
     AppError, AppState, CreateRemoteComputerJobAssignment, RemoteComputerJobAssignment,
-    SessionLoopJob, WorkerLoadValidationRun, WorkerReadinessReport,
+    SessionLoopJob, WorkerLoadValidationRun, WorkerReadinessReport, Permission,
     assign_execution_job_remote_computer_lease as assign_execution_job_remote_computer_lease_impl,
+    authorize_request, build_worker_readiness,
     cancel_execution_job_route as cancel_execution_job_route_impl,
-    get_worker_readiness as get_worker_readiness_impl,
     list_execution_jobs as list_execution_jobs_impl,
     list_session_loop_jobs as list_session_loop_jobs_impl,
     queue_notify_wait as queue_notify_wait_impl,
@@ -104,7 +104,8 @@ async fn get_worker_readiness(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<WorkerReadinessReport>, AppError> {
-    get_worker_readiness_impl(state, headers).await
+    authorize_request(&state, &headers, Permission::Admin, "execution_jobs", None).await?;
+    Ok(Json(build_worker_readiness(&state).await?))
 }
 
 async fn run_worker_load_validation(

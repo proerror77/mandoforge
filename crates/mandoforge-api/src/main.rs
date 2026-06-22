@@ -49059,14 +49059,6 @@ pub(crate) async fn assign_execution_job_remote_computer_lease(
     Ok(Json(assignment))
 }
 
-pub(crate) async fn get_worker_readiness(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<WorkerReadinessReport>, AppError> {
-    authorize_request(&state, &headers, Permission::Admin, "execution_jobs", None).await?;
-    Ok(Json(build_worker_readiness(&state).await?))
-}
-
 pub(crate) async fn run_worker_load_validation(
     state: AppState,
     headers: HeaderMap,
@@ -51893,7 +51885,9 @@ fn remote_computer_attention(
     }
 }
 
-async fn build_worker_readiness(state: &AppState) -> Result<WorkerReadinessReport, AppError> {
+pub(crate) async fn build_worker_readiness(
+    state: &AppState,
+) -> Result<WorkerReadinessReport, AppError> {
     let generated_at = Utc::now();
     let queue_backend = worker_queue_backend_readiness(state.execution_queue.backend_kind());
     let jobs = state.execution_queue.list().await?;
