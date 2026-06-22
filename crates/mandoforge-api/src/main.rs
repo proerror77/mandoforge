@@ -42062,21 +42062,6 @@ fn remote_computer_runner_response_for_audit(
     value
 }
 
-pub(crate) async fn list_remote_computers(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<Vec<RemoteComputer>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "remote_computers",
-        None,
-    )
-    .await?;
-    Ok(Json(state.list_remote_computers().await?))
-}
-
 pub(crate) async fn reclaim_stale_remote_computers(
     state: AppState,
     headers: HeaderMap,
@@ -42216,40 +42201,6 @@ async fn execute_remote_computer_stale_reclaim(
         ))
         .await?;
     Ok(run)
-}
-
-pub(crate) async fn create_remote_computer(
-    state: AppState,
-    headers: HeaderMap,
-    input: CreateRemoteComputer,
-) -> Result<Json<RemoteComputer>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "remote_computers",
-        None,
-    )
-    .await?;
-    let record = state.create_remote_computer(input).await?;
-    state
-        .append_audit_log(new_audit_log(
-            None,
-            "system",
-            None,
-            "remote_computer.created",
-            "remote_computer",
-            Some(record.id),
-            json!({
-                "name": record.name,
-                "profile": record.profile,
-                "namespace": record.namespace,
-                "pod_name": record.pod_name,
-                "execution_enabled": false
-            }),
-        ))
-        .await?;
-    Ok(Json(record))
 }
 
 pub(crate) async fn list_remote_computer_leases(

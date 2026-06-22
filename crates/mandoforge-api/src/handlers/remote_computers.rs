@@ -4,9 +4,10 @@ use axum::{
     http::HeaderMap,
     routing::{get, post},
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
+use crate::authorization::Permission;
 use crate::{
     AppError, AppState, CreateRemoteComputer, CreateRemoteComputerAttachment,
     CreateRemoteComputerLease, CreateRemoteComputerSidecarHeartbeat, CreateRemoteComputerStateLock,
@@ -20,7 +21,7 @@ use crate::{
     RemoteComputerStateSyncValidationRun,
     acquire_remote_computer_state_lock as acquire_remote_computer_state_lock_impl,
     attach_remote_computer_lease as attach_remote_computer_lease_impl,
-    create_remote_computer as create_remote_computer_impl,
+    authorize_request,
     create_remote_computer_lease as create_remote_computer_lease_impl,
     discover_remote_computer_artifacts as discover_remote_computer_artifacts_impl,
     dry_run_remote_computer_runner as dry_run_remote_computer_runner_impl,
@@ -32,10 +33,9 @@ use crate::{
     list_remote_computer_job_assignments as list_remote_computer_job_assignments_impl,
     list_remote_computer_leases as list_remote_computer_leases_impl,
     list_stale_remote_computer_attachments as list_stale_remote_computer_attachments_impl,
-    list_remote_computers as list_remote_computers_impl,
     list_remote_computer_sidecar_heartbeats as list_remote_computer_sidecar_heartbeats_impl,
     list_remote_computer_state_locks as list_remote_computer_state_locks_impl,
-    mutate_remote_computer_runner as mutate_remote_computer_runner_impl,
+    mutate_remote_computer_runner as mutate_remote_computer_runner_impl, new_audit_log,
     record_remote_computer_sidecar_heartbeat as record_remote_computer_sidecar_heartbeat_impl,
     reclaim_stale_remote_computers as reclaim_stale_remote_computers_impl,
     release_remote_computer_state_lock as release_remote_computer_state_lock_impl,
@@ -266,7 +266,15 @@ async fn list_remote_computers(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<RemoteComputer>>, AppError> {
-    list_remote_computers_impl(state, headers).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computers",
+        None,
+    )
+    .await?;
+    Ok(Json(state.list_remote_computers().await?))
 }
 
 async fn create_remote_computer(
@@ -274,7 +282,33 @@ async fn create_remote_computer(
     headers: HeaderMap,
     Json(input): Json<CreateRemoteComputer>,
 ) -> Result<Json<RemoteComputer>, AppError> {
-    create_remote_computer_impl(state, headers, input).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computers",
+        None,
+    )
+    .await?;
+    let record = state.create_remote_computer(input).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "system",
+            None,
+            "remote_computer.created",
+            "remote_computer",
+            Some(record.id),
+            json!({
+                "name": record.name,
+                "profile": record.profile,
+                "namespace": record.namespace,
+                "pod_name": record.pod_name,
+                "execution_enabled": false
+            }),
+        ))
+        .await?;
+    Ok(Json(record))
 }
 
 async fn create_remote_computer_lease(
