@@ -9,6 +9,7 @@ pub(crate) mod observability;
 pub(crate) mod ontology;
 pub(crate) mod provider;
 pub(crate) mod remote_computer;
+pub(crate) mod scheduler;
 pub(crate) mod semantic;
 pub(crate) mod session;
 pub(crate) mod tenant;

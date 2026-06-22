@@ -241,6 +241,11 @@ pub(crate) use types::remote_computer::{
     RemoteComputerStateLock, RemoteComputerStateSyncValidationRun,
     RemoteComputerWarmPoolReadiness, UpdateRemoteComputerAttachment, UpdateRemoteComputerLease,
 };
+pub(crate) use types::scheduler::{
+    SchedulerAttentionItem, SchedulerDeploymentReadiness, SchedulerDeploymentValidationRun,
+    SchedulerDuePlan, SchedulerDuePlanItem, SchedulerDueRun, SchedulerOrchestrationSummary,
+    SchedulerRetryPolicy, SchedulerRunDueRequest, SchedulerRunHistoryItem,
+};
 pub(crate) use types::semantic::{
     ContextPacketSemanticObject, CreateMemoryWritebackCandidates, CreateSemanticIngestionBatch,
     CreateSemanticLink, CreateSemanticObject, CreateSemanticSource, CreateSemanticSynthesisRun,
@@ -718,148 +723,6 @@ struct RenderedContextBudget {
     max_objects: usize,
     max_summary_chars: usize,
     max_policy_reminders: usize,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct SchedulerDueRun {
-    run_id: Uuid,
-    idempotency_key: Option<String>,
-    owner: String,
-    run_window_start: DateTime<Utc>,
-    run_window_end: DateTime<Utc>,
-    retry_policy: SchedulerRetryPolicy,
-    replayed: bool,
-    status: String,
-    checked_at: DateTime<Utc>,
-    team_count: usize,
-    actions: Vec<String>,
-    provider_policy_gate: Option<ProviderPolicyGateRun>,
-    policy_rollout: PolicyScheduledRolloutRun,
-    approval_escalations: ApprovalEscalationDueRun,
-    agent_releases: AgentReleaseAutomationRun,
-    workflow_scheduled_steps: Option<WorkflowScheduledStepActivationSweep>,
-    semantic_synthesis_schedules: Option<SemanticSynthesisScheduleSweep>,
-    #[serde(default)]
-    semantic_aging_policies: Option<SemanticAgingPolicySweep>,
-    mcp_health_runs: Vec<McpServerScheduledHealthRun>,
-    mcp_rollout_runs: Vec<McpServerRolloutDueRun>,
-    codex_app_server_stale_polls: CodexAppServerStalePollRun,
-    cost_alert_delivery: Option<CostAlertDelivery>,
-    usage_finance_export: UsageFinanceExportDelivery,
-    remote_computer_reclaim: RemoteComputerReclaimRun,
-    remote_computer_sidecar_supervision: RemoteComputerSidecarSupervisionRun,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SchedulerRetryPolicy {
-    max_attempts: u32,
-    backoff_seconds: u32,
-}
-
-#[derive(Debug, Deserialize)]
-struct SchedulerRunDueRequest {
-    #[serde(default)]
-    idempotency_key: Option<String>,
-    #[serde(default)]
-    owner: Option<String>,
-    #[serde(default)]
-    run_window_start: Option<DateTime<Utc>>,
-    #[serde(default)]
-    run_window_end: Option<DateTime<Utc>>,
-    #[serde(default)]
-    retry_policy: Option<SchedulerRetryPolicy>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SchedulerDuePlan {
-    status: String,
-    generated_at: DateTime<Utc>,
-    team_count: usize,
-    item_count: usize,
-    actionable_count: usize,
-    actions: Vec<SchedulerDuePlanItem>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SchedulerDuePlanItem {
-    area: String,
-    action: String,
-    mode: String,
-    status: String,
-    due_count: usize,
-    skipped_count: usize,
-    target_count: usize,
-    severity: String,
-    reason: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SchedulerOrchestrationSummary {
-    generated_at: DateTime<Utc>,
-    status: String,
-    plan: SchedulerDuePlan,
-    deployment_readiness: SchedulerDeploymentReadiness,
-    recent_run_count: usize,
-    last_run_at: Option<DateTime<Utc>>,
-    last_run_status: Option<String>,
-    last_run_action_count: usize,
-    recent_runs: Vec<SchedulerRunHistoryItem>,
-    attention_items: Vec<SchedulerAttentionItem>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SchedulerRunHistoryItem {
-    audit_log_id: Uuid,
-    run_id: Option<Uuid>,
-    idempotency_key: Option<String>,
-    owner: Option<String>,
-    status: String,
-    team_count: usize,
-    action_count: usize,
-    actions: Vec<String>,
-    created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SchedulerAttentionItem {
-    severity: String,
-    kind: String,
-    message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SchedulerDeploymentReadiness {
-    status: String,
-    production_blocked: bool,
-    scheduler_manifest_present: bool,
-    service_account_manifest_present: bool,
-    service_account_name: Option<String>,
-    automount_service_account_token_disabled: bool,
-    subject_from_secret: bool,
-    roles_from_secret: bool,
-    token_from_secret: bool,
-    token_header_present: bool,
-    hardcoded_admin_headers_absent: bool,
-    shared_token_runtime_configured: bool,
-    controller_required: bool,
-    controller_configured: bool,
-    latest_controller_status: Option<String>,
-    latest_controller_age_hours: Option<i64>,
-    controller_evidence_fresh: bool,
-    latest_controller_validated: bool,
-    blocking_reasons: Vec<String>,
-    message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SchedulerDeploymentValidationRun {
-    status: String,
-    checked_at: DateTime<Utc>,
-    controller_required: bool,
-    controller_configured: bool,
-    controller_execution: Value,
-    readiness_status: String,
-    blocking_reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
