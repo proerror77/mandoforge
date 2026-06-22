@@ -42203,132 +42203,6 @@ async fn execute_remote_computer_stale_reclaim(
     Ok(run)
 }
 
-pub(crate) async fn list_remote_computer_leases(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<Vec<RemoteComputerLease>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "remote_computer_leases",
-        None,
-    )
-    .await?;
-    Ok(Json(state.list_remote_computer_leases().await?))
-}
-
-pub(crate) async fn create_remote_computer_lease(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-    input: CreateRemoteComputerLease,
-) -> Result<Json<RemoteComputerLease>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "remote_computer",
-        Some(id),
-    )
-    .await?;
-    let lease = state.create_remote_computer_lease(id, input).await?;
-    record_remote_computer_lease_event(&state, &lease, "remote_computer.leased").await?;
-    Ok(Json(lease))
-}
-
-pub(crate) async fn attach_remote_computer_lease(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-    input: CreateRemoteComputerAttachment,
-) -> Result<Json<RemoteComputerAttachment>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "remote_computer_lease",
-        Some(id),
-    )
-    .await?;
-    let attachment = state.create_remote_computer_attachment(id, input).await?;
-    record_remote_computer_attachment_event(&state, &attachment, "remote_computer.attached")
-        .await?;
-    Ok(Json(attachment))
-}
-
-pub(crate) async fn heartbeat_remote_computer_lease(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-    input: UpdateRemoteComputerLease,
-) -> Result<Json<RemoteComputerLease>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "remote_computer_lease",
-        Some(id),
-    )
-    .await?;
-    let lease = state
-        .update_remote_computer_lease_status(id, "leased", input)
-        .await?;
-    record_remote_computer_lease_event(&state, &lease, "remote_computer.heartbeat").await?;
-    Ok(Json(lease))
-}
-
-pub(crate) async fn release_remote_computer_lease(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-    input: UpdateRemoteComputerLease,
-) -> Result<Json<RemoteComputerLease>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "remote_computer_lease",
-        Some(id),
-    )
-    .await?;
-    let lease = state
-        .update_remote_computer_lease_status(id, "released", input)
-        .await?;
-    record_remote_computer_lease_event(&state, &lease, "remote_computer.released").await?;
-    Ok(Json(lease))
-}
-
-pub(crate) async fn list_remote_computer_attachments(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<Vec<RemoteComputerAttachment>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "remote_computer_attachments",
-        None,
-    )
-    .await?;
-    Ok(Json(state.list_remote_computer_attachments().await?))
-}
-
-pub(crate) async fn list_remote_computer_job_assignments(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<Vec<RemoteComputerJobAssignment>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "remote_computer_job_assignments",
-        None,
-    )
-    .await?;
-    Ok(Json(state.list_remote_computer_job_assignments().await?))
-}
-
 pub(crate) async fn list_remote_computer_state_locks(
     state: AppState,
     headers: HeaderMap,
@@ -42528,63 +42402,7 @@ pub(crate) async fn run_remote_computer_sidecar_recovery(
     ))
 }
 
-pub(crate) async fn list_stale_remote_computer_attachments(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<Vec<RemoteComputerAttachment>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "remote_computer_attachments",
-        None,
-    )
-    .await?;
-    Ok(Json(state.list_stale_remote_computer_attachments().await?))
-}
-
-pub(crate) async fn release_remote_computer_attachment(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-    input: UpdateRemoteComputerAttachment,
-) -> Result<Json<RemoteComputerAttachment>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "remote_computer_attachment",
-        Some(id),
-    )
-    .await?;
-    let attachment = state.release_remote_computer_attachment(id, input).await?;
-    record_remote_computer_attachment_event(&state, &attachment, "remote_computer.detached")
-        .await?;
-    Ok(Json(attachment))
-}
-
-pub(crate) async fn fail_remote_computer_lease(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-    input: UpdateRemoteComputerLease,
-) -> Result<Json<RemoteComputerLease>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "remote_computer_lease",
-        Some(id),
-    )
-    .await?;
-    let lease = state
-        .update_remote_computer_lease_status(id, "failed", input)
-        .await?;
-    record_remote_computer_lease_event(&state, &lease, "remote_computer.failed").await?;
-    Ok(Json(lease))
-}
-
-async fn record_remote_computer_lease_event(
+pub(crate) async fn record_remote_computer_lease_event(
     state: &AppState,
     lease: &RemoteComputerLease,
     event_type: &str,
@@ -42619,7 +42437,7 @@ async fn record_remote_computer_lease_event(
     Ok(())
 }
 
-async fn record_remote_computer_attachment_event(
+pub(crate) async fn record_remote_computer_attachment_event(
     state: &AppState,
     attachment: &RemoteComputerAttachment,
     event_type: &str,

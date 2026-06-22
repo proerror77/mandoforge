@@ -20,30 +20,21 @@ use crate::{
     RemoteComputerSidecarRecoveryRun, RemoteComputerStateLock,
     RemoteComputerStateSyncValidationRun,
     acquire_remote_computer_state_lock as acquire_remote_computer_state_lock_impl,
-    attach_remote_computer_lease as attach_remote_computer_lease_impl,
     authorize_request,
-    create_remote_computer_lease as create_remote_computer_lease_impl,
     discover_remote_computer_artifacts as discover_remote_computer_artifacts_impl,
     dry_run_remote_computer_runner as dry_run_remote_computer_runner_impl,
     get_remote_computer_production_path as get_remote_computer_production_path_impl,
     get_remote_computer_readiness as get_remote_computer_readiness_impl,
     get_remote_computer_runner_readiness as get_remote_computer_runner_readiness_impl,
-    heartbeat_remote_computer_lease as heartbeat_remote_computer_lease_impl,
-    list_remote_computer_attachments as list_remote_computer_attachments_impl,
-    list_remote_computer_job_assignments as list_remote_computer_job_assignments_impl,
-    list_remote_computer_leases as list_remote_computer_leases_impl,
-    list_stale_remote_computer_attachments as list_stale_remote_computer_attachments_impl,
     list_remote_computer_sidecar_heartbeats as list_remote_computer_sidecar_heartbeats_impl,
     list_remote_computer_state_locks as list_remote_computer_state_locks_impl,
     mutate_remote_computer_runner as mutate_remote_computer_runner_impl, new_audit_log,
     record_remote_computer_sidecar_heartbeat as record_remote_computer_sidecar_heartbeat_impl,
     reclaim_stale_remote_computers as reclaim_stale_remote_computers_impl,
     release_remote_computer_state_lock as release_remote_computer_state_lock_impl,
-    release_remote_computer_attachment as release_remote_computer_attachment_impl,
-    release_remote_computer_lease as release_remote_computer_lease_impl,
+    record_remote_computer_attachment_event, record_remote_computer_lease_event,
     run_remote_computer_sidecar_recovery as run_remote_computer_sidecar_recovery_impl,
     sync_remote_computer_artifacts as sync_remote_computer_artifacts_impl,
-    fail_remote_computer_lease as fail_remote_computer_lease_impl,
     validate_remote_computer_state_sync as validate_remote_computer_state_sync_impl,
     UpdateRemoteComputerAttachment, UpdateRemoteComputerLease,
 };
@@ -317,7 +308,17 @@ async fn create_remote_computer_lease(
     headers: HeaderMap,
     Json(input): Json<CreateRemoteComputerLease>,
 ) -> Result<Json<RemoteComputerLease>, AppError> {
-    create_remote_computer_lease_impl(state, id, headers, input).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computer",
+        Some(id),
+    )
+    .await?;
+    let lease = state.create_remote_computer_lease(id, input).await?;
+    record_remote_computer_lease_event(&state, &lease, "remote_computer.leased").await?;
+    Ok(Json(lease))
 }
 
 async fn attach_remote_computer_lease(
@@ -326,35 +327,78 @@ async fn attach_remote_computer_lease(
     headers: HeaderMap,
     Json(input): Json<CreateRemoteComputerAttachment>,
 ) -> Result<Json<RemoteComputerAttachment>, AppError> {
-    attach_remote_computer_lease_impl(state, id, headers, input).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computer_lease",
+        Some(id),
+    )
+    .await?;
+    let attachment = state.create_remote_computer_attachment(id, input).await?;
+    record_remote_computer_attachment_event(&state, &attachment, "remote_computer.attached")
+        .await?;
+    Ok(Json(attachment))
 }
 
 async fn list_remote_computer_leases(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<RemoteComputerLease>>, AppError> {
-    list_remote_computer_leases_impl(state, headers).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computer_leases",
+        None,
+    )
+    .await?;
+    Ok(Json(state.list_remote_computer_leases().await?))
 }
 
 async fn list_remote_computer_attachments(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<RemoteComputerAttachment>>, AppError> {
-    list_remote_computer_attachments_impl(state, headers).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computer_attachments",
+        None,
+    )
+    .await?;
+    Ok(Json(state.list_remote_computer_attachments().await?))
 }
 
 async fn list_remote_computer_job_assignments(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<RemoteComputerJobAssignment>>, AppError> {
-    list_remote_computer_job_assignments_impl(state, headers).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computer_job_assignments",
+        None,
+    )
+    .await?;
+    Ok(Json(state.list_remote_computer_job_assignments().await?))
 }
 
 async fn list_stale_remote_computer_attachments(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<RemoteComputerAttachment>>, AppError> {
-    list_stale_remote_computer_attachments_impl(state, headers).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computer_attachments",
+        None,
+    )
+    .await?;
+    Ok(Json(state.list_stale_remote_computer_attachments().await?))
 }
 
 async fn release_remote_computer_attachment(
@@ -363,7 +407,18 @@ async fn release_remote_computer_attachment(
     headers: HeaderMap,
     Json(input): Json<UpdateRemoteComputerAttachment>,
 ) -> Result<Json<RemoteComputerAttachment>, AppError> {
-    release_remote_computer_attachment_impl(state, id, headers, input).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computer_attachment",
+        Some(id),
+    )
+    .await?;
+    let attachment = state.release_remote_computer_attachment(id, input).await?;
+    record_remote_computer_attachment_event(&state, &attachment, "remote_computer.detached")
+        .await?;
+    Ok(Json(attachment))
 }
 
 async fn heartbeat_remote_computer_lease(
@@ -372,7 +427,19 @@ async fn heartbeat_remote_computer_lease(
     headers: HeaderMap,
     Json(input): Json<UpdateRemoteComputerLease>,
 ) -> Result<Json<RemoteComputerLease>, AppError> {
-    heartbeat_remote_computer_lease_impl(state, id, headers, input).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computer_lease",
+        Some(id),
+    )
+    .await?;
+    let lease = state
+        .update_remote_computer_lease_status(id, "leased", input)
+        .await?;
+    record_remote_computer_lease_event(&state, &lease, "remote_computer.heartbeat").await?;
+    Ok(Json(lease))
 }
 
 async fn release_remote_computer_lease(
@@ -381,7 +448,19 @@ async fn release_remote_computer_lease(
     headers: HeaderMap,
     Json(input): Json<UpdateRemoteComputerLease>,
 ) -> Result<Json<RemoteComputerLease>, AppError> {
-    release_remote_computer_lease_impl(state, id, headers, input).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computer_lease",
+        Some(id),
+    )
+    .await?;
+    let lease = state
+        .update_remote_computer_lease_status(id, "released", input)
+        .await?;
+    record_remote_computer_lease_event(&state, &lease, "remote_computer.released").await?;
+    Ok(Json(lease))
 }
 
 async fn fail_remote_computer_lease(
@@ -390,5 +469,17 @@ async fn fail_remote_computer_lease(
     headers: HeaderMap,
     Json(input): Json<UpdateRemoteComputerLease>,
 ) -> Result<Json<RemoteComputerLease>, AppError> {
-    fail_remote_computer_lease_impl(state, id, headers, input).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "remote_computer_lease",
+        Some(id),
+    )
+    .await?;
+    let lease = state
+        .update_remote_computer_lease_status(id, "failed", input)
+        .await?;
+    record_remote_computer_lease_event(&state, &lease, "remote_computer.failed").await?;
+    Ok(Json(lease))
 }
