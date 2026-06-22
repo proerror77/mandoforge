@@ -149,6 +149,12 @@ pub(crate) use types::agent::{
     CreateAgentRuntimeProfile, CreateEnvironment, Environment, RejectAgentReleasePromotion,
     RequestAgentReleasePromotion, UpdateAgentRuntimeProfile, UpdateEnvironment,
 };
+pub(crate) use types::agent_handoff::{
+    AgentHandoffAssignment, AgentHandoffEvent, AttachAgentHandoffRemoteComputerAssignment,
+    CreateAgentHandoffAssignment, CreateAgentHandoffEvent, CreateManagerAgentPlan,
+    EscalateAgentHandoffEvent, ManagerAgentPlan, ReviewManagerAgentPlan,
+    TransitionAgentHandoffEvent,
+};
 pub(crate) use types::approval::{
     Approval, ApprovalCommitToken, ApprovalEscalationDueRun, ApprovalEscalationRule,
     ApprovalGroup, ApprovalNotificationChannelDelivery, ApprovalNotificationChannelPolicy,
@@ -361,149 +367,6 @@ enum ExecutionQueueBackendSelection {
     Redis,
     Nats,
     NatsJetstream,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct AgentHandoffEvent {
-    id: Uuid,
-    pub(crate) source_session_id: Uuid,
-    source_agent_id: Uuid,
-    target_agent_id: Uuid,
-    manager_plan_id: Option<Uuid>,
-    intent: String,
-    payload: Value,
-    schema_version: String,
-    risk_level: String,
-    approval_required: bool,
-    semantic_scopes: Value,
-    runtime_profile_id: Option<Uuid>,
-    remote_computer_required: bool,
-    review_status: String,
-    human_escalation_status: String,
-    status: String,
-    audit_trace_id: Option<Uuid>,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct AgentHandoffAssignment {
-    id: Uuid,
-    agent_handoff_event_id: Uuid,
-    manager_plan_id: Uuid,
-    pub(crate) source_session_id: Uuid,
-    specialist_session_id: Uuid,
-    source_agent_id: Uuid,
-    target_agent_id: Uuid,
-    semantic_scopes: Value,
-    runtime_profile_id: Option<Uuid>,
-    remote_computer_required: bool,
-    remote_computer_job_assignment_id: Option<Uuid>,
-    status: String,
-    assigned_by: Option<String>,
-    metadata: Value,
-    audit_trace_id: Option<Uuid>,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ManagerAgentPlan {
-    id: Uuid,
-    session_id: Uuid,
-    manager_agent_id: Uuid,
-    work_item_id: Option<Uuid>,
-    specialist_agent_id: Option<Uuid>,
-    task_intake: Value,
-    decomposition: Value,
-    specialist_selection: Value,
-    risk_classification: String,
-    review: Value,
-    status: String,
-    audit_trace_id: Option<Uuid>,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct CreateManagerAgentPlan {
-    #[serde(default)]
-    work_item_id: Option<Uuid>,
-    #[serde(default)]
-    specialist_agent_id: Option<Uuid>,
-    task_intake: Value,
-    decomposition: Value,
-    specialist_selection: Value,
-    risk_classification: String,
-    #[serde(default = "empty_json_object")]
-    review: Value,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct ReviewManagerAgentPlan {
-    review: Value,
-    #[serde(default)]
-    status: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct CreateAgentHandoffEvent {
-    target_agent_id: Uuid,
-    #[serde(default)]
-    manager_plan_id: Option<Uuid>,
-    intent: String,
-    payload: Value,
-    schema_version: String,
-    risk_level: String,
-    #[serde(default)]
-    approval_required: bool,
-    #[serde(default)]
-    semantic_scopes: Option<Value>,
-    #[serde(default)]
-    runtime_profile_id: Option<Uuid>,
-    #[serde(default)]
-    remote_computer_required: Option<bool>,
-    #[serde(default)]
-    review_status: Option<String>,
-    #[serde(default)]
-    human_escalation_status: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct TransitionAgentHandoffEvent {
-    #[serde(default)]
-    reason: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct EscalateAgentHandoffEvent {
-    #[serde(default)]
-    reason: Option<String>,
-    #[serde(default)]
-    status: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct CreateAgentHandoffAssignment {
-    #[serde(default)]
-    specialist_session_id: Option<Uuid>,
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    message: Option<String>,
-    #[serde(default)]
-    remote_computer_job_assignment_id: Option<Uuid>,
-    #[serde(default)]
-    assigned_by: Option<String>,
-    #[serde(default = "empty_json_object")]
-    metadata: Value,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct AttachAgentHandoffRemoteComputerAssignment {
-    remote_computer_job_assignment_id: Uuid,
-    #[serde(default = "empty_json_object")]
-    metadata: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
