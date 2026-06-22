@@ -1,10 +1,13 @@
+use std::time::Duration;
+
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::HeaderMap,
-    response::sse::{Event, Sse},
+    response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
 };
+use futures_util::StreamExt as _;
 use uuid::Uuid;
 
 use crate::{
@@ -15,7 +18,7 @@ use crate::{
     authorize_request, authorize_session_run, enqueue_session_loop, ensure_primary_session_thread,
     generate_and_persist_context_packet, principal_from_request,
     project_session_event_to_loop, render_execution_context_for_packet,
-    stream_events as stream_events_impl, visible_session_ids_for_principal,
+    store_events, visible_session_ids_for_principal,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -65,7 +68,87 @@ async fn stream_events(
     Sse<impl futures_core::Stream<Item = Result<Event, std::convert::Infallible>>>,
     AppError,
 > {
-    stream_events_impl(state, id, query, headers).await
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "session",
+        Some(id),
+    )
+    .await?;
+    let after_seq = stream_after_seq(&headers, query.after_seq)?;
+    let live_events = store_events::subscribe_session_events();
+    let events = state
+        .list_events(id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|event| after_seq.map_or(true, |after_seq| event.seq > after_seq))
+        .collect::<Vec<_>>();
+    let replay_high_water = events
+        .iter()
+        .map(|event| event.seq)
+        .max()
+        .or(after_seq)
+        .unwrap_or_default();
+    let replay_stream = futures_util::stream::iter(events.into_iter().map(sse_session_event));
+    let live_stream =
+        futures_util::stream::unfold((live_events, replay_high_water), move |state| async move {
+            let (mut live_events, mut high_water) = state;
+            loop {
+                match live_events.recv().await {
+                    Ok(event)
+                        if event.session_id == id
+                            && event.seq > high_water
+                            && after_seq.map_or(true, |after_seq| event.seq > after_seq) =>
+                    {
+                        high_water = event.seq;
+                        return Some((sse_session_event(event), (live_events, high_water)));
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                }
+            }
+        });
+    let stream = replay_stream.chain(live_stream);
+    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
+}
+
+fn sse_session_event(event: SessionEvent) -> Result<Event, std::convert::Infallible> {
+    Ok(Event::default()
+        .event(event.event_type.clone())
+        .id(event.seq.to_string())
+        .json_data(event)
+        .unwrap_or_else(|_| Event::default().event("error").data("serialization failed")))
+}
+
+fn stream_after_seq(
+    headers: &HeaderMap,
+    query_after_seq: Option<i64>,
+) -> Result<Option<i64>, AppError> {
+    let after_seq = match query_after_seq {
+        Some(after_seq) => Some(after_seq),
+        None => {
+            let Some(raw) = headers
+                .get("last-event-id")
+                .and_then(|value| value.to_str().ok())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                return Ok(None);
+            };
+            Some(raw.parse::<i64>().map_err(|_| {
+                AppError::bad_request("Last-Event-ID must be a session event sequence")
+            })?)
+        }
+    };
+    if after_seq.is_some_and(|seq| seq < 0) {
+        return Err(AppError::bad_request(
+            "stream cursor sequence must be non-negative",
+        ));
+    }
+    Ok(after_seq)
 }
 
 async fn list_artifacts(
