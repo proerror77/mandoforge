@@ -40864,14 +40864,6 @@ pub(crate) async fn discover_mcp_server_tools(
     ))
 }
 
-pub(crate) async fn list_eval_datasets(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<Vec<EvalDataset>>, AppError> {
-    authorize_request(&state, &headers, Permission::Admin, "eval_datasets", None).await?;
-    Ok(Json(state.list_eval_datasets().await?))
-}
-
 pub(crate) async fn create_eval_dataset(
     state: AppState,
     headers: HeaderMap,
@@ -40879,22 +40871,6 @@ pub(crate) async fn create_eval_dataset(
 ) -> Result<Json<EvalDataset>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "eval_datasets", None).await?;
     Ok(Json(state.create_eval_dataset(input).await?))
-}
-
-pub(crate) async fn list_eval_cases(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-) -> Result<Json<Vec<EvalCase>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "eval_dataset",
-        Some(id),
-    )
-    .await?;
-    Ok(Json(state.list_eval_cases(id).await?))
 }
 
 pub(crate) async fn create_eval_case(
@@ -40912,29 +40888,6 @@ pub(crate) async fn create_eval_case(
     )
     .await?;
     Ok(Json(state.create_eval_case(id, input).await?))
-}
-
-pub(crate) async fn list_eval_judge_profiles(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<Vec<ProviderRecord>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "eval_judge_profiles",
-        None,
-    )
-    .await?;
-    let mut profiles: Vec<_> = state
-        .list_providers()
-        .await?
-        .into_iter()
-        .filter(|provider| provider.provider_type == "eval_judge")
-        .collect();
-    profiles.sort_by_key(|profile| profile.created_at);
-    profiles.reverse();
-    Ok(Json(profiles))
 }
 
 pub(crate) async fn create_eval_judge_profile(
@@ -41113,30 +41066,6 @@ fn stage2_regression_suite_cases(judge_profile: Option<&str>) -> Vec<CreateEvalC
         });
     }
     cases
-}
-
-pub(crate) async fn list_dataset_eval_runs(
-    state: AppState,
-    id: Uuid,
-    headers: HeaderMap,
-) -> Result<Json<Vec<EvalRun>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::Admin,
-        "eval_dataset",
-        Some(id),
-    )
-    .await?;
-    Ok(Json(state.list_eval_runs(Some(id)).await?))
-}
-
-pub(crate) async fn list_eval_runs(
-    state: AppState,
-    headers: HeaderMap,
-) -> Result<Json<Vec<EvalRun>>, AppError> {
-    authorize_request(&state, &headers, Permission::Admin, "eval_runs", None).await?;
-    Ok(Json(state.list_eval_runs(None).await?))
 }
 
 pub(crate) async fn create_eval_run(
