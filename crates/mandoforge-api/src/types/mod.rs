@@ -10,5 +10,6 @@ pub(crate) mod semantic;
 pub(crate) mod session;
 pub(crate) mod tenant;
 pub(crate) mod tools;
+pub(crate) mod usage;
 pub(crate) mod workflow;
 pub(crate) mod workflow_pack;
