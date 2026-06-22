@@ -1111,7 +1111,7 @@ struct SchedulerDeploymentValidationRun {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ToolCall {
+pub(crate) struct ToolCall {
     id: Uuid,
     session_id: Uuid,
     event_id: Option<Uuid>,
@@ -1131,7 +1131,7 @@ struct ToolCall {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct AuditLog {
+pub(crate) struct AuditLog {
     id: Uuid,
     session_id: Option<Uuid>,
     actor_type: String,
@@ -1144,7 +1144,7 @@ struct AuditLog {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Artifact {
+pub(crate) struct Artifact {
     id: Uuid,
     session_id: Uuid,
     artifact_type: String,
@@ -3894,16 +3894,6 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::sessions::router())
         .merge(handlers::manager_plans::router())
         .merge(handlers::dynamic_workflow_plans::router())
-        .route("/api/sessions/{id}/stream", get(stream_events))
-        .route("/api/sessions/{id}/artifacts", get(list_artifacts))
-        .route(
-            "/api/sessions/{id}/tool-calls",
-            get(list_session_tool_calls),
-        )
-        .route(
-            "/api/sessions/{id}/audit-logs",
-            get(list_session_audit_logs),
-        )
         .route(
             "/api/workflow-definitions",
             get(list_workflow_definitions_route).post(create_workflow_definition_route),
@@ -31656,13 +31646,15 @@ fn value_is_empty_object(value: &Value) -> bool {
     }
 }
 
-async fn stream_events(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-    Query(query): Query<StreamEventsQuery>,
+pub(crate) async fn stream_events(
+    state: AppState,
+    id: Uuid,
+    query: StreamEventsQuery,
     headers: HeaderMap,
-) -> Result<Sse<impl futures_core::Stream<Item = Result<Event, std::convert::Infallible>>>, AppError>
-{
+) -> Result<
+    Sse<impl futures_core::Stream<Item = Result<Event, std::convert::Infallible>>>,
+    AppError,
+> {
     authorize_request(
         &state,
         &headers,
@@ -53029,9 +53021,9 @@ fn delegated_approver_group_id(approval: &Approval) -> Option<Uuid> {
         .and_then(|value| Uuid::parse_str(value.trim()).ok())
 }
 
-async fn list_artifacts(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn list_artifacts(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<Vec<Artifact>>, AppError> {
     authorize_request(
@@ -53063,9 +53055,9 @@ async fn list_tool_calls(
     ))
 }
 
-async fn list_session_tool_calls(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn list_session_tool_calls(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<Vec<ToolCall>>, AppError> {
     authorize_request(
@@ -57620,9 +57612,9 @@ fn ensure_worker_execution_principal(
     Ok(insecure_dev_override)
 }
 
-async fn list_session_audit_logs(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn list_session_audit_logs(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<Vec<AuditLog>>, AppError> {
     authorize_request(&state, &headers, Permission::AuditRead, "session", Some(id)).await?;

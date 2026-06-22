@@ -1,19 +1,23 @@
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::HeaderMap,
+    response::sse::{Event, Sse},
     routing::{get, post},
 };
 use uuid::Uuid;
 
 use crate::{
-    AddMessage, AppError, AppState, AuthorizationRequest, CreateSession, Permission,
-    SendSessionEvents, Session, SessionEvent, SessionThread, ContextPacket,
-    RenderContextPacketRequest, RenderedExecutionContext, append_incoming_session_event,
-    append_user_message_event, authorize_collection_request, authorize_request,
-    authorize_session_run, enqueue_session_loop, ensure_primary_session_thread,
-    generate_and_persist_context_packet, principal_from_request, project_session_event_to_loop,
-    render_execution_context_for_packet, visible_session_ids_for_principal,
+    AddMessage, AppError, AppState, Artifact, AuditLog, AuthorizationRequest, ContextPacket,
+    CreateSession, Permission, RenderContextPacketRequest, RenderedExecutionContext,
+    SendSessionEvents, Session, SessionEvent, SessionThread, StreamEventsQuery, ToolCall,
+    append_incoming_session_event, append_user_message_event, authorize_collection_request,
+    authorize_request, authorize_session_run, enqueue_session_loop, ensure_primary_session_thread,
+    generate_and_persist_context_packet, list_artifacts as list_artifacts_impl,
+    list_session_audit_logs as list_session_audit_logs_impl,
+    list_session_tool_calls as list_session_tool_calls_impl, principal_from_request,
+    project_session_event_to_loop, render_execution_context_for_packet,
+    stream_events as stream_events_impl, visible_session_ids_for_principal,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -25,6 +29,16 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/api/sessions/{id}/events",
             get(list_events).post(send_session_events),
+        )
+        .route("/api/sessions/{id}/stream", get(stream_events))
+        .route("/api/sessions/{id}/artifacts", get(list_artifacts))
+        .route(
+            "/api/sessions/{id}/tool-calls",
+            get(list_session_tool_calls),
+        )
+        .route(
+            "/api/sessions/{id}/audit-logs",
+            get(list_session_audit_logs),
         )
         .route("/api/sessions/{id}/threads", get(list_session_threads))
         .route(
@@ -42,6 +56,42 @@ pub(crate) fn router() -> Router<AppState> {
             "/api/context-packets/{id}/render",
             post(render_context_packet),
         )
+}
+
+async fn stream_events(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Query(query): Query<StreamEventsQuery>,
+    headers: HeaderMap,
+) -> Result<
+    Sse<impl futures_core::Stream<Item = Result<Event, std::convert::Infallible>>>,
+    AppError,
+> {
+    stream_events_impl(state, id, query, headers).await
+}
+
+async fn list_artifacts(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<Artifact>>, AppError> {
+    list_artifacts_impl(state, id, headers).await
+}
+
+async fn list_session_tool_calls(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ToolCall>>, AppError> {
+    list_session_tool_calls_impl(state, id, headers).await
+}
+
+async fn list_session_audit_logs(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<AuditLog>>, AppError> {
+    list_session_audit_logs_impl(state, id, headers).await
 }
 
 async fn list_sessions(
