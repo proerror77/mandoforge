@@ -435,7 +435,7 @@ pub(crate) struct AgentHandoffAssignment {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ManagerAgentPlan {
+pub(crate) struct ManagerAgentPlan {
     id: Uuid,
     session_id: Uuid,
     manager_agent_id: Uuid,
@@ -453,7 +453,7 @@ struct ManagerAgentPlan {
 }
 
 #[derive(Debug, Deserialize)]
-struct CreateManagerAgentPlan {
+pub(crate) struct CreateManagerAgentPlan {
     #[serde(default)]
     work_item_id: Option<Uuid>,
     #[serde(default)]
@@ -467,7 +467,7 @@ struct CreateManagerAgentPlan {
 }
 
 #[derive(Debug, Deserialize)]
-struct ReviewManagerAgentPlan {
+pub(crate) struct ReviewManagerAgentPlan {
     review: Value,
     #[serde(default)]
     status: Option<String>,
@@ -3892,10 +3892,7 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::ontology::router())
         .merge(handlers::memory_governance::router())
         .merge(handlers::sessions::router())
-        .route(
-            "/api/sessions/{id}/manager-plans",
-            get(list_session_manager_agent_plans).post(create_manager_agent_plan),
-        )
+        .merge(handlers::manager_plans::router())
         .route(
             "/api/dynamic-workflow-plans",
             get(list_dynamic_workflow_plans).post(create_dynamic_workflow_plan),
@@ -4066,10 +4063,6 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/work-items/{id}/activity",
             get(list_work_item_activity),
-        )
-        .route(
-            "/api/work-items/{id}/manager-plans",
-            get(list_work_item_manager_agent_plans),
         )
         .route("/api/capability-discovery", get(get_capability_discovery))
         .route(
@@ -4523,12 +4516,6 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/api/remote-computer-leases/{id}/fail",
             post(fail_remote_computer_lease),
-        )
-        .route("/api/manager-plans", get(list_manager_agent_plans))
-        .route("/api/manager-plans/{id}", get(get_manager_agent_plan))
-        .route(
-            "/api/manager-plans/{id}/review",
-            post(review_manager_agent_plan),
         )
         .route(
             "/api/execution-jobs/{id}/run",
@@ -15701,8 +15688,8 @@ pub(crate) async fn get_agent_handoff_assignment_for_handoff(
     Ok(Json(assignment))
 }
 
-async fn list_manager_agent_plans(
-    State(state): State<AppState>,
+pub(crate) async fn list_manager_agent_plans(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Vec<ManagerAgentPlan>>, AppError> {
     let principal = authorize_collection_request(
@@ -15723,9 +15710,9 @@ async fn list_manager_agent_plans(
     ))
 }
 
-async fn list_session_manager_agent_plans(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn list_session_manager_agent_plans(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<Vec<ManagerAgentPlan>>, AppError> {
     authorize_request(
@@ -15739,9 +15726,9 @@ async fn list_session_manager_agent_plans(
     Ok(Json(state.list_manager_agent_plans(Some(id)).await?))
 }
 
-async fn list_work_item_manager_agent_plans(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn list_work_item_manager_agent_plans(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<Vec<ManagerAgentPlan>>, AppError> {
     authorize_request(
@@ -16523,9 +16510,9 @@ fn capability_sample_tasks(agent: &Agent) -> Vec<String> {
     }
 }
 
-async fn get_manager_agent_plan(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn get_manager_agent_plan(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<ManagerAgentPlan>, AppError> {
     let plan = state.get_manager_agent_plan(id).await?;
@@ -16540,11 +16527,11 @@ async fn get_manager_agent_plan(
     Ok(Json(plan))
 }
 
-async fn create_manager_agent_plan(
-    State(state): State<AppState>,
-    Path(session_id): Path<Uuid>,
+pub(crate) async fn create_manager_agent_plan(
+    state: AppState,
+    session_id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<CreateManagerAgentPlan>,
+    input: CreateManagerAgentPlan,
 ) -> Result<Json<ManagerAgentPlan>, AppError> {
     authorize_request(
         &state,
@@ -16615,11 +16602,11 @@ async fn create_manager_agent_plan(
     Ok(Json(plan))
 }
 
-async fn review_manager_agent_plan(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn review_manager_agent_plan(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<ReviewManagerAgentPlan>,
+    input: ReviewManagerAgentPlan,
 ) -> Result<Json<ManagerAgentPlan>, AppError> {
     let current = state.get_manager_agent_plan(id).await?;
     authorize_request(

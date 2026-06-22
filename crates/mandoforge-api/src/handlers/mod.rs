@@ -3,6 +3,7 @@ pub(crate) mod agent_releases;
 pub(crate) mod agent_handoffs;
 pub(crate) mod deployment;
 pub(crate) mod github;
+pub(crate) mod manager_plans;
 pub(crate) mod memory_governance;
 pub(crate) mod ontology;
 pub(crate) mod ontology_intelligence;
