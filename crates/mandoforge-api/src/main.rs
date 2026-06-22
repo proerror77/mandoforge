@@ -133,6 +133,7 @@ use remote_computer_runner::{
     RemoteComputerRunnerDryRunResponse, RemoteComputerRunnerReadiness,
     remote_computer_runner_for_config,
 };
+pub(crate) use types::agent::{Agent, AgentVersion};
 pub(crate) use types::deployment::{
     DeploymentVersion, ProductionAutoDeployRequest, ProductionDeploymentVerifyRequest,
 };
@@ -321,47 +322,6 @@ enum ExecutionQueueBackendSelection {
     Redis,
     Nats,
     NatsJetstream,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Agent {
-    id: Uuid,
-    name: String,
-    kind: String,
-    team_id: Option<Uuid>,
-    project_id: Option<Uuid>,
-    runtime_profile_id: Option<Uuid>,
-    agent_role: String,
-    provider: String,
-    model: String,
-    system_prompt: String,
-    tools: Vec<String>,
-    tool_policy: Value,
-    mcp_server_ids: Vec<Uuid>,
-    skill_ids: Vec<String>,
-    workflow_pack_ids: Vec<String>,
-    remote_computer_profile: Value,
-    semantic_scopes: Value,
-    release_state: String,
-    created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AgentVersion {
-    id: Uuid,
-    agent_id: Uuid,
-    version: i32,
-    model: String,
-    system_prompt: String,
-    tools: Vec<String>,
-    tool_names: Vec<String>,
-    runtime_config: Value,
-    approval_policy: Value,
-    mcp_server_ids: Vec<Uuid>,
-    skill_ids: Vec<String>,
-    workflow_pack_ids: Vec<String>,
-    semantic_scopes: Value,
-    created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
