@@ -156,6 +156,14 @@ pub(crate) use types::session::{
     AddMessage, CreateSession, IncomingSessionEvent, SendSessionEvents, Session, SessionEvent,
     SessionLoopJob, SessionLoopJobStatus, SessionStatus, SessionThread, StreamEventsQuery,
 };
+pub(crate) use types::tenant::{
+    AcceptTenantInvitation, AcceptedTenantInvitation, BootstrapTenantProvisioning,
+    CreateMembership, CreateOrganization, CreateProject, CreateTeam, CreateTenantInvitation,
+    Membership, Organization, Project, Team, TenantInvitation, TenantIsolationAttentionItem,
+    TenantIsolationReadinessReport, TenantIsolationRlsReadiness, TenantIsolationScopedCounts,
+    TenantIsolationTableCoverage, TenantProductionRoutingReadiness, TenantProvisioningResult,
+    TenantRuntimeMode, TransferOrganizationOwnership,
+};
 use types::tools::{
     ApprovalRequestTool, ArtifactCreateTool, FileReadTool, McpCallTool, OntologyTypeLookupTool,
     SemanticLinkExpandTool, SemanticObjectFetchTool, SemanticObjectSearchTool, ShellExecTool,
@@ -193,21 +201,6 @@ struct AppState {
     tenant_id: Uuid,
     tenant_runtime_mode: TenantRuntimeMode,
     policy: Arc<RwLock<PolicyRuntime>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TenantRuntimeMode {
-    SingleRuntimeTenant,
-    TenantRouted,
-}
-
-impl TenantRuntimeMode {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::SingleRuntimeTenant => "single_runtime_tenant",
-            Self::TenantRouted => "tenant_routed",
-        }
-    }
 }
 
 tokio::task_local! {
@@ -4992,145 +4985,6 @@ struct UsageFinanceOperationAudit {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Organization {
-    id: Uuid,
-    name: String,
-    slug: String,
-    owner_subject: Option<String>,
-    created_at: DateTime<Utc>,
-    #[serde(default)]
-    archived_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateOrganization {
-    name: String,
-    slug: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct TransferOrganizationOwnership {
-    owner_subject: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct BootstrapTenantProvisioning {
-    organization_name: String,
-    organization_slug: String,
-    owner_subject: String,
-    #[serde(default)]
-    team_name: Option<String>,
-    #[serde(default)]
-    team_slug: Option<String>,
-    #[serde(default)]
-    project_name: Option<String>,
-    #[serde(default)]
-    project_slug: Option<String>,
-    #[serde(default = "default_bootstrap_owner_role")]
-    owner_role: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TenantProvisioningResult {
-    organization: Organization,
-    team: Option<Team>,
-    project: Option<Project>,
-    owner_membership: Membership,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TenantIsolationReadinessReport {
-    generated_at: DateTime<Utc>,
-    status: String,
-    readiness_score: i64,
-    runtime_tenant_id: Uuid,
-    runtime_tenant_mode: String,
-    header_fail_closed: bool,
-    membership_scope_enforced: bool,
-    production_routing: TenantProductionRoutingReadiness,
-    scoped_counts: TenantIsolationScopedCounts,
-    table_coverage: Vec<TenantIsolationTableCoverage>,
-    rls: TenantIsolationRlsReadiness,
-    attention_items: Vec<TenantIsolationAttentionItem>,
-    runbook_actions: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TenantProductionRoutingReadiness {
-    status: String,
-    production_blocked: bool,
-    cross_tenant_routing_supported: bool,
-    runtime_tenant_mode: String,
-    header_fail_closed: bool,
-    membership_scope_enforced: bool,
-    rls_ready: bool,
-    controller_required: bool,
-    controller_configured: bool,
-    latest_controller_status: Option<String>,
-    latest_controller_age_hours: Option<i64>,
-    controller_evidence_fresh: bool,
-    latest_controller_validated: bool,
-    message: String,
-    blocking_reasons: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TenantIsolationScopedCounts {
-    organizations: usize,
-    teams: usize,
-    projects: usize,
-    memberships: usize,
-    invitations: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TenantIsolationTableCoverage {
-    table: String,
-    tenant_id_required: bool,
-    store_filters_tenant: bool,
-    rls_required_for_production: bool,
-    rls_enabled: bool,
-    rls_forced: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TenantIsolationRlsReadiness {
-    required_for_production: bool,
-    enabled: bool,
-    forced: bool,
-    migration_asset_present: bool,
-    tenant_context_configured: bool,
-    enabled_table_count: usize,
-    forced_table_count: usize,
-    tracked_table_count: usize,
-    status: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TenantIsolationAttentionItem {
-    kind: String,
-    severity: String,
-    message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Team {
-    id: Uuid,
-    organization_id: Uuid,
-    name: String,
-    slug: String,
-    created_at: DateTime<Utc>,
-    #[serde(default)]
-    archived_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateTeam {
-    name: String,
-    slug: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 struct AgentTeammate {
     id: Uuid,
     agent_id: Option<Uuid>,
@@ -5204,23 +5058,6 @@ struct CreateSquadMember {
     status: String,
     #[serde(default = "empty_json_object")]
     metadata: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Project {
-    id: Uuid,
-    team_id: Uuid,
-    name: String,
-    slug: String,
-    created_at: DateTime<Utc>,
-    #[serde(default)]
-    archived_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateProject {
-    name: String,
-    slug: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5334,67 +5171,6 @@ struct WorkItemActivityEntry {
     summary: String,
     metadata: Value,
     created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Membership {
-    id: Uuid,
-    user_id: String,
-    organization_id: Option<Uuid>,
-    team_id: Option<Uuid>,
-    project_id: Option<Uuid>,
-    role: String,
-    created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateMembership {
-    user_id: String,
-    #[serde(default)]
-    team_id: Option<Uuid>,
-    #[serde(default)]
-    project_id: Option<Uuid>,
-    role: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TenantInvitation {
-    id: Uuid,
-    organization_id: Uuid,
-    team_id: Option<Uuid>,
-    project_id: Option<Uuid>,
-    email: String,
-    role: String,
-    status: String,
-    token: String,
-    invited_by: Option<String>,
-    accepted_by: Option<String>,
-    expires_at: DateTime<Utc>,
-    created_at: DateTime<Utc>,
-    decided_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateTenantInvitation {
-    email: String,
-    role: String,
-    #[serde(default)]
-    team_id: Option<Uuid>,
-    #[serde(default)]
-    project_id: Option<Uuid>,
-    #[serde(default)]
-    expires_in_hours: Option<i64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AcceptTenantInvitation {
-    token: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AcceptedTenantInvitation {
-    invitation: TenantInvitation,
-    membership: Membership,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

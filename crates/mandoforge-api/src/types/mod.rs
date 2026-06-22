@@ -4,4 +4,5 @@ pub(crate) mod agent;
 pub(crate) mod deployment;
 pub(crate) mod eval;
 pub(crate) mod session;
+pub(crate) mod tenant;
 pub(crate) mod tools;
