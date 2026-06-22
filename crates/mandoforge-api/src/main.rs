@@ -3898,10 +3898,6 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::tools::router())
         .merge(handlers::tenant::router())
         .route(
-            "/api/organizations/{id}/teams",
-            get(list_teams).post(create_team),
-        )
-        .route(
             "/api/organizations/{id}/memberships",
             get(list_memberships).post(create_membership),
         )
@@ -3915,17 +3911,6 @@ fn build_router(state: AppState) -> Router {
             post(revoke_tenant_invitation),
         )
         .route("/api/invitations/accept", post(accept_tenant_invitation))
-        .route(
-            "/api/teams/{id}/projects",
-            get(list_projects).post(create_project),
-        )
-        .route("/api/teams/{id}", patch(update_team).delete(delete_team))
-        .route("/api/teams/{id}/archive", post(archive_team))
-        .route(
-            "/api/projects/{id}",
-            patch(update_project).delete(delete_project),
-        )
-        .route("/api/projects/{id}/archive", post(archive_project))
         .route(
             "/api/work-items",
             get(list_work_items).post(create_work_item),
@@ -34163,9 +34148,9 @@ pub(crate) async fn transfer_organization_ownership(
     Ok(Json(organization))
 }
 
-async fn list_teams(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn list_teams(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<Vec<Team>>, AppError> {
     authorize_request(
@@ -34179,11 +34164,11 @@ async fn list_teams(
     Ok(Json(state.list_teams(id).await?))
 }
 
-async fn create_team(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn create_team(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<CreateTeam>,
+    input: CreateTeam,
 ) -> Result<Json<Team>, AppError> {
     authorize_request(
         &state,
@@ -34196,11 +34181,11 @@ async fn create_team(
     Ok(Json(state.create_team(id, input).await?))
 }
 
-async fn update_team(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn update_team(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<CreateTeam>,
+    input: CreateTeam,
 ) -> Result<Json<Team>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
@@ -34231,30 +34216,30 @@ async fn update_team(
     Ok(Json(team))
 }
 
-async fn list_projects(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn list_projects(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<Vec<Project>>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "team", Some(id)).await?;
     Ok(Json(state.list_projects(id).await?))
 }
 
-async fn create_project(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn create_project(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<CreateProject>,
+    input: CreateProject,
 ) -> Result<Json<Project>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "team", Some(id)).await?;
     Ok(Json(state.create_project(id, input).await?))
 }
 
-async fn update_project(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn update_project(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    Json(input): Json<CreateProject>,
+    input: CreateProject,
 ) -> Result<Json<Project>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
@@ -34285,9 +34270,9 @@ async fn update_project(
     Ok(Json(project))
 }
 
-async fn archive_team(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn archive_team(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<Team>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
@@ -34314,9 +34299,9 @@ async fn archive_team(
     Ok(Json(team))
 }
 
-async fn delete_team(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn delete_team(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<Team>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
@@ -34347,9 +34332,9 @@ async fn delete_team(
     Ok(Json(team))
 }
 
-async fn archive_project(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn archive_project(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<Project>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
@@ -34376,9 +34361,9 @@ async fn archive_project(
     Ok(Json(project))
 }
 
-async fn delete_project(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn delete_project(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<Project>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
