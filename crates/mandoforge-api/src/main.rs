@@ -55,6 +55,7 @@ mod ontology_source_adapters;
 mod policy;
 mod provider;
 mod remote_computer_production;
+mod remote_computer_runtime;
 mod remote_computer_runner;
 mod secrets;
 mod shell_runner;
@@ -140,6 +141,10 @@ use provider::{
     ProviderResponse, default_provider_tool_names,
 };
 pub(crate) use remote_computer_production::build_remote_computer_production_path_payload;
+pub(crate) use remote_computer_runtime::{
+    build_remote_computer_runner_readiness, remote_computer_runner_request_is_exec,
+    remote_computer_runner_response_for_audit,
+};
 use remote_computer_runner::{
     RemoteComputerRunnerConfig, RemoteComputerRunnerDryRunRequest,
     RemoteComputerRunnerDryRunResponse, RemoteComputerRunnerReadiness,
@@ -41038,38 +41043,6 @@ pub(crate) async fn enforce_worker_pool_binding(
     Err(AppError::not_found("job not claimable for worker pool"))
 }
 
-pub(crate) fn remote_computer_runner_request_is_exec(input: &RemoteComputerRunnerDryRunRequest) -> bool {
-    input
-        .operation
-        .as_deref()
-        .map(str::trim)
-        .map(str::to_ascii_lowercase)
-        .is_some_and(|operation| matches!(operation.as_str(), "exec" | "live_exec"))
-}
-
-pub(crate) fn remote_computer_runner_response_for_audit(
-    response: &RemoteComputerRunnerDryRunResponse,
-) -> Value {
-    let mut value = json!(response);
-    if let Some(exec_result) = response.exec_result.as_ref() {
-        value["exec_result"] = json!({
-            "captured": true,
-            "stdout_chars": exec_result
-                .get("stdout")
-                .and_then(|value| value.as_str())
-                .map(|value| value.chars().count())
-                .unwrap_or(0),
-            "stderr_chars": exec_result
-                .get("stderr")
-                .and_then(|value| value.as_str())
-                .map(|value| value.chars().count())
-                .unwrap_or(0),
-            "status": exec_result.get("status").cloned().unwrap_or(Value::Null)
-        });
-    }
-    value
-}
-
 pub(crate) async fn execute_remote_computer_stale_reclaim(
     state: &AppState,
 ) -> Result<RemoteComputerReclaimRun, AppError> {
@@ -42669,12 +42642,6 @@ where
             matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
         })
         .unwrap_or(false)
-}
-
-pub(crate) fn build_remote_computer_runner_readiness() -> RemoteComputerRunnerReadiness {
-    let config = RemoteComputerRunnerConfig::from_env();
-    let runner = remote_computer_runner_for_config(&config);
-    runner.readiness(&config)
 }
 
 fn remote_computer_manifest_readiness(
