@@ -1,18 +1,24 @@
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Path, State},
     http::HeaderMap,
     routing::{get, post},
 };
 use serde_json::Value;
+use uuid::Uuid;
 
 use crate::{
-    AppError, AppState, PolicyRollbackResult, PolicyRolloutOrchestrationReadiness,
-    PolicyRolloutOrchestrationValidationRun, PolicyRuntimeStatus, PolicyScheduledRolloutRun,
-    PolicyTestResult, SimulatePolicy, TestPolicyRequest,
-    cancel_policy_rollout as cancel_policy_rollout_impl, get_policy as get_policy_impl,
+    AppError, AppState, CreatePolicyRevision, PolicyRevision, PolicyRevisionDiff,
+    PolicyRevisionGate, PolicyRevisionGateRequest, PolicyRollbackResult,
+    PolicyRolloutOrchestrationReadiness, PolicyRolloutOrchestrationValidationRun,
+    PolicyRuntimeStatus, PolicyScheduledRolloutRun, PolicyTestResult, SimulatePolicy,
+    TestPolicyRequest, activate_policy_revision as activate_policy_revision_impl,
+    cancel_policy_rollout as cancel_policy_rollout_impl,
+    create_policy_revision as create_policy_revision_impl,
+    diff_policy_revision as diff_policy_revision_impl, gate_policy_revision as gate_policy_revision_impl,
+    get_policy as get_policy_impl,
     get_policy_rollout_orchestration_readiness as get_policy_rollout_orchestration_readiness_impl,
-    get_policy_runtime as get_policy_runtime_impl, policy,
+    get_policy_runtime as get_policy_runtime_impl, list_policy_revisions as list_policy_revisions_impl, policy,
     rollback_policy_rollout as rollback_policy_rollout_impl,
     run_due_policy_rollouts as run_due_policy_rollouts_impl,
     simulate_policy as simulate_policy_impl, test_policy as test_policy_impl,
@@ -39,6 +45,19 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/api/policy/rollout/run-due", post(run_due_policy_rollouts))
         .route("/api/policy/simulate", post(simulate_policy))
         .route("/api/policy/test", post(test_policy))
+        .route(
+            "/api/policy/revisions",
+            get(list_policy_revisions).post(create_policy_revision),
+        )
+        .route(
+            "/api/policy/revisions/{id}/activate",
+            post(activate_policy_revision),
+        )
+        .route("/api/policy/revisions/{id}/diff", get(diff_policy_revision))
+        .route(
+            "/api/policy/revisions/{id}/gate",
+            post(gate_policy_revision),
+        )
 }
 
 async fn get_policy(
@@ -104,4 +123,44 @@ async fn test_policy(
     Json(input): Json<TestPolicyRequest>,
 ) -> Result<Json<PolicyTestResult>, AppError> {
     test_policy_impl(state, headers, input).await
+}
+
+async fn list_policy_revisions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<PolicyRevision>>, AppError> {
+    list_policy_revisions_impl(state, headers).await
+}
+
+async fn create_policy_revision(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreatePolicyRevision>,
+) -> Result<Json<PolicyRevision>, AppError> {
+    create_policy_revision_impl(state, headers, input).await
+}
+
+async fn activate_policy_revision(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<PolicyRevision>, AppError> {
+    activate_policy_revision_impl(state, id, headers).await
+}
+
+async fn diff_policy_revision(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<PolicyRevisionDiff>, AppError> {
+    diff_policy_revision_impl(state, id, headers).await
+}
+
+async fn gate_policy_revision(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    input: Option<Json<PolicyRevisionGateRequest>>,
+) -> Result<Json<PolicyRevisionGate>, AppError> {
+    gate_policy_revision_impl(state, id, headers, input.map(|Json(input)| input)).await
 }

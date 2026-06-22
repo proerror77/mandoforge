@@ -3901,19 +3901,6 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::providers::router())
         .merge(handlers::mcp::router())
         .merge(handlers::policy::router())
-        .route(
-            "/api/policy/revisions",
-            get(list_policy_revisions).post(create_policy_revision),
-        )
-        .route(
-            "/api/policy/revisions/{id}/activate",
-            post(activate_policy_revision),
-        )
-        .route("/api/policy/revisions/{id}/diff", get(diff_policy_revision))
-        .route(
-            "/api/policy/revisions/{id}/gate",
-            post(gate_policy_revision),
-        )
         .route("/api/vault/health", get(get_vault_health))
         .route("/api/vault/readiness", get(get_vault_readiness))
         .route("/api/vault/kms/rotation/run", post(run_vault_kms_rotation))
@@ -36676,8 +36663,8 @@ pub(crate) async fn test_policy(
     Ok(Json(result))
 }
 
-async fn list_policy_revisions(
-    State(state): State<AppState>,
+pub(crate) async fn list_policy_revisions(
+    state: AppState,
     headers: HeaderMap,
 ) -> Result<Json<Vec<PolicyRevision>>, AppError> {
     authorize_request(&state, &headers, Permission::Admin, "policy", None).await?;
@@ -37407,10 +37394,10 @@ where
     }))
 }
 
-async fn create_policy_revision(
-    State(state): State<AppState>,
+pub(crate) async fn create_policy_revision(
+    state: AppState,
     headers: HeaderMap,
-    Json(input): Json<CreatePolicyRevision>,
+    input: CreatePolicyRevision,
 ) -> Result<Json<PolicyRevision>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
@@ -37443,9 +37430,9 @@ async fn create_policy_revision(
     Ok(Json(revision))
 }
 
-async fn diff_policy_revision(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn diff_policy_revision(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<PolicyRevisionDiff>, AppError> {
     authorize_request(
@@ -37461,11 +37448,11 @@ async fn diff_policy_revision(
     Ok(Json(build_policy_revision_diff(&policy, &revision)?))
 }
 
-async fn gate_policy_revision(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn gate_policy_revision(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
-    input: Option<Json<PolicyRevisionGateRequest>>,
+    input: Option<PolicyRevisionGateRequest>,
 ) -> Result<Json<PolicyRevisionGate>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
@@ -37481,7 +37468,7 @@ async fn gate_policy_revision(
     let gate = build_policy_revision_gate(
         &policy,
         &revision,
-        input.map(|Json(input)| input).unwrap_or_default(),
+        input.unwrap_or_default(),
     )?;
     state.update_policy_revision_gate(&gate).await?;
     state
@@ -37506,9 +37493,9 @@ async fn gate_policy_revision(
     Ok(Json(gate))
 }
 
-async fn activate_policy_revision(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+pub(crate) async fn activate_policy_revision(
+    state: AppState,
+    id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<PolicyRevision>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
