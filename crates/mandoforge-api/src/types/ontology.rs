@@ -486,6 +486,15 @@ pub(crate) const ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_PENDING: &str = "pendi
 pub(crate) const ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_TRIGGERED: &str = "triggered";
 pub(crate) const ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_FAILED: &str = "failed";
 pub(crate) const ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_SKIPPED: &str = "skipped";
+pub(crate) const ONTOLOGY_RELEASE_STATUS_ACTIVE: &str = "active";
+pub(crate) const ONTOLOGY_RELEASE_STATUS_ACTIVE_TRIGGER_FAILED: &str = "active_trigger_failed";
+
+pub(crate) fn ontology_release_current_status(status: &str) -> bool {
+    matches!(
+        status,
+        ONTOLOGY_RELEASE_STATUS_ACTIVE | ONTOLOGY_RELEASE_STATUS_ACTIVE_TRIGGER_FAILED
+    )
+}
 
 pub(crate) fn ontology_release_workflow_trigger_status_allowed(status: &str) -> bool {
     matches!(

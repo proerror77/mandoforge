@@ -17,8 +17,8 @@ use crate::codex_app_server::{CodexThreadRequest, CodexTurnRequest, CodexTurnRes
 use crate::execution_queue::{ExecutionJob, ExecutionJobRequest, ExecutionJobStatus};
 use crate::mcp_gateway::McpCallRequest;
 use crate::remote_computer_runner::{
-    RemoteComputerRunnerConfig, RemoteComputerRunnerDryRunRequest, poll_kubernetes_pod_running,
-    remote_computer_runner_for_config,
+    RemoteComputerRunner, RemoteComputerRunnerConfig, RemoteComputerRunnerDryRunRequest,
+    poll_kubernetes_pod_running, remote_computer_runner_for_config,
 };
 use crate::shell_runner::{shell_command, shell_runner};
 use crate::{
@@ -1215,6 +1215,8 @@ async fn provision_remote_computer_pod_for_job(
     let runner = remote_computer_runner_for_config(&config);
     // Deterministic pod name: lowercase hex, max 63 chars, dashes allowed
     let pod_name = format!("agent-rc-{}", &job.session_id.simple().to_string()[..20]);
+    let remote_computer_id = on_demand_remote_computer_id(job.session_id);
+    let mut created_pod = false;
     // Check if a remote_computer record already exists for this pod (race guard)
     let existing = state
         .list_remote_computers()
@@ -1230,14 +1232,14 @@ async fn provision_remote_computer_pod_for_job(
                 &config,
                 RemoteComputerRunnerDryRunRequest {
                     operation: Some("live_create".to_string()),
-                    remote_computer_id: None,
+                    remote_computer_id: Some(remote_computer_id),
                     session_id: Some(job.session_id),
                     pod_name: Some(pod_name.clone()),
                     metadata: Some(json!({
                         "assignment_id": "",
                         "session_workspace_path": remote_session_workspace_path_from_base("/workspace", job.session_id),
                         "artifact_dir": remote_session_artifacts_path_from_base("/workspace", job.session_id),
-                        "artifact_discovery_enabled": false
+                        "artifact_discovery_enabled": true
                     })),
                 },
             )
@@ -1254,6 +1256,7 @@ async fn provision_remote_computer_pod_for_job(
                 create_response.message
             )));
         }
+        created_pod = create_response.status == "mutation_ok";
         // Wait for Pod to reach Running phase
         let ready_timeout = Duration::from_secs(
             std::env::var("MANDOFORGE_REMOTE_COMPUTER_POD_READY_TIMEOUT_SECONDS")
@@ -1269,14 +1272,34 @@ async fn provision_remote_computer_pod_for_job(
                 .filter(|v| *v > 0)
                 .unwrap_or(2000),
         );
-        poll_kubernetes_pod_running(&config, &pod_name, ready_timeout, ready_interval)
-            .await
-            .map_err(|err| AppError::internal(format!("Remote Computer Pod not ready: {err}")))?;
+        if let Err(error) =
+            poll_kubernetes_pod_running(&config, &pod_name, ready_timeout, ready_interval).await
+        {
+            let cleanup_error = if created_pod {
+                cleanup_on_demand_remote_computer_pod_after_failed_provision(
+                    state,
+                    runner.as_ref(),
+                    &config,
+                    &pod_name,
+                    job,
+                    worker_id,
+                    "pod_not_ready",
+                )
+                .await
+            } else {
+                None
+            };
+            return Err(remote_computer_pod_provision_error(
+                format!("Remote Computer Pod not ready: {error}"),
+                cleanup_error,
+            ));
+        }
         // Persist the remote_computer record so the assignment chain can find pod_name.
         // On concurrent provisioning, a unique-constraint violation can occur — in that
         // case the winner's record is already in the DB; re-read it.
         match state
             .create_remote_computer(CreateRemoteComputer {
+                id: Some(remote_computer_id),
                 name: pod_name.clone(),
                 profile: Some("workspace-write".to_string()),
                 namespace: Some(config.namespace.clone()),
@@ -1304,13 +1327,30 @@ async fn provision_remote_computer_pod_for_job(
                 {
                     existing
                 } else {
+                    if created_pod {
+                        let cleanup_error =
+                            cleanup_on_demand_remote_computer_pod_after_failed_provision(
+                                state,
+                                runner.as_ref(),
+                                &config,
+                                &pod_name,
+                                job,
+                                worker_id,
+                                "remote_computer_record_failed",
+                            )
+                            .await;
+                        return Err(remote_computer_pod_provision_error(
+                            error.message,
+                            cleanup_error,
+                        ));
+                    }
                     return Err(error);
                 }
             }
         }
     };
     // Create the lease tied to this session
-    let lease = state
+    let lease = match state
         .create_remote_computer_lease(
             computer.id,
             CreateRemoteComputerLease {
@@ -1328,7 +1368,29 @@ async fn provision_remote_computer_pod_for_job(
                 })),
             },
         )
-        .await?;
+        .await
+    {
+        Ok(lease) => lease,
+        Err(error) => {
+            if created_pod {
+                let cleanup_error = cleanup_on_demand_remote_computer_pod_after_failed_provision(
+                    state,
+                    runner.as_ref(),
+                    &config,
+                    &pod_name,
+                    job,
+                    worker_id,
+                    "remote_computer_lease_failed",
+                )
+                .await;
+                return Err(remote_computer_pod_provision_error(
+                    error.message,
+                    cleanup_error,
+                ));
+            }
+            return Err(error);
+        }
+    };
     let details = json!({
         "lease_id": lease.id,
         "remote_computer_id": lease.remote_computer_id,
@@ -1365,6 +1427,93 @@ async fn provision_remote_computer_pod_for_job(
     Ok(Some(lease))
 }
 
+async fn cleanup_on_demand_remote_computer_pod_after_failed_provision(
+    state: &AppState,
+    runner: &dyn RemoteComputerRunner,
+    config: &RemoteComputerRunnerConfig,
+    pod_name: &str,
+    job: &ExecutionJob,
+    worker_id: &str,
+    reason: &str,
+) -> Option<String> {
+    let response = runner
+        .mutate(
+            config,
+            RemoteComputerRunnerDryRunRequest {
+                operation: Some("live_delete".to_string()),
+                remote_computer_id: None,
+                session_id: Some(job.session_id),
+                pod_name: Some(pod_name.to_string()),
+                metadata: Some(json!({
+                    "source": "cleanup_on_demand_remote_computer_pod_after_failed_provision",
+                    "reason": reason,
+                    "execution_job_id": job.id,
+                    "tool_call_id": job.tool_call_id,
+                    "worker_id": worker_id,
+                })),
+            },
+        )
+        .await;
+    let cleanup_failed = response.status != "mutation_ok";
+    let event_type = if cleanup_failed {
+        "remote_computer.on_demand_pod_cleanup_failed"
+    } else {
+        "remote_computer.on_demand_pod_cleaned_up"
+    };
+    let details = json!({
+        "pod_name": pod_name,
+        "reason": reason,
+        "execution_job_id": job.id,
+        "tool_call_id": job.tool_call_id,
+        "worker_id": worker_id,
+        "cleanup_status": response.status,
+        "cleanup_message": response.message,
+        "cleanup_status_code": response.live_mutation_status_code,
+    });
+    let _ = state
+        .append_event(
+            "worker",
+            Some(job.id),
+            job.session_id,
+            event_type,
+            details.clone(),
+        )
+        .await;
+    let _ = state
+        .append_audit_log(new_audit_log(
+            Some(job.session_id),
+            "worker",
+            Some(job.id),
+            event_type,
+            "remote_computer_pod",
+            None,
+            details,
+        ))
+        .await;
+    cleanup_failed.then_some(response.message)
+}
+
+fn remote_computer_pod_provision_error(
+    message: impl Into<String>,
+    cleanup_error: Option<String>,
+) -> AppError {
+    AppError::internal(remote_computer_pod_provision_error_message(
+        message,
+        cleanup_error,
+    ))
+}
+
+fn remote_computer_pod_provision_error_message(
+    message: impl Into<String>,
+    cleanup_error: Option<String>,
+) -> String {
+    let message = message.into();
+    match cleanup_error {
+        Some(cleanup_error) => format!("{message}; cleanup failed: {cleanup_error}"),
+        None => message,
+    }
+}
+
 fn remote_computer_lease_race_error(error: &AppError) -> bool {
     error.status == StatusCode::BAD_REQUEST
         && matches!(
@@ -1380,6 +1529,10 @@ fn remote_computer_pod_create_already_exists(
     response.would_create_pod
         && response.live_mutation_attempted
         && response.live_mutation_status_code == Some(StatusCode::CONFLICT.as_u16())
+}
+
+fn on_demand_remote_computer_id(session_id: Uuid) -> Uuid {
+    Uuid::from_u128(session_id.as_u128() ^ 0x6d616e646f666f7267655f72635f7631)
 }
 
 async fn finalize_remote_computer_assignment_for_job(
@@ -5170,6 +5323,29 @@ mod tests {
         assert!(!remote_computer_pod_create_already_exists(
             &non_create_conflict
         ));
+    }
+
+    #[test]
+    fn remote_computer_pod_provision_error_reports_cleanup_failure() {
+        let message = remote_computer_pod_provision_error_message(
+            "Remote Computer Pod not ready: timed out",
+            Some("Kubernetes Pod API returned HTTP 403".to_string()),
+        );
+
+        assert!(message.contains("Pod not ready"));
+        assert!(message.contains("cleanup failed"));
+        assert!(message.contains("HTTP 403"));
+    }
+
+    #[test]
+    fn on_demand_remote_computer_id_is_stable_per_session() {
+        let session_id = Uuid::new_v4();
+
+        assert_eq!(
+            on_demand_remote_computer_id(session_id),
+            on_demand_remote_computer_id(session_id)
+        );
+        assert_ne!(on_demand_remote_computer_id(session_id), session_id);
     }
 
     #[test]

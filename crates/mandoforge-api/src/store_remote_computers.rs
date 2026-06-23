@@ -51,7 +51,7 @@ impl AppState {
     ) -> Result<RemoteComputer, AppError> {
         let now = Utc::now();
         let record = RemoteComputer {
-            id: Uuid::new_v4(),
+            id: input.id.unwrap_or_else(Uuid::new_v4),
             name: input.name.trim().to_string(),
             profile: input
                 .profile

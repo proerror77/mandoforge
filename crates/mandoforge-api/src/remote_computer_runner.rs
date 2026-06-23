@@ -555,9 +555,8 @@ async fn probe_kubernetes_version(
     let token = tokio::fs::read_to_string(&access.bearer_token_path)
         .await
         .map_err(|err| format!("failed to read bearer token: {err}"))?;
-    let response = reqwest::Client::builder()
-        .build()
-        .map_err(|err| format!("failed to build Kubernetes HTTP client: {err}"))?
+    let response = kubernetes_http_client(&access, Duration::from_secs(10))
+        .await?
         .get(format!("{}/version", access.api_url))
         .bearer_auth(token.trim())
         .send()
@@ -588,15 +587,9 @@ async fn call_kubernetes_mutation(
         .map_err(|err| {
             KubernetesMutationError::without_status(format!("failed to read bearer token: {err}"))
         })?;
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(access.danger_accept_invalid_certs)
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|err| {
-            KubernetesMutationError::without_status(format!(
-                "failed to build Kubernetes HTTP client: {err}"
-            ))
-        })?;
+    let client = kubernetes_http_client(&access, Duration::from_secs(10))
+        .await
+        .map_err(KubernetesMutationError::without_status)?;
     let url = if create {
         format!(
             "{}/api/v1/namespaces/{}/pods",
@@ -815,11 +808,7 @@ pub(crate) async fn poll_kubernetes_pod_running(
         .ok_or_else(|| "supported Kubernetes API client is not configured".to_string())?;
     let poll_interval = interval.max(Duration::from_millis(100));
     let deadline = Instant::now() + timeout;
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(config.in_cluster)
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|err| format!("failed to build HTTP client: {err}"))?;
+    let client = kubernetes_http_client(&access, Duration::from_secs(10)).await?;
     loop {
         if Instant::now() >= deadline {
             return Err(format!(
@@ -915,7 +904,6 @@ struct KubernetesClientAccess {
     api_url: String,
     bearer_token_path: PathBuf,
     ca_cert_path: Option<PathBuf>,
-    danger_accept_invalid_certs: bool,
 }
 
 fn kubernetes_client_access(config: &RemoteComputerRunnerConfig) -> Option<KubernetesClientAccess> {
@@ -935,7 +923,6 @@ fn kubernetes_client_access(config: &RemoteComputerRunnerConfig) -> Option<Kuber
             api_url: api_url.trim_end_matches('/').to_string(),
             bearer_token_path: token_path,
             ca_cert_path: in_cluster_ca_cert_path(config.in_cluster),
-            danger_accept_invalid_certs: config.in_cluster,
         });
     }
     if config.in_cluster {
@@ -954,7 +941,6 @@ fn kubernetes_client_access(config: &RemoteComputerRunnerConfig) -> Option<Kuber
                     .to_string(),
                 bearer_token_path: token_path,
                 ca_cert_path: in_cluster_ca_cert_path(true),
-                danger_accept_invalid_certs: true,
             });
         }
     }
@@ -962,9 +948,25 @@ fn kubernetes_client_access(config: &RemoteComputerRunnerConfig) -> Option<Kuber
 }
 
 fn in_cluster_ca_cert_path(in_cluster: bool) -> Option<PathBuf> {
-    in_cluster
-        .then(|| PathBuf::from(IN_CLUSTER_SERVICE_ACCOUNT_CA))
-        .filter(|path| path.exists())
+    in_cluster.then(|| PathBuf::from(IN_CLUSTER_SERVICE_ACCOUNT_CA))
+}
+
+async fn kubernetes_http_client(
+    access: &KubernetesClientAccess,
+    timeout: Duration,
+) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder().timeout(timeout);
+    if let Some(ca_cert_path) = &access.ca_cert_path {
+        let ca = tokio::fs::read(ca_cert_path)
+            .await
+            .map_err(|err| format!("failed to read Kubernetes service-account CA: {err}"))?;
+        let certificate = reqwest::Certificate::from_pem(&ca)
+            .map_err(|err| format!("failed to parse Kubernetes service-account CA: {err}"))?;
+        builder = builder.add_root_certificate(certificate);
+    }
+    builder
+        .build()
+        .map_err(|err| format!("failed to build Kubernetes HTTP client: {err}"))
 }
 
 async fn kubernetes_exec_tls_connector(
@@ -1442,6 +1444,32 @@ mod tests {
         assert!(!readiness.bearer_token_configured);
         assert!(!readiness.configured);
         assert!(readiness.dry_run_only);
+    }
+
+    #[test]
+    fn kubernetes_client_access_uses_service_account_ca_for_in_cluster_tls() {
+        let token_path = write_test_token();
+        let config = RemoteComputerRunnerConfig {
+            mode: "kubernetes".to_string(),
+            namespace: "agent-os".to_string(),
+            pod_template_path: test_pod_template_path(),
+            service_account: "mandoforge-remote-computer".to_string(),
+            kubeconfig_path: None,
+            kube_api_url: Some("https://kubernetes.default.svc".to_string()),
+            bearer_token_path: Some(token_path.to_string_lossy().to_string()),
+            in_cluster: true,
+            mutation_enabled: true,
+            live_mutation_enabled: true,
+            execution_enabled: true,
+        };
+
+        let access = kubernetes_client_access(&config).expect("client access");
+
+        assert_eq!(
+            access.ca_cert_path.as_deref(),
+            Some(Path::new(IN_CLUSTER_SERVICE_ACCOUNT_CA))
+        );
+        let _ = std::fs::remove_file(token_path);
     }
 
     #[tokio::test]

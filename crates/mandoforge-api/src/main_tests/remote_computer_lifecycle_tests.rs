@@ -1119,6 +1119,7 @@ async fn remote_computer_readiness_flags_missing_and_stale_sidecar_heartbeats() 
     let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
     let computer = state
         .create_remote_computer(CreateRemoteComputer {
+            id: None,
             name: "sidecar-supervision-remote-computer".to_string(),
             profile: Some("workspace-write".to_string()),
             namespace: None,
@@ -1239,6 +1240,7 @@ async fn remote_computer_sidecar_recovery_run_is_audited_and_fail_closed() {
     let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
     let computer = state
         .create_remote_computer(CreateRemoteComputer {
+            id: None,
             name: "sidecar-recovery-remote-computer".to_string(),
             profile: Some("workspace-write".to_string()),
             namespace: None,

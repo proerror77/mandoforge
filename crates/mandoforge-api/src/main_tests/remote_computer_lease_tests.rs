@@ -5,6 +5,7 @@ async fn remote_computer_lease_rejects_non_positive_duration() {
     let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
     let computer = state
         .create_remote_computer(CreateRemoteComputer {
+            id: None,
             name: "lease-duration-test".to_string(),
             profile: None,
             namespace: None,
@@ -41,6 +42,7 @@ async fn remote_computer_rejects_second_active_lease_until_released() {
     let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
     let computer = state
         .create_remote_computer(CreateRemoteComputer {
+            id: None,
             name: "single-active-lease-test".to_string(),
             profile: None,
             namespace: None,
