@@ -1,11 +1,316 @@
+use chrono::Utc;
 use serde_json::{Value, json};
 
 use crate::{
-    K8sAutoscalingManifest, WorkerAutoscalingReadiness, WorkerK8sReadiness,
-    WorkerLoadValidationEvidence, WorkerModeReadiness, WorkerProductionOpsReadiness,
-    WorkerQueueBackendReadiness, env_i64, manifest_has_kind_name, network_policy_targets_app,
-    project_file_path, read_yaml_manifest_value,
+    AppError, AppState, ExecutionJobStatus, K8sAutoscalingManifest, WorkerAutoscalingReadiness,
+    WorkerJobSummary, WorkerK8sReadiness, WorkerLeaseSummary, WorkerLoadValidationEvidence,
+    WorkerModeReadiness, WorkerProductionOpsReadiness, WorkerQueueBackendReadiness,
+    WorkerReadinessAttentionItem, WorkerReadinessReport, env_i64, manifest_has_kind_name,
+    network_policy_targets_app, project_file_path, read_yaml_manifest_value,
+    worker_load_validation_evidence,
 };
+
+pub(crate) async fn build_worker_readiness(
+    state: &AppState,
+) -> Result<WorkerReadinessReport, AppError> {
+    let generated_at = Utc::now();
+    let queue_backend = worker_queue_backend_readiness(state.execution_queue.backend_kind());
+    let jobs = state.execution_queue.list().await?;
+    let worker_mode = WorkerModeReadiness {
+        mode: state.execution_worker.mode().to_string(),
+        external_worker_required: state.execution_worker.mode() == "queue",
+        api_inline_execution: state.execution_worker.mode() == "inline",
+    };
+    let mut queued_jobs = 0usize;
+    let mut running_jobs = 0usize;
+    let mut completed_jobs = 0usize;
+    let mut failed_jobs = 0usize;
+    let mut retryable_jobs = 0usize;
+    let mut leased_jobs = 0usize;
+    let mut stale_leases = 0usize;
+    let mut oldest_queued_at = None;
+    let mut oldest_stale_lease_at = None;
+
+    for job in &jobs {
+        match job.status {
+            ExecutionJobStatus::Queued => {
+                queued_jobs += 1;
+                oldest_queued_at = Some(match oldest_queued_at {
+                    Some(oldest) if oldest <= job.enqueued_at => oldest,
+                    _ => job.enqueued_at,
+                });
+            }
+            ExecutionJobStatus::Running => running_jobs += 1,
+            ExecutionJobStatus::Completed => completed_jobs += 1,
+            ExecutionJobStatus::Failed => failed_jobs += 1,
+            ExecutionJobStatus::Canceled => {}
+        }
+        if job.attempt_count > 0
+            && job.attempt_count < job.max_attempts
+            && job.status != ExecutionJobStatus::Completed
+            && job.status != ExecutionJobStatus::Canceled
+        {
+            retryable_jobs += 1;
+        }
+        if job.lease_expires_at.is_some() {
+            leased_jobs += 1;
+        }
+        if job.status == ExecutionJobStatus::Running
+            && job
+                .lease_expires_at
+                .is_some_and(|lease_expires_at| lease_expires_at < generated_at)
+        {
+            stale_leases += 1;
+            if let Some(lease_expires_at) = job.lease_expires_at {
+                oldest_stale_lease_at = Some(match oldest_stale_lease_at {
+                    Some(oldest) if oldest <= lease_expires_at => oldest,
+                    _ => lease_expires_at,
+                });
+            }
+        }
+    }
+
+    let oldest_queued_job_age_seconds = oldest_queued_at.map(|queued_at| {
+        generated_at
+            .signed_duration_since(queued_at)
+            .num_seconds()
+            .max(0)
+    });
+    let oldest_stale_lease_age_seconds = oldest_stale_lease_at.map(|lease_at| {
+        generated_at
+            .signed_duration_since(lease_at)
+            .num_seconds()
+            .max(0)
+    });
+    let job_summary = WorkerJobSummary {
+        total_jobs: jobs.len(),
+        queued_jobs,
+        running_jobs,
+        completed_jobs,
+        failed_jobs,
+        retryable_jobs,
+        oldest_queued_job_age_seconds,
+    };
+    let lease_summary = WorkerLeaseSummary {
+        running_jobs,
+        leased_jobs,
+        stale_leases,
+        oldest_stale_lease_age_seconds,
+    };
+    let k8s = worker_k8s_readiness_from_manifests();
+    let autoscaling = worker_autoscaling_readiness_from_manifests(&[
+        "deploy/k8s/worker-hpa.yaml",
+        "deploy/k8s/worker-keda.yaml",
+        "deploy/k8s/keda.yaml",
+        "deploy/k8s/worker-isolated-pool-keda.yaml",
+    ]);
+    let load_validation = worker_load_validation_evidence(state).await?;
+    let production_ops = build_worker_production_ops_readiness(
+        &queue_backend,
+        &worker_mode,
+        &k8s,
+        &autoscaling,
+        &load_validation,
+        failed_jobs,
+        stale_leases,
+    );
+    let mut attention_items = Vec::new();
+    if worker_mode.api_inline_execution {
+        attention_items.push(WorkerReadinessAttentionItem {
+            kind: "inline_worker_mode".to_string(),
+            severity: "warning".to_string(),
+            message: "approved tools still execute in the API process; use MANDOFORGE_EXECUTION_WORKER=queue for production drains".to_string(),
+        });
+    }
+    if queue_backend.kind == "memory" {
+        attention_items.push(WorkerReadinessAttentionItem {
+            kind: "process_local_queue".to_string(),
+            severity: "warning".to_string(),
+            message: "memory queue is process-local and does not survive API restart".to_string(),
+        });
+    }
+    if queue_backend.kind == "nats" && !queue_backend.jetstream_enabled {
+        attention_items.push(WorkerReadinessAttentionItem {
+            kind: "core_nats_non_jetstream".to_string(),
+            severity: "warning".to_string(),
+            message:
+                "NATS backend is Core NATS broker handoff; JetStream durability is not enabled"
+                    .to_string(),
+        });
+    }
+    if queued_jobs > 0 {
+        attention_items.push(WorkerReadinessAttentionItem {
+            kind: "queued_jobs_present".to_string(),
+            severity: "warning".to_string(),
+            message: format!("{queued_jobs} execution job(s) are waiting for a worker drain"),
+        });
+    }
+    if retryable_jobs > 0 {
+        attention_items.push(WorkerReadinessAttentionItem {
+            kind: "retryable_jobs_present".to_string(),
+            severity: "warning".to_string(),
+            message: format!(
+                "{retryable_jobs} execution job(s) can retry before exhausting attempts"
+            ),
+        });
+    }
+    if failed_jobs > 0 {
+        attention_items.push(WorkerReadinessAttentionItem {
+            kind: "failed_jobs_present".to_string(),
+            severity: "critical".to_string(),
+            message: format!(
+                "{failed_jobs} execution job(s) exhausted attempts and require triage"
+            ),
+        });
+    }
+    if stale_leases > 0 {
+        attention_items.push(WorkerReadinessAttentionItem {
+            kind: "stale_worker_leases".to_string(),
+            severity: "critical".to_string(),
+            message: format!("{stale_leases} running execution job lease(s) are expired"),
+        });
+    }
+    if !k8s.worker_manifest_present {
+        attention_items.push(WorkerReadinessAttentionItem {
+            kind: "worker_manifest_missing".to_string(),
+            severity: "warning".to_string(),
+            message: "deploy/k8s/worker.yaml is not present in this runtime package".to_string(),
+        });
+    }
+    if k8s.worker_manifest_present && k8s.hardening_status != "hardened" {
+        attention_items.push(WorkerReadinessAttentionItem {
+            kind: "worker_hardening_incomplete".to_string(),
+            severity: "warning".to_string(),
+            message: "worker Deployment is present, but securityContext, ServiceAccount, NetworkPolicy, or resource bounds are incomplete".to_string(),
+        });
+    }
+    if !autoscaling.autoscaling_manifest_present {
+        attention_items.push(WorkerReadinessAttentionItem {
+            kind: "worker_autoscaling_missing".to_string(),
+            severity: "warning".to_string(),
+            message: "no worker HPA/KEDA manifest is present; autoscaling remains a production gap"
+                .to_string(),
+        });
+    } else if autoscaling.validation_status == "skeleton" {
+        attention_items.push(WorkerReadinessAttentionItem {
+            kind: "worker_autoscaling_skeleton".to_string(),
+            severity: "warning".to_string(),
+            message: "worker HPA/KEDA manifest is present, but production autoscaling still needs cluster metrics, load validation, and isolation policy".to_string(),
+        });
+    } else if autoscaling.validation_status == "queue_depth_configured" {
+        attention_items.push(WorkerReadinessAttentionItem {
+            kind: "worker_autoscaling_load_validation_missing".to_string(),
+            severity: "warning".to_string(),
+            message: "worker KEDA queue-depth scaling is configured, but production load validation and isolation policy remain required".to_string(),
+        });
+    }
+    if !load_validation.load_validated {
+        attention_items.push(WorkerReadinessAttentionItem {
+            kind: "worker_load_validation_missing".to_string(),
+            severity: "warning".to_string(),
+            message: load_validation.message.clone(),
+        });
+    }
+    if production_ops.production_blocked {
+        attention_items.push(WorkerReadinessAttentionItem {
+            kind: "worker_production_ops_blocked".to_string(),
+            severity: "critical".to_string(),
+            message: production_ops.message.clone(),
+        });
+    }
+
+    let mut runbook_actions = Vec::new();
+    if worker_mode.api_inline_execution {
+        runbook_actions
+            .push("set MANDOFORGE_EXECUTION_WORKER=queue before production pilot".to_string());
+    }
+    if queued_jobs > 0 || retryable_jobs > 0 {
+        runbook_actions.push(
+            "run mandoforge-worker or POST /api/execution-jobs/:id/run for claimable jobs"
+                .to_string(),
+        );
+    }
+    if stale_leases > 0 {
+        runbook_actions.push(
+            "restart or reclaim stale worker leases before resuming high-risk actions".to_string(),
+        );
+    }
+    if failed_jobs > 0 {
+        runbook_actions.push(
+            "inspect failed execution job last_error and related tool/audit logs".to_string(),
+        );
+    }
+    if !autoscaling.autoscaling_manifest_present {
+        runbook_actions.push(
+            "add HPA/KEDA worker autoscaling before declaring production hardening complete"
+                .to_string(),
+        );
+    } else if autoscaling.validation_status == "skeleton" {
+        runbook_actions.push(
+            "validate worker HPA/KEDA behavior under load before declaring production autoscaling complete"
+                .to_string(),
+        );
+    } else if autoscaling.validation_status == "queue_depth_configured" {
+        runbook_actions.push(
+            "run a production-like queue pressure test against worker KEDA scaling before declaring autoscaling validated"
+                .to_string(),
+        );
+    }
+    if !load_validation.load_validated {
+        runbook_actions.push(
+            "run POST /api/execution-jobs/worker-load-validation/run after a queue pressure test and isolated worker-pool check; keep Stage 2 production pilot blocked until it reports validated"
+                .to_string(),
+        );
+    }
+    if production_ops.production_blocked {
+        runbook_actions.push("resolve_worker_production_ops_gate".to_string());
+    }
+    if queue_backend.kind == "nats" && !queue_backend.jetstream_enabled {
+        runbook_actions.push(
+            "replace Core NATS handoff with JetStream before claiming durable NATS queues"
+                .to_string(),
+        );
+    }
+    if k8s.worker_manifest_present && k8s.hardening_status != "hardened" {
+        runbook_actions.push(
+            "complete worker Pod hardening: restricted ServiceAccount, token automount disabled, RuntimeDefault seccomp, no privilege escalation, dropped capabilities, read-only root filesystem, resource bounds, and NetworkPolicy".to_string(),
+        );
+    }
+
+    let critical_count = attention_items
+        .iter()
+        .filter(|item| item.severity == "critical")
+        .count() as i64;
+    let warning_count = attention_items
+        .iter()
+        .filter(|item| item.severity == "warning")
+        .count() as i64;
+    let readiness_score = (100_i64 - critical_count * 25 - warning_count * 10).clamp(0, 100);
+    let status = if critical_count > 0 {
+        "critical"
+    } else if warning_count > 0 {
+        "attention"
+    } else {
+        "ready"
+    }
+    .to_string();
+
+    Ok(WorkerReadinessReport {
+        generated_at,
+        status,
+        readiness_score,
+        queue_backend,
+        worker_mode,
+        job_summary,
+        lease_summary,
+        k8s,
+        autoscaling,
+        load_validation,
+        production_ops,
+        attention_items,
+        runbook_actions,
+    })
+}
 
 pub(crate) fn worker_queue_backend_readiness(kind: &str) -> WorkerQueueBackendReadiness {
     match kind {
