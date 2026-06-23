@@ -602,20 +602,20 @@ pub(crate) fn ontology_generate_seed_proposals_for_run(
     }
 
     for mapping in &seed.relations {
-        if let Some(profile) = ontology_profile_by_table(profiles, &mapping.source_table) {
-            if let Some(candidate) = ontology_profile_fk(
+        if let Some(profile) = ontology_profile_by_table(profiles, &mapping.source_table)
+            && let Some(candidate) = ontology_profile_fk(
                 profile,
                 &mapping.source_field,
                 &mapping.reference_table,
                 "id",
-            ) {
-                proposals.push(ontology_relation_proposal(
-                    run_id,
-                    seed,
-                    mapping,
-                    candidate.join_success_rate,
-                ));
-            }
+            )
+        {
+            proposals.push(ontology_relation_proposal(
+                run_id,
+                seed,
+                mapping,
+                candidate.join_success_rate,
+            ));
         }
     }
 
@@ -962,7 +962,7 @@ pub(crate) async fn ontology_onboarding_tool_specs_for_run(
         .await?
         .into_iter()
         .filter(|object| ontology_onboarding_object_run_id(object) == Some(run_id))
-        .filter(|object| ontology_onboarding_object_materialized(object))
+        .filter(ontology_onboarding_object_materialized)
         .map(|object| ontology_onboarding_object_proposal(&object))
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
@@ -1685,7 +1685,8 @@ pub(crate) fn ontology_topological_execution_levels(
     }
     let mut ready = in_degree
         .iter()
-        .filter_map(|(node_id, degree)| (*degree == 0).then(|| node_id.clone()))
+        .filter(|&(_, degree)| *degree == 0)
+        .map(|(node_id, _)| node_id.clone())
         .collect::<Vec<_>>();
     ready.sort();
     let mut visited = 0usize;
@@ -2168,7 +2169,7 @@ pub(crate) fn ontology_infer_object_type_from_table(table_name: &str) -> String 
 
 pub(crate) fn ontology_title_case(value: &str) -> String {
     value
-        .split(|character: char| character == '_' || character == '-' || character == ' ')
+        .split(['_', '-', ' '])
         .filter(|part| !part.is_empty())
         .map(|part| {
             let mut chars = part.chars();
@@ -2490,7 +2491,7 @@ pub(crate) async fn ontology_entity_resolution_for_request(
         run.proposals
             .iter()
             .filter(|proposal| proposal.proposal_type == "object")
-            .filter_map(|proposal| {
+            .map(|proposal| {
                 let candidate_name = proposal
                     .content
                     .get("object_type")
@@ -2498,7 +2499,7 @@ pub(crate) async fn ontology_entity_resolution_for_request(
                     .unwrap_or(&proposal.name)
                     .to_string();
                 let domain_scope = ontology_proposal_domain_scope(proposal);
-                Some((candidate_name.clone(), candidate_name, domain_scope))
+                (candidate_name.clone(), candidate_name, domain_scope)
             })
             .collect::<Vec<_>>()
     } else {
@@ -3522,7 +3523,7 @@ pub(crate) async fn list_ontology_onboarding_runs_for_state(
         .into_iter()
         .map(|(run_id, objects)| ontology_onboarding_run_from_objects(run_id, &objects))
         .collect::<Result<Vec<_>, _>>()?;
-    runs.sort_by(|left, right| right.generated_at.cmp(&left.generated_at));
+    runs.sort_by_key(|run| std::cmp::Reverse(run.generated_at));
     Ok(runs)
 }
 
@@ -4245,10 +4246,8 @@ pub(crate) async fn trigger_workflow_run_from_ontology_release(
     release: &OntologyRelease,
     actor_subject: &str,
 ) -> Result<Option<WorkflowRun>, AppError> {
-    if ontology_release_workflow_run_exists(state, release.id).await? {
-        return Ok(None);
-    }
-    let Some(definition) = ontology_release_workflow_definition(state, release).await? else {
+    let definitions = ontology_release_workflow_definitions(state, release).await?;
+    if definitions.is_empty() {
         state
             .append_audit_log(new_audit_log(
                 None,
@@ -4267,9 +4266,100 @@ pub(crate) async fn trigger_workflow_run_from_ontology_release(
             ))
             .await?;
         return Ok(None);
+    }
+
+    let mut first_run = None;
+    let mut first_error = None;
+    for definition in definitions {
+        match trigger_workflow_run_from_ontology_release_definition(
+            state,
+            release,
+            actor_subject,
+            &definition,
+        )
+        .await
+        {
+            Ok(Some(run)) => {
+                if first_run.is_none() {
+                    first_run = Some(run);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                state
+                    .append_audit_log(new_audit_log(
+                        None,
+                        "system",
+                        None,
+                        "ontology_release.workflow_definition_trigger_failed",
+                        "workflow_definition",
+                        Some(definition.id),
+                        json!({
+                            "subject": actor_subject,
+                            "release_id": release.id,
+                            "ontology_release_id": release.id,
+                            "version": release.version,
+                            "domain_scope": release.domain_scope,
+                            "workflow_definition_id": definition.id,
+                            "error": error.message.clone(),
+                        }),
+                    ))
+                    .await?;
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+    }
+    if first_run.is_some() {
+        Ok(first_run)
+    } else if let Some(error) = first_error {
+        Err(error)
+    } else {
+        Ok(None)
+    }
+}
+
+async fn trigger_workflow_run_from_ontology_release_definition(
+    state: &AppState,
+    release: &OntologyRelease,
+    actor_subject: &str,
+    definition: &WorkflowDefinition,
+) -> Result<Option<WorkflowRun>, AppError> {
+    let Some(trigger) = state
+        .claim_ontology_release_workflow_trigger(release.id, definition.id)
+        .await?
+    else {
+        return Ok(None);
     };
+    if let Some(existing_run) =
+        ontology_release_workflow_run_for_definition(state, release.id, definition.id).await?
+    {
+        state
+            .complete_ontology_release_workflow_trigger(
+                trigger.id,
+                "triggered",
+                Some(existing_run.id),
+                None,
+            )
+            .await?;
+        return Ok(Some(existing_run));
+    }
     let tool_specs = match release.source_run_id {
-        Some(run_id) => ontology_onboarding_tool_specs_for_run(state, run_id).await?,
+        Some(run_id) => match ontology_onboarding_tool_specs_for_run(state, run_id).await {
+            Ok(tool_specs) => tool_specs,
+            Err(error) => {
+                state
+                    .complete_ontology_release_workflow_trigger(
+                        trigger.id,
+                        "failed",
+                        None,
+                        Some(error.message.clone()),
+                    )
+                    .await?;
+                return Err(error);
+            }
+        },
         None => Vec::new(),
     };
     let input_payload = json!({
@@ -4292,9 +4382,9 @@ pub(crate) async fn trigger_workflow_run_from_ontology_release(
             "tool_specs": tool_specs,
         }
     });
-    let run = create_workflow_run_from_definition(
+    let run = match create_workflow_run_from_definition(
         state,
-        &definition,
+        definition,
         format!(
             "Ontology promoted: {} {}",
             release.domain_scope, release.version
@@ -4307,7 +4397,24 @@ pub(crate) async fn trigger_workflow_run_from_ontology_release(
             "domain_scope": release.domain_scope,
         }),
     )
-    .await?;
+    .await
+    {
+        Ok(run) => run,
+        Err(error) => {
+            state
+                .complete_ontology_release_workflow_trigger(
+                    trigger.id,
+                    "failed",
+                    None,
+                    Some(error.message.clone()),
+                )
+                .await?;
+            return Err(error);
+        }
+    };
+    state
+        .complete_ontology_release_workflow_trigger(trigger.id, "triggered", Some(run.id), None)
+        .await?;
     state
         .append_event(
             "system",
@@ -4345,28 +4452,146 @@ pub(crate) async fn trigger_workflow_run_from_ontology_release(
     Ok(Some(run))
 }
 
-pub(crate) async fn ontology_release_workflow_run_exists(
+pub(crate) async fn drain_due_ontology_release_workflow_triggers(
     state: &AppState,
-    release_id: Uuid,
-) -> Result<bool, AppError> {
-    Ok(state.list_workflow_runs().await?.into_iter().any(|run| {
-        run.input_payload["trigger"] == json!("ontology_release.promoted")
-            && run.input_payload["ontology_release_id"] == json!(release_id)
-    }))
+    actor_subject: &str,
+    limit: usize,
+) -> Result<OntologyReleaseWorkflowTriggerDrain, AppError> {
+    let checked_at = Utc::now();
+    let triggers = state
+        .retryable_ontology_release_workflow_triggers(limit)
+        .await?;
+    let retryable_count = triggers.len();
+    let mut triggered_count = 0usize;
+    let mut skipped_count = 0usize;
+    let mut failed_count = 0usize;
+    let mut trigger_ids = Vec::new();
+    for trigger in triggers {
+        trigger_ids.push(trigger.id);
+        let release = match state
+            .get_ontology_release(trigger.ontology_release_id)
+            .await
+        {
+            Ok(release) => release,
+            Err(error) => {
+                failed_count += 1;
+                state
+                    .complete_ontology_release_workflow_trigger(
+                        trigger.id,
+                        "failed",
+                        None,
+                        Some(error.message),
+                    )
+                    .await?;
+                continue;
+            }
+        };
+        if release.status != "active" {
+            skipped_count += 1;
+            state
+                .complete_ontology_release_workflow_trigger(
+                    trigger.id,
+                    ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_SKIPPED,
+                    None,
+                    Some(format!(
+                        "ontology release status is {}; workflow trigger skipped",
+                        release.status
+                    )),
+                )
+                .await?;
+            continue;
+        }
+        match trigger_workflow_run_from_ontology_release(state, &release, actor_subject).await {
+            Ok(Some(_)) => triggered_count += 1,
+            Ok(None) => {
+                skipped_count += 1;
+                state
+                    .complete_ontology_release_workflow_trigger(
+                        trigger.id,
+                        ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_SKIPPED,
+                        None,
+                        Some(
+                            "workflow definition no longer matches ontology release trigger"
+                                .to_string(),
+                        ),
+                    )
+                    .await?;
+            }
+            Err(error) => {
+                failed_count += 1;
+                state
+                    .complete_ontology_release_workflow_trigger(
+                        trigger.id,
+                        "failed",
+                        None,
+                        Some(error.message.clone()),
+                    )
+                    .await?;
+                state
+                    .append_audit_log(new_audit_log(
+                        None,
+                        "system",
+                        None,
+                        "ontology_release.workflow_trigger_retry_failed",
+                        "ontology_release_workflow_trigger",
+                        Some(trigger.id),
+                        json!({
+                            "subject": actor_subject,
+                            "trigger_id": trigger.id,
+                            "release_id": release.id,
+                            "version": release.version,
+                            "domain_scope": release.domain_scope,
+                            "error": error.message,
+                        }),
+                    ))
+                    .await?;
+            }
+        }
+    }
+    let status = if failed_count > 0 {
+        "failed"
+    } else if triggered_count > 0 {
+        "triggered"
+    } else if skipped_count > 0 {
+        "skipped"
+    } else {
+        "noop"
+    }
+    .to_string();
+    Ok(OntologyReleaseWorkflowTriggerDrain {
+        status,
+        checked_at,
+        retryable_count,
+        triggered_count,
+        skipped_count,
+        failed_count,
+        trigger_ids,
+    })
 }
 
-pub(crate) async fn ontology_release_workflow_definition(
+async fn ontology_release_workflow_run_for_definition(
+    state: &AppState,
+    release_id: Uuid,
+    workflow_definition_id: Uuid,
+) -> Result<Option<WorkflowRun>, AppError> {
+    state
+        .ontology_release_workflow_run_for_trigger(release_id, workflow_definition_id)
+        .await
+}
+
+pub(crate) async fn ontology_release_workflow_definitions(
     state: &AppState,
     release: &OntologyRelease,
-) -> Result<Option<WorkflowDefinition>, AppError> {
+) -> Result<Vec<WorkflowDefinition>, AppError> {
     Ok(state
         .list_workflow_definitions()
         .await?
         .into_iter()
-        .find(|definition| {
+        .filter(|definition| {
             definition.release_state == "released"
                 && ontology_release_trigger_matches_definition(definition, release)
-        }))
+        })
+        .collect())
 }
 
 pub(crate) fn ontology_release_trigger_matches_definition(
@@ -4545,11 +4770,11 @@ pub(crate) async fn ontology_release_action_profiles_ready(
     for id in ids {
         let object = state.get_semantic_object(id).await?;
         if object.object_type == "ontology_action_type"
-            && !object
+            && object
                 .content
                 .get("transaction_profile")
                 .and_then(Value::as_str)
-                .is_some_and(|value| !value.trim().is_empty())
+                .is_none_or(|value| value.trim().is_empty())
         {
             return Ok(false);
         }
@@ -4727,7 +4952,7 @@ pub(crate) async fn ontology_confidence_calibration_for_run(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    records.sort_by(|left, right| left.recorded_at.cmp(&right.recorded_at));
+    records.sort_by_key(|left| left.recorded_at);
     let buckets = ontology_confidence_calibration_buckets(&records);
     Ok(ConfidenceCalibrationResponse {
         run_id,

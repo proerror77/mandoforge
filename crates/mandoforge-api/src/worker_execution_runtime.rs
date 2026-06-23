@@ -22,6 +22,18 @@ fn worker_pool_from_headers(headers: &HeaderMap) -> Option<String> {
         .map(ToString::to_string)
 }
 
+pub(crate) fn worker_environment_scope_required() -> bool {
+    std::env::var("MANDOFORGE_REQUIRE_WORKER_ENVIRONMENT_SCOPE")
+        .ok()
+        .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(!cfg!(test))
+}
+
+pub(crate) fn worker_scope_headers_present(headers: &HeaderMap) -> Result<bool, AppError> {
+    Ok(worker_environment_id_from_headers(headers)?.is_some()
+        || worker_pool_from_headers(headers).is_some())
+}
+
 pub(crate) fn environment_worker_pool(worker_queue_binding: &Value) -> Option<String> {
     for key in ["queue", "worker_pool", "pool"] {
         if let Some(value) = worker_queue_binding
@@ -42,19 +54,29 @@ pub(crate) async fn enforce_worker_environment_binding(
     session_id: Uuid,
     job_environment_id: Option<Uuid>,
 ) -> Result<(), AppError> {
-    let Some(worker_environment_id) = worker_environment_id_from_headers(headers)? else {
-        return Ok(());
-    };
+    let worker_environment_id = worker_environment_id_from_headers(headers)?;
+    let worker_pool = worker_pool_from_headers(headers);
     let actual_environment_id = match job_environment_id {
         Some(environment_id) => Some(environment_id),
         None => state.get_session(session_id).await?.environment_id,
     };
-    if actual_environment_id == Some(worker_environment_id) {
-        return Ok(());
+    if let Some(worker_environment_id) = worker_environment_id {
+        if actual_environment_id == Some(worker_environment_id) {
+            return Ok(());
+        }
+        return Err(AppError::not_found(
+            "job not claimable for worker environment",
+        ));
     }
-    Err(AppError::not_found(
-        "job not claimable for worker environment",
-    ))
+    if worker_environment_scope_required()
+        && actual_environment_id.is_some()
+        && worker_pool.is_none()
+    {
+        return Err(AppError::bad_request(
+            "worker must provide x-mandoforge-environment-id or x-mandoforge-worker-pool for environment-bound jobs",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) async fn enforce_worker_pool_binding(

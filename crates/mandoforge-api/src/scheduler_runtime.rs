@@ -19,7 +19,7 @@ pub(crate) async fn build_scheduler_orchestration_summary(
         .filter(|log| log.action == "scheduler.run_due")
         .filter_map(scheduler_run_history_item)
         .collect();
-    recent_runs.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    recent_runs.sort_by_key(|run| std::cmp::Reverse(run.created_at));
     recent_runs.truncate(10);
     let last_run = recent_runs.first();
     let mut attention_items = Vec::new();
@@ -662,12 +662,13 @@ pub(crate) async fn build_scheduler_due_plan(
             "no scheduled workflow steps are pending"
         },
     ));
-    if let Some(item) = actions.last_mut() {
-        if workflow_scheduled_due_count == 0 && workflow_scheduled_total > 0 {
-            item.status = "waiting".to_string();
-            item.severity = "info".to_string();
-            item.skipped_count = workflow_scheduled_total;
-        }
+    if let Some(item) = actions.last_mut()
+        && workflow_scheduled_due_count == 0
+        && workflow_scheduled_total > 0
+    {
+        item.status = "waiting".to_string();
+        item.severity = "info".to_string();
+        item.skipped_count = workflow_scheduled_total;
     }
 
     let (
@@ -711,6 +712,23 @@ pub(crate) async fn build_scheduler_due_plan(
             "semantic aging policies exist but none are due"
         } else {
             "no semantic aging policies are registered"
+        },
+    ));
+
+    let retryable_ontology_release_triggers = state
+        .retryable_ontology_release_workflow_triggers(100)
+        .await?;
+    actions.push(scheduler_due_plan_item(
+        "ontology",
+        "ontology_release_workflow_trigger_retry",
+        "auto",
+        retryable_ontology_release_triggers.len(),
+        0,
+        retryable_ontology_release_triggers.len(),
+        if retryable_ontology_release_triggers.is_empty() {
+            "no failed or stale ontology release workflow trigger needs retry"
+        } else {
+            "retry failed or stale ontology release workflow triggers"
         },
     ));
 
@@ -874,75 +892,213 @@ pub(crate) async fn execute_scheduler_due_tasks(
     input: Option<SchedulerRunDueRequest>,
 ) -> Result<SchedulerDueRun, AppError> {
     let checked_at = Utc::now();
+    let mut task_errors = Vec::new();
     let request = normalize_scheduler_run_due_request(input, checked_at)?;
     if let Some(existing_run) =
         scheduler_replay_due_run(state, request.idempotency_key.as_deref()).await?
     {
         return Ok(existing_run);
     }
-    let providers = state.list_providers().await?;
-    let audit_logs = state.list_audit_logs(None).await?;
+    let providers = match state.list_providers().await {
+        Ok(providers) => providers,
+        Err(error) => {
+            scheduler_task_failed(&mut task_errors, "provider_policy_gate.inputs", error);
+            Vec::new()
+        }
+    };
+    let audit_logs = match state.list_audit_logs(None).await {
+        Ok(audit_logs) => audit_logs,
+        Err(error) => {
+            scheduler_task_failed(&mut task_errors, "provider_policy_gate.audit_logs", error);
+            Vec::new()
+        }
+    };
     let provider_policy_gate = if provider_policy_gate_is_due(&providers, &audit_logs, checked_at) {
-        Some(
-            execute_provider_policy_gate(state, Some("system".to_string()), "system")
-                .await?
-                .run,
-        )
+        match execute_provider_policy_gate(state, Some("system".to_string()), "system").await {
+            Ok(response) => Some(response.run),
+            Err(error) => {
+                scheduler_task_failed(&mut task_errors, "provider_policy_gate", error);
+                None
+            }
+        }
     } else {
         None
     };
-    let policy_rollout = execute_due_policy_rollouts(state, "scheduler", "system").await?;
-    let approval_escalations = execute_due_approval_escalations(state).await?;
-    let agent_releases = execute_due_agent_release_promotions(state).await?;
-    let codex_app_server_stale_polls = execute_stale_codex_app_server_polls(
+    let policy_rollout_result =
+        match scheduler_forced_task_failure("policy_rollout", request.owner.as_deref()) {
+            Some(error) => Err(error),
+            None => execute_due_policy_rollouts(state, "scheduler", "system").await,
+        };
+    let policy_rollout = match policy_rollout_result {
+        Ok(run) => run,
+        Err(error) => {
+            scheduler_task_failed(&mut task_errors, "policy_rollout", error);
+            failed_policy_rollout_run(checked_at)
+        }
+    };
+    let approval_escalations = match execute_due_approval_escalations(state).await {
+        Ok(run) => run,
+        Err(error) => {
+            scheduler_task_failed(&mut task_errors, "approval_escalations", error);
+            failed_approval_escalation_run(checked_at)
+        }
+    };
+    let agent_releases = match execute_due_agent_release_promotions(state).await {
+        Ok(run) => run,
+        Err(error) => {
+            scheduler_task_failed(&mut task_errors, "agent_releases", error);
+            failed_agent_release_run(checked_at)
+        }
+    };
+    let stale_poll_request = CodexAppServerStalePollRequest::default();
+    let codex_app_server_stale_polls = match execute_stale_codex_app_server_polls(
         state,
-        CodexAppServerStalePollRequest::default(),
+        stale_poll_request.clone(),
         "system",
         "system",
     )
-    .await?;
-    let workflow_scheduled_steps = execute_due_workflow_scheduled_steps(state, checked_at).await?;
+    .await
+    {
+        Ok(run) => run,
+        Err(error) => {
+            scheduler_task_failed(&mut task_errors, "codex_app_server_stale_polls", error);
+            failed_codex_app_server_stale_poll_run(checked_at, &stale_poll_request)
+        }
+    };
+    let workflow_scheduled_steps =
+        match execute_due_workflow_scheduled_steps(state, checked_at).await {
+            Ok(run) => run,
+            Err(error) => {
+                scheduler_task_failed(&mut task_errors, "workflow_scheduled_steps", error);
+                failed_workflow_scheduled_step_sweep(checked_at)
+            }
+        };
     let semantic_synthesis_schedules =
-        execute_due_semantic_synthesis_schedules(state, checked_at).await?;
-    let semantic_aging_policies = execute_due_semantic_aging_policies(state, checked_at).await?;
-    let usage = build_usage_summary(state).await?;
-    let cost_alerts = build_cost_alerts(&usage.provider_budgets, checked_at);
-    let active_alert_route_count = state
-        .list_cost_alert_routes()
-        .await?
-        .iter()
-        .filter(|route| route.status == "active")
-        .count();
+        match execute_due_semantic_synthesis_schedules(state, checked_at).await {
+            Ok(run) => run,
+            Err(error) => {
+                scheduler_task_failed(&mut task_errors, "semantic_synthesis_schedules", error);
+                failed_semantic_synthesis_schedule_sweep(checked_at)
+            }
+        };
+    let semantic_aging_policies = match execute_due_semantic_aging_policies(state, checked_at).await
+    {
+        Ok(run) => run,
+        Err(error) => {
+            scheduler_task_failed(&mut task_errors, "semantic_aging_policies", error);
+            failed_semantic_aging_policy_sweep(checked_at)
+        }
+    };
+    let ontology_release_workflow_triggers =
+        match drain_due_ontology_release_workflow_triggers(state, "system", 100).await {
+            Ok(run) => run,
+            Err(error) => {
+                scheduler_task_failed(
+                    &mut task_errors,
+                    "ontology_release_workflow_triggers",
+                    error,
+                );
+                failed_ontology_release_workflow_trigger_drain(checked_at)
+            }
+        };
+    let usage = match build_usage_summary(state).await {
+        Ok(usage) => Some(usage),
+        Err(error) => {
+            scheduler_task_failed(&mut task_errors, "usage_summary", error);
+            None
+        }
+    };
+    let cost_alerts = usage
+        .as_ref()
+        .map(|usage| build_cost_alerts(&usage.provider_budgets, checked_at))
+        .unwrap_or_default();
+    let active_alert_route_count = match state.list_cost_alert_routes().await {
+        Ok(routes) => routes
+            .iter()
+            .filter(|route| route.status == "active")
+            .count(),
+        Err(error) => {
+            scheduler_task_failed(&mut task_errors, "cost_alert_routes", error);
+            0
+        }
+    };
     let cost_alert_delivery = if !cost_alerts.is_empty()
         && (active_alert_route_count > 0 || state.cost_alert_webhook_url.is_some())
     {
-        Some(execute_cost_alert_delivery(state, checked_at).await?)
+        match execute_cost_alert_delivery(state, checked_at).await {
+            Ok(delivery) => Some(delivery),
+            Err(error) => {
+                scheduler_task_failed(&mut task_errors, "cost_alert_delivery", error);
+                Some(failed_cost_alert_delivery(checked_at))
+            }
+        }
     } else {
         None
     };
     let usage_finance_export =
-        execute_usage_finance_export_delivery(state, true, "system", Some("system")).await?;
+        match execute_usage_finance_export_delivery(state, true, "system", Some("system")).await {
+            Ok(run) => run,
+            Err(error) => {
+                scheduler_task_failed(&mut task_errors, "usage_finance_export", error);
+                failed_usage_finance_export_delivery(checked_at)
+            }
+        };
     let remote_computer_sidecar_supervision =
-        execute_remote_computer_sidecar_supervision(state).await?;
-    let remote_computer_reclaim = execute_remote_computer_stale_reclaim(state).await?;
+        match execute_remote_computer_sidecar_supervision(state).await {
+            Ok(run) => run,
+            Err(error) => {
+                scheduler_task_failed(
+                    &mut task_errors,
+                    "remote_computer_sidecar_supervision",
+                    error,
+                );
+                failed_remote_computer_sidecar_supervision_run(checked_at)
+            }
+        };
+    let remote_computer_reclaim = match execute_remote_computer_stale_reclaim(state).await {
+        Ok(run) => run,
+        Err(error) => {
+            scheduler_task_failed(&mut task_errors, "remote_computer_reclaim", error);
+            failed_remote_computer_reclaim_run(checked_at)
+        }
+    };
     let mut mcp_health_runs = Vec::new();
     let mut mcp_rollout_runs = Vec::new();
     let mut team_count = 0usize;
-    for organization in state
-        .list_organizations()
-        .await?
+    let organizations = match state.list_organizations().await {
+        Ok(organizations) => organizations,
+        Err(error) => {
+            scheduler_task_failed(&mut task_errors, "organizations", error);
+            Vec::new()
+        }
+    };
+    for organization in organizations
         .into_iter()
         .filter(|organization| organization.archived_at.is_none())
     {
-        for team in state
-            .list_teams(organization.id)
-            .await?
-            .into_iter()
-            .filter(|team| team.archived_at.is_none())
-        {
+        let teams = match state.list_teams(organization.id).await {
+            Ok(teams) => teams,
+            Err(error) => {
+                scheduler_task_failed(&mut task_errors, "teams", error);
+                Vec::new()
+            }
+        };
+        for team in teams.into_iter().filter(|team| team.archived_at.is_none()) {
             team_count += 1;
-            mcp_health_runs.push(execute_due_mcp_server_health_checks(state, team.id).await?);
-            mcp_rollout_runs.push(execute_due_mcp_server_rollouts(state, team.id).await?);
+            match execute_due_mcp_server_health_checks(state, team.id).await {
+                Ok(run) => mcp_health_runs.push(run),
+                Err(error) => {
+                    scheduler_task_failed(&mut task_errors, "mcp_health_checks", error);
+                    mcp_health_runs.push(failed_mcp_health_run(team.id, checked_at));
+                }
+            }
+            match execute_due_mcp_server_rollouts(state, team.id).await {
+                Ok(run) => mcp_rollout_runs.push(run),
+                Err(error) => {
+                    scheduler_task_failed(&mut task_errors, "mcp_rollouts", error);
+                    mcp_rollout_runs.push(failed_mcp_rollout_run(team.id, checked_at));
+                }
+            }
         }
     }
     let mut actions = Vec::new();
@@ -983,6 +1139,11 @@ pub(crate) async fn execute_scheduler_due_tasks(
     if semantic_aging_policies.archived_count > 0 || semantic_aging_policies.failed_count > 0 {
         actions.push("semantic_aging_policies_processed".to_string());
     }
+    if ontology_release_workflow_triggers.triggered_count > 0
+        || ontology_release_workflow_triggers.failed_count > 0
+    {
+        actions.push("ontology_release_workflow_triggers_processed".to_string());
+    }
     if cost_alert_delivery.is_some() {
         actions.push("usage_cost_alert_delivery_processed".to_string());
     }
@@ -999,7 +1160,9 @@ pub(crate) async fn execute_scheduler_due_tasks(
     {
         actions.push("remote_computer_sidecar_supervision_processed".to_string());
     }
-    let status = if actions.is_empty() {
+    let status = if !task_errors.is_empty() {
+        "failed"
+    } else if actions.is_empty() {
         "noop"
     } else {
         "completed"
@@ -1022,6 +1185,7 @@ pub(crate) async fn execute_scheduler_due_tasks(
         checked_at,
         team_count,
         actions,
+        task_errors,
         provider_policy_gate,
         policy_rollout,
         approval_escalations,
@@ -1029,6 +1193,7 @@ pub(crate) async fn execute_scheduler_due_tasks(
         workflow_scheduled_steps: Some(workflow_scheduled_steps),
         semantic_synthesis_schedules: Some(semantic_synthesis_schedules),
         semantic_aging_policies: Some(semantic_aging_policies),
+        ontology_release_workflow_triggers: Some(ontology_release_workflow_triggers),
         mcp_health_runs,
         mcp_rollout_runs,
         codex_app_server_stale_polls,
@@ -1056,6 +1221,8 @@ pub(crate) async fn execute_scheduler_due_tasks(
                 "retry_policy": run.retry_policy,
                 "team_count": run.team_count,
                 "actions": run.actions,
+                "task_errors": run.task_errors,
+                "task_error_count": run.task_errors.len(),
                 "provider_policy_gate_status": run.provider_policy_gate.as_ref().map(|gate| gate.status.clone()),
                 "workflow_scheduled_step_status": run.workflow_scheduled_steps.as_ref().map(|workflow| workflow.status.clone()),
                 "workflow_scheduled_step_activated_count": run.workflow_scheduled_steps.as_ref().map(|workflow| workflow.activated_count).unwrap_or(0),
@@ -1064,6 +1231,9 @@ pub(crate) async fn execute_scheduler_due_tasks(
                 "semantic_synthesis_schedule_failed_count": run.semantic_synthesis_schedules.as_ref().map(|semantic| semantic.failed_count).unwrap_or(0),
                 "semantic_aging_policy_status": run.semantic_aging_policies.as_ref().map(|semantic| semantic.status.clone()),
                 "semantic_aging_policy_archived_count": run.semantic_aging_policies.as_ref().map(|semantic| semantic.archived_count).unwrap_or(0),
+                "ontology_release_workflow_trigger_status": run.ontology_release_workflow_triggers.as_ref().map(|trigger| trigger.status.clone()),
+                "ontology_release_workflow_trigger_triggered_count": run.ontology_release_workflow_triggers.as_ref().map(|trigger| trigger.triggered_count).unwrap_or(0),
+                "ontology_release_workflow_trigger_failed_count": run.ontology_release_workflow_triggers.as_ref().map(|trigger| trigger.failed_count).unwrap_or(0),
                 "cost_alert_delivery_status": run.cost_alert_delivery.as_ref().map(|delivery| delivery.status.clone()),
                 "remote_computer_sidecar_supervision_status": run.remote_computer_sidecar_supervision.status,
                 "remote_computer_sidecar_missing_heartbeat_count": run.remote_computer_sidecar_supervision.missing_heartbeat_count,
@@ -1074,6 +1244,237 @@ pub(crate) async fn execute_scheduler_due_tasks(
         ))
         .await?;
     Ok(run)
+}
+
+fn scheduler_task_failed(task_errors: &mut Vec<SchedulerTaskError>, task: &str, error: AppError) {
+    task_errors.push(SchedulerTaskError {
+        task: task.to_string(),
+        message: error.message,
+    });
+}
+
+fn scheduler_forced_task_failure(task: &str, owner: Option<&str>) -> Option<AppError> {
+    #[cfg(test)]
+    {
+        if owner == Some("__force_policy_rollout_failure") && task == "policy_rollout" {
+            return Some(AppError::bad_request(format!(
+                "forced scheduler task failure: {task}"
+            )));
+        }
+    }
+    #[cfg(not(test))]
+    {
+        let _ = task;
+        let _ = owner;
+    }
+    None
+}
+
+fn failed_policy_rollout_run(checked_at: DateTime<Utc>) -> PolicyScheduledRolloutRun {
+    PolicyScheduledRolloutRun {
+        status: "failed".to_string(),
+        activated_revision_id: None,
+        activated_revision: None,
+        controller_id: None,
+        policy_store_id: None,
+        deployment_id: None,
+        scanned_count: 0,
+        skipped_count: 0,
+        scanned_revisions: Vec::new(),
+        checked_at,
+        reason: "scheduler task failed before policy rollout completed".to_string(),
+    }
+}
+
+fn failed_approval_escalation_run(checked_at: DateTime<Utc>) -> ApprovalEscalationDueRun {
+    ApprovalEscalationDueRun {
+        status: "failed".to_string(),
+        checked_at,
+        expired_count: 0,
+        escalated_count: 0,
+        skipped_count: 0,
+        notification_deliveries: Vec::new(),
+    }
+}
+
+fn failed_agent_release_run(checked_at: DateTime<Utc>) -> AgentReleaseAutomationRun {
+    AgentReleaseAutomationRun {
+        checked_at,
+        pending_count: 0,
+        promoted_count: 0,
+        rejected_count: 0,
+        skipped_count: 0,
+        controller_required: false,
+        controller_configured: false,
+        controller_execution_count: 0,
+        controller_failed_count: 1,
+        results: Vec::new(),
+    }
+}
+
+fn failed_codex_app_server_stale_poll_run(
+    checked_at: DateTime<Utc>,
+    request: &CodexAppServerStalePollRequest,
+) -> CodexAppServerStalePollRun {
+    CodexAppServerStalePollRun {
+        checked_at,
+        stale_after_seconds: request.stale_after_seconds,
+        candidate_count: 0,
+        polled_count: 0,
+        terminal_count: 0,
+        skipped_count: 0,
+        failed_count: 1,
+        results: Vec::new(),
+    }
+}
+
+fn failed_workflow_scheduled_step_sweep(
+    checked_at: DateTime<Utc>,
+) -> WorkflowScheduledStepActivationSweep {
+    WorkflowScheduledStepActivationSweep {
+        status: "failed".to_string(),
+        checked_at,
+        workflow_run_count: 0,
+        scheduled_step_count: 0,
+        due_step_count: 0,
+        activated_count: 0,
+        activated_step_ids: Vec::new(),
+        remaining_scheduled_count: 0,
+        actions: Vec::new(),
+    }
+}
+
+fn failed_semantic_synthesis_schedule_sweep(
+    checked_at: DateTime<Utc>,
+) -> SemanticSynthesisScheduleSweep {
+    SemanticSynthesisScheduleSweep {
+        status: "failed".to_string(),
+        checked_at,
+        scheduled_count: 0,
+        due_count: 0,
+        created_count: 0,
+        skipped_count: 0,
+        failed_count: 1,
+        runs: Vec::new(),
+        actions: Vec::new(),
+    }
+}
+
+fn failed_semantic_aging_policy_sweep(checked_at: DateTime<Utc>) -> SemanticAgingPolicySweep {
+    SemanticAgingPolicySweep {
+        status: "failed".to_string(),
+        checked_at,
+        policy_count: 0,
+        due_count: 0,
+        archived_count: 0,
+        skipped_count: 0,
+        failed_count: 1,
+        archived_object_ids: Vec::new(),
+        runs: Vec::new(),
+        actions: Vec::new(),
+    }
+}
+
+fn failed_ontology_release_workflow_trigger_drain(
+    checked_at: DateTime<Utc>,
+) -> OntologyReleaseWorkflowTriggerDrain {
+    OntologyReleaseWorkflowTriggerDrain {
+        status: "failed".to_string(),
+        checked_at,
+        retryable_count: 0,
+        triggered_count: 0,
+        skipped_count: 0,
+        failed_count: 1,
+        trigger_ids: Vec::new(),
+    }
+}
+
+fn failed_cost_alert_delivery(checked_at: DateTime<Utc>) -> CostAlertDelivery {
+    CostAlertDelivery {
+        status: "failed".to_string(),
+        delivered: false,
+        channel: "scheduler".to_string(),
+        webhook_configured: false,
+        alerts: Vec::new(),
+        route_deliveries: Vec::new(),
+        delivered_at: checked_at,
+    }
+}
+
+fn failed_usage_finance_export_delivery(checked_at: DateTime<Utc>) -> UsageFinanceExportDelivery {
+    UsageFinanceExportDelivery {
+        status: "failed".to_string(),
+        delivered: false,
+        channel: "scheduler".to_string(),
+        scheduled: true,
+        target_configured: false,
+        delivery_id: Uuid::new_v4(),
+        file_name: "usage-finance-export-failed.csv".to_string(),
+        bytes: 0,
+        export_bytes: 0,
+        record_count: 0,
+        provider_count: 0,
+        budget_pressure_count: 0,
+        rollup_count: 0,
+        delivered_at: checked_at,
+    }
+}
+
+fn failed_remote_computer_sidecar_supervision_run(
+    checked_at: DateTime<Utc>,
+) -> RemoteComputerSidecarSupervisionRun {
+    RemoteComputerSidecarSupervisionRun {
+        status: "failed".to_string(),
+        checked_at,
+        active_remote_computer_count: 0,
+        heartbeat_count: 0,
+        missing_heartbeat_count: 0,
+        stale_heartbeat_count: 0,
+        stale_after_seconds: 0,
+        actions: Vec::new(),
+    }
+}
+
+fn failed_remote_computer_reclaim_run(checked_at: DateTime<Utc>) -> RemoteComputerReclaimRun {
+    RemoteComputerReclaimRun {
+        generated_at: checked_at,
+        status: "failed".to_string(),
+        stale_attachment_count: 0,
+        reclaimed_attachment_count: 0,
+        expired_lease_count: 0,
+        reclaimed_lease_count: 0,
+        attachments: Vec::new(),
+        leases: Vec::new(),
+        execution_enabled: false,
+    }
+}
+
+fn failed_mcp_health_run(team_id: Uuid, checked_at: DateTime<Utc>) -> McpServerScheduledHealthRun {
+    McpServerScheduledHealthRun {
+        team_id,
+        due_count: 0,
+        skipped_count: 0,
+        healthy_count: 0,
+        unhealthy_count: 1,
+        results: Vec::new(),
+        checked_at,
+    }
+}
+
+fn failed_mcp_rollout_run(team_id: Uuid, checked_at: DateTime<Utc>) -> McpServerRolloutDueRun {
+    McpServerRolloutDueRun {
+        team_id,
+        applied_count: 0,
+        skipped_count: 0,
+        expired_count: 0,
+        failed_count: 1,
+        controller_required: false,
+        controller_configured: false,
+        controller_execution_count: 0,
+        controller_failed_count: 0,
+        results: Vec::new(),
+        checked_at,
+    }
 }
 
 pub(crate) fn normalize_scheduler_run_due_request(

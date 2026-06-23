@@ -486,6 +486,7 @@ pub(crate) fn tenant_isolation_tracked_tables() -> Vec<&'static str> {
         "context_packets",
         "memory_writeback_candidates",
         "ontology_releases",
+        "ontology_release_workflow_triggers",
         "ontology_onboarding_runs",
         "workflow_schedules",
     ]

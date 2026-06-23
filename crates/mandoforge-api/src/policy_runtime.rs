@@ -27,10 +27,10 @@ impl AppState {
 
     pub(crate) async fn policy_for_session(&self, session_id: Uuid) -> PolicyConfig {
         let runtime = self.policy.read().await;
-        if let Some(staged) = runtime.staged.as_ref() {
-            if session_rollout_bucket(session_id) < staged.rollout_percent {
-                return staged.policy.clone();
-            }
+        if let Some(staged) = runtime.staged.as_ref()
+            && session_rollout_bucket(session_id) < staged.rollout_percent
+        {
+            return staged.policy.clone();
         }
         runtime.active.clone()
     }

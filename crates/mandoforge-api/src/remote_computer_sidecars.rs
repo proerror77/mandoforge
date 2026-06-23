@@ -96,13 +96,12 @@ where
         .iter()
         .filter(|response| !matches!(response.status.as_str(), "mutation_ok"))
         .count();
+    let replacement_blocked = !replacement_enabled
+        || (validation_controller_required && !validation_controller_configured)
+        || attempted_replacement_count == 0;
     let status = if targets.is_empty() {
         "noop"
-    } else if !replacement_enabled {
-        "blocked"
-    } else if validation_controller_required && !validation_controller_configured {
-        "blocked"
-    } else if attempted_replacement_count == 0 {
+    } else if replacement_blocked {
         "blocked"
     } else if failed_attempts > 0 {
         "attention"

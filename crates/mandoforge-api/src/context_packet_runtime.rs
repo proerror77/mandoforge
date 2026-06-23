@@ -1602,7 +1602,7 @@ pub(crate) fn missing_semantic_scope_keys(scopes: &Value) -> Vec<String> {
             &REQUIRED_SEMANTIC_SCOPE_KEYS
         };
     required_keys
-        .into_iter()
+        .iter()
         .filter(|key| {
             scopes
                 .get(*key)
@@ -1721,9 +1721,9 @@ impl ToolExecutor for ShellExecTool {
             .map_err(|error| {
                 AppError::bad_request(format!("failed to prepare session workspace: {error}"))
             })?;
-        if !host_shell_exec_allowed_for_inline_tool() {
+        if !inline_shell_exec_allowed_for_tool() {
             return Err(AppError::bad_request(
-                "host shell.exec is disabled; use Remote Computer execution or set MANDOFORGE_ALLOW_HOST_SHELL_EXEC=1",
+                "inline shell.exec is disabled; use approved execution jobs or set MANDOFORGE_ALLOW_INLINE_SHELL_EXEC=1 for local development",
             ));
         }
         let runner = shell_runner();
@@ -2210,7 +2210,7 @@ impl ToolExecutor for OntologyTypeLookupTool {
                 "domain": packet.semantic_scopes.get("domain_scope").and_then(Value::as_str).unwrap_or("global"),
                 "workflow_scope": packet.semantic_scopes.get("workflow_scope").and_then(Value::as_str),
                 "memory_scope": packet.semantic_scopes.get("memory_scope").and_then(Value::as_str),
-                "release_model": "core registry scoped by ContextPacket; domain ontology releases are not yet materialized"
+                "release_model": "core registry scoped by ContextPacket; active domain ontology release metadata is pinned when available"
             },
             "ontology_scope": render_ontology_scope(&packet.semantic_scopes),
             "requested_name": requested_name,
@@ -2347,8 +2347,8 @@ pub(crate) fn tool_registry() -> HashMap<&'static str, Box<dyn ToolExecutor>> {
         .collect()
 }
 
-pub(crate) fn host_shell_exec_allowed_for_inline_tool() -> bool {
-    std::env::var("MANDOFORGE_ALLOW_HOST_SHELL_EXEC")
+pub(crate) fn inline_shell_exec_allowed_for_tool() -> bool {
+    std::env::var("MANDOFORGE_ALLOW_INLINE_SHELL_EXEC")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(false)
 }
@@ -3140,7 +3140,7 @@ pub(crate) async fn execute_tool_invocation(
             .await?;
         return Err(AppError::not_found("unknown tool"));
     };
-    let result = match executor.execute(&state, &input, &tool_call).await {
+    let result = match executor.execute(state, &input, &tool_call).await {
         Ok(result) => result,
         Err(error) => {
             let error_payload = json!({"error": error.message.clone()});

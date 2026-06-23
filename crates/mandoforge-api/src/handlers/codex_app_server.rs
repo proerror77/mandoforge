@@ -294,7 +294,7 @@ async fn validate_codex_app_server_ops(
         && summary
             .production_ops
             .latest_stale_poll_age_hours
-            .map_or(true, |age_hours| age_hours < 24)
+            .is_none_or(|age_hours| age_hours < 24)
         && !summary.production_ops.latest_controller_validated;
     if summary.production_ops.production_blocked
         && !production_blocked_only_by_missing_controller_evidence

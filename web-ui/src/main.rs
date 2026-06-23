@@ -631,9 +631,9 @@ fn App() -> Html {
                     current_run.id
                 );
                 let body = if version.is_empty() {
-                    json!({"release_class": "customer_grade"})
+                    json!({})
                 } else {
-                    json!({"version": version, "release_class": "customer_grade"})
+                    json!({"version": version})
                 };
                 match api_post::<OntologyRelease, _>(&path, &body).await {
                     Ok(release) => mutation_status.set(format!(

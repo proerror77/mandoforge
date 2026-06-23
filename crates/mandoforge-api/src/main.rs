@@ -114,6 +114,7 @@ mod store_github_bindings;
 mod store_governance;
 mod store_manager_plans;
 mod store_memory_writeback;
+mod store_ontology_release_workflow_triggers;
 mod store_ontology_releases;
 mod store_policy_revisions;
 mod store_releases;
@@ -393,14 +394,18 @@ pub(crate) use types::ontology::{
     ConfidenceCalibrationResponse, CreateOntologyOnboardingRunRequest,
     CreateOntologyReleaseCandidateRequest, CuratedDatasetDraft, EntityResolutionCandidate,
     EntityResolutionDecisionDraft, EntityResolutionRequest, EntityResolutionResponse,
-    EntityResolutionRetrievalHit, ExpandSemanticOntologyRequest, OntologyActionTransactionProfile,
+    EntityResolutionRetrievalHit, ExpandSemanticOntologyRequest,
+    ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_FAILED,
+    ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_PENDING,
+    ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_SKIPPED, OntologyActionTransactionProfile,
     OntologyBuilderDag, OntologyBuilderEdge, OntologyBuilderExecutionLevel, OntologyBuilderNode,
     OntologyDatasetProfile, OntologyEngineReadiness, OntologyEngineReadinessCheck,
     OntologyForeignKeyCandidate, OntologyObjectType, OntologyOnboardingDataset,
     OntologyOnboardingField, OntologyOnboardingMaterializationResult,
     OntologyOnboardingProposalDraft, OntologyOnboardingRun, OntologyOnboardingToolSpec,
     OntologyOnboardingToolSpecResponse, OntologyPromptPacket, OntologyRegistry,
-    OntologyRelationType, OntologyRelease, OntologyReleaseListQuery, OntologyReviewGraph,
+    OntologyRelationType, OntologyRelease, OntologyReleaseListQuery,
+    OntologyReleaseWorkflowTrigger, OntologyReleaseWorkflowTriggerDrain, OntologyReviewGraph,
     OntologyReviewGraphEdge, OntologyReviewGraphNode, OntologySeedActionMapping,
     OntologySeedMetricMapping, OntologySeedObjectMapping, OntologySeedPack,
     OntologySeedPackSummary, OntologySeedRelationMapping, OntologySourceBundle,
@@ -409,6 +414,7 @@ pub(crate) use types::ontology::{
     SchemaUnderstandingCandidate, SchemaUnderstandingRequest, SchemaUnderstandingResponse,
     SubgraphProposalDraft, SubgraphProposalMember, SubgraphProposalRequest,
     SubgraphProposalResponse, TaxonomyLayerCandidate,
+    ontology_release_workflow_trigger_status_allowed,
 };
 pub(crate) use types::policy::{
     CreatePolicyRevision, PolicyActivationWindow, PolicyDiffChange, PolicyGateCaseInput,
@@ -447,7 +453,7 @@ pub(crate) use types::remote_computer::{
 pub(crate) use types::scheduler::{
     SchedulerAttentionItem, SchedulerDeploymentReadiness, SchedulerDeploymentValidationRun,
     SchedulerDuePlan, SchedulerDuePlanItem, SchedulerDueRun, SchedulerOrchestrationSummary,
-    SchedulerRetryPolicy, SchedulerRunDueRequest, SchedulerRunHistoryItem,
+    SchedulerRetryPolicy, SchedulerRunDueRequest, SchedulerRunHistoryItem, SchedulerTaskError,
 };
 pub(crate) use types::semantic::{
     ContextPacketSemanticObject, CreateMemoryWritebackCandidates, CreateSemanticIngestionBatch,

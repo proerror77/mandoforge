@@ -550,9 +550,9 @@ impl AppState {
                     return Err(AppError::not_found("workflow step run not found"));
                 };
                 if step.status != "scheduled"
-                    || !step
+                    || step
                         .scheduled_at
-                        .is_some_and(|scheduled_at| scheduled_at <= checked_at)
+                        .is_none_or(|scheduled_at| scheduled_at > checked_at)
                 {
                     return Ok(None);
                 }

@@ -1607,7 +1607,7 @@ fn validate_ref(
     validate_relative_existing_path(package_dir, &item.path)
 }
 
-fn insert_unique_id<'a>(
+fn insert_unique_id(
     ids_by_section: &mut BTreeMap<&'static str, BTreeSet<String>>,
     section: &'static str,
     id: &str,
@@ -1981,7 +1981,7 @@ release_gates:
 "#;
         let manifest = WorkflowPackManifest::from_yaml_str(input).expect("manifest parses");
         let error = manifest
-            .validate_package_dir(&fixture_manifest_path().parent().unwrap().to_path_buf())
+            .validate_package_dir(fixture_manifest_path().parent().unwrap())
             .expect_err("high-risk handoff without approval must fail");
 
         assert!(error.to_string().contains("must require approval"));
@@ -1996,7 +1996,7 @@ release_gates:
         );
         let manifest = WorkflowPackManifest::from_yaml_str(&input).expect("manifest parses");
         let error = manifest
-            .validate_package_dir(&fixture_manifest_path().parent().unwrap().to_path_buf())
+            .validate_package_dir(fixture_manifest_path().parent().unwrap())
             .expect_err("manifest scope drift from policy must fail");
 
         assert!(
@@ -2069,7 +2069,7 @@ release_gates:
         );
         let manifest = WorkflowPackManifest::from_yaml_str(&input).expect("manifest parses");
         let error = manifest
-            .validate_package_dir(&fixture_manifest_path().parent().unwrap().to_path_buf())
+            .validate_package_dir(fixture_manifest_path().parent().unwrap())
             .expect_err("connector prompt-injection boundary drift must fail");
 
         assert!(
@@ -2090,7 +2090,7 @@ release_gates:
             .required_content_fields
             .clear();
         let error = manifest
-            .validate_package_dir(&fixture_manifest_path().parent().unwrap().to_path_buf())
+            .validate_package_dir(fixture_manifest_path().parent().unwrap())
             .expect_err("connector data_quality contract should fail");
 
         assert!(

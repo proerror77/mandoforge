@@ -1009,7 +1009,7 @@ fn build_amazon_sp_api_request(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .or_else(|| env_region.as_deref())
+        .or(env_region.as_deref())
         .unwrap_or("us-east-1")
         .to_string();
     let path = endpoint_path(call, amazon_default_path(&call.operation))?;
@@ -1387,6 +1387,7 @@ fn env_bool(key: &str) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use std::collections::BTreeSet;

@@ -299,7 +299,7 @@ pub(crate) fn build_codex_app_server_trace_summary(
             last_seen_at: latest.created_at,
         });
     }
-    traces.sort_by(|left, right| right.last_seen_at.cmp(&left.last_seen_at));
+    traces.sort_by_key(|trace| std::cmp::Reverse(trace.last_seen_at));
     let active_turn_count = traces
         .iter()
         .filter(|trace| trace.turn_id.is_some() && !trace.terminal)

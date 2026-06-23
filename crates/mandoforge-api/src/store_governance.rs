@@ -46,6 +46,34 @@ impl AppState {
         }
     }
 
+    pub(crate) async fn get_organization(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Organization, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => inner
+                .read()
+                .await
+                .organizations
+                .get(&organization_id)
+                .cloned()
+                .ok_or_else(|| AppError::not_found("organization not found")),
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "SELECT id, name, slug, owner_subject, created_at, archived_at
+                     FROM organizations
+                     WHERE tenant_id = $1 AND id = $2",
+                )
+                .bind(self.current_tenant_id())
+                .bind(organization_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("organization not found"))?;
+                organization_from_row(row)
+            }
+        }
+    }
+
     pub(crate) async fn create_organization(
         &self,
         input: CreateOrganization,
@@ -152,6 +180,31 @@ impl AppState {
         }
     }
 
+    pub(crate) async fn get_team(&self, team_id: Uuid) -> Result<Team, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => inner
+                .read()
+                .await
+                .teams
+                .get(&team_id)
+                .cloned()
+                .ok_or_else(|| AppError::not_found("team not found")),
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "SELECT id, organization_id, name, slug, created_at, archived_at
+                     FROM teams
+                     WHERE tenant_id = $1 AND id = $2",
+                )
+                .bind(self.current_tenant_id())
+                .bind(team_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("team not found"))?;
+                team_from_row(row)
+            }
+        }
+    }
+
     pub(crate) async fn create_team(
         &self,
         organization_id: Uuid,
@@ -201,10 +254,10 @@ impl AppState {
                     .get(&team_id)
                     .map(|team| team.organization_id)
                     .ok_or_else(|| AppError::not_found("active team not found"))?;
-                if !store
+                if store
                     .organizations
                     .get(&organization_id)
-                    .is_some_and(|organization| organization.archived_at.is_none())
+                    .is_none_or(|organization| organization.archived_at.is_some())
                 {
                     return Err(AppError::not_found("active team not found"));
                 }
@@ -271,6 +324,31 @@ impl AppState {
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter().map(project_from_row).collect()
+            }
+        }
+    }
+
+    pub(crate) async fn get_project(&self, project_id: Uuid) -> Result<Project, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => inner
+                .read()
+                .await
+                .projects
+                .get(&project_id)
+                .cloned()
+                .ok_or_else(|| AppError::not_found("project not found")),
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "SELECT id, team_id, name, slug, created_at, archived_at
+                     FROM projects
+                     WHERE tenant_id = $1 AND id = $2",
+                )
+                .bind(self.current_tenant_id())
+                .bind(project_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("project not found"))?;
+                project_from_row(row)
             }
         }
     }
@@ -1541,6 +1619,31 @@ impl AppState {
         }
     }
 
+    pub(crate) async fn get_membership(&self, membership_id: Uuid) -> Result<Membership, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => inner
+                .read()
+                .await
+                .memberships
+                .get(&membership_id)
+                .cloned()
+                .ok_or_else(|| AppError::not_found("membership not found")),
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "SELECT id, user_id, organization_id, team_id, project_id, role, created_at
+                     FROM memberships
+                     WHERE tenant_id = $1 AND id = $2",
+                )
+                .bind(self.current_tenant_id())
+                .bind(membership_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("membership not found"))?;
+                membership_from_row(row)
+            }
+        }
+    }
+
     pub(crate) async fn create_membership(
         &self,
         organization_id: Uuid,
@@ -1608,22 +1711,22 @@ impl AppState {
                     .get(&membership_id)
                     .cloned()
                     .ok_or_else(|| AppError::not_found("membership not found"))?;
-                if membership.role == "admin" {
-                    if let Some(organization_id) = membership.organization_id {
-                        let remaining_admin_count = store
-                            .memberships
-                            .values()
-                            .filter(|candidate| {
-                                candidate.id != membership_id
-                                    && candidate.organization_id == Some(organization_id)
-                                    && candidate.role == "admin"
-                            })
-                            .count();
-                        if remaining_admin_count == 0 {
-                            return Err(AppError::bad_request(
-                                "cannot delete the last admin membership",
-                            ));
-                        }
+                if membership.role == "admin"
+                    && let Some(organization_id) = membership.organization_id
+                {
+                    let remaining_admin_count = store
+                        .memberships
+                        .values()
+                        .filter(|candidate| {
+                            candidate.id != membership_id
+                                && candidate.organization_id == Some(organization_id)
+                                && candidate.role == "admin"
+                        })
+                        .count();
+                    if remaining_admin_count == 0 {
+                        return Err(AppError::bad_request(
+                            "cannot delete the last admin membership",
+                        ));
                     }
                 }
                 store.memberships.remove(&membership_id);
@@ -1641,26 +1744,26 @@ impl AppState {
                 .await?
                 .ok_or_else(|| AppError::not_found("membership not found"))?;
                 let membership = membership_from_row(row)?;
-                if membership.role == "admin" {
-                    if let Some(organization_id) = membership.organization_id {
-                        let remaining_admin_count: i64 = sqlx::query_scalar(
-                            "SELECT COUNT(*)
+                if membership.role == "admin"
+                    && let Some(organization_id) = membership.organization_id
+                {
+                    let remaining_admin_count: i64 = sqlx::query_scalar(
+                        "SELECT COUNT(*)
                              FROM memberships
                              WHERE tenant_id = $1
                                AND organization_id = $2
                                AND role = 'admin'
                                AND id <> $3",
-                        )
-                        .bind(self.current_tenant_id())
-                        .bind(organization_id)
-                        .bind(membership_id)
-                        .fetch_one(pool)
-                        .await?;
-                        if remaining_admin_count == 0 {
-                            return Err(AppError::bad_request(
-                                "cannot delete the last admin membership",
-                            ));
-                        }
+                    )
+                    .bind(self.current_tenant_id())
+                    .bind(organization_id)
+                    .bind(membership_id)
+                    .fetch_one(pool)
+                    .await?;
+                    if remaining_admin_count == 0 {
+                        return Err(AppError::bad_request(
+                            "cannot delete the last admin membership",
+                        ));
                     }
                 }
                 sqlx::query("DELETE FROM memberships WHERE tenant_id = $1 AND id = $2")
@@ -1703,6 +1806,34 @@ impl AppState {
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter().map(tenant_invitation_from_row).collect()
+            }
+        }
+    }
+
+    pub(crate) async fn get_tenant_invitation(
+        &self,
+        invitation_id: Uuid,
+    ) -> Result<TenantInvitation, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => inner
+                .read()
+                .await
+                .tenant_invitations
+                .get(&invitation_id)
+                .cloned()
+                .ok_or_else(|| AppError::not_found("tenant invitation not found")),
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "SELECT id, organization_id, team_id, project_id, email, role, status, token, invited_by, accepted_by, expires_at, created_at, decided_at
+                     FROM tenant_invitations
+                     WHERE tenant_id = $1 AND id = $2",
+                )
+                .bind(self.current_tenant_id())
+                .bind(invitation_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("tenant invitation not found"))?;
+                tenant_invitation_from_row(row)
             }
         }
     }
@@ -2897,6 +3028,34 @@ impl AppState {
                 )
                 .bind(self.current_tenant_id())
                 .bind(team_id)
+                .bind(server_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("mcp server not found"))?;
+                mcp_server_from_row(row)
+            }
+        }
+    }
+
+    pub(crate) async fn get_mcp_server_by_id(
+        &self,
+        server_id: Uuid,
+    ) -> Result<McpServerRecord, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => inner
+                .read()
+                .await
+                .mcp_servers
+                .get(&server_id)
+                .cloned()
+                .ok_or_else(|| AppError::not_found("mcp server not found")),
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "SELECT id, team_id, name, transport, config, tool_allowlist, status, created_at
+                     FROM mcp_servers
+                     WHERE tenant_id = $1 AND id = $2",
+                )
+                .bind(self.current_tenant_id())
                 .bind(server_id)
                 .fetch_optional(pool)
                 .await?

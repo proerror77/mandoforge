@@ -87,7 +87,7 @@ pub(crate) async fn execute_remote_computer_stale_reclaim(
             )
             .await?;
         record_remote_computer_attachment_event(
-            &state,
+            state,
             &reclaimed,
             "remote_computer.attachment_reclaimed",
         )
@@ -116,38 +116,37 @@ pub(crate) async fn execute_remote_computer_stale_reclaim(
             .get("on_demand")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        if is_on_demand {
-            if let Some(pod_name) = state
+        if is_on_demand
+            && let Some(pod_name) = state
                 .list_remote_computers()
                 .await
                 .unwrap_or_default()
                 .into_iter()
                 .find(|c| c.id == lease.remote_computer_id)
                 .and_then(|c| c.pod_name)
-            {
-                let config = RemoteComputerRunnerConfig::from_env();
-                let runner = remote_computer_runner_for_config(&config);
-                runner
-                    .mutate(
-                        &config,
-                        RemoteComputerRunnerDryRunRequest {
-                            operation: Some("live_delete".to_string()),
-                            remote_computer_id: Some(lease.remote_computer_id),
-                            session_id: lease.session_id,
-                            pod_name: Some(pod_name),
-                            metadata: Some(json!({
-                                "reclaim_reason": "expired_on_demand_lease",
-                                "lease_id": lease.id
-                            })),
-                        },
-                    )
-                    .await;
-                // Deletion errors are fire-and-forget: the Pod will be garbage-collected
-                // by Kubernetes TTL or a future sweep. We do not propagate the error here
-                // so that the lease reclaim itself always succeeds.
-            }
+        {
+            let config = RemoteComputerRunnerConfig::from_env();
+            let runner = remote_computer_runner_for_config(&config);
+            runner
+                .mutate(
+                    &config,
+                    RemoteComputerRunnerDryRunRequest {
+                        operation: Some("live_delete".to_string()),
+                        remote_computer_id: Some(lease.remote_computer_id),
+                        session_id: lease.session_id,
+                        pod_name: Some(pod_name),
+                        metadata: Some(json!({
+                            "reclaim_reason": "expired_on_demand_lease",
+                            "lease_id": lease.id
+                        })),
+                    },
+                )
+                .await;
+            // Deletion errors are fire-and-forget: the Pod will be garbage-collected
+            // by Kubernetes TTL or a future sweep. We do not propagate the error here
+            // so that the lease reclaim itself always succeeds.
         }
-        record_remote_computer_lease_event(&state, &reclaimed, "remote_computer.lease_reclaimed")
+        record_remote_computer_lease_event(state, &reclaimed, "remote_computer.lease_reclaimed")
             .await?;
         reclaimed_leases.push(reclaimed);
     }

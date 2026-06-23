@@ -47,12 +47,11 @@ pub(crate) async fn decide_provider_status_approval(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
+        && approver_subject != principal.subject_id
     {
-        if approver_subject != principal.subject_id {
-            return Err(AppError::forbidden(format!(
-                "provider status approval is delegated to {approver_subject}"
-            )));
-        }
+        return Err(AppError::forbidden(format!(
+            "provider status approval is delegated to {approver_subject}"
+        )));
     }
     let decided_at = Utc::now();
     approval["status"] = json!(decision);
@@ -492,7 +491,7 @@ pub(crate) async fn execute_due_mcp_server_health_checks(
             skipped_count += 1;
             continue;
         }
-        let health = mcp_server_health(&state, &server).await;
+        let health = mcp_server_health(state, &server).await;
         let config = mcp_server_config_with_health_result(&server.config, &health, checked_at);
         state
             .update_mcp_server(
@@ -584,7 +583,7 @@ where
         if mcp_rollout_is_expired(&rollout, checked_at) {
             expired_count += 1;
             let expired =
-                mark_mcp_server_rollout_expired(&state, team_id, &server, &rollout).await?;
+                mark_mcp_server_rollout_expired(state, team_id, &server, &rollout).await?;
             results.push(json!({
                 "server_id": server.id,
                 "rollout_id": rollout_id,
@@ -656,7 +655,7 @@ where
                 }
             }
         }
-        match apply_mcp_server_rollout_inner(&state, team_id, server.id, rollout_id, "system").await
+        match apply_mcp_server_rollout_inner(state, team_id, server.id, rollout_id, "system").await
         {
             Ok(response) => {
                 applied_count += 1;
@@ -934,7 +933,7 @@ pub(crate) fn build_mcp_server_rollout_run_summary(
         .filter_map(mcp_server_rollout_run_from_audit_log)
         .filter(|run| run.team_id == team_id)
         .collect();
-    recent_runs.sort_by(|left, right| right.ran_at.cmp(&left.ran_at));
+    recent_runs.sort_by_key(|run| std::cmp::Reverse(run.ran_at));
     let run_count = recent_runs.len();
     let processed_run_count = recent_runs
         .iter()
@@ -1641,7 +1640,7 @@ pub(crate) fn build_mcp_server_rollout_summary(
             .cmp(&mcp_rollout_attention_priority(&right.reason))
             .then_with(|| left.name.cmp(&right.name))
     });
-    latest_rollouts.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    latest_rollouts.sort_by_key(|rollout| std::cmp::Reverse(rollout.updated_at));
 
     McpServerRolloutSummary {
         team_id,

@@ -1,17 +1,23 @@
 use async_trait::async_trait;
 use futures_util::StreamExt;
+use rustls_pki_types::pem::PemObject;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_tungstenite::{
-    connect_async,
+    Connector, connect_async_tls_with_config,
     tungstenite::{Message, client::IntoClientRequest},
 };
 use uuid::Uuid;
 
 const DEFAULT_KUBERNETES_EXEC_TIMEOUT_SECONDS: u64 = 120;
 const MAX_KUBERNETES_EXEC_CAPTURE_BYTES: usize = 1024 * 1024;
+const IN_CLUSTER_KUBERNETES_API_URL: &str = "https://kubernetes.default.svc";
+const IN_CLUSTER_SERVICE_ACCOUNT_TOKEN: &str =
+    "/var/run/secrets/kubernetes.io/serviceaccount/token";
+const IN_CLUSTER_SERVICE_ACCOUNT_CA: &str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RemoteComputerRunnerConfig {
@@ -247,8 +253,9 @@ impl RemoteComputerRunner for ReservedRemoteComputerRunner {
 #[async_trait]
 impl RemoteComputerRunner for KubernetesRemoteComputerRunner {
     fn readiness(&self, config: &RemoteComputerRunnerConfig) -> RemoteComputerRunnerReadiness {
-        let client_configured = kubernetes_client_configured(config);
-        let api_server_configured = config.kube_api_url.is_some();
+        let client_access = kubernetes_client_access(config);
+        let client_configured = client_access.is_some();
+        let api_server_configured = config.kube_api_url.is_some() || config.in_cluster;
         let bearer_token_configured = kubernetes_bearer_token_configured(config);
         let template_present = Path::new(&config.pod_template_path).exists();
         let configured = client_configured && template_present;
@@ -283,15 +290,17 @@ impl RemoteComputerRunner for KubernetesRemoteComputerRunner {
                 "live_exec".to_string(),
             ],
             message: if configured && config.mutation_enabled && config.live_mutation_enabled {
-                "Kubernetes Remote Computer adapter is configured for explicit live Pod create/delete; tool execution remains disabled"
+                "Kubernetes Remote Computer adapter is configured for explicit live Pod create/delete and optional Pod exec"
             } else if configured {
                 "Kubernetes Remote Computer adapter is configured for dry-run planning; Pod mutation remains disabled until both mutation gates are enabled"
             } else if !template_present {
                 "Kubernetes Remote Computer adapter is selected, but the Pod template is missing"
-            } else if api_server_configured && !bearer_token_configured && !config.in_cluster {
-                "Kubernetes Remote Computer adapter has an API server URL, but no bearer token path or in-cluster identity is configured"
+            } else if api_server_configured && !bearer_token_configured {
+                "Kubernetes Remote Computer adapter has an API server URL, but no readable bearer token is configured"
+            } else if config.kubeconfig_path.is_some() {
+                "Kubernetes Remote Computer adapter has a kubeconfig path, but live kubeconfig transport is not implemented; configure API server URL and bearer token"
             } else {
-                "Kubernetes Remote Computer adapter is selected, but kubeconfig or in-cluster config is missing"
+                "Kubernetes Remote Computer adapter is selected, but API server URL and bearer token configuration are missing"
             }
             .to_string(),
         }
@@ -423,11 +432,11 @@ impl RemoteComputerRunner for KubernetesRemoteComputerRunner {
         } else {
             None
         };
+        let client_access = kubernetes_client_access(config);
         let gates_open = readiness.configured
             && config.mutation_enabled
             && config.live_mutation_enabled
-            && config.kube_api_url.is_some()
-            && config.bearer_token_path.is_some();
+            && client_access.is_some();
         let mutation_result = if gates_open && (operation_is_create || operation_is_delete) {
             Some(call_kubernetes_mutation(config, operation_is_create, &pod_name, &request).await)
         } else {
@@ -444,28 +453,32 @@ impl RemoteComputerRunner for KubernetesRemoteComputerRunner {
         let exec_gates_open = readiness.configured
             && config.execution_enabled
             && config.live_mutation_enabled
-            && config.kube_api_url.is_some()
-            && config.bearer_token_path.is_some();
+            && client_access.is_some();
         let exec_result = if exec_gates_open && operation_is_exec {
             Some(call_kubernetes_exec(config, &pod_name, &exec_command).await)
         } else {
             None
         };
-        let live_mutation_status_code = mutation_result
-            .as_ref()
-            .and_then(|result| result.as_ref().ok().map(|(status_code, _)| *status_code));
+        let live_mutation_status_code = mutation_result.as_ref().and_then(|result| match result {
+            Ok((status_code, _)) => Some(*status_code),
+            Err(error) => error.status_code,
+        });
         let mutation_failed_message = mutation_result
             .as_ref()
-            .and_then(|result| result.as_ref().err().cloned());
-        let exec_failed_message = exec_result
-            .as_ref()
-            .and_then(|result| result.as_ref().err().cloned());
+            .and_then(|result| result.as_ref().err().map(ToString::to_string));
+        let exec_failed_message = exec_result.as_ref().and_then(|result| match result {
+            Ok(result) => result.status_failure.clone(),
+            Err(error) => Some(error.clone()),
+        });
         let exec_result_payload = exec_result
             .as_ref()
             .and_then(|result| result.as_ref().ok())
             .map(KubernetesExecResult::to_json);
         let status = if let Some(result) = &exec_result {
-            if result.is_ok() {
+            if result
+                .as_ref()
+                .is_ok_and(|result| result.status_failure.is_none())
+            {
                 "exec_ok"
             } else {
                 "exec_failed"
@@ -493,7 +506,11 @@ impl RemoteComputerRunner for KubernetesRemoteComputerRunner {
             namespace: Some(config.namespace.clone()),
             pod_name: Some(pod_name),
             pod_template_path: Some(config.pod_template_path.clone()),
-            execution_enabled: exec_result.as_ref().is_some_and(|result| result.is_ok()),
+            execution_enabled: exec_result.as_ref().is_some_and(|result| {
+                result
+                    .as_ref()
+                    .is_ok_and(|result| result.status_failure.is_none())
+            }),
             message: if let Some(message) = exec_failed_message {
                 format!("Kubernetes Pod exec failed: {message}")
             } else if exec_result.is_some() {
@@ -510,8 +527,8 @@ impl RemoteComputerRunner for KubernetesRemoteComputerRunner {
             } else if !config.mutation_enabled || !config.live_mutation_enabled {
                 "Kubernetes mutation is blocked until both mutation gates are explicitly enabled"
                     .to_string()
-            } else if config.kube_api_url.is_none() || config.bearer_token_path.is_none() {
-                "Kubernetes mutation requires API server URL and bearer token path; kubeconfig/in-cluster mutation is not implemented"
+            } else if client_access.is_none() {
+                "Kubernetes mutation requires a supported API server URL and readable bearer token; kubeconfig mutation is not implemented"
                     .to_string()
             } else if operation_is_exec && !config.execution_enabled {
                 "Kubernetes Pod exec is blocked until MANDOFORGE_REMOTE_COMPUTER_EXECUTION_ENABLED is explicitly enabled".to_string()
@@ -533,21 +550,15 @@ impl RemoteComputerRunner for KubernetesRemoteComputerRunner {
 async fn probe_kubernetes_version(
     config: &RemoteComputerRunnerConfig,
 ) -> Result<(u16, Value), String> {
-    let api_url = config
-        .kube_api_url
-        .as_deref()
-        .ok_or_else(|| "kube API URL is not configured".to_string())?;
-    let token_path = config
-        .bearer_token_path
-        .as_deref()
-        .ok_or_else(|| "bearer token path is not configured".to_string())?;
-    let token = tokio::fs::read_to_string(token_path)
+    let access = kubernetes_client_access(config)
+        .ok_or_else(|| "supported Kubernetes API client is not configured".to_string())?;
+    let token = tokio::fs::read_to_string(&access.bearer_token_path)
         .await
         .map_err(|err| format!("failed to read bearer token: {err}"))?;
     let response = reqwest::Client::builder()
         .build()
         .map_err(|err| format!("failed to build Kubernetes HTTP client: {err}"))?
-        .get(format!("{api_url}/version"))
+        .get(format!("{}/version", access.api_url))
         .bearer_auth(token.trim())
         .send()
         .await
@@ -568,51 +579,86 @@ async fn call_kubernetes_mutation(
     create: bool,
     pod_name: &str,
     request: &RemoteComputerRunnerDryRunRequest,
-) -> Result<(u16, Value), String> {
-    let api_url = config
-        .kube_api_url
-        .as_deref()
-        .ok_or_else(|| "kube API URL is not configured".to_string())?;
-    let token_path = config
-        .bearer_token_path
-        .as_deref()
-        .ok_or_else(|| "bearer token path is not configured".to_string())?;
-    let token = tokio::fs::read_to_string(token_path)
+) -> Result<(u16, Value), KubernetesMutationError> {
+    let access = kubernetes_client_access(config).ok_or_else(|| {
+        KubernetesMutationError::without_status("supported Kubernetes API client is not configured")
+    })?;
+    let token = tokio::fs::read_to_string(&access.bearer_token_path)
         .await
-        .map_err(|err| format!("failed to read bearer token: {err}"))?;
+        .map_err(|err| {
+            KubernetesMutationError::without_status(format!("failed to read bearer token: {err}"))
+        })?;
     let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(access.danger_accept_invalid_certs)
         .timeout(Duration::from_secs(10))
         .build()
-        .map_err(|err| format!("failed to build Kubernetes HTTP client: {err}"))?;
+        .map_err(|err| {
+            KubernetesMutationError::without_status(format!(
+                "failed to build Kubernetes HTTP client: {err}"
+            ))
+        })?;
     let url = if create {
-        format!("{api_url}/api/v1/namespaces/{}/pods", config.namespace)
+        format!(
+            "{}/api/v1/namespaces/{}/pods",
+            access.api_url, config.namespace
+        )
     } else {
         format!(
-            "{api_url}/api/v1/namespaces/{}/pods/{}",
-            config.namespace, pod_name
+            "{}/api/v1/namespaces/{}/pods/{}",
+            access.api_url, config.namespace, pod_name
         )
     };
     let request = if create {
-        client
-            .post(url)
-            .bearer_auth(token.trim())
-            .json(&build_kubernetes_pod_request(config, pod_name, request))
+        client.post(url).bearer_auth(token.trim()).json(
+            &build_kubernetes_pod_request(config, pod_name, request)
+                .map_err(KubernetesMutationError::without_status)?,
+        )
     } else {
         client.delete(url).bearer_auth(token.trim())
     };
-    let response = request
-        .send()
-        .await
-        .map_err(|err| format!("failed to call Kubernetes Pod API: {err}"))?;
+    let response = request.send().await.map_err(|err| {
+        KubernetesMutationError::without_status(format!("failed to call Kubernetes Pod API: {err}"))
+    })?;
     let status_code = response.status().as_u16();
     let body = response
         .json::<Value>()
         .await
         .unwrap_or_else(|_| json!({"status_code": status_code}));
     if !(200..300).contains(&status_code) {
-        return Err(format!("Kubernetes Pod API returned HTTP {status_code}"));
+        return Err(KubernetesMutationError::with_status(
+            status_code,
+            format!("Kubernetes Pod API returned HTTP {status_code}"),
+        ));
     }
     Ok((status_code, body))
+}
+
+#[derive(Debug, Clone)]
+struct KubernetesMutationError {
+    status_code: Option<u16>,
+    message: String,
+}
+
+impl KubernetesMutationError {
+    fn with_status(status_code: u16, message: impl Into<String>) -> Self {
+        Self {
+            status_code: Some(status_code),
+            message: message.into(),
+        }
+    }
+
+    fn without_status(message: impl Into<String>) -> Self {
+        Self {
+            status_code: None,
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for KubernetesMutationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -623,6 +669,7 @@ struct KubernetesExecResult {
     stdout_truncated: bool,
     stderr_truncated: bool,
     status: Option<Value>,
+    status_failure: Option<String>,
 }
 
 impl KubernetesExecResult {
@@ -633,7 +680,8 @@ impl KubernetesExecResult {
             "stderr": self.stderr,
             "stdout_truncated": self.stdout_truncated,
             "stderr_truncated": self.stderr_truncated,
-            "status": self.status
+            "status": self.status,
+            "status_failure": self.status_failure
         })
     }
 }
@@ -658,19 +706,13 @@ async fn call_kubernetes_exec_with_timeout(
     command: &str,
     timeout: Duration,
 ) -> Result<KubernetesExecResult, String> {
-    let api_url = config
-        .kube_api_url
-        .as_deref()
-        .ok_or_else(|| "kube API URL is not configured".to_string())?;
-    let token_path = config
-        .bearer_token_path
-        .as_deref()
-        .ok_or_else(|| "bearer token path is not configured".to_string())?;
-    let token = tokio::fs::read_to_string(token_path)
+    let access = kubernetes_client_access(config)
+        .ok_or_else(|| "supported Kubernetes API client is not configured".to_string())?;
+    let token = tokio::fs::read_to_string(&access.bearer_token_path)
         .await
         .map_err(|err| format!("failed to read bearer token: {err}"))?;
     let websocket_url =
-        kubernetes_exec_websocket_url(api_url, &config.namespace, pod_name, command);
+        kubernetes_exec_websocket_url(&access.api_url, &config.namespace, pod_name, command);
     let mut request = websocket_url
         .into_client_request()
         .map_err(|err| format!("failed to build Kubernetes exec WebSocket request: {err}"))?;
@@ -686,7 +728,8 @@ async fn call_kubernetes_exec_with_timeout(
             .parse()
             .map_err(|err| format!("failed to build Kubernetes exec protocol header: {err}"))?,
     );
-    let (mut socket, response) = connect_async(request)
+    let connector = kubernetes_exec_tls_connector(&access).await?;
+    let (mut socket, response) = connect_async_tls_with_config(request, None, false, connector)
         .await
         .map_err(|err| format!("failed to open Kubernetes exec WebSocket: {err}"))?;
     let handshake_status_code = response.status().as_u16();
@@ -731,6 +774,11 @@ async fn call_kubernetes_exec_with_timeout(
         }
     }
     let _ = socket.close(None).await;
+    if status.is_none() {
+        return Err("Kubernetes exec WebSocket closed without status".to_string());
+    }
+    let status_failure =
+        kubernetes_exec_status_failure(status.as_ref().expect("status checked above"));
     Ok(KubernetesExecResult {
         handshake_status_code,
         stdout: String::from_utf8_lossy(&stdout).to_string(),
@@ -738,6 +786,7 @@ async fn call_kubernetes_exec_with_timeout(
         stdout_truncated,
         stderr_truncated,
         status,
+        status_failure,
     })
 }
 
@@ -762,14 +811,8 @@ pub(crate) async fn poll_kubernetes_pod_running(
     timeout: Duration,
     interval: Duration,
 ) -> Result<(), String> {
-    let api_url = config
-        .kube_api_url
-        .as_deref()
-        .ok_or_else(|| "kube API URL is not configured".to_string())?;
-    let token_path = config
-        .bearer_token_path
-        .as_deref()
-        .ok_or_else(|| "bearer token path is not configured".to_string())?;
+    let access = kubernetes_client_access(config)
+        .ok_or_else(|| "supported Kubernetes API client is not configured".to_string())?;
     let poll_interval = interval.max(Duration::from_millis(100));
     let deadline = Instant::now() + timeout;
     let client = reqwest::Client::builder()
@@ -784,11 +827,12 @@ pub(crate) async fn poll_kubernetes_pod_running(
                 timeout.as_secs_f64()
             ));
         }
-        let token = tokio::fs::read_to_string(token_path)
+        let token = tokio::fs::read_to_string(&access.bearer_token_path)
             .await
             .map_err(|err| format!("failed to read bearer token: {err}"))?;
         let url = format!(
-            "{api_url}/api/v1/namespaces/{}/pods/{}",
+            "{}/api/v1/namespaces/{}/pods/{}",
+            access.api_url,
             percent_encode(&config.namespace),
             percent_encode(pod_name)
         );
@@ -866,11 +910,130 @@ fn percent_encode(value: &str) -> String {
     encoded
 }
 
+#[derive(Debug, Clone)]
+struct KubernetesClientAccess {
+    api_url: String,
+    bearer_token_path: PathBuf,
+    ca_cert_path: Option<PathBuf>,
+    danger_accept_invalid_certs: bool,
+}
+
+fn kubernetes_client_access(config: &RemoteComputerRunnerConfig) -> Option<KubernetesClientAccess> {
+    if let (Some(api_url), Some(token_path)) = (
+        config
+            .kube_api_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        config
+            .bearer_token_path
+            .as_deref()
+            .map(PathBuf::from)
+            .filter(|path| path.exists()),
+    ) {
+        return Some(KubernetesClientAccess {
+            api_url: api_url.trim_end_matches('/').to_string(),
+            bearer_token_path: token_path,
+            ca_cert_path: in_cluster_ca_cert_path(config.in_cluster),
+            danger_accept_invalid_certs: config.in_cluster,
+        });
+    }
+    if config.in_cluster {
+        let token_path = config
+            .bearer_token_path
+            .as_deref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(IN_CLUSTER_SERVICE_ACCOUNT_TOKEN));
+        if token_path.exists() {
+            return Some(KubernetesClientAccess {
+                api_url: config
+                    .kube_api_url
+                    .as_deref()
+                    .unwrap_or(IN_CLUSTER_KUBERNETES_API_URL)
+                    .trim_end_matches('/')
+                    .to_string(),
+                bearer_token_path: token_path,
+                ca_cert_path: in_cluster_ca_cert_path(true),
+                danger_accept_invalid_certs: true,
+            });
+        }
+    }
+    None
+}
+
+fn in_cluster_ca_cert_path(in_cluster: bool) -> Option<PathBuf> {
+    in_cluster
+        .then(|| PathBuf::from(IN_CLUSTER_SERVICE_ACCOUNT_CA))
+        .filter(|path| path.exists())
+}
+
+async fn kubernetes_exec_tls_connector(
+    access: &KubernetesClientAccess,
+) -> Result<Option<Connector>, String> {
+    let Some(ca_cert_path) = &access.ca_cert_path else {
+        return Ok(None);
+    };
+    let ca = tokio::fs::read(ca_cert_path)
+        .await
+        .map_err(|err| format!("failed to read Kubernetes service-account CA: {err}"))?;
+    let certs = rustls_pki_types::CertificateDer::pem_slice_iter(&ca)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| format!("failed to parse Kubernetes service-account CA: {err}"))?;
+    let mut root_store = rustls::RootCertStore::empty();
+    let (added, _ignored) = root_store.add_parsable_certificates(certs);
+    if added == 0 {
+        return Err(
+            "Kubernetes service-account CA did not contain a usable certificate".to_string(),
+        );
+    }
+    Ok(Some(Connector::Rustls(Arc::new(
+        rustls::ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth(),
+    ))))
+}
+
+fn kubernetes_exec_status_failure(status: &Value) -> Option<String> {
+    if status.get("status").and_then(Value::as_str) == Some("Success") {
+        return None;
+    }
+    let status_label = status
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("Failure");
+    let reason = status.get("reason").and_then(Value::as_str);
+    let message = status.get("message").and_then(Value::as_str);
+    let exit_code = status.get("exitCode").and_then(Value::as_i64).or_else(|| {
+        status
+            .pointer("/details/causes")
+            .and_then(Value::as_array)
+            .and_then(|causes| {
+                causes
+                    .iter()
+                    .find(|cause| cause.get("reason").and_then(Value::as_str) == Some("ExitCode"))
+                    .and_then(|cause| cause.get("message"))
+                    .and_then(Value::as_str)
+                    .and_then(|value| value.parse::<i64>().ok())
+            })
+    });
+    let mut parts = vec![format!("Kubernetes exec status reported {status_label}")];
+    if let Some(exit_code) = exit_code {
+        parts.push(format!("exit_code={exit_code}"));
+    }
+    if let Some(reason) = reason {
+        parts.push(format!("reason={reason}"));
+    }
+    if let Some(message) = message {
+        parts.push(format!("message={message}"));
+    }
+    Some(parts.join(", "))
+}
+
 fn build_kubernetes_pod_request(
     config: &RemoteComputerRunnerConfig,
     pod_name: &str,
     request: &RemoteComputerRunnerDryRunRequest,
-) -> Value {
+) -> Result<Value, String> {
     let session_id = request
         .session_id
         .map(|id| id.to_string())
@@ -907,94 +1070,155 @@ fn build_kubernetes_pod_request(
         .and_then(|value| value.as_str())
         .unwrap_or("/workspace/artifacts")
         .to_string();
-    json!({
+    let mut pod = load_kubernetes_pod_template(config)?;
+    patch_pod_metadata(&mut pod, config, pod_name)?;
+    patch_pod_spec(&mut pod, config)?;
+    patch_container_env(
+        &mut pod,
+        "remote-computer",
+        &[
+            ("MANDOFORGE_REMOTE_COMPUTER_MODE", "session-pod"),
+            ("MANDOFORGE_SESSION_ID", &session_id),
+            ("MANDOFORGE_REMOTE_COMPUTER_ID", &remote_computer_id),
+            ("MANDOFORGE_SESSION_WORKSPACE", &session_workspace_path),
+            ("MANDOFORGE_WORKSPACE_ROOT", "/workspace"),
+        ],
+    )?;
+    patch_container_env(
+        &mut pod,
+        "artifact-discovery",
+        &[
+            (
+                "MANDOFORGE_ARTIFACT_DISCOVERY_ENABLED",
+                &artifact_discovery_enabled,
+            ),
+            ("MANDOFORGE_SESSION_ID", &session_id),
+            ("MANDOFORGE_REMOTE_COMPUTER_ID", &remote_computer_id),
+            ("MANDOFORGE_ASSIGNMENT_ID", &assignment_id),
+            ("MANDOFORGE_ARTIFACT_DIR", &artifact_dir),
+        ],
+    )?;
+    Ok(pod)
+}
+
+fn load_kubernetes_pod_template(config: &RemoteComputerRunnerConfig) -> Result<Value, String> {
+    let content = std::fs::read_to_string(&config.pod_template_path)
+        .map_err(|err| format!("failed to read Pod template: {err}"))?;
+    let document: Value = serde_yaml::from_str(&content)
+        .map_err(|err| format!("failed to parse Pod template YAML: {err}"))?;
+    if document.get("kind").and_then(Value::as_str) == Some("Pod") {
+        return Ok(document);
+    }
+    let template = document
+        .pointer("/spec/template")
+        .cloned()
+        .ok_or_else(|| "Pod template YAML must be a Pod or contain spec.template".to_string())?;
+    let metadata = template
+        .get("metadata")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let spec = template
+        .get("spec")
+        .cloned()
+        .ok_or_else(|| "Pod template spec.template.spec is required".to_string())?;
+    Ok(json!({
         "apiVersion": "v1",
         "kind": "Pod",
-        "metadata": {
-            "name": pod_name,
-            "namespace": config.namespace,
-            "labels": {
-                "app": "mandoforge-agent-remote-computer",
-                "mandoforge.io/runner": "remote-computer"
-            },
-            "annotations": {
-                "mandoforge.io/template-path": config.pod_template_path
-            }
-        },
-        "spec": {
-            "serviceAccountName": config.service_account,
-            "automountServiceAccountToken": false,
-            "restartPolicy": "Never",
-            "securityContext": {
-                "runAsNonRoot": true,
-                "seccompProfile": {"type": "RuntimeDefault"}
-            },
-            "containers": [
-                {
-                    "name": "remote-computer",
-                    "image": "ghcr.io/proerror77/mandoforge-remote-computer:latest",
-                    "imagePullPolicy": "IfNotPresent",
-                    "command": ["sleep", "infinity"],
-                    "env": [
-                        {"name": "MANDOFORGE_REMOTE_COMPUTER_MODE", "value": "session-pod"},
-                        {"name": "MANDOFORGE_SESSION_ID", "value": session_id},
-                        {"name": "MANDOFORGE_REMOTE_COMPUTER_ID", "value": remote_computer_id},
-                        {"name": "MANDOFORGE_SESSION_WORKSPACE", "value": session_workspace_path},
-                        {"name": "MANDOFORGE_WORKSPACE_ROOT", "value": "/workspace"}
-                    ],
-                    "securityContext": {
-                        "allowPrivilegeEscalation": false,
-                        "readOnlyRootFilesystem": false,
-                        "capabilities": {"drop": ["ALL"]}
-                    },
-                    "volumeMounts": [
-                        {"name": "state", "mountPath": "/agent-state"},
-                        {"name": "state-contract", "mountPath": "/agent-state/.mandoforge/contract", "readOnly": true},
-                        {"name": "workspace", "mountPath": "/workspace"}
-                    ],
-                    "resources": {
-                        "requests": {"cpu": "100m", "memory": "256Mi"},
-                        "limits": {"cpu": "1", "memory": "1Gi"}
-                    }
-                },
-                {
-                    "name": "artifact-discovery",
-                    "image": "python:3.12-alpine",
-                    "imagePullPolicy": "IfNotPresent",
-                    "command": ["python", "/opt/mandoforge/discover-artifacts.py"],
-                    "env": [
-                        {"name": "MANDOFORGE_ARTIFACT_DISCOVERY_ENABLED", "value": artifact_discovery_enabled},
-                        {"name": "MANDOFORGE_API_URL", "value": "http://mandoforge-api:8787"},
-                        {"name": "MANDOFORGE_SESSION_ID", "value": session_id},
-                        {"name": "MANDOFORGE_REMOTE_COMPUTER_ID", "value": remote_computer_id},
-                        {"name": "MANDOFORGE_ASSIGNMENT_ID", "value": assignment_id},
-                        {"name": "MANDOFORGE_ARTIFACT_DIR", "value": artifact_dir},
-                        {"name": "MANDOFORGE_ARTIFACT_DISCOVERY_INTERVAL_SECONDS", "value": "30"},
-                        {"name": "MANDOFORGE_ARTIFACT_DISCOVERY_MAX_FILES", "value": "50"}
-                    ],
-                    "securityContext": {
-                        "allowPrivilegeEscalation": false,
-                        "readOnlyRootFilesystem": true,
-                        "capabilities": {"drop": ["ALL"]}
-                    },
-                    "volumeMounts": [
-                        {"name": "workspace", "mountPath": "/workspace", "readOnly": true},
-                        {"name": "artifact-discovery", "mountPath": "/opt/mandoforge", "readOnly": true}
-                    ],
-                    "resources": {
-                        "requests": {"cpu": "25m", "memory": "64Mi"},
-                        "limits": {"cpu": "100m", "memory": "128Mi"}
-                    }
-                }
-            ],
-            "volumes": [
-                {"name": "state", "persistentVolumeClaim": {"claimName": "mandoforge-remote-computer-state"}},
-                {"name": "state-contract", "configMap": {"name": "mandoforge-remote-computer-state-contract"}},
-                {"name": "workspace", "emptyDir": {}},
-                {"name": "artifact-discovery", "configMap": {"name": "mandoforge-remote-computer-artifact-discovery"}}
-            ]
-        }
-    })
+        "metadata": metadata,
+        "spec": spec
+    }))
+}
+
+fn patch_pod_metadata(
+    pod: &mut Value,
+    config: &RemoteComputerRunnerConfig,
+    pod_name: &str,
+) -> Result<(), String> {
+    let object = pod
+        .as_object_mut()
+        .ok_or_else(|| "Pod template root must be an object".to_string())?;
+    object.insert("apiVersion".to_string(), json!("v1"));
+    object.insert("kind".to_string(), json!("Pod"));
+    let metadata = object
+        .entry("metadata")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| "Pod template metadata must be an object".to_string())?;
+    metadata.insert("name".to_string(), json!(pod_name));
+    metadata.insert("namespace".to_string(), json!(config.namespace));
+    let labels = metadata
+        .entry("labels")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| "Pod template metadata.labels must be an object".to_string())?;
+    labels.insert("app".to_string(), json!("mandoforge-agent-remote-computer"));
+    labels.insert("mandoforge.io/runner".to_string(), json!("remote-computer"));
+    let annotations = metadata
+        .entry("annotations")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| "Pod template metadata.annotations must be an object".to_string())?;
+    annotations.insert(
+        "mandoforge.io/template-path".to_string(),
+        json!(config.pod_template_path),
+    );
+    Ok(())
+}
+
+fn patch_pod_spec(pod: &mut Value, config: &RemoteComputerRunnerConfig) -> Result<(), String> {
+    let spec = pod
+        .get_mut("spec")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "Pod template spec must be an object".to_string())?;
+    spec.insert(
+        "serviceAccountName".to_string(),
+        json!(config.service_account),
+    );
+    spec.insert("automountServiceAccountToken".to_string(), json!(false));
+    spec.insert("restartPolicy".to_string(), json!("Never"));
+    Ok(())
+}
+
+fn patch_container_env(
+    pod: &mut Value,
+    container_name: &str,
+    entries: &[(&str, &str)],
+) -> Result<(), String> {
+    let containers = pod
+        .pointer_mut("/spec/containers")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| "Pod template spec.containers must be an array".to_string())?;
+    let Some(container) = containers
+        .iter_mut()
+        .find(|container| container.get("name").and_then(Value::as_str) == Some(container_name))
+    else {
+        return Ok(());
+    };
+    let container = container
+        .as_object_mut()
+        .ok_or_else(|| "Pod template container must be an object".to_string())?;
+    let env = container
+        .entry("env")
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+        .ok_or_else(|| "Pod template container env must be an array".to_string())?;
+    for (name, value) in entries {
+        upsert_container_env(env, name, value);
+    }
+    Ok(())
+}
+
+fn upsert_container_env(env: &mut Vec<Value>, name: &str, value: &str) {
+    if let Some(existing) = env
+        .iter_mut()
+        .find(|entry| entry.get("name").and_then(Value::as_str) == Some(name))
+        .and_then(Value::as_object_mut)
+    {
+        existing.insert("value".to_string(), json!(value));
+        existing.remove("valueFrom");
+        return;
+    }
+    env.push(json!({"name": name, "value": value}));
 }
 
 fn live_pod_name(request: &RemoteComputerRunnerDryRunRequest) -> String {
@@ -1025,20 +1249,15 @@ fn valid_kubernetes_name(value: &str) -> bool {
             .is_some_and(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit())
 }
 
-fn kubernetes_client_configured(config: &RemoteComputerRunnerConfig) -> bool {
-    config.in_cluster
-        || (config.kube_api_url.is_some() && kubernetes_bearer_token_configured(config))
-        || config
-            .kubeconfig_path
-            .as_deref()
-            .is_some_and(|path| Path::new(path).exists())
-}
-
 fn kubernetes_bearer_token_configured(config: &RemoteComputerRunnerConfig) -> bool {
-    config
+    if config
         .bearer_token_path
         .as_deref()
         .is_some_and(|path| Path::new(path).exists())
+    {
+        return true;
+    }
+    config.in_cluster && Path::new(IN_CLUSTER_SERVICE_ACCOUNT_TOKEN).exists()
 }
 
 fn env_flag(name: &str) -> bool {
@@ -1049,6 +1268,7 @@ fn env_flag(name: &str) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::result_large_err)]
 mod tests {
     use super::*;
     use axum::{
@@ -1064,6 +1284,13 @@ mod tests {
             .join("../../deploy/k8s/agent-remote-computer.yaml")
             .to_string_lossy()
             .to_string()
+    }
+
+    fn write_test_token() -> PathBuf {
+        let token_path =
+            std::env::temp_dir().join(format!("mandoforge-kube-token-{}.txt", Uuid::new_v4()));
+        std::fs::write(&token_path, "test-token").expect("write token");
+        token_path
     }
 
     #[test]
@@ -1088,9 +1315,11 @@ mod tests {
             "reserved"
         );
 
+        let token_path = write_test_token();
         let kubernetes = RemoteComputerRunnerConfig {
             mode: "kubernetes".to_string(),
-            in_cluster: true,
+            kube_api_url: Some("https://kubernetes.default.svc".to_string()),
+            bearer_token_path: Some(token_path.to_string_lossy().to_string()),
             ..reserved
         };
         assert_eq!(
@@ -1099,22 +1328,24 @@ mod tests {
                 .status,
             "dry_run_ready"
         );
+        let _ = std::fs::remove_file(token_path);
     }
 
     #[tokio::test]
     async fn kubernetes_runner_dry_run_never_enables_execution() {
+        let token_path = write_test_token();
         let config = RemoteComputerRunnerConfig {
             mode: "kubernetes".to_string(),
             namespace: "agent-os".to_string(),
             pod_template_path: test_pod_template_path(),
             service_account: "mandoforge-remote-computer".to_string(),
             kubeconfig_path: None,
-            in_cluster: true,
+            in_cluster: false,
             mutation_enabled: true,
             live_mutation_enabled: false,
             execution_enabled: false,
-            kube_api_url: None,
-            bearer_token_path: None,
+            kube_api_url: Some("https://kubernetes.default.svc".to_string()),
+            bearer_token_path: Some(token_path.to_string_lossy().to_string()),
         };
         let runner = KubernetesRemoteComputerRunner;
         let response = runner
@@ -1141,22 +1372,24 @@ mod tests {
             Some("agent-remote-computer-test")
         );
         assert!(!response.execution_enabled);
+        let _ = std::fs::remove_file(token_path);
     }
 
     #[tokio::test]
     async fn kubernetes_runner_dry_run_exec_plans_pod_exec_without_execution() {
+        let token_path = write_test_token();
         let config = RemoteComputerRunnerConfig {
             mode: "kubernetes".to_string(),
             namespace: "agent-os".to_string(),
             pod_template_path: test_pod_template_path(),
             service_account: "mandoforge-remote-computer".to_string(),
             kubeconfig_path: None,
-            in_cluster: true,
+            in_cluster: false,
             mutation_enabled: true,
             live_mutation_enabled: false,
             execution_enabled: false,
-            kube_api_url: None,
-            bearer_token_path: None,
+            kube_api_url: Some("https://kubernetes.default.svc".to_string()),
+            bearer_token_path: Some(token_path.to_string_lossy().to_string()),
         };
         let runner = KubernetesRemoteComputerRunner;
         let response = runner
@@ -1185,6 +1418,7 @@ mod tests {
         assert!(response.message.contains("no command was executed"));
         assert!(!response.execution_enabled);
         assert_eq!(response.request["metadata"]["command"][0], "sh");
+        let _ = std::fs::remove_file(token_path);
     }
 
     #[test]
@@ -1315,6 +1549,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn kubernetes_runner_live_create_preserves_conflict_status_code() {
+        async fn create_pod() -> (axum::http::StatusCode, Json<Value>) {
+            (
+                axum::http::StatusCode::CONFLICT,
+                Json(json!({"kind": "Status", "reason": "AlreadyExists"})),
+            )
+        }
+
+        let token_path =
+            std::env::temp_dir().join(format!("mandoforge-kube-token-{}.txt", Uuid::new_v4()));
+        tokio::fs::write(&token_path, "test-token")
+            .await
+            .expect("write token");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let addr = listener.local_addr().expect("addr");
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/api/v1/namespaces/agent-os/pods", post(create_pod)),
+            )
+            .await
+            .expect("mock kube server");
+        });
+        let config = RemoteComputerRunnerConfig {
+            mode: "kubernetes".to_string(),
+            namespace: "agent-os".to_string(),
+            pod_template_path: test_pod_template_path(),
+            service_account: "mandoforge-remote-computer".to_string(),
+            kubeconfig_path: None,
+            kube_api_url: Some(format!("http://{addr}")),
+            bearer_token_path: Some(token_path.to_string_lossy().to_string()),
+            in_cluster: false,
+            mutation_enabled: true,
+            live_mutation_enabled: true,
+            execution_enabled: false,
+        };
+        let response = KubernetesRemoteComputerRunner
+            .mutate(
+                &config,
+                RemoteComputerRunnerDryRunRequest {
+                    operation: Some("live_create".to_string()),
+                    remote_computer_id: None,
+                    session_id: Some(Uuid::new_v4()),
+                    pod_name: Some("agent-remote-computer-test".to_string()),
+                    metadata: Some(json!({
+                        "session_workspace_path": "/workspace/session",
+                        "artifact_dir": "/workspace/session/artifacts"
+                    })),
+                },
+            )
+            .await;
+
+        assert_eq!(response.status, "mutation_failed");
+        assert!(response.would_create_pod);
+        assert!(response.live_mutation_attempted);
+        assert_eq!(
+            response.live_mutation_status_code,
+            Some(axum::http::StatusCode::CONFLICT.as_u16())
+        );
+        assert!(response.message.contains("HTTP 409"));
+
+        server.abort();
+        let _ = tokio::fs::remove_file(token_path).await;
+    }
+
+    #[tokio::test]
     async fn kubernetes_runner_live_exec_captures_websocket_channels() {
         let token_path =
             std::env::temp_dir().join(format!("mandoforge-kube-token-{}.txt", Uuid::new_v4()));
@@ -1399,6 +1701,170 @@ mod tests {
         assert_eq!(exec_result["stdout_truncated"], false);
         assert_eq!(exec_result["stderr_truncated"], false);
         assert_eq!(exec_result["status"]["status"], "Success");
+
+        server.await.expect("server task");
+        let _ = tokio::fs::remove_file(token_path).await;
+    }
+
+    #[tokio::test]
+    async fn kubernetes_runner_live_exec_fails_on_failure_status_frame() {
+        let token_path =
+            std::env::temp_dir().join(format!("mandoforge-kube-token-{}.txt", Uuid::new_v4()));
+        tokio::fs::write(&token_path, "test-token")
+            .await
+            .expect("write token");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let addr = listener.local_addr().expect("addr");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept exec websocket");
+            let mut websocket = tokio_tungstenite::accept_hdr_async(
+                stream,
+                |_request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                 mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                    response.headers_mut().insert(
+                        "sec-websocket-protocol",
+                        "v4.channel.k8s.io".parse().expect("protocol header"),
+                    );
+                    Ok(response)
+                },
+            )
+            .await
+            .expect("accept websocket");
+            let mut stderr_frame = vec![2];
+            stderr_frame.extend_from_slice(b"command failed\n");
+            websocket
+                .send(Message::Binary(stderr_frame))
+                .await
+                .expect("send stderr");
+            let mut status_frame = vec![3];
+            status_frame.extend_from_slice(
+                br#"{"status":"Failure","reason":"NonZeroExitCode","exitCode":2,"message":"command terminated with exit code 2"}"#,
+            );
+            websocket
+                .send(Message::Binary(status_frame))
+                .await
+                .expect("send status");
+            let _ = websocket.close(None).await;
+        });
+
+        let config = RemoteComputerRunnerConfig {
+            mode: "kubernetes".to_string(),
+            namespace: "agent-os".to_string(),
+            pod_template_path: test_pod_template_path(),
+            service_account: "mandoforge-remote-computer".to_string(),
+            kubeconfig_path: None,
+            kube_api_url: Some(format!("http://{addr}")),
+            bearer_token_path: Some(token_path.to_string_lossy().to_string()),
+            in_cluster: false,
+            mutation_enabled: true,
+            live_mutation_enabled: true,
+            execution_enabled: true,
+        };
+        let response = KubernetesRemoteComputerRunner
+            .mutate(
+                &config,
+                RemoteComputerRunnerDryRunRequest {
+                    operation: Some("live_exec".to_string()),
+                    remote_computer_id: None,
+                    session_id: None,
+                    pod_name: Some("agent-remote-computer-test".to_string()),
+                    metadata: Some(json!({"command": "exit 2"})),
+                },
+            )
+            .await;
+
+        assert_eq!(response.status, "exec_failed");
+        assert!(!response.execution_enabled);
+        let exec_result = response.exec_result.expect("failure exec result");
+        assert_eq!(exec_result["stderr"], "command failed\n");
+        assert_eq!(exec_result["status"]["status"], "Failure");
+        assert!(
+            exec_result["status_failure"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("exit_code=2")
+        );
+        assert!(
+            response.message.contains("exit_code=2"),
+            "{}",
+            response.message
+        );
+
+        server.await.expect("server task");
+        let _ = tokio::fs::remove_file(token_path).await;
+    }
+
+    #[tokio::test]
+    async fn kubernetes_runner_live_exec_fails_when_status_frame_missing() {
+        let token_path =
+            std::env::temp_dir().join(format!("mandoforge-kube-token-{}.txt", Uuid::new_v4()));
+        tokio::fs::write(&token_path, "test-token")
+            .await
+            .expect("write token");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let addr = listener.local_addr().expect("addr");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept exec websocket");
+            let mut websocket = tokio_tungstenite::accept_hdr_async(
+                stream,
+                |_request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                 mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                    response.headers_mut().insert(
+                        "sec-websocket-protocol",
+                        "v4.channel.k8s.io".parse().expect("protocol header"),
+                    );
+                    Ok(response)
+                },
+            )
+            .await
+            .expect("accept websocket");
+            let mut stdout_frame = vec![1];
+            stdout_frame.extend_from_slice(b"partial output");
+            websocket
+                .send(Message::Binary(stdout_frame))
+                .await
+                .expect("send stdout");
+            let _ = websocket.close(None).await;
+        });
+
+        let config = RemoteComputerRunnerConfig {
+            mode: "kubernetes".to_string(),
+            namespace: "agent-os".to_string(),
+            pod_template_path: test_pod_template_path(),
+            service_account: "mandoforge-remote-computer".to_string(),
+            kubeconfig_path: None,
+            kube_api_url: Some(format!("http://{addr}")),
+            bearer_token_path: Some(token_path.to_string_lossy().to_string()),
+            in_cluster: false,
+            mutation_enabled: true,
+            live_mutation_enabled: true,
+            execution_enabled: true,
+        };
+        let response = KubernetesRemoteComputerRunner
+            .mutate(
+                &config,
+                RemoteComputerRunnerDryRunRequest {
+                    operation: Some("live_exec".to_string()),
+                    remote_computer_id: None,
+                    session_id: None,
+                    pod_name: Some("agent-remote-computer-test".to_string()),
+                    metadata: Some(json!({"command": "echo partial"})),
+                },
+            )
+            .await;
+
+        assert_eq!(response.status, "exec_failed");
+        assert!(!response.execution_enabled);
+        assert!(response.exec_result.is_none());
+        assert!(
+            response.message.contains("closed without status"),
+            "{}",
+            response.message
+        );
 
         server.await.expect("server task");
         let _ = tokio::fs::remove_file(token_path).await;
@@ -1502,6 +1968,13 @@ mod tests {
                 body["spec"]["serviceAccountName"],
                 "mandoforge-remote-computer"
             );
+            let remote_computer = &body["spec"]["containers"][0];
+            assert_eq!(remote_computer["name"], "remote-computer");
+            assert_eq!(remote_computer["image"], "mandoforge-adoption-api:latest");
+            let remote_env = remote_computer["env"].as_array().expect("remote env");
+            assert!(remote_env.iter().any(|env| {
+                env["name"] == "MANDOFORGE_REMOTE_COMPUTER_MODE" && env["value"] == "session-pod"
+            }));
             assert!(
                 body["spec"]["containers"][0]["volumeMounts"]
                     .as_array()
@@ -1662,8 +2135,10 @@ mod tests {
         .await;
         assert!(result.is_err());
         assert!(
-            result.unwrap_err().contains("kube API URL"),
-            "error should mention kube API URL"
+            result
+                .unwrap_err()
+                .contains("supported Kubernetes API client"),
+            "error should mention unsupported Kubernetes client configuration"
         );
     }
 
@@ -1691,8 +2166,10 @@ mod tests {
         .await;
         assert!(result.is_err());
         assert!(
-            result.unwrap_err().contains("bearer token"),
-            "error should mention bearer token"
+            result
+                .unwrap_err()
+                .contains("supported Kubernetes API client"),
+            "error should mention unsupported Kubernetes client configuration"
         );
     }
 
@@ -1718,7 +2195,8 @@ mod tests {
             .unwrap()
         });
 
-        let token_path = std::env::temp_dir().join("poll_test_token_running");
+        let token_path =
+            std::env::temp_dir().join(format!("poll_test_token_running-{}", Uuid::new_v4()));
         tokio::fs::write(&token_path, "test-token").await.unwrap();
 
         let config = RemoteComputerRunnerConfig {
@@ -1770,7 +2248,8 @@ mod tests {
             .unwrap()
         });
 
-        let token_path = std::env::temp_dir().join("poll_test_token_failed");
+        let token_path =
+            std::env::temp_dir().join(format!("poll_test_token_failed-{}", Uuid::new_v4()));
         tokio::fs::write(&token_path, "test-token").await.unwrap();
 
         let config = RemoteComputerRunnerConfig {
@@ -1827,7 +2306,8 @@ mod tests {
             .unwrap()
         });
 
-        let token_path = std::env::temp_dir().join("poll_test_token_pending");
+        let token_path =
+            std::env::temp_dir().join(format!("poll_test_token_pending-{}", Uuid::new_v4()));
         tokio::fs::write(&token_path, "test-token").await.unwrap();
 
         let config = RemoteComputerRunnerConfig {
@@ -1902,7 +2382,10 @@ mod tests {
             .unwrap()
         });
 
-        let token_path = std::env::temp_dir().join("poll_test_token_404_then_running");
+        let token_path = std::env::temp_dir().join(format!(
+            "poll_test_token_404_then_running-{}",
+            Uuid::new_v4()
+        ));
         tokio::fs::write(&token_path, "test-token").await.unwrap();
 
         let config = RemoteComputerRunnerConfig {
@@ -1960,7 +2443,8 @@ mod tests {
             .unwrap()
         });
 
-        let token_path = std::env::temp_dir().join("poll_test_token_500");
+        let token_path =
+            std::env::temp_dir().join(format!("poll_test_token_500-{}", Uuid::new_v4()));
         tokio::fs::write(&token_path, "test-token").await.unwrap();
 
         let config = RemoteComputerRunnerConfig {
@@ -2016,7 +2500,8 @@ mod tests {
             .unwrap()
         });
 
-        let token_path = std::env::temp_dir().join("poll_test_token_succeeded");
+        let token_path =
+            std::env::temp_dir().join(format!("poll_test_token_succeeded-{}", Uuid::new_v4()));
         tokio::fs::write(&token_path, "test-token").await.unwrap();
 
         let config = RemoteComputerRunnerConfig {

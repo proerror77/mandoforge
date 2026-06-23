@@ -82,7 +82,7 @@ async fn get_memory_governance_partition_detail(
         .map(memory_governance_object_ref)
         .collect::<Vec<_>>();
     let object_count = object_refs.len();
-    object_refs.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    object_refs.sort_by_key(|object_ref| std::cmp::Reverse(object_ref.updated_at));
     object_refs.truncate(limit);
 
     let mut writeback_candidates = candidates
@@ -90,7 +90,7 @@ async fn get_memory_governance_partition_detail(
         .filter(|candidate| memory_governance_candidate_partition_key(candidate) == partition_key)
         .map(memory_governance_writeback_ref)
         .collect::<Vec<_>>();
-    writeback_candidates.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    writeback_candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.updated_at));
     writeback_candidates.truncate(limit);
 
     let risk_items = summary
@@ -155,7 +155,7 @@ async fn get_memory_governance_writebacks(
         })
         .map(memory_governance_writeback_ref)
         .collect::<Vec<_>>();
-    refs.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    refs.sort_by_key(|object_ref| std::cmp::Reverse(object_ref.updated_at));
     refs.truncate(limit);
     Ok(Json(MemoryGovernanceWritebackQueue {
         generated_at,

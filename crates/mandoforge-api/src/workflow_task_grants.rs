@@ -630,13 +630,12 @@ pub(crate) fn task_grant_mcp_call_denial(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
+        && !task_grant_allows_side_effect_class(grant, side_effect_class)
     {
-        if !task_grant_allows_side_effect_class(grant, side_effect_class) {
-            return Ok(Some(format!(
-                "task grant side effect class {} is not allowed",
-                side_effect_class
-            )));
-        }
+        return Ok(Some(format!(
+            "task grant side effect class {} is not allowed",
+            side_effect_class
+        )));
     }
     Ok(None)
 }
@@ -864,9 +863,9 @@ pub(crate) fn workflow_step_claim_blockers(
         }
     } else if step.status != "queued" {
         if step.status == "running" {
-            if !step
+            if step
                 .lease_expires_at
-                .is_some_and(|lease_expires_at| lease_expires_at <= now)
+                .is_none_or(|lease_expires_at| lease_expires_at > now)
             {
                 blockers.push("already_claimed".to_string());
             }

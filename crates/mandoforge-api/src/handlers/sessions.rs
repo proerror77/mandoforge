@@ -80,7 +80,7 @@ async fn stream_events(
         .await
         .unwrap_or_default()
         .into_iter()
-        .filter(|event| after_seq.map_or(true, |after_seq| event.seq > after_seq))
+        .filter(|event| after_seq.is_none_or(|after_seq| event.seq > after_seq))
         .collect::<Vec<_>>();
     let replay_high_water = events
         .iter()
@@ -97,7 +97,7 @@ async fn stream_events(
                     Ok(event)
                         if event.session_id == id
                             && event.seq > high_water
-                            && after_seq.map_or(true, |after_seq| event.seq > after_seq) =>
+                            && after_seq.is_none_or(|after_seq| event.seq > after_seq) =>
                     {
                         high_water = event.seq;
                         return Some((sse_session_event(event), (live_events, high_water)));
@@ -450,7 +450,7 @@ async fn get_context_packet(
         &headers,
         Permission::SessionsRead,
         "context_packet",
-        Some(packet.session_id),
+        Some(packet.id),
     )
     .await?;
     Ok(Json(packet))
@@ -468,7 +468,7 @@ async fn render_context_packet(
         &headers,
         Permission::SessionsRead,
         "context_packet",
-        Some(packet.session_id),
+        Some(packet.id),
     )
     .await?;
     Ok(Json(

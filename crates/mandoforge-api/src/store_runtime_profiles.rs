@@ -117,12 +117,12 @@ impl AppState {
                 "agent runtime profile command cannot be empty",
             ));
         }
-        if let Some(timeout_seconds) = input.timeout_seconds {
-            if !(1..=3600).contains(&timeout_seconds) {
-                return Err(AppError::bad_request(
-                    "agent runtime profile timeout_seconds must be between 1 and 3600",
-                ));
-            }
+        if let Some(timeout_seconds) = input.timeout_seconds
+            && !(1..=3600).contains(&timeout_seconds)
+        {
+            return Err(AppError::bad_request(
+                "agent runtime profile timeout_seconds must be between 1 and 3600",
+            ));
         }
 
         let now = Utc::now();
@@ -276,22 +276,22 @@ impl AppState {
 }
 
 fn validate_runtime_profile_update(input: &UpdateAgentRuntimeProfile) -> Result<(), AppError> {
-    if let Some(command) = input.command.as_ref() {
-        if command.trim().is_empty() {
-            return Err(AppError::bad_request(
-                "agent runtime profile command cannot be empty",
-            ));
-        }
+    if let Some(command) = input.command.as_ref()
+        && command.trim().is_empty()
+    {
+        return Err(AppError::bad_request(
+            "agent runtime profile command cannot be empty",
+        ));
     }
     if let Some(env) = input.env.as_ref() {
         validate_runtime_profile_env(env)?;
     }
-    if let Some(Some(timeout_seconds)) = input.timeout_seconds {
-        if !(1..=3600).contains(&timeout_seconds) {
-            return Err(AppError::bad_request(
-                "agent runtime profile timeout_seconds must be between 1 and 3600",
-            ));
-        }
+    if let Some(Some(timeout_seconds)) = input.timeout_seconds
+        && !(1..=3600).contains(&timeout_seconds)
+    {
+        return Err(AppError::bad_request(
+            "agent runtime profile timeout_seconds must be between 1 and 3600",
+        ));
     }
     if let Some(status) = input.status.as_ref() {
         validate_runtime_profile_status(status)?;

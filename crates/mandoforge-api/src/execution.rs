@@ -6,6 +6,7 @@ use std::{
 
 use anyhow::Result;
 use async_trait::async_trait;
+use axum::http::StatusCode;
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -78,7 +79,7 @@ pub(crate) trait ExecutionWorker: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub(crate) enum ExecutionWorkerOutcome {
-    Completed { job: Option<ExecutionJob> },
+    Completed { job_id: Option<Uuid> },
     Queued,
 }
 
@@ -96,11 +97,11 @@ impl ExecutionWorker for InlineExecutionWorker {
         approval: &Approval,
     ) -> Result<ExecutionWorkerOutcome, AppError> {
         let Some(job) = enqueue_approved_job(state, approval).await? else {
-            return Ok(ExecutionWorkerOutcome::Completed { job: None });
+            return Ok(ExecutionWorkerOutcome::Completed { job_id: None });
         };
         let completed = run_execution_job(state, job.id, "inline").await?;
         Ok(ExecutionWorkerOutcome::Completed {
-            job: Some(completed),
+            job_id: Some(completed.id),
         })
     }
 }
@@ -119,7 +120,7 @@ impl ExecutionWorker for QueueBackedExecutionWorker {
         approval: &Approval,
     ) -> Result<ExecutionWorkerOutcome, AppError> {
         let Some(job) = enqueue_approved_job(state, approval).await? else {
-            return Ok(ExecutionWorkerOutcome::Completed { job: None });
+            return Ok(ExecutionWorkerOutcome::Completed { job_id: None });
         };
         state
             .append_event(
@@ -363,7 +364,8 @@ pub(crate) async fn run_execution_job(
             .await;
         }
     }
-    if remote_environment_contract.is_some() && !remote_computer_pod_execution_requested() {
+    let remote_pod_execution_enabled = remote_computer_pod_execution_requested();
+    if remote_environment_contract.is_some() && !remote_pod_execution_enabled {
         let error = AppError::bad_request(
             "remote_computer environment requires enabled Remote Computer execution transport",
         );
@@ -384,68 +386,30 @@ pub(crate) async fn run_execution_job(
         )
         .await;
     }
-    let result = match tool_call.tool_name.as_str() {
-        "file.write"
-            if remote_computer_assignment.is_some()
-                && remote_computer_pod_execution_requested() =>
-        {
-            execute_approved_remote_computer_file_write(
-                state,
-                &approval,
-                &tool_call,
-                remote_computer_assignment
-                    .as_ref()
-                    .expect("checked assignment"),
-            )
-            .await
+    let result = match (
+        tool_call.tool_name.as_str(),
+        remote_computer_assignment.as_ref(),
+        remote_pod_execution_enabled,
+    ) {
+        ("file.write", Some(assignment), true) => {
+            execute_approved_remote_computer_file_write(state, &approval, &tool_call, assignment)
+                .await
         }
-        "file.write" => execute_approved_file_write(state, &approval, &tool_call).await,
-        "shell.exec"
-            if remote_computer_assignment.is_some()
-                && remote_computer_pod_execution_requested() =>
-        {
-            execute_approved_remote_computer_shell(
-                state,
-                &approval,
-                &tool_call,
-                remote_computer_assignment
-                    .as_ref()
-                    .expect("checked assignment"),
-            )
-            .await
+        ("file.write", _, _) => execute_approved_file_write(state, &approval, &tool_call).await,
+        ("shell.exec", Some(assignment), true) => {
+            execute_approved_remote_computer_shell(state, &approval, &tool_call, assignment).await
         }
-        "shell.exec" => execute_approved_shell(state, &approval, &tool_call).await,
-        "codex.exec"
-            if remote_computer_assignment.is_some()
-                && remote_computer_pod_execution_requested() =>
-        {
-            execute_approved_remote_computer_codex(
-                state,
-                &approval,
-                &tool_call,
-                remote_computer_assignment
-                    .as_ref()
-                    .expect("checked assignment"),
-            )
-            .await
+        ("shell.exec", _, _) => execute_approved_shell(state, &approval, &tool_call).await,
+        ("codex.exec", Some(assignment), true) => {
+            execute_approved_remote_computer_codex(state, &approval, &tool_call, assignment).await
         }
-        "codex.exec" => execute_approved_codex(state, &approval, &tool_call).await,
-        "agent_cli.exec"
-            if remote_computer_assignment.is_some()
-                && remote_computer_pod_execution_requested() =>
-        {
-            execute_approved_remote_computer_agent_cli(
-                state,
-                &approval,
-                &tool_call,
-                remote_computer_assignment
-                    .as_ref()
-                    .expect("checked assignment"),
-            )
-            .await
+        ("codex.exec", _, _) => execute_approved_codex(state, &approval, &tool_call).await,
+        ("agent_cli.exec", Some(assignment), true) => {
+            execute_approved_remote_computer_agent_cli(state, &approval, &tool_call, assignment)
+                .await
         }
-        "agent_cli.exec" => execute_approved_agent_cli(state, &approval, &tool_call).await,
-        "mcp.call" => execute_approved_mcp_call(state, &approval, &tool_call).await,
+        ("agent_cli.exec", _, _) => execute_approved_agent_cli(state, &approval, &tool_call).await,
+        ("mcp.call", _, _) => execute_approved_mcp_call(state, &approval, &tool_call).await,
         _ => execute_approved_native_connector_or_generic_tool(state, &approval, &tool_call).await,
     };
     if result.is_ok() {
@@ -1035,10 +999,9 @@ async fn auto_assign_remote_computer_for_job(
     worker_id: &str,
     environment_contract: Option<&RemoteComputerEnvironmentContract>,
 ) -> Result<Option<RemoteComputerJobAssignment>, AppError> {
-    if environment_contract.is_none() {
+    let Some(contract) = environment_contract else {
         return Ok(None);
-    }
-    let contract = environment_contract.expect("checked remote computer contract");
+    };
     let active_assignments: Vec<_> = state
         .list_remote_computer_job_assignments()
         .await?
@@ -1133,20 +1096,12 @@ async fn claim_remote_computer_warm_pool_lease_for_job(
     worker_id: &str,
     contract: &RemoteComputerEnvironmentContract,
 ) -> Result<Option<crate::RemoteComputerLease>, AppError> {
-    let leased_remote_computer_ids: HashSet<_> = state
-        .list_remote_computer_leases()
-        .await?
-        .into_iter()
-        .filter(|lease| lease.status == "leased")
-        .map(|lease| lease.remote_computer_id)
-        .collect();
-    let Some(computer) = state
+    let mut candidates = state
         .list_remote_computers()
         .await?
         .into_iter()
         .filter(|computer| {
             computer.status == "available"
-                && !leased_remote_computer_ids.contains(&computer.id)
                 && contract.matches_computer(computer)
                 && computer
                     .metadata
@@ -1154,28 +1109,59 @@ async fn claim_remote_computer_warm_pool_lease_for_job(
                     .and_then(Value::as_bool)
                     .unwrap_or(false)
         })
-        .max_by_key(|computer| computer.updated_at)
-    else {
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|computer| std::cmp::Reverse(computer.updated_at));
+    if candidates.is_empty() {
         return Ok(None);
+    }
+    let mut last_race_error = None;
+    let (computer, lease) = loop {
+        let Some(computer) = candidates.pop() else {
+            return Ok(None);
+        };
+        match state
+            .create_remote_computer_lease(
+                computer.id,
+                CreateRemoteComputerLease {
+                    session_id: Some(job.session_id),
+                    worker_id: Some(worker_id.to_string()),
+                    lease_seconds: Some(REMOTE_COMPUTER_DEFAULT_LEASE_SECONDS),
+                    metadata: Some(json!({
+                        "handoff_mode": "environment-warm-pool-lease",
+                        "source": "run_execution_job",
+                        "execution_job_id": job.id,
+                        "tool_call_id": job.tool_call_id,
+                        "session_workspace_path": remote_session_workspace_path(&computer, job.session_id),
+                        "environment_contract": contract.evidence()
+                    })),
+                },
+            )
+            .await
+        {
+            Ok(lease) => break (computer, lease),
+            Err(error) if remote_computer_lease_race_error(&error) => {
+                last_race_error = Some(error.message);
+                continue;
+            }
+            Err(error) => return Err(error),
+        }
     };
-    let lease = state
-        .create_remote_computer_lease(
-            computer.id,
-            CreateRemoteComputerLease {
-                session_id: Some(job.session_id),
-                worker_id: Some(worker_id.to_string()),
-                lease_seconds: Some(REMOTE_COMPUTER_DEFAULT_LEASE_SECONDS),
-                metadata: Some(json!({
-                    "handoff_mode": "environment-warm-pool-lease",
-                    "source": "run_execution_job",
+    if let Some(error) = last_race_error {
+        state
+            .append_event(
+                "worker",
+                Some(job.id),
+                job.session_id,
+                "remote_computer.warm_pool_claim_race_recovered",
+                json!({
                     "execution_job_id": job.id,
                     "tool_call_id": job.tool_call_id,
-                    "session_workspace_path": remote_session_workspace_path(&computer, job.session_id),
-                    "environment_contract": contract.evidence()
-                })),
-            },
-        )
-        .await?;
+                    "recovered_remote_computer_id": computer.id,
+                    "last_race_error": error,
+                }),
+            )
+            .await?;
+    }
     let details = json!({
         "lease_id": lease.id,
         "remote_computer_id": lease.remote_computer_id,
@@ -1213,8 +1199,9 @@ async fn claim_remote_computer_warm_pool_lease_for_job(
 
 /// Creates a Pod on-demand for jobs that find no available warm-pool Remote Computer.
 /// Requires the full triple-gate (`mutation_enabled`, `live_mutation_enabled`, `execution_enabled`)
-/// plus `MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT=kubernetes` to be active; otherwise returns `Ok(None)`
-/// so the caller can fall through to local execution.
+/// plus `MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT=kubernetes` to be active; otherwise returns
+/// `Ok(None)`. Environment-bound Remote Computer jobs then fail closed at assignment validation
+/// instead of falling back to host execution.
 async fn provision_remote_computer_pod_for_job(
     state: &AppState,
     job: &ExecutionJob,
@@ -1255,11 +1242,13 @@ async fn provision_remote_computer_pod_for_job(
                 },
             )
             .await;
-        // Gates not open or runner blocked — fall through to local execution
+        // Gates not open or runner blocked; environment-bound callers fail closed at assignment validation.
         if create_response.status == "blocked" {
             return Ok(None);
         }
-        if create_response.status != "mutation_ok" {
+        if create_response.status != "mutation_ok"
+            && !remote_computer_pod_create_already_exists(&create_response)
+        {
             return Err(AppError::internal(format!(
                 "Remote Computer Pod creation failed: {}",
                 create_response.message
@@ -1305,16 +1294,18 @@ async fn provision_remote_computer_pod_for_job(
             .await
         {
             Ok(computer) => computer,
-            Err(_) => {
+            Err(error) => {
                 // Duplicate insert — another worker won the race; use the existing record
-                state
+                if let Some(existing) = state
                     .list_remote_computers()
                     .await?
                     .into_iter()
                     .find(|c| c.pod_name.as_deref() == Some(&pod_name))
-                    .ok_or_else(|| {
-                        AppError::internal("Pod created but record not found after conflict")
-                    })?
+                {
+                    existing
+                } else {
+                    return Err(error);
+                }
             }
         }
     };
@@ -1372,6 +1363,23 @@ async fn provision_remote_computer_pod_for_job(
         ))
         .await?;
     Ok(Some(lease))
+}
+
+fn remote_computer_lease_race_error(error: &AppError) -> bool {
+    error.status == StatusCode::BAD_REQUEST
+        && matches!(
+            error.message.as_str(),
+            "Remote computer is not available for lease"
+                | "Remote computer already has an active lease"
+        )
+}
+
+fn remote_computer_pod_create_already_exists(
+    response: &crate::RemoteComputerRunnerDryRunResponse,
+) -> bool {
+    response.would_create_pod
+        && response.live_mutation_attempted
+        && response.live_mutation_status_code == Some(StatusCode::CONFLICT.as_u16())
 }
 
 async fn finalize_remote_computer_assignment_for_job(
@@ -1540,6 +1548,68 @@ fn env_flag(name: &str) -> bool {
 
 fn host_shell_execution_allowed() -> bool {
     env_flag("MANDOFORGE_ALLOW_HOST_SHELL_EXEC")
+}
+
+struct RemoteComputerPodExecTarget {
+    remote_computer: RemoteComputer,
+    pod_name: String,
+    workspace_path: String,
+}
+
+async fn remote_computer_pod_exec_target(
+    state: &AppState,
+    session_id: Uuid,
+    assignment: &crate::RemoteComputerJobAssignment,
+) -> Result<RemoteComputerPodExecTarget, AppError> {
+    let remote_computer = state
+        .list_remote_computers()
+        .await?
+        .into_iter()
+        .find(|computer| computer.id == assignment.remote_computer_id)
+        .ok_or_else(|| AppError::not_found("Remote computer not found"))?;
+    let pod_name = remote_computer
+        .pod_name
+        .clone()
+        .ok_or_else(|| AppError::bad_request("Remote computer has no pod_name for Pod exec"))?;
+    let workspace_path = remote_session_workspace_path(&remote_computer, session_id);
+    Ok(RemoteComputerPodExecTarget {
+        remote_computer,
+        pod_name,
+        workspace_path,
+    })
+}
+
+async fn run_remote_computer_pod_exec(
+    target: &RemoteComputerPodExecTarget,
+    session_id: Uuid,
+    command: String,
+    metadata: Value,
+    missing_output_message: &str,
+) -> Result<Value, AppError> {
+    let config = RemoteComputerRunnerConfig::from_env();
+    let runner = remote_computer_runner_for_config(&config);
+    let response = runner
+        .mutate(
+            &config,
+            RemoteComputerRunnerDryRunRequest {
+                operation: Some("live_exec".to_string()),
+                remote_computer_id: Some(target.remote_computer.id),
+                session_id: Some(session_id),
+                pod_name: Some(target.pod_name.clone()),
+                metadata: Some(merge_json_object(
+                    json!({
+                        "command": command,
+                        "session_workspace_path": target.workspace_path,
+                    }),
+                    metadata,
+                )),
+            },
+        )
+        .await;
+    let exec_result = response.exec_result.clone().ok_or_else(|| {
+        AppError::bad_request(format!("{missing_output_message}: {}", response.message))
+    })?;
+    Ok(exec_result)
 }
 
 async fn execute_approved_file_write(
@@ -1906,41 +1976,16 @@ async fn execute_approved_remote_computer_shell(
         .get("command")
         .and_then(Value::as_str)
         .ok_or_else(|| AppError::bad_request("shell.exec requires command"))?;
-    let remote_computer = state
-        .list_remote_computers()
-        .await?
-        .into_iter()
-        .find(|computer| computer.id == assignment.remote_computer_id)
-        .ok_or_else(|| AppError::not_found("Remote computer not found"))?;
-    let pod_name = remote_computer
-        .pod_name
-        .clone()
-        .ok_or_else(|| AppError::bad_request("Remote computer has no pod_name for Pod exec"))?;
-    let workspace_path = remote_session_workspace_path(&remote_computer, approval.session_id);
-    let remote_command = remote_shell_exec_command(&workspace_path, command);
-    let config = RemoteComputerRunnerConfig::from_env();
-    let runner = remote_computer_runner_for_config(&config);
-    let response = runner
-        .mutate(
-            &config,
-            RemoteComputerRunnerDryRunRequest {
-                operation: Some("live_exec".to_string()),
-                remote_computer_id: Some(remote_computer.id),
-                session_id: Some(approval.session_id),
-                pod_name: Some(pod_name.clone()),
-                metadata: Some(json!({"command": remote_command, "tool_call_id": tool_call.id, "session_workspace_path": workspace_path, "requested_command": command})),
-            },
-        )
-        .await;
-    let exec_result = response.exec_result.clone().ok_or_else(|| {
-        AppError::bad_request(format!(
-            "Remote Computer Pod exec did not return output: {}",
-            response.message
-        ))
-    })?;
-    if response.status != "exec_ok" || !response.execution_enabled {
-        return Err(AppError::bad_request(response.message));
-    }
+    let target = remote_computer_pod_exec_target(state, approval.session_id, assignment).await?;
+    let remote_command = remote_shell_exec_command(&target.workspace_path, command);
+    let exec_result = run_remote_computer_pod_exec(
+        &target,
+        approval.session_id,
+        remote_command,
+        json!({"tool_call_id": tool_call.id, "requested_command": command}),
+        "Remote Computer Pod exec did not return output",
+    )
+    .await?;
     let limit = execution_output_limit_bytes();
     let stdout = truncate_output(
         exec_result
@@ -1966,12 +2011,12 @@ async fn execute_approved_remote_computer_shell(
         "approval": "approved",
         "command": command,
         "runner": "remote_computer_pod_exec",
-        "remote_computer_id": remote_computer.id,
+        "remote_computer_id": target.remote_computer.id,
         "assignment_id": assignment.id,
         "lease_id": assignment.lease_id,
-        "namespace": remote_computer.namespace,
-        "pod_name": pod_name,
-        "workspace": workspace_path,
+        "namespace": target.remote_computer.namespace,
+        "pod_name": target.pod_name,
+        "workspace": target.workspace_path,
         "status": status,
         "stdout": stdout.text,
         "stdout_bytes": stdout.original_bytes,
@@ -1995,10 +2040,10 @@ async fn execute_approved_remote_computer_shell(
             json!({
                 "tool_call_id": tool_call.id,
                 "assignment_id": assignment.id,
-                "remote_computer_id": remote_computer.id,
+                "remote_computer_id": target.remote_computer.id,
                 "lease_id": assignment.lease_id,
-                "pod_name": pod_name,
-                "workspace": workspace_path,
+                "pod_name": target.pod_name,
+                "workspace": target.workspace_path,
                 "stdout_bytes": stdout.original_bytes,
                 "stderr_bytes": stderr.original_bytes,
                 "status": status,
@@ -2030,10 +2075,10 @@ async fn execute_approved_remote_computer_shell(
                 "tool": tool_call.tool_name,
                 "command": command,
                 "runner": "remote_computer_pod_exec",
-                "remote_computer_id": remote_computer.id,
+                "remote_computer_id": target.remote_computer.id,
                 "assignment_id": assignment.id,
-                "workspace": workspace_path,
-                "pod_name": pod_name,
+                "workspace": target.workspace_path,
+                "pod_name": target.pod_name,
                 "status": status,
                 "stdout_chars": stdout.text.chars().count(),
                 "stderr_chars": stderr.text.chars().count(),
@@ -2056,20 +2101,8 @@ async fn execute_approved_remote_computer_codex(
             "codex sandbox mode requires approval",
         ));
     }
-    let remote_computer = state
-        .list_remote_computers()
-        .await?
-        .into_iter()
-        .find(|computer| computer.id == assignment.remote_computer_id)
-        .ok_or_else(|| AppError::not_found("Remote computer not found"))?;
-    let pod_name = remote_computer
-        .pod_name
-        .clone()
-        .ok_or_else(|| AppError::bad_request("Remote computer has no pod_name for Pod exec"))?;
-    let workspace_path = remote_session_workspace_path(&remote_computer, approval.session_id);
-    let command = remote_codex_exec_command(&request, &workspace_path);
-    let config = RemoteComputerRunnerConfig::from_env();
-    let runner = remote_computer_runner_for_config(&config);
+    let target = remote_computer_pod_exec_target(state, approval.session_id, assignment).await?;
+    let command = remote_codex_exec_command(&request, &target.workspace_path);
     state
         .append_event(
             "tool",
@@ -2080,36 +2113,23 @@ async fn execute_approved_remote_computer_codex(
                 "task": &request.task,
                 "sandbox_mode": &request.sandbox_mode,
                 "runner": "remote_computer_pod_exec",
-                "remote_computer_id": remote_computer.id,
+                "remote_computer_id": target.remote_computer.id,
                 "assignment_id": assignment.id,
                 "lease_id": assignment.lease_id,
-                "namespace": remote_computer.namespace,
-                "pod_name": pod_name,
-                "workspace": workspace_path,
+                "namespace": target.remote_computer.namespace,
+                "pod_name": target.pod_name,
+                "workspace": target.workspace_path,
             }),
         )
         .await?;
-    let response = runner
-        .mutate(
-            &config,
-            RemoteComputerRunnerDryRunRequest {
-                operation: Some("live_exec".to_string()),
-                remote_computer_id: Some(remote_computer.id),
-                session_id: Some(approval.session_id),
-                pod_name: Some(pod_name.clone()),
-                metadata: Some(json!({"command": command, "tool_call_id": tool_call.id, "session_workspace_path": workspace_path})),
-            },
-        )
-        .await;
-    let exec_result = response.exec_result.clone().ok_or_else(|| {
-        AppError::bad_request(format!(
-            "Remote Computer Codex exec did not return output: {}",
-            response.message
-        ))
-    })?;
-    if response.status != "exec_ok" || !response.execution_enabled {
-        return Err(AppError::bad_request(response.message));
-    }
+    let exec_result = run_remote_computer_pod_exec(
+        &target,
+        approval.session_id,
+        command,
+        json!({"tool_call_id": tool_call.id}),
+        "Remote Computer Codex exec did not return output",
+    )
+    .await?;
 
     let stdout_full = exec_result
         .get("stdout")
@@ -2160,7 +2180,7 @@ async fn execute_approved_remote_computer_codex(
                 "markdown_bytes": final_output.original_bytes,
                 "markdown_truncated": final_output.truncated,
                 "runner": "remote_computer_pod_exec",
-                "remote_computer_id": remote_computer.id,
+                "remote_computer_id": target.remote_computer.id,
                 "assignment_id": assignment.id,
             }),
             created_at: Utc::now(),
@@ -2177,7 +2197,8 @@ async fn execute_approved_remote_computer_codex(
             .await?;
     }
 
-    let event_type = if kubernetes_exec_status_succeeded(&status) {
+    let exec_succeeded = kubernetes_exec_status_succeeded(&status);
+    let event_type = if exec_succeeded {
         "codex.task.completed"
     } else {
         "codex.task.failed"
@@ -2191,11 +2212,11 @@ async fn execute_approved_remote_computer_codex(
             json!({
                 "tool_call_id": tool_call.id,
                 "assignment_id": assignment.id,
-                "remote_computer_id": remote_computer.id,
+                "remote_computer_id": target.remote_computer.id,
                 "lease_id": assignment.lease_id,
-                "pod_name": pod_name,
+                "pod_name": target.pod_name,
                 "tool": tool_call.tool_name,
-                "workspace": workspace_path,
+                "workspace": target.workspace_path,
                 "stdout_bytes": stdout.original_bytes,
                 "stderr_bytes": stderr.original_bytes,
                 "status": status,
@@ -2221,7 +2242,7 @@ async fn execute_approved_remote_computer_codex(
                 "final_message_bytes": final_output.original_bytes,
                 "final_message_truncated": final_output.truncated,
                 "runner": "remote_computer_pod_exec",
-                "remote_computer_id": remote_computer.id,
+                "remote_computer_id": target.remote_computer.id,
                 "assignment_id": assignment.id,
                 "lease_id": assignment.lease_id,
             }),
@@ -2229,12 +2250,12 @@ async fn execute_approved_remote_computer_codex(
         .await?;
     let result = json!({
         "runner": "remote_computer_pod_exec",
-        "remote_computer_id": remote_computer.id,
+        "remote_computer_id": target.remote_computer.id,
         "assignment_id": assignment.id,
         "lease_id": assignment.lease_id,
-        "namespace": remote_computer.namespace,
-        "pod_name": pod_name,
-        "workspace": workspace_path,
+        "namespace": target.remote_computer.namespace,
+        "pod_name": target.pod_name,
+        "workspace": target.workspace_path,
         "status": status,
         "stdout": stdout.text,
         "stdout_bytes": stdout.original_bytes,
@@ -2246,6 +2267,48 @@ async fn execute_approved_remote_computer_codex(
         "final_message_bytes": final_output.original_bytes,
         "final_message_truncated": final_output.truncated,
     });
+    if !exec_succeeded {
+        let error_payload = json!({
+            "error": "Remote Computer Codex exec failed",
+            "content": result
+        });
+        state
+            .append_event(
+                "tool",
+                Some(tool_call.id),
+                approval.session_id,
+                "tool.error",
+                json!({"tool_call_id": tool_call.id, "tool": tool_call.tool_name, "content": error_payload}),
+            )
+            .await?;
+        state
+            .update_tool_call_status(tool_call.id, "failed", None, Some(error_payload.clone()))
+            .await?;
+        state
+            .append_audit_log(new_audit_log(
+                Some(approval.session_id),
+                "tool",
+                Some(tool_call.id),
+                "tool.failed",
+                "tool_call",
+                Some(tool_call.id),
+                json!({
+                    "tool": tool_call.tool_name,
+                    "runner": "remote_computer_pod_exec",
+                    "remote_computer_id": target.remote_computer.id,
+                    "assignment_id": assignment.id,
+                    "workspace": target.workspace_path,
+                    "pod_name": target.pod_name,
+                    "status": status,
+                    "stdout_chars": stdout.text.chars().count(),
+                    "stderr_chars": stderr.text.chars().count(),
+                    "final_message_chars": final_output.text.chars().count(),
+                    "resumed_after_approval": true
+                }),
+            ))
+            .await?;
+        return Err(AppError::bad_request("Remote Computer Codex exec failed"));
+    }
     state
         .append_event(
             "tool",
@@ -2269,10 +2332,10 @@ async fn execute_approved_remote_computer_codex(
             json!({
                 "tool": tool_call.tool_name,
                 "runner": "remote_computer_pod_exec",
-                "remote_computer_id": remote_computer.id,
+                "remote_computer_id": target.remote_computer.id,
                 "assignment_id": assignment.id,
-                "workspace": workspace_path,
-                "pod_name": pod_name,
+                "workspace": target.workspace_path,
+                "pod_name": target.pod_name,
                 "status": status,
                 "stdout_chars": stdout.text.chars().count(),
                 "stderr_chars": stderr.text.chars().count(),
@@ -2292,17 +2355,7 @@ async fn execute_approved_remote_computer_agent_cli(
 ) -> Result<(), AppError> {
     let request: AgentCliRequest = serde_json::from_value(tool_call.args.clone())?;
     let profile = normalize_agent_cli_profile(&request.profile)?;
-    let remote_computer = state
-        .list_remote_computers()
-        .await?
-        .into_iter()
-        .find(|computer| computer.id == assignment.remote_computer_id)
-        .ok_or_else(|| AppError::not_found("Remote computer not found"))?;
-    let pod_name = remote_computer
-        .pod_name
-        .clone()
-        .ok_or_else(|| AppError::bad_request("Remote computer has no pod_name for Pod exec"))?;
-    let workspace_path = remote_session_workspace_path(&remote_computer, approval.session_id);
+    let target = remote_computer_pod_exec_target(state, approval.session_id, assignment).await?;
     let profile_config = agent_cli_profile_config(state, &profile).await?;
     enforce_bound_agent_cli_profile(state, approval.session_id, &profile).await?;
     let profile_source = match profile_config.source {
@@ -2310,9 +2363,7 @@ async fn execute_approved_remote_computer_agent_cli(
         AgentCliProfileConfigSource::Environment => "environment",
     };
     let runtime_type = profile_config.runtime_type.clone();
-    let command = remote_agent_cli_exec_command(&request, &profile_config, &workspace_path)?;
-    let config = RemoteComputerRunnerConfig::from_env();
-    let runner = remote_computer_runner_for_config(&config);
+    let command = remote_agent_cli_exec_command(&request, &profile_config, &target.workspace_path)?;
     state
         .append_event(
             "tool",
@@ -2325,38 +2376,23 @@ async fn execute_approved_remote_computer_agent_cli(
                 "runtime_type": runtime_type,
                 "task": &request.task,
                 "runner": "remote_computer_pod_exec",
-                "remote_computer_id": remote_computer.id,
+                "remote_computer_id": target.remote_computer.id,
                 "assignment_id": assignment.id,
                 "lease_id": assignment.lease_id,
-                "namespace": remote_computer.namespace,
-                "pod_name": pod_name,
-                "workspace": workspace_path,
+                "namespace": target.remote_computer.namespace,
+                "pod_name": target.pod_name,
+                "workspace": target.workspace_path,
             }),
         )
         .await?;
-    let response = runner
-        .mutate(
-            &config,
-            RemoteComputerRunnerDryRunRequest {
-                operation: Some("live_exec".to_string()),
-                remote_computer_id: Some(remote_computer.id),
-                session_id: Some(approval.session_id),
-                pod_name: Some(pod_name.clone()),
-                metadata: Some(
-                    json!({"command": command, "tool_call_id": tool_call.id, "profile": profile, "profile_source": profile_source, "runtime_type": runtime_type, "session_workspace_path": workspace_path}),
-                ),
-            },
-        )
-        .await;
-    let exec_result = response.exec_result.clone().ok_or_else(|| {
-        AppError::bad_request(format!(
-            "Remote Computer agent CLI exec did not return output: {}",
-            response.message
-        ))
-    })?;
-    if response.status != "exec_ok" || !response.execution_enabled {
-        return Err(AppError::bad_request(response.message));
-    }
+    let exec_result = run_remote_computer_pod_exec(
+        &target,
+        approval.session_id,
+        command,
+        json!({"tool_call_id": tool_call.id, "profile": profile, "profile_source": profile_source, "runtime_type": runtime_type}),
+        "Remote Computer agent CLI exec did not return output",
+    )
+    .await?;
 
     let limit = execution_output_limit_bytes();
     let stdout = truncate_output(
@@ -2398,7 +2434,8 @@ async fn execute_approved_remote_computer_agent_cli(
     )
     .await?;
     let status = exec_result.get("status").cloned().unwrap_or(Value::Null);
-    let event_type = if kubernetes_exec_status_succeeded(&status) {
+    let exec_succeeded = kubernetes_exec_status_succeeded(&status);
+    let event_type = if exec_succeeded {
         "agent_cli.task.completed"
     } else {
         "agent_cli.task.failed"
@@ -2412,12 +2449,12 @@ async fn execute_approved_remote_computer_agent_cli(
             json!({
                 "tool_call_id": tool_call.id,
                 "assignment_id": assignment.id,
-                "remote_computer_id": remote_computer.id,
+                "remote_computer_id": target.remote_computer.id,
                 "lease_id": assignment.lease_id,
-                "pod_name": pod_name,
+                "pod_name": target.pod_name,
                 "tool": tool_call.tool_name,
                 "profile": profile,
-                "workspace": workspace_path,
+                "workspace": target.workspace_path,
                 "profile_source": profile_source,
                 "runtime_type": runtime_type,
                 "stdout_bytes": stdout.original_bytes,
@@ -2457,7 +2494,7 @@ async fn execute_approved_remote_computer_agent_cli(
                 "runtime_turn_event_count": turn_recording.event_count,
                 "runtime_final_artifact_count": turn_recording.final_artifact_count,
                 "runner": "remote_computer_pod_exec",
-                "remote_computer_id": remote_computer.id,
+                "remote_computer_id": target.remote_computer.id,
                 "assignment_id": assignment.id,
                 "lease_id": assignment.lease_id,
             }),
@@ -2468,12 +2505,12 @@ async fn execute_approved_remote_computer_agent_cli(
         "profile": profile,
         "profile_source": profile_source,
         "runtime_type": runtime_type,
-        "remote_computer_id": remote_computer.id,
+        "remote_computer_id": target.remote_computer.id,
         "assignment_id": assignment.id,
         "lease_id": assignment.lease_id,
-        "namespace": remote_computer.namespace,
-        "pod_name": pod_name,
-        "workspace": workspace_path,
+        "namespace": target.remote_computer.namespace,
+        "pod_name": target.pod_name,
+        "workspace": target.workspace_path,
         "status": status,
         "stdout": stdout.text,
         "stdout_bytes": stdout.original_bytes,
@@ -2491,6 +2528,55 @@ async fn execute_approved_remote_computer_agent_cli(
         "runtime_turn_event_count": turn_recording.event_count,
         "runtime_final_artifact_count": turn_recording.final_artifact_count,
     });
+    if !exec_succeeded {
+        let error_payload = json!({
+            "error": "Remote Computer agent CLI exec failed",
+            "content": result
+        });
+        state
+            .append_event(
+                "tool",
+                Some(tool_call.id),
+                approval.session_id,
+                "tool.error",
+                json!({"tool_call_id": tool_call.id, "tool": tool_call.tool_name, "content": error_payload}),
+            )
+            .await?;
+        state
+            .update_tool_call_status(tool_call.id, "failed", None, Some(error_payload.clone()))
+            .await?;
+        state
+            .append_audit_log(new_audit_log(
+                Some(approval.session_id),
+                "tool",
+                Some(tool_call.id),
+                "tool.failed",
+                "tool_call",
+                Some(tool_call.id),
+                json!({
+                    "tool": tool_call.tool_name,
+                    "profile": profile,
+                    "profile_source": profile_source,
+                    "runtime_type": runtime_type,
+                    "runner": "remote_computer_pod_exec",
+                    "remote_computer_id": target.remote_computer.id,
+                    "assignment_id": assignment.id,
+                    "workspace": target.workspace_path,
+                    "pod_name": target.pod_name,
+                    "status": status,
+                    "stdout_chars": stdout.text.chars().count(),
+                    "stderr_chars": stderr.text.chars().count(),
+                    "runtime_adapter_event_count": adapter_events.len(),
+                    "runtime_turn_event_count": turn_recording.event_count,
+                    "runtime_final_artifact_count": turn_recording.final_artifact_count,
+                    "resumed_after_approval": true
+                }),
+            ))
+            .await?;
+        return Err(AppError::bad_request(
+            "Remote Computer agent CLI exec failed",
+        ));
+    }
     state
         .append_event(
             "tool",
@@ -2517,10 +2603,10 @@ async fn execute_approved_remote_computer_agent_cli(
                 "profile_source": profile_source,
                 "runtime_type": runtime_type,
                 "runner": "remote_computer_pod_exec",
-                "remote_computer_id": remote_computer.id,
+                "remote_computer_id": target.remote_computer.id,
                 "assignment_id": assignment.id,
-                "workspace": workspace_path,
-                "pod_name": pod_name,
+                "workspace": target.workspace_path,
+                "pod_name": target.pod_name,
                 "status": status,
                 "stdout_chars": stdout.text.chars().count(),
                 "stderr_chars": stderr.text.chars().count(),
@@ -2938,9 +3024,6 @@ fn split_remote_codex_output(stdout: &str) -> RemoteCodexOutput {
 }
 
 fn kubernetes_exec_status_succeeded(status: &Value) -> bool {
-    if status.is_null() {
-        return true;
-    }
     let status_text = status
         .get("status")
         .and_then(Value::as_str)
@@ -3470,15 +3553,15 @@ fn codex_app_server_final_message(result: &Value) -> Option<String> {
         "text",
     ] {
         if let Some(value) = result.get(key) {
-            if let Some(message) = value.as_str() {
-                if let Some(message) = non_empty_string(message) {
-                    return Some(message);
-                }
+            if let Some(message) = value.as_str()
+                && let Some(message) = non_empty_string(message)
+            {
+                return Some(message);
             }
-            if let Some(message) = string_value_at(value, &["content"]) {
-                if let Some(message) = non_empty_string(&message) {
-                    return Some(message);
-                }
+            if let Some(message) = string_value_at(value, &["content"])
+                && let Some(message) = non_empty_string(&message)
+            {
+                return Some(message);
             }
         }
     }
@@ -3736,14 +3819,13 @@ async fn bound_agent_cli_profile(
         .into_iter()
         .filter(|assignment| assignment.specialist_session_id == session_id)
         .max_by_key(|assignment| assignment.created_at)
+        && let Some(profile_id) = assignment.runtime_profile_id
     {
-        if let Some(profile_id) = assignment.runtime_profile_id {
-            let profile = state.get_agent_runtime_profile(profile_id).await?;
-            return Ok(Some(BoundAgentCliProfile {
-                name: profile.name,
-                source: "handoff",
-            }));
-        }
+        let profile = state.get_agent_runtime_profile(profile_id).await?;
+        return Ok(Some(BoundAgentCliProfile {
+            name: profile.name,
+            source: "handoff",
+        }));
     }
 
     let agent = state.get_agent(session.agent_id).await?;
@@ -4484,13 +4566,13 @@ fn runtime_adapter_output_schema_from_args(args: &[String]) -> Option<Value> {
                 })
             });
         }
-        if let Some(path) = arg.strip_prefix("--output-schema=") {
-            if !path.trim().is_empty() {
-                return Some(json!({
-                    "path": path,
-                    "source": "cli_args"
-                }));
-            }
+        if let Some(path) = arg.strip_prefix("--output-schema=")
+            && !path.trim().is_empty()
+        {
+            return Some(json!({
+                "path": path,
+                "source": "cli_args"
+            }));
         }
     }
     None
@@ -4690,15 +4772,15 @@ fn runtime_adapter_final_message(adapter_event_type: &str, event: &Value) -> Opt
         "result",
     ] {
         if let Some(value) = event.get(key) {
-            if let Some(message) = value.as_str() {
-                if !message.trim().is_empty() {
-                    return Some(message.to_string());
-                }
+            if let Some(message) = value.as_str()
+                && !message.trim().is_empty()
+            {
+                return Some(message.to_string());
             }
-            if let Some(message) = string_value_at(value, &["content"]) {
-                if !message.trim().is_empty() {
-                    return Some(message);
-                }
+            if let Some(message) = string_value_at(value, &["content"])
+                && !message.trim().is_empty()
+            {
+                return Some(message);
             }
         }
     }
@@ -5047,12 +5129,46 @@ mod tests {
 
     #[test]
     fn kubernetes_exec_status_defaults_and_failure_are_explicit() {
-        assert!(kubernetes_exec_status_succeeded(&Value::Null));
+        assert!(!kubernetes_exec_status_succeeded(&Value::Null));
         assert!(kubernetes_exec_status_succeeded(
             &json!({"status": "Success", "exitCode": 0})
         ));
         assert!(!kubernetes_exec_status_succeeded(
             &json!({"status": "Failure", "exitCode": 2})
+        ));
+    }
+
+    #[test]
+    fn remote_computer_pod_create_conflict_is_recoverable() {
+        let response = crate::RemoteComputerRunnerDryRunResponse {
+            status: "mutation_failed".to_string(),
+            operation: "live_create".to_string(),
+            configured: true,
+            would_create_pod: true,
+            would_delete_pod: false,
+            live_probe_attempted: false,
+            live_probe_status_code: None,
+            live_mutation_attempted: true,
+            live_mutation_status_code: Some(StatusCode::CONFLICT.as_u16()),
+            kubernetes_api_path: Some("/api/v1/namespaces/agent-os/pods".to_string()),
+            namespace: Some("agent-os".to_string()),
+            pod_name: Some("agent-rc-session".to_string()),
+            pod_template_path: Some("deploy/k8s/agent-remote-computer.yaml".to_string()),
+            execution_enabled: false,
+            message: "Kubernetes Pod API returned HTTP 409".to_string(),
+            request: json!({"operation": "live_create"}),
+            exec_result: None,
+        };
+
+        assert!(remote_computer_pod_create_already_exists(&response));
+
+        let non_create_conflict = crate::RemoteComputerRunnerDryRunResponse {
+            would_create_pod: false,
+            operation: "live_delete".to_string(),
+            ..response
+        };
+        assert!(!remote_computer_pod_create_already_exists(
+            &non_create_conflict
         ));
     }
 

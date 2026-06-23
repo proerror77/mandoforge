@@ -180,12 +180,12 @@ impl AppState {
                     .workflow_pack_installations
                     .get_mut(&id)
                     .ok_or_else(|| AppError::not_found("workflow pack installation not found"))?;
-                if let Some(expected) = expected_status {
-                    if installation.status != expected {
-                        return Err(AppError::bad_request(
-                            "workflow pack installation status conflict: concurrent update detected",
-                        ));
-                    }
+                if let Some(expected) = expected_status
+                    && installation.status != expected
+                {
+                    return Err(AppError::bad_request(
+                        "workflow pack installation status conflict: concurrent update detected",
+                    ));
                 }
                 installation.status = status.to_string();
                 installation.eval_gate_status = eval_gate_status.to_string();
