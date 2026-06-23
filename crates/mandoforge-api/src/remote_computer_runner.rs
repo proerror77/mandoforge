@@ -731,6 +731,9 @@ async fn call_kubernetes_exec_with_timeout(
         }
     }
     let _ = socket.close(None).await;
+    if status.is_none() {
+        return Err("Kubernetes exec WebSocket closed without status".to_string());
+    }
     Ok(KubernetesExecResult {
         handshake_status_code,
         stdout: String::from_utf8_lossy(&stdout).to_string(),
@@ -1405,6 +1408,80 @@ mod tests {
         let _ = tokio::fs::remove_file(token_path).await;
     }
 
+    #[tokio::test]
+    async fn kubernetes_runner_live_exec_fails_when_status_frame_missing() {
+        let token_path =
+            std::env::temp_dir().join(format!("mandoforge-kube-token-{}.txt", Uuid::new_v4()));
+        tokio::fs::write(&token_path, "test-token")
+            .await
+            .expect("write token");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let addr = listener.local_addr().expect("addr");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept exec websocket");
+            let mut websocket = tokio_tungstenite::accept_hdr_async(
+                stream,
+                |_request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                 mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                    response.headers_mut().insert(
+                        "sec-websocket-protocol",
+                        "v4.channel.k8s.io".parse().expect("protocol header"),
+                    );
+                    Ok(response)
+                },
+            )
+            .await
+            .expect("accept websocket");
+            let mut stdout_frame = vec![1];
+            stdout_frame.extend_from_slice(b"partial output");
+            websocket
+                .send(Message::Binary(stdout_frame))
+                .await
+                .expect("send stdout");
+            let _ = websocket.close(None).await;
+        });
+
+        let config = RemoteComputerRunnerConfig {
+            mode: "kubernetes".to_string(),
+            namespace: "agent-os".to_string(),
+            pod_template_path: test_pod_template_path(),
+            service_account: "mandoforge-remote-computer".to_string(),
+            kubeconfig_path: None,
+            kube_api_url: Some(format!("http://{addr}")),
+            bearer_token_path: Some(token_path.to_string_lossy().to_string()),
+            in_cluster: false,
+            mutation_enabled: true,
+            live_mutation_enabled: true,
+            execution_enabled: true,
+        };
+        let response = KubernetesRemoteComputerRunner
+            .mutate(
+                &config,
+                RemoteComputerRunnerDryRunRequest {
+                    operation: Some("live_exec".to_string()),
+                    remote_computer_id: None,
+                    session_id: None,
+                    pod_name: Some("agent-remote-computer-test".to_string()),
+                    metadata: Some(json!({"command": "echo partial"})),
+                },
+            )
+            .await;
+
+        assert_eq!(response.status, "exec_failed");
+        assert!(!response.execution_enabled);
+        assert!(response.exec_result.is_none());
+        assert!(
+            response.message.contains("closed without status"),
+            "{}",
+            response.message
+        );
+
+        server.await.expect("server task");
+        let _ = tokio::fs::remove_file(token_path).await;
+    }
+
     #[test]
     fn kubernetes_exec_output_capture_is_bounded() {
         let mut output = Vec::new();
@@ -1719,7 +1796,8 @@ mod tests {
             .unwrap()
         });
 
-        let token_path = std::env::temp_dir().join("poll_test_token_running");
+        let token_path =
+            std::env::temp_dir().join(format!("poll_test_token_running-{}", Uuid::new_v4()));
         tokio::fs::write(&token_path, "test-token").await.unwrap();
 
         let config = RemoteComputerRunnerConfig {
@@ -1771,7 +1849,8 @@ mod tests {
             .unwrap()
         });
 
-        let token_path = std::env::temp_dir().join("poll_test_token_failed");
+        let token_path =
+            std::env::temp_dir().join(format!("poll_test_token_failed-{}", Uuid::new_v4()));
         tokio::fs::write(&token_path, "test-token").await.unwrap();
 
         let config = RemoteComputerRunnerConfig {
@@ -1828,7 +1907,8 @@ mod tests {
             .unwrap()
         });
 
-        let token_path = std::env::temp_dir().join("poll_test_token_pending");
+        let token_path =
+            std::env::temp_dir().join(format!("poll_test_token_pending-{}", Uuid::new_v4()));
         tokio::fs::write(&token_path, "test-token").await.unwrap();
 
         let config = RemoteComputerRunnerConfig {
@@ -1903,7 +1983,10 @@ mod tests {
             .unwrap()
         });
 
-        let token_path = std::env::temp_dir().join("poll_test_token_404_then_running");
+        let token_path = std::env::temp_dir().join(format!(
+            "poll_test_token_404_then_running-{}",
+            Uuid::new_v4()
+        ));
         tokio::fs::write(&token_path, "test-token").await.unwrap();
 
         let config = RemoteComputerRunnerConfig {
@@ -1961,7 +2044,8 @@ mod tests {
             .unwrap()
         });
 
-        let token_path = std::env::temp_dir().join("poll_test_token_500");
+        let token_path =
+            std::env::temp_dir().join(format!("poll_test_token_500-{}", Uuid::new_v4()));
         tokio::fs::write(&token_path, "test-token").await.unwrap();
 
         let config = RemoteComputerRunnerConfig {
@@ -2017,7 +2101,8 @@ mod tests {
             .unwrap()
         });
 
-        let token_path = std::env::temp_dir().join("poll_test_token_succeeded");
+        let token_path =
+            std::env::temp_dir().join(format!("poll_test_token_succeeded-{}", Uuid::new_v4()));
         tokio::fs::write(&token_path, "test-token").await.unwrap();
 
         let config = RemoteComputerRunnerConfig {

@@ -1283,7 +1283,9 @@ async fn provision_remote_computer_pod_for_job(
         if create_response.status == "blocked" {
             return Ok(None);
         }
-        if create_response.status != "mutation_ok" {
+        if create_response.status != "mutation_ok"
+            && !remote_computer_pod_create_already_exists(&create_response)
+        {
             return Err(AppError::internal(format!(
                 "Remote Computer Pod creation failed: {}",
                 create_response.message
@@ -1407,6 +1409,14 @@ fn remote_computer_lease_race_error(error: &AppError) -> bool {
             "Remote computer is not available for lease"
                 | "Remote computer already has an active lease"
         )
+}
+
+fn remote_computer_pod_create_already_exists(
+    response: &crate::RemoteComputerRunnerDryRunResponse,
+) -> bool {
+    response.would_create_pod
+        && response.live_mutation_attempted
+        && response.live_mutation_status_code == Some(StatusCode::CONFLICT.as_u16())
 }
 
 async fn finalize_remote_computer_assignment_for_job(
@@ -2212,7 +2222,8 @@ async fn execute_approved_remote_computer_codex(
             .await?;
     }
 
-    let event_type = if kubernetes_exec_status_succeeded(&status) {
+    let exec_succeeded = kubernetes_exec_status_succeeded(&status);
+    let event_type = if exec_succeeded {
         "codex.task.completed"
     } else {
         "codex.task.failed"
@@ -2281,6 +2292,48 @@ async fn execute_approved_remote_computer_codex(
         "final_message_bytes": final_output.original_bytes,
         "final_message_truncated": final_output.truncated,
     });
+    if !exec_succeeded {
+        let error_payload = json!({
+            "error": "Remote Computer Codex exec failed",
+            "content": result
+        });
+        state
+            .append_event(
+                "tool",
+                Some(tool_call.id),
+                approval.session_id,
+                "tool.error",
+                json!({"tool_call_id": tool_call.id, "tool": tool_call.tool_name, "content": error_payload}),
+            )
+            .await?;
+        state
+            .update_tool_call_status(tool_call.id, "failed", None, Some(error_payload.clone()))
+            .await?;
+        state
+            .append_audit_log(new_audit_log(
+                Some(approval.session_id),
+                "tool",
+                Some(tool_call.id),
+                "tool.failed",
+                "tool_call",
+                Some(tool_call.id),
+                json!({
+                    "tool": tool_call.tool_name,
+                    "runner": "remote_computer_pod_exec",
+                    "remote_computer_id": remote_computer.id,
+                    "assignment_id": assignment.id,
+                    "workspace": workspace_path,
+                    "pod_name": pod_name,
+                    "status": status,
+                    "stdout_chars": stdout.text.chars().count(),
+                    "stderr_chars": stderr.text.chars().count(),
+                    "final_message_chars": final_output.text.chars().count(),
+                    "resumed_after_approval": true
+                }),
+            ))
+            .await?;
+        return Err(AppError::bad_request("Remote Computer Codex exec failed"));
+    }
     state
         .append_event(
             "tool",
@@ -2433,7 +2486,8 @@ async fn execute_approved_remote_computer_agent_cli(
     )
     .await?;
     let status = exec_result.get("status").cloned().unwrap_or(Value::Null);
-    let event_type = if kubernetes_exec_status_succeeded(&status) {
+    let exec_succeeded = kubernetes_exec_status_succeeded(&status);
+    let event_type = if exec_succeeded {
         "agent_cli.task.completed"
     } else {
         "agent_cli.task.failed"
@@ -2526,6 +2580,55 @@ async fn execute_approved_remote_computer_agent_cli(
         "runtime_turn_event_count": turn_recording.event_count,
         "runtime_final_artifact_count": turn_recording.final_artifact_count,
     });
+    if !exec_succeeded {
+        let error_payload = json!({
+            "error": "Remote Computer agent CLI exec failed",
+            "content": result
+        });
+        state
+            .append_event(
+                "tool",
+                Some(tool_call.id),
+                approval.session_id,
+                "tool.error",
+                json!({"tool_call_id": tool_call.id, "tool": tool_call.tool_name, "content": error_payload}),
+            )
+            .await?;
+        state
+            .update_tool_call_status(tool_call.id, "failed", None, Some(error_payload.clone()))
+            .await?;
+        state
+            .append_audit_log(new_audit_log(
+                Some(approval.session_id),
+                "tool",
+                Some(tool_call.id),
+                "tool.failed",
+                "tool_call",
+                Some(tool_call.id),
+                json!({
+                    "tool": tool_call.tool_name,
+                    "profile": profile,
+                    "profile_source": profile_source,
+                    "runtime_type": runtime_type,
+                    "runner": "remote_computer_pod_exec",
+                    "remote_computer_id": remote_computer.id,
+                    "assignment_id": assignment.id,
+                    "workspace": workspace_path,
+                    "pod_name": pod_name,
+                    "status": status,
+                    "stdout_chars": stdout.text.chars().count(),
+                    "stderr_chars": stderr.text.chars().count(),
+                    "runtime_adapter_event_count": adapter_events.len(),
+                    "runtime_turn_event_count": turn_recording.event_count,
+                    "runtime_final_artifact_count": turn_recording.final_artifact_count,
+                    "resumed_after_approval": true
+                }),
+            ))
+            .await?;
+        return Err(AppError::bad_request(
+            "Remote Computer agent CLI exec failed",
+        ));
+    }
     state
         .append_event(
             "tool",
@@ -2973,9 +3076,6 @@ fn split_remote_codex_output(stdout: &str) -> RemoteCodexOutput {
 }
 
 fn kubernetes_exec_status_succeeded(status: &Value) -> bool {
-    if status.is_null() {
-        return true;
-    }
     let status_text = status
         .get("status")
         .and_then(Value::as_str)
@@ -5081,12 +5181,46 @@ mod tests {
 
     #[test]
     fn kubernetes_exec_status_defaults_and_failure_are_explicit() {
-        assert!(kubernetes_exec_status_succeeded(&Value::Null));
+        assert!(!kubernetes_exec_status_succeeded(&Value::Null));
         assert!(kubernetes_exec_status_succeeded(
             &json!({"status": "Success", "exitCode": 0})
         ));
         assert!(!kubernetes_exec_status_succeeded(
             &json!({"status": "Failure", "exitCode": 2})
+        ));
+    }
+
+    #[test]
+    fn remote_computer_pod_create_conflict_is_recoverable() {
+        let response = crate::RemoteComputerRunnerDryRunResponse {
+            status: "mutation_failed".to_string(),
+            operation: "live_create".to_string(),
+            configured: true,
+            would_create_pod: true,
+            would_delete_pod: false,
+            live_probe_attempted: false,
+            live_probe_status_code: None,
+            live_mutation_attempted: true,
+            live_mutation_status_code: Some(StatusCode::CONFLICT.as_u16()),
+            kubernetes_api_path: Some("/api/v1/namespaces/agent-os/pods".to_string()),
+            namespace: Some("agent-os".to_string()),
+            pod_name: Some("agent-rc-session".to_string()),
+            pod_template_path: Some("deploy/k8s/agent-remote-computer.yaml".to_string()),
+            execution_enabled: false,
+            message: "Kubernetes Pod API returned HTTP 409".to_string(),
+            request: json!({"operation": "live_create"}),
+            exec_result: None,
+        };
+
+        assert!(remote_computer_pod_create_already_exists(&response));
+
+        let non_create_conflict = crate::RemoteComputerRunnerDryRunResponse {
+            would_create_pod: false,
+            operation: "live_delete".to_string(),
+            ..response
+        };
+        assert!(!remote_computer_pod_create_already_exists(
+            &non_create_conflict
         ));
     }
 
