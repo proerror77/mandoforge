@@ -57,6 +57,7 @@ mod handlers;
 mod mcp_gateway;
 mod native_connectors;
 mod observability;
+mod ontology_review;
 mod ontology_source_adapters;
 mod policy;
 mod provider;
@@ -460,6 +461,7 @@ pub(crate) use deployment_version::{
 };
 pub(crate) use enterprise_product_readiness::build_enterprise_product_completion_readiness;
 pub(crate) use enterprise_security_readiness::build_enterprise_security_admin_readiness;
+pub(crate) use ontology_review::normalize_ontology_review_decision;
 pub(crate) use stage2_readiness::build_stage2_completion_readiness;
 pub(crate) use telemetry_events::{telemetry_attributes_for_event, telemetry_status_for_event};
 #[cfg(test)]
@@ -803,18 +805,6 @@ impl AppState {
         {
             warn!(%error.message, "telemetry export failed");
         }
-    }
-}
-
-fn normalize_ontology_review_decision(value: &str) -> Result<String, AppError> {
-    let normalized = value.trim().to_ascii_lowercase().replace('-', "_");
-    match normalized.as_str() {
-        "approve" | "approved" => Ok("approve".to_string()),
-        "reject" | "rejected" => Ok("reject".to_string()),
-        "request_changes" | "changes_requested" => Ok("request_changes".to_string()),
-        _ => Err(AppError::bad_request(
-            "ontology proposal review decision must be approve, reject, or request_changes",
-        )),
     }
 }
 
