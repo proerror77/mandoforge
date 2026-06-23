@@ -75,6 +75,57 @@ async fn ontology_release_promote_triggers_workflow_run_with_action_catalog() {
 }
 
 #[tokio::test]
+async fn ontology_release_promote_triggers_all_matching_workflow_definitions() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let first_definition =
+        ontology_release_trigger_workflow_definition_for_test(&state, "commerce").await;
+    let second_definition =
+        ontology_release_trigger_workflow_definition_for_test(&state, "commerce").await;
+    let release =
+        ontology_release_candidate_for_test(&state, "commerce-vtest-trigger-all-workflows").await;
+    gate_ontology_release_with_actor(&state, release.id, "test")
+        .await
+        .expect("gate");
+
+    let active = promote_ontology_release_with_actor(&state, release.id, "test")
+        .await
+        .expect("promote");
+
+    let runs = state.list_workflow_runs().await.expect("workflow runs");
+    let matching_runs: Vec<_> = runs
+        .iter()
+        .filter(|run| {
+            [first_definition.id, second_definition.id].contains(&run.workflow_definition_id)
+                && run.input_payload["ontology_release_id"] == json!(active.id)
+        })
+        .collect();
+    assert_eq!(matching_runs.len(), 2);
+    assert!(matching_runs.iter().all(|run| {
+        run.input_payload["trigger"] == json!("ontology_release.promoted")
+            && run.input_payload["action_catalog"]["tool_count"] == json!(1)
+    }));
+
+    let triggers = state
+        .list_ontology_release_workflow_triggers()
+        .await
+        .expect("workflow triggers");
+    let matching_triggers: Vec<_> = triggers
+        .iter()
+        .filter(|trigger| {
+            trigger.ontology_release_id == active.id
+                && [first_definition.id, second_definition.id]
+                    .contains(&trigger.workflow_definition_id)
+        })
+        .collect();
+    assert_eq!(matching_triggers.len(), 2);
+    assert!(
+        matching_triggers
+            .iter()
+            .all(|trigger| { trigger.status == "triggered" && trigger.workflow_run_id.is_some() })
+    );
+}
+
+#[tokio::test]
 async fn ontology_release_workflow_trigger_is_idempotent_per_release() {
     let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
     let definition =

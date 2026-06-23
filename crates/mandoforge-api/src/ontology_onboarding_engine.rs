@@ -4246,7 +4246,8 @@ pub(crate) async fn trigger_workflow_run_from_ontology_release(
     release: &OntologyRelease,
     actor_subject: &str,
 ) -> Result<Option<WorkflowRun>, AppError> {
-    let Some(definition) = ontology_release_workflow_definition(state, release).await? else {
+    let definitions = ontology_release_workflow_definitions(state, release).await?;
+    if definitions.is_empty() {
         state
             .append_audit_log(new_audit_log(
                 None,
@@ -4265,7 +4266,31 @@ pub(crate) async fn trigger_workflow_run_from_ontology_release(
             ))
             .await?;
         return Ok(None);
-    };
+    }
+
+    let mut first_run = None;
+    for definition in definitions {
+        if let Some(run) = trigger_workflow_run_from_ontology_release_definition(
+            state,
+            release,
+            actor_subject,
+            &definition,
+        )
+        .await?
+            && first_run.is_none()
+        {
+            first_run = Some(run);
+        }
+    }
+    Ok(first_run)
+}
+
+async fn trigger_workflow_run_from_ontology_release_definition(
+    state: &AppState,
+    release: &OntologyRelease,
+    actor_subject: &str,
+    definition: &WorkflowDefinition,
+) -> Result<Option<WorkflowRun>, AppError> {
     let Some(trigger) = state
         .claim_ontology_release_workflow_trigger(release.id, definition.id)
         .await?
@@ -4324,7 +4349,7 @@ pub(crate) async fn trigger_workflow_run_from_ontology_release(
     });
     let run = match create_workflow_run_from_definition(
         state,
-        &definition,
+        definition,
         format!(
             "Ontology promoted: {} {}",
             release.domain_scope, release.version
@@ -4495,18 +4520,19 @@ async fn ontology_release_workflow_run_for_definition(
         .await
 }
 
-pub(crate) async fn ontology_release_workflow_definition(
+pub(crate) async fn ontology_release_workflow_definitions(
     state: &AppState,
     release: &OntologyRelease,
-) -> Result<Option<WorkflowDefinition>, AppError> {
+) -> Result<Vec<WorkflowDefinition>, AppError> {
     Ok(state
         .list_workflow_definitions()
         .await?
         .into_iter()
-        .find(|definition| {
+        .filter(|definition| {
             definition.release_state == "released"
                 && ontology_release_trigger_matches_definition(definition, release)
-        }))
+        })
+        .collect())
 }
 
 pub(crate) fn ontology_release_trigger_matches_definition(
