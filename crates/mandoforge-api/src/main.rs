@@ -452,7 +452,7 @@ pub(crate) use types::remote_computer::{
 pub(crate) use types::scheduler::{
     SchedulerAttentionItem, SchedulerDeploymentReadiness, SchedulerDeploymentValidationRun,
     SchedulerDuePlan, SchedulerDuePlanItem, SchedulerDueRun, SchedulerOrchestrationSummary,
-    SchedulerRetryPolicy, SchedulerRunDueRequest, SchedulerRunHistoryItem,
+    SchedulerRetryPolicy, SchedulerRunDueRequest, SchedulerRunHistoryItem, SchedulerTaskError,
 };
 pub(crate) use types::semantic::{
     ContextPacketSemanticObject, CreateMemoryWritebackCandidates, CreateSemanticIngestionBatch,

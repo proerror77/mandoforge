@@ -35583,6 +35583,52 @@ async fn scheduler_due_run_replays_by_idempotency_key_and_validates_request() {
 }
 
 #[tokio::test]
+async fn scheduler_due_run_records_task_error_and_continues_remaining_tasks() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+
+    let run = execute_scheduler_due_tasks(
+        &state,
+        Some(SchedulerRunDueRequest {
+            idempotency_key: Some("scheduler-forced-task-failure".to_string()),
+            owner: Some("__force_policy_rollout_failure".to_string()),
+            run_window_start: None,
+            run_window_end: None,
+            retry_policy: None,
+        }),
+    )
+    .await
+    .expect("scheduler run should continue after task failure");
+
+    assert_eq!(run.status, "failed");
+    assert_eq!(run.policy_rollout.status, "failed");
+    assert_eq!(run.task_errors.len(), 1);
+    assert_eq!(run.task_errors[0].task, "policy_rollout");
+    assert!(
+        run.task_errors[0]
+            .message
+            .contains("forced scheduler task failure")
+    );
+    assert!(run.workflow_scheduled_steps.is_some());
+    assert!(run.semantic_synthesis_schedules.is_some());
+    assert!(run.semantic_aging_policies.is_some());
+    assert!(run.ontology_release_workflow_triggers.is_some());
+    assert_eq!(run.remote_computer_reclaim.status, "noop");
+    assert_eq!(run.usage_finance_export.status, "disabled");
+
+    let audit_logs = state.list_audit_logs(None).await.expect("audit logs");
+    let scheduler_audit = audit_logs
+        .iter()
+        .find(|log| log.action == "scheduler.run_due")
+        .expect("scheduler run audit");
+    assert_eq!(scheduler_audit.details["status"], json!("failed"));
+    assert_eq!(scheduler_audit.details["task_error_count"], json!(1));
+    assert_eq!(
+        scheduler_audit.details["task_errors"][0]["task"],
+        json!("policy_rollout")
+    );
+}
+
+#[tokio::test]
 async fn work_items_create_list_and_audit_collaboration_intake() {
     let app = test_app().await;
     let payload = json!({
