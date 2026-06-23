@@ -1,6 +1,7 @@
 use anyhow::Result;
 use chrono::Utc;
 use serde_json::json;
+use sqlx::error::DatabaseError;
 use sqlx::{Row, postgres::PgRow};
 use uuid::Uuid;
 
@@ -596,7 +597,8 @@ impl AppState {
                 .bind(assignment.created_at)
                 .bind(assignment.updated_at)
                 .execute(pool)
-                .await?;
+                .await
+                .map_err(remote_computer_job_assignment_insert_error)?;
                 Ok(assignment)
             }
         }
@@ -1336,5 +1338,62 @@ fn merge_remote_computer_assignment_metadata(
             serde_json::Value::Object(merged)
         }
         _ => patch,
+    }
+}
+
+fn remote_computer_job_assignment_insert_error(error: sqlx::Error) -> AppError {
+    let sqlx::Error::Database(database_error) = &error else {
+        return error.into();
+    };
+    if !is_unique_violation(database_error.as_ref()) {
+        return error.into();
+    }
+    AppError::bad_request(remote_computer_job_assignment_unique_violation_message(
+        database_error.constraint(),
+    ))
+}
+
+fn remote_computer_job_assignment_unique_violation_message(
+    constraint: Option<&str>,
+) -> &'static str {
+    match constraint {
+        Some("idx_remote_computer_job_assignments_active_session") => {
+            "session already has an active remote computer assignment"
+        }
+        Some("idx_remote_computer_job_assignments_active_job") => {
+            "execution job already has an active remote computer assignment"
+        }
+        _ => "remote computer job assignment already exists",
+    }
+}
+
+fn is_unique_violation(error: &(dyn DatabaseError + '_)) -> bool {
+    error.code().as_deref() == Some("23505")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remote_computer_job_assignment_unique_violation_message;
+
+    #[test]
+    fn remote_computer_job_assignment_unique_constraints_map_to_domain_conflicts() {
+        assert_eq!(
+            remote_computer_job_assignment_unique_violation_message(Some(
+                "idx_remote_computer_job_assignments_active_session"
+            )),
+            "session already has an active remote computer assignment"
+        );
+        assert_eq!(
+            remote_computer_job_assignment_unique_violation_message(Some(
+                "idx_remote_computer_job_assignments_active_job"
+            )),
+            "execution job already has an active remote computer assignment"
+        );
+        assert_eq!(
+            remote_computer_job_assignment_unique_violation_message(Some(
+                "remote_computer_job_assignments_pkey"
+            )),
+            "remote computer job assignment already exists"
+        );
     }
 }
