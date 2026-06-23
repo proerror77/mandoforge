@@ -482,6 +482,67 @@ async fn ontology_release_workflow_trigger_drain_skips_inactive_release_terminal
 }
 
 #[tokio::test]
+async fn ontology_release_workflow_trigger_drain_skips_unmatched_definition_terminally() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let mut release =
+        ontology_release_candidate_for_test(&state, "commerce-vtest-trigger-unmatched-skip").await;
+    release.status = "active".to_string();
+    state
+        .update_ontology_release(release.clone(), None)
+        .await
+        .expect("activate release");
+    let mut definition =
+        ontology_release_trigger_workflow_definition_for_test(&state, "commerce").await;
+    let claim = state
+        .claim_ontology_release_workflow_trigger(release.id, definition.id)
+        .await
+        .expect("claim trigger")
+        .expect("claimed trigger");
+    state
+        .complete_ontology_release_workflow_trigger(
+            claim.id,
+            "failed",
+            None,
+            Some("simulated stale trigger".to_string()),
+        )
+        .await
+        .expect("mark retryable");
+    definition.handoff_rules["ontology_release_trigger"]["domain_scope"] = json!("insurance");
+    state
+        .update_workflow_definition(definition)
+        .await
+        .expect("change trigger match");
+
+    let drain = drain_due_ontology_release_workflow_triggers(&state, "test", 10)
+        .await
+        .expect("drain workflow triggers");
+
+    assert_eq!(drain.retryable_count, 1);
+    assert_eq!(drain.triggered_count, 0);
+    assert_eq!(drain.skipped_count, 1);
+    assert_eq!(drain.failed_count, 0);
+
+    let trigger = state
+        .list_ontology_release_workflow_triggers()
+        .await
+        .expect("workflow triggers")
+        .into_iter()
+        .find(|trigger| trigger.id == claim.id)
+        .expect("drained trigger");
+    assert_eq!(
+        trigger.status,
+        ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_SKIPPED
+    );
+    assert!(
+        trigger
+            .error_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("no longer matches")
+    );
+}
+
+#[tokio::test]
 async fn ontology_release_workflow_trigger_rejects_unknown_status() {
     let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
     let trigger = state

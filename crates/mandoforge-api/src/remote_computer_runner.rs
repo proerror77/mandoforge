@@ -1,11 +1,13 @@
 use async_trait::async_trait;
 use futures_util::StreamExt;
+use rustls_pki_types::pem::PemObject;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_tungstenite::{
-    connect_async,
+    Connector, connect_async_tls_with_config,
     tungstenite::{Message, client::IntoClientRequest},
 };
 use uuid::Uuid;
@@ -15,6 +17,7 @@ const MAX_KUBERNETES_EXEC_CAPTURE_BYTES: usize = 1024 * 1024;
 const IN_CLUSTER_KUBERNETES_API_URL: &str = "https://kubernetes.default.svc";
 const IN_CLUSTER_SERVICE_ACCOUNT_TOKEN: &str =
     "/var/run/secrets/kubernetes.io/serviceaccount/token";
+const IN_CLUSTER_SERVICE_ACCOUNT_CA: &str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RemoteComputerRunnerConfig {
@@ -463,15 +466,19 @@ impl RemoteComputerRunner for KubernetesRemoteComputerRunner {
         let mutation_failed_message = mutation_result
             .as_ref()
             .and_then(|result| result.as_ref().err().map(ToString::to_string));
-        let exec_failed_message = exec_result
-            .as_ref()
-            .and_then(|result| result.as_ref().err().cloned());
+        let exec_failed_message = exec_result.as_ref().and_then(|result| match result {
+            Ok(result) => result.status_failure.clone(),
+            Err(error) => Some(error.clone()),
+        });
         let exec_result_payload = exec_result
             .as_ref()
             .and_then(|result| result.as_ref().ok())
             .map(KubernetesExecResult::to_json);
         let status = if let Some(result) = &exec_result {
-            if result.is_ok() {
+            if result
+                .as_ref()
+                .is_ok_and(|result| result.status_failure.is_none())
+            {
                 "exec_ok"
             } else {
                 "exec_failed"
@@ -499,7 +506,11 @@ impl RemoteComputerRunner for KubernetesRemoteComputerRunner {
             namespace: Some(config.namespace.clone()),
             pod_name: Some(pod_name),
             pod_template_path: Some(config.pod_template_path.clone()),
-            execution_enabled: exec_result.as_ref().is_some_and(|result| result.is_ok()),
+            execution_enabled: exec_result.as_ref().is_some_and(|result| {
+                result
+                    .as_ref()
+                    .is_ok_and(|result| result.status_failure.is_none())
+            }),
             message: if let Some(message) = exec_failed_message {
                 format!("Kubernetes Pod exec failed: {message}")
             } else if exec_result.is_some() {
@@ -658,6 +669,7 @@ struct KubernetesExecResult {
     stdout_truncated: bool,
     stderr_truncated: bool,
     status: Option<Value>,
+    status_failure: Option<String>,
 }
 
 impl KubernetesExecResult {
@@ -668,7 +680,8 @@ impl KubernetesExecResult {
             "stderr": self.stderr,
             "stdout_truncated": self.stdout_truncated,
             "stderr_truncated": self.stderr_truncated,
-            "status": self.status
+            "status": self.status,
+            "status_failure": self.status_failure
         })
     }
 }
@@ -715,7 +728,8 @@ async fn call_kubernetes_exec_with_timeout(
             .parse()
             .map_err(|err| format!("failed to build Kubernetes exec protocol header: {err}"))?,
     );
-    let (mut socket, response) = connect_async(request)
+    let connector = kubernetes_exec_tls_connector(&access).await?;
+    let (mut socket, response) = connect_async_tls_with_config(request, None, false, connector)
         .await
         .map_err(|err| format!("failed to open Kubernetes exec WebSocket: {err}"))?;
     let handshake_status_code = response.status().as_u16();
@@ -763,7 +777,8 @@ async fn call_kubernetes_exec_with_timeout(
     if status.is_none() {
         return Err("Kubernetes exec WebSocket closed without status".to_string());
     }
-    validate_kubernetes_exec_status(status.as_ref().expect("status checked above"))?;
+    let status_failure =
+        kubernetes_exec_status_failure(status.as_ref().expect("status checked above"));
     Ok(KubernetesExecResult {
         handshake_status_code,
         stdout: String::from_utf8_lossy(&stdout).to_string(),
@@ -771,6 +786,7 @@ async fn call_kubernetes_exec_with_timeout(
         stdout_truncated,
         stderr_truncated,
         status,
+        status_failure,
     })
 }
 
@@ -898,6 +914,7 @@ fn percent_encode(value: &str) -> String {
 struct KubernetesClientAccess {
     api_url: String,
     bearer_token_path: PathBuf,
+    ca_cert_path: Option<PathBuf>,
     danger_accept_invalid_certs: bool,
 }
 
@@ -917,6 +934,7 @@ fn kubernetes_client_access(config: &RemoteComputerRunnerConfig) -> Option<Kuber
         return Some(KubernetesClientAccess {
             api_url: api_url.trim_end_matches('/').to_string(),
             bearer_token_path: token_path,
+            ca_cert_path: in_cluster_ca_cert_path(config.in_cluster),
             danger_accept_invalid_certs: config.in_cluster,
         });
     }
@@ -935,6 +953,7 @@ fn kubernetes_client_access(config: &RemoteComputerRunnerConfig) -> Option<Kuber
                     .trim_end_matches('/')
                     .to_string(),
                 bearer_token_path: token_path,
+                ca_cert_path: in_cluster_ca_cert_path(true),
                 danger_accept_invalid_certs: true,
             });
         }
@@ -942,9 +961,41 @@ fn kubernetes_client_access(config: &RemoteComputerRunnerConfig) -> Option<Kuber
     None
 }
 
-fn validate_kubernetes_exec_status(status: &Value) -> Result<(), String> {
+fn in_cluster_ca_cert_path(in_cluster: bool) -> Option<PathBuf> {
+    in_cluster
+        .then(|| PathBuf::from(IN_CLUSTER_SERVICE_ACCOUNT_CA))
+        .filter(|path| path.exists())
+}
+
+async fn kubernetes_exec_tls_connector(
+    access: &KubernetesClientAccess,
+) -> Result<Option<Connector>, String> {
+    let Some(ca_cert_path) = &access.ca_cert_path else {
+        return Ok(None);
+    };
+    let ca = tokio::fs::read(ca_cert_path)
+        .await
+        .map_err(|err| format!("failed to read Kubernetes service-account CA: {err}"))?;
+    let certs = rustls_pki_types::CertificateDer::pem_slice_iter(&ca)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| format!("failed to parse Kubernetes service-account CA: {err}"))?;
+    let mut root_store = rustls::RootCertStore::empty();
+    let (added, _ignored) = root_store.add_parsable_certificates(certs);
+    if added == 0 {
+        return Err(
+            "Kubernetes service-account CA did not contain a usable certificate".to_string(),
+        );
+    }
+    Ok(Some(Connector::Rustls(Arc::new(
+        rustls::ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth(),
+    ))))
+}
+
+fn kubernetes_exec_status_failure(status: &Value) -> Option<String> {
     if status.get("status").and_then(Value::as_str) == Some("Success") {
-        return Ok(());
+        return None;
     }
     let status_label = status
         .get("status")
@@ -975,7 +1026,7 @@ fn validate_kubernetes_exec_status(status: &Value) -> Result<(), String> {
     if let Some(message) = message {
         parts.push(format!("message={message}"));
     }
-    Err(parts.join(", "))
+    Some(parts.join(", "))
 }
 
 fn build_kubernetes_pod_request(
@@ -1726,7 +1777,15 @@ mod tests {
 
         assert_eq!(response.status, "exec_failed");
         assert!(!response.execution_enabled);
-        assert!(response.exec_result.is_none());
+        let exec_result = response.exec_result.expect("failure exec result");
+        assert_eq!(exec_result["stderr"], "command failed\n");
+        assert_eq!(exec_result["status"]["status"], "Failure");
+        assert!(
+            exec_result["status_failure"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("exit_code=2")
+        );
         assert!(
             response.message.contains("exit_code=2"),
             "{}",

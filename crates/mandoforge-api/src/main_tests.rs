@@ -5517,7 +5517,6 @@ async fn semantic_kernel_persists_sources_objects_links_and_audit() {
                 "source_type": "repo_doc",
                 "source_uri": "repo://docs/mandoforge-roadmap-v2.md",
                 "display_name": "MandoForge Roadmap v2",
-                "owner_type": "repo",
                 "metadata": {"path": "docs/mandoforge-roadmap-v2.md"},
                 "provenance": {"ingested_by": "stage-5.1-test"},
                 "freshness": {"state": "workspace_current"}
@@ -5752,6 +5751,21 @@ async fn semantic_collections_filter_project_scoped_resources() {
         ),
     )
     .await;
+    let partial_owner_source: SemanticSource = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/semantic-sources",
+            json!({
+                "source_type": "repo_doc",
+                "source_uri": "repo://partial-owner/semantic.md",
+                "display_name": "Partial Owner Semantic Source",
+                "owner_type": "project"
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
     let visible_object: SemanticObject = request_json(
         app.clone(),
         json_request_with_headers(
@@ -5763,6 +5777,24 @@ async fn semantic_collections_filter_project_scoped_resources() {
                 "object_key": "decision:visible-semantic-scope",
                 "title": "Visible semantic scope",
                 "summary": "Visible to the project member.",
+                "trust_level": "human_verified",
+                "freshness": "current"
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let partial_owner_object: SemanticObject = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/semantic-objects",
+            json!({
+                "source_id": partial_owner_source.id,
+                "object_type": "decision",
+                "object_key": "decision:partial-owner-semantic-scope",
+                "title": "Partial owner semantic scope",
+                "summary": "Hidden because the source owner is incomplete.",
                 "trust_level": "human_verified",
                 "freshness": "current"
             }),
@@ -5858,6 +5890,22 @@ async fn semantic_collections_filter_project_scoped_resources() {
         ),
     )
     .await;
+    let non_object_link: SemanticLink = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/semantic-links",
+            json!({
+                "from_entity_type": "artifact",
+                "from_entity_id": Uuid::new_v4().to_string(),
+                "relation_type": "belongs_to",
+                "to_entity_type": "session",
+                "to_entity_id": Uuid::new_v4().to_string()
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
 
     let viewer_headers = [("x-mandoforge-subject", "semantic-project-viewer")];
     let sources: Vec<SemanticSource> = request_json(
@@ -5867,6 +5915,11 @@ async fn semantic_collections_filter_project_scoped_resources() {
     .await;
     assert!(sources.iter().any(|source| source.id == visible_source.id));
     assert!(!sources.iter().any(|source| source.id == hidden_source.id));
+    assert!(
+        !sources
+            .iter()
+            .any(|source| source.id == partial_owner_source.id)
+    );
 
     let objects: Vec<SemanticObject> = request_json(
         app.clone(),
@@ -5883,6 +5936,11 @@ async fn semantic_collections_filter_project_scoped_resources() {
     assert!(
         !objects
             .iter()
+            .any(|object| object.id == partial_owner_object.id)
+    );
+    assert!(
+        !objects
+            .iter()
             .any(|object| object.id == unresolved_text_scoped_object.id)
     );
 
@@ -5893,6 +5951,7 @@ async fn semantic_collections_filter_project_scoped_resources() {
     .await;
     assert!(links.iter().any(|link| link.id == visible_link.id));
     assert!(!links.iter().any(|link| link.id == hidden_link.id));
+    assert!(!links.iter().any(|link| link.id == non_object_link.id));
 
     let (status, hidden_error) = request_value(
         app,

@@ -264,12 +264,13 @@ async fn semantic_source_scope(
     state: &AppState,
     source: &SemanticSource,
 ) -> Result<ResourceScope, AppError> {
-    let Some(owner_type) = source.owner_type.as_deref() else {
-        return Ok(ResourceScope::Tenant);
+    match (source.owner_type.as_deref(), source.owner_id) {
+        (None, None) => return Ok(ResourceScope::Tenant),
+        (None, Some(_)) | (Some(_), None) => return Ok(ResourceScope::ScopedUnknown),
+        (Some(_), Some(_)) => {}
     };
-    let Some(owner_id) = source.owner_id else {
-        return Ok(ResourceScope::Tenant);
-    };
+    let owner_type = source.owner_type.as_deref().unwrap_or_default();
+    let owner_id = source.owner_id.expect("owner_id checked above");
     match owner_type.trim().to_ascii_lowercase().as_str() {
         "project" => project_scope(state, owner_id).await,
         "team" => team_scope(state, owner_id).await,
@@ -331,13 +332,18 @@ async fn semantic_link_endpoint_scope(
     entity_type: &str,
     entity_id: &str,
 ) -> Result<ResourceScope, AppError> {
-    if entity_type != "semantic_object" {
-        return Ok(ResourceScope::Tenant);
+    if entity_type == "semantic_object" {
+        let object_id = Uuid::parse_str(entity_id)
+            .map_err(|_| AppError::forbidden("semantic link endpoint is not a valid object id"))?;
+        let object = state.get_semantic_object(object_id).await?;
+        return semantic_object_scope(state, &object).await;
     }
-    let object_id = Uuid::parse_str(entity_id)
-        .map_err(|_| AppError::forbidden("semantic link endpoint is not a valid object id"))?;
-    let object = state.get_semantic_object(object_id).await?;
-    semantic_object_scope(state, &object).await
+    let Some(resource_type) = semantic_link_endpoint_resource_type(entity_type) else {
+        return Ok(ResourceScope::ScopedUnknown);
+    };
+    let resource_id = Uuid::parse_str(entity_id)
+        .map_err(|_| AppError::forbidden("semantic link endpoint is not a valid resource id"))?;
+    semantic_link_endpoint_resource_scope(state, resource_type, resource_id).await
 }
 
 async fn semantic_link_endpoint_scope_with_object_scopes(
@@ -347,7 +353,7 @@ async fn semantic_link_endpoint_scope_with_object_scopes(
     object_scopes: &HashMap<Uuid, ResourceScope>,
 ) -> Result<ResourceScope, AppError> {
     if entity_type != "semantic_object" {
-        return Ok(ResourceScope::Tenant);
+        return semantic_link_endpoint_scope(state, entity_type, entity_id).await;
     }
     let object_id = Uuid::parse_str(entity_id)
         .map_err(|_| AppError::forbidden("semantic link endpoint is not a valid object id"))?;
@@ -357,6 +363,47 @@ async fn semantic_link_endpoint_scope_with_object_scopes(
             let object = state.get_semantic_object(object_id).await?;
             semantic_object_scope(state, &object).await
         }
+    }
+}
+
+fn semantic_link_endpoint_resource_type(entity_type: &str) -> Option<&'static str> {
+    match entity_type.trim().to_ascii_lowercase().as_str() {
+        "agent" => Some("agent"),
+        "project" => Some("project"),
+        "session" => Some("session"),
+        "work_item" => Some("work_item"),
+        "workflow_run" => Some("workflow_run"),
+        _ => None,
+    }
+}
+
+async fn semantic_link_endpoint_resource_scope(
+    state: &AppState,
+    resource_type: &str,
+    resource_id: Uuid,
+) -> Result<ResourceScope, AppError> {
+    match resource_type {
+        "agent" => {
+            let agent = state.get_agent(resource_id).await?;
+            Ok(ResourceScope::TeamProject {
+                team_id: agent.team_id,
+                project_id: agent.project_id,
+            })
+        }
+        "project" => project_scope(state, resource_id).await,
+        "session" => session_scope(state, resource_id).await,
+        "work_item" => {
+            let work_item = state.get_work_item(resource_id).await?;
+            Ok(ResourceScope::TeamProject {
+                team_id: work_item.team_id,
+                project_id: work_item.project_id,
+            })
+        }
+        "workflow_run" => {
+            let run = state.get_workflow_run(resource_id).await?;
+            Ok(ResourceScope::Session(run.primary_session_id))
+        }
+        _ => Ok(ResourceScope::ScopedUnknown),
     }
 }
 

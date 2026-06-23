@@ -319,6 +319,125 @@ async fn remote_computer_artifact_sync_records_artifacts_events_and_audit() {
 }
 
 #[tokio::test]
+async fn remote_computer_artifact_sync_accepts_completed_assignment_with_active_lease() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let app = build_router(state.clone());
+    let agents: Vec<Agent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/agents")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let session: Session = request_json(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri("/api/sessions")
+            .header("content-type", "application/json")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::from(
+                json!({"agent_id": agents[0].id, "title": "remote artifact completed assignment"})
+                    .to_string(),
+            ))
+            .expect("valid request"),
+    )
+    .await;
+    let computer: RemoteComputer = request_json(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri("/api/remote-computers")
+            .header("content-type", "application/json")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::from(
+                json!({
+                    "name": "artifact-sync-completed-assignment",
+                    "profile": "workspace-write",
+                    "pod_name": "agent-remote-computer-completed-artifacts"
+                })
+                .to_string(),
+            ))
+            .expect("valid request"),
+    )
+    .await;
+    let lease: RemoteComputerLease = request_json(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/remote-computers/{}/leases", computer.id))
+            .header("content-type", "application/json")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::from(
+                json!({
+                    "session_id": session.id,
+                    "worker_id": "artifact-sync-completed-worker"
+                })
+                .to_string(),
+            ))
+            .expect("valid request"),
+    )
+    .await;
+    let assignment = state
+        .create_remote_computer_job_assignment(
+            Uuid::new_v4(),
+            session.id,
+            CreateRemoteComputerJobAssignment {
+                lease_id: lease.id,
+                assigned_by: Some("worker".to_string()),
+                metadata: Some(json!({"test": "completed_artifact_sync"})),
+            },
+        )
+        .await
+        .expect("assignment");
+    state
+        .update_remote_computer_job_assignment_status(
+            assignment.id,
+            "completed",
+            json!({"completed": true}),
+        )
+        .await
+        .expect("complete assignment");
+
+    let synced: RemoteComputerArtifactSyncResponse = request_json(
+        app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/remote-computers/artifacts/sync")
+            .header("content-type", "application/json")
+            .header("x-mandoforge-subject", "operator-1")
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::from(
+                json!({
+                    "session_id": session.id,
+                    "remote_computer_id": computer.id,
+                    "assignment_id": assignment.id,
+                    "artifacts": [{
+                        "name": "final.md",
+                        "artifact_type": "markdown",
+                        "path": "artifacts/final.md",
+                        "content": {"markdown": "# Final"},
+                        "metadata": {"source_path": "/workspace/artifacts/final.md"}
+                    }]
+                })
+                .to_string(),
+            ))
+            .expect("valid request"),
+    )
+    .await;
+
+    assert_eq!(synced.assignment_id, Some(assignment.id));
+    assert_eq!(synced.artifact_count, 1);
+}
+
+#[tokio::test]
 async fn remote_computer_artifact_sync_requires_session_binding_for_non_admin() {
     let app = test_app().await;
     let agents: Vec<Agent> = request_json(

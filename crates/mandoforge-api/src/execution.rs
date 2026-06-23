@@ -1609,9 +1609,6 @@ async fn run_remote_computer_pod_exec(
     let exec_result = response.exec_result.clone().ok_or_else(|| {
         AppError::bad_request(format!("{missing_output_message}: {}", response.message))
     })?;
-    if response.status != "exec_ok" || !response.execution_enabled {
-        return Err(AppError::bad_request(response.message));
-    }
     Ok(exec_result)
 }
 

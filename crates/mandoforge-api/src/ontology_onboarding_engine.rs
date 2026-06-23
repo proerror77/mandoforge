@@ -4503,7 +4503,20 @@ pub(crate) async fn drain_due_ontology_release_workflow_triggers(
         }
         match trigger_workflow_run_from_ontology_release(state, &release, actor_subject).await {
             Ok(Some(_)) => triggered_count += 1,
-            Ok(None) => skipped_count += 1,
+            Ok(None) => {
+                skipped_count += 1;
+                state
+                    .complete_ontology_release_workflow_trigger(
+                        trigger.id,
+                        ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_SKIPPED,
+                        None,
+                        Some(
+                            "workflow definition no longer matches ontology release trigger"
+                                .to_string(),
+                        ),
+                    )
+                    .await?;
+            }
             Err(error) => {
                 failed_count += 1;
                 state

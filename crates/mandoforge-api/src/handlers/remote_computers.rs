@@ -347,7 +347,7 @@ async fn authorize_remote_computer_artifact_access(
             })?;
         if assignment.remote_computer_id == remote_computer_id
             && assignment.session_id == session_id
-            && assignment.status == "assigned"
+            && matches!(assignment.status.as_str(), "assigned" | "completed")
             && lease_is_active(assignment.lease_id)
         {
             return Ok(());
@@ -364,7 +364,7 @@ async fn authorize_remote_computer_artifact_access(
         .any(|assignment| {
             assignment.remote_computer_id == remote_computer_id
                 && assignment.session_id == session_id
-                && assignment.status == "assigned"
+                && matches!(assignment.status.as_str(), "assigned" | "completed")
                 && lease_is_active(assignment.lease_id)
         });
     if has_active_assignment {
