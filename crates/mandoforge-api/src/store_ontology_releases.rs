@@ -507,7 +507,8 @@ fn ontology_release_unique_violation_message(constraint: Option<&str>) -> &'stat
         Some("ontology_releases_tenant_id_domain_scope_version_key") => {
             "ontology release version already exists for domain"
         }
-        Some("idx_ontology_releases_one_active_per_domain") => {
+        Some("idx_ontology_releases_one_active_per_domain")
+        | Some("idx_ontology_releases_one_current_per_domain") => {
             "ontology release domain already has an active release"
         }
         _ => "ontology release already exists",
@@ -564,6 +565,12 @@ mod tests {
         assert_eq!(
             ontology_release_unique_violation_message(Some(
                 "idx_ontology_releases_one_active_per_domain"
+            )),
+            "ontology release domain already has an active release"
+        );
+        assert_eq!(
+            ontology_release_unique_violation_message(Some(
+                "idx_ontology_releases_one_current_per_domain"
             )),
             "ontology release domain already has an active release"
         );

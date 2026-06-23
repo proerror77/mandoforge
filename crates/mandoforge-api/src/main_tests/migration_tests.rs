@@ -66,6 +66,7 @@ async fn migration_paths_include_stage2_migrations_in_order() {
     assert!(names.contains(&"0068_remote_computer_active_lease_unique.sql"));
     assert!(names.contains(&"0069_ontology_release_workflow_triggers.sql"));
     assert!(names.contains(&"0070_ontology_release_workflow_trigger_skipped_status.sql"));
+    assert!(names.contains(&"0071_ontology_release_current_status_unique.sql"));
     assert!(
         names.windows(2).all(|window| window[0] <= window[1]),
         "migrations should run lexicographically: {names:?}"

@@ -2044,6 +2044,7 @@ pub(crate) fn status_tone(status: &str) -> &'static str {
         "pending" | "requires_action" | "review" | "warning" | "attention" | "pilot_ready" => {
             "warn"
         }
+        "active_trigger_failed" => "warn",
         "failed" | "blocked" | "critical" | "cancelled" | "rolled_back" => "bad",
         _ => "neutral",
     }
