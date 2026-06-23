@@ -8,7 +8,7 @@ use chrono::Utc;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::authorization::{AuthorizationRequest, Permission};
+use crate::authorization::{AuthorizationRequest, Permission, Role};
 use crate::remote_computer_runner::{
     RemoteComputerRunnerConfig, remote_computer_runner_for_config,
 };
@@ -37,7 +37,7 @@ use crate::{
     record_remote_computer_state_lock_event, remote_computer_runner_request_is_exec,
     remote_computer_runner_response_for_audit, remote_computer_state_sync_base_issues,
     remote_computer_state_sync_controller_configured,
-    remote_computer_state_sync_controller_required,
+    remote_computer_state_sync_controller_required, visible_session_ids_for_principal,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -291,17 +291,121 @@ async fn validate_remote_computer_state_sync(
     }))
 }
 
+async fn authorize_remote_computer_artifact_access(
+    state: &AppState,
+    headers: &HeaderMap,
+    remote_computer_id: Uuid,
+    session_id: Uuid,
+    assignment_id: Option<Uuid>,
+    operation: &str,
+) -> Result<(), AppError> {
+    authorize_request(
+        state,
+        headers,
+        Permission::SessionsRun,
+        "remote_computer",
+        Some(remote_computer_id),
+    )
+    .await?;
+
+    let principal = principal_from_request(state, headers).await?;
+    if principal.roles.contains(&Role::Admin) {
+        return Ok(());
+    }
+
+    let visible_session_ids = visible_session_ids_for_principal(state, &principal).await?;
+    if !visible_session_ids.contains(&session_id) {
+        return Err(AppError::forbidden(format!(
+            "principal {} cannot {} Remote Computer artifacts for session {}",
+            principal.subject_id, operation, session_id
+        )));
+    }
+
+    let leases = state.list_remote_computer_leases().await?;
+    let lease_is_active = |lease_id: Uuid| {
+        leases.iter().any(|lease| {
+            lease.id == lease_id
+                && lease.remote_computer_id == remote_computer_id
+                && lease
+                    .session_id
+                    .is_none_or(|leased_session_id| leased_session_id == session_id)
+                && lease.status == "leased"
+                && lease
+                    .lease_expires_at
+                    .is_none_or(|lease_expires_at| lease_expires_at > Utc::now())
+        })
+    };
+
+    if let Some(assignment_id) = assignment_id {
+        let assignment = state
+            .list_remote_computer_job_assignments()
+            .await?
+            .into_iter()
+            .find(|assignment| assignment.id == assignment_id)
+            .ok_or_else(|| {
+                AppError::forbidden("Remote Computer artifact assignment is not valid")
+            })?;
+        if assignment.remote_computer_id == remote_computer_id
+            && assignment.session_id == session_id
+            && assignment.status == "assigned"
+            && lease_is_active(assignment.lease_id)
+        {
+            return Ok(());
+        }
+        return Err(AppError::forbidden(
+            "Remote Computer artifact assignment is not active for this session",
+        ));
+    }
+
+    let has_active_assignment = state
+        .list_remote_computer_job_assignments()
+        .await?
+        .into_iter()
+        .any(|assignment| {
+            assignment.remote_computer_id == remote_computer_id
+                && assignment.session_id == session_id
+                && assignment.status == "assigned"
+                && lease_is_active(assignment.lease_id)
+        });
+    if has_active_assignment {
+        return Ok(());
+    }
+
+    let has_active_attachment = state
+        .list_remote_computer_attachments()
+        .await?
+        .into_iter()
+        .any(|attachment| {
+            attachment.remote_computer_id == remote_computer_id
+                && attachment.session_id == session_id
+                && attachment.status == "attached"
+                && attachment
+                    .stale_after
+                    .is_none_or(|stale_after| stale_after > Utc::now())
+                && lease_is_active(attachment.lease_id)
+        });
+    if has_active_attachment {
+        return Ok(());
+    }
+
+    Err(AppError::forbidden(format!(
+        "principal {} has no active Remote Computer lease binding for artifact {}",
+        principal.subject_id, operation
+    )))
+}
+
 async fn sync_remote_computer_artifacts(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(input): Json<RemoteComputerArtifactSyncRequest>,
 ) -> Result<Json<RemoteComputerArtifactSyncResponse>, AppError> {
-    authorize_request(
+    authorize_remote_computer_artifact_access(
         &state,
         &headers,
-        Permission::SessionsRun,
-        "remote_computer",
-        Some(input.remote_computer_id),
+        input.remote_computer_id,
+        input.session_id,
+        input.assignment_id,
+        "sync",
     )
     .await?;
     if input.artifacts.is_empty() {
@@ -319,21 +423,6 @@ async fn sync_remote_computer_artifacts(
         .into_iter()
         .find(|computer| computer.id == input.remote_computer_id)
         .ok_or_else(|| AppError::not_found("Remote computer not found"))?;
-    if let Some(assignment_id) = input.assignment_id {
-        let assignment = state
-            .list_remote_computer_job_assignments()
-            .await?
-            .into_iter()
-            .find(|assignment| assignment.id == assignment_id)
-            .ok_or_else(|| AppError::not_found("Remote computer job assignment not found"))?;
-        if assignment.remote_computer_id != input.remote_computer_id
-            || assignment.session_id != input.session_id
-        {
-            return Err(AppError::bad_request(
-                "Remote Computer artifact sync assignment does not match session or remote computer",
-            ));
-        }
-    }
 
     let mut artifacts = Vec::with_capacity(input.artifacts.len());
     for artifact_input in input.artifacts {
@@ -409,12 +498,13 @@ async fn discover_remote_computer_artifacts(
     headers: HeaderMap,
     Json(input): Json<RemoteComputerArtifactDiscoverRequest>,
 ) -> Result<Json<RemoteComputerArtifactSyncResponse>, AppError> {
-    authorize_request(
+    authorize_remote_computer_artifact_access(
         &state,
         &headers,
-        Permission::SessionsRun,
-        "remote_computer",
-        Some(input.remote_computer_id),
+        input.remote_computer_id,
+        input.session_id,
+        input.assignment_id,
+        "discover",
     )
     .await?;
     if input.max_files == 0 || input.max_files > 50 {
@@ -429,21 +519,6 @@ async fn discover_remote_computer_artifacts(
         .into_iter()
         .find(|computer| computer.id == input.remote_computer_id)
         .ok_or_else(|| AppError::not_found("Remote computer not found"))?;
-    if let Some(assignment_id) = input.assignment_id {
-        let assignment = state
-            .list_remote_computer_job_assignments()
-            .await?
-            .into_iter()
-            .find(|assignment| assignment.id == assignment_id)
-            .ok_or_else(|| AppError::not_found("Remote computer job assignment not found"))?;
-        if assignment.remote_computer_id != input.remote_computer_id
-            || assignment.session_id != input.session_id
-        {
-            return Err(AppError::bad_request(
-                "Remote Computer artifact discovery assignment does not match session or remote computer",
-            ));
-        }
-    }
 
     let artifact_dir = normalize_remote_computer_artifact_dir(&input.artifact_dir)?;
     let workspace_path = std::path::PathBuf::from(&remote_computer.workspace_path);

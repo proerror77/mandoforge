@@ -222,6 +222,42 @@ async fn remote_computer_artifact_sync_records_artifacts_events_and_audit() {
             .expect("valid request"),
     )
     .await;
+    let lease: RemoteComputerLease = request_json(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/remote-computers/{}/leases", computer.id))
+            .header("content-type", "application/json")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::from(
+                json!({
+                    "session_id": session.id,
+                    "worker_id": "artifact-sync-worker"
+                })
+                .to_string(),
+            ))
+            .expect("valid request"),
+    )
+    .await;
+    let _attachment: RemoteComputerAttachment = request_json(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/remote-computer-leases/{}/attach", lease.id))
+            .header("content-type", "application/json")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::from(
+                json!({
+                    "session_id": session.id,
+                    "attached_by": "artifact-sync-test"
+                })
+                .to_string(),
+            ))
+            .expect("valid request"),
+    )
+    .await;
 
     let synced: RemoteComputerArtifactSyncResponse = request_json(
         app.clone(),
@@ -283,6 +319,86 @@ async fn remote_computer_artifact_sync_records_artifacts_events_and_audit() {
 }
 
 #[tokio::test]
+async fn remote_computer_artifact_sync_requires_session_binding_for_non_admin() {
+    let app = test_app().await;
+    let agents: Vec<Agent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/agents")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let session: Session = request_json(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri("/api/sessions")
+            .header("content-type", "application/json")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::from(
+                json!({"agent_id": agents[0].id, "title": "remote artifact unauthorized"})
+                    .to_string(),
+            ))
+            .expect("valid request"),
+    )
+    .await;
+    let computer: RemoteComputer = request_json(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri("/api/remote-computers")
+            .header("content-type", "application/json")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::from(
+                json!({
+                    "name": "artifact-sync-unbound-remote-computer",
+                    "profile": "workspace-write"
+                })
+                .to_string(),
+            ))
+            .expect("valid request"),
+    )
+    .await;
+
+    let (status, body) = request_value(
+        app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/remote-computers/artifacts/sync")
+            .header("content-type", "application/json")
+            .header("x-mandoforge-subject", "operator-1")
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::from(
+                json!({
+                    "session_id": session.id,
+                    "remote_computer_id": computer.id,
+                    "artifacts": [{
+                        "name": "diagnostics.md",
+                        "artifact_type": "markdown",
+                        "path": "artifacts/diagnostics.md",
+                        "content": {"markdown": "# Diagnostics"}
+                    }]
+                })
+                .to_string(),
+            ))
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("no active Remote Computer lease binding")),
+        "{body:?}"
+    );
+}
+
+#[tokio::test]
 async fn remote_computer_artifact_discovery_scans_workspace_artifacts() {
     let app = test_app().await;
     let agents: Vec<Agent> = request_json(
@@ -332,6 +448,42 @@ async fn remote_computer_artifact_discovery_scans_workspace_artifacts() {
                     "profile": "workspace-write",
                     "pod_name": "agent-remote-computer-discovery",
                     "workspace_path": workspace_path
+                })
+                .to_string(),
+            ))
+            .expect("valid request"),
+    )
+    .await;
+    let lease: RemoteComputerLease = request_json(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/remote-computers/{}/leases", computer.id))
+            .header("content-type", "application/json")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::from(
+                json!({
+                    "session_id": session.id,
+                    "worker_id": "artifact-discovery-worker"
+                })
+                .to_string(),
+            ))
+            .expect("valid request"),
+    )
+    .await;
+    let _attachment: RemoteComputerAttachment = request_json(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/remote-computer-leases/{}/attach", lease.id))
+            .header("content-type", "application/json")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::from(
+                json!({
+                    "session_id": session.id,
+                    "attached_by": "artifact-discovery-test"
                 })
                 .to_string(),
             ))
