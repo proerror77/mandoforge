@@ -364,7 +364,8 @@ pub(crate) async fn run_execution_job(
             .await;
         }
     }
-    if remote_environment_contract.is_some() && !remote_computer_pod_execution_requested() {
+    let remote_pod_execution_enabled = remote_computer_pod_execution_requested();
+    if remote_environment_contract.is_some() && !remote_pod_execution_enabled {
         let error = AppError::bad_request(
             "remote_computer environment requires enabled Remote Computer execution transport",
         );
@@ -385,68 +386,30 @@ pub(crate) async fn run_execution_job(
         )
         .await;
     }
-    let result = match tool_call.tool_name.as_str() {
-        "file.write"
-            if remote_computer_assignment.is_some()
-                && remote_computer_pod_execution_requested() =>
-        {
-            execute_approved_remote_computer_file_write(
-                state,
-                &approval,
-                &tool_call,
-                remote_computer_assignment
-                    .as_ref()
-                    .expect("checked assignment"),
-            )
-            .await
+    let result = match (
+        tool_call.tool_name.as_str(),
+        remote_computer_assignment.as_ref(),
+        remote_pod_execution_enabled,
+    ) {
+        ("file.write", Some(assignment), true) => {
+            execute_approved_remote_computer_file_write(state, &approval, &tool_call, assignment)
+                .await
         }
-        "file.write" => execute_approved_file_write(state, &approval, &tool_call).await,
-        "shell.exec"
-            if remote_computer_assignment.is_some()
-                && remote_computer_pod_execution_requested() =>
-        {
-            execute_approved_remote_computer_shell(
-                state,
-                &approval,
-                &tool_call,
-                remote_computer_assignment
-                    .as_ref()
-                    .expect("checked assignment"),
-            )
-            .await
+        ("file.write", _, _) => execute_approved_file_write(state, &approval, &tool_call).await,
+        ("shell.exec", Some(assignment), true) => {
+            execute_approved_remote_computer_shell(state, &approval, &tool_call, assignment).await
         }
-        "shell.exec" => execute_approved_shell(state, &approval, &tool_call).await,
-        "codex.exec"
-            if remote_computer_assignment.is_some()
-                && remote_computer_pod_execution_requested() =>
-        {
-            execute_approved_remote_computer_codex(
-                state,
-                &approval,
-                &tool_call,
-                remote_computer_assignment
-                    .as_ref()
-                    .expect("checked assignment"),
-            )
-            .await
+        ("shell.exec", _, _) => execute_approved_shell(state, &approval, &tool_call).await,
+        ("codex.exec", Some(assignment), true) => {
+            execute_approved_remote_computer_codex(state, &approval, &tool_call, assignment).await
         }
-        "codex.exec" => execute_approved_codex(state, &approval, &tool_call).await,
-        "agent_cli.exec"
-            if remote_computer_assignment.is_some()
-                && remote_computer_pod_execution_requested() =>
-        {
-            execute_approved_remote_computer_agent_cli(
-                state,
-                &approval,
-                &tool_call,
-                remote_computer_assignment
-                    .as_ref()
-                    .expect("checked assignment"),
-            )
-            .await
+        ("codex.exec", _, _) => execute_approved_codex(state, &approval, &tool_call).await,
+        ("agent_cli.exec", Some(assignment), true) => {
+            execute_approved_remote_computer_agent_cli(state, &approval, &tool_call, assignment)
+                .await
         }
-        "agent_cli.exec" => execute_approved_agent_cli(state, &approval, &tool_call).await,
-        "mcp.call" => execute_approved_mcp_call(state, &approval, &tool_call).await,
+        ("agent_cli.exec", _, _) => execute_approved_agent_cli(state, &approval, &tool_call).await,
+        ("mcp.call", _, _) => execute_approved_mcp_call(state, &approval, &tool_call).await,
         _ => execute_approved_native_connector_or_generic_tool(state, &approval, &tool_call).await,
     };
     if result.is_ok() {
@@ -1036,10 +999,9 @@ async fn auto_assign_remote_computer_for_job(
     worker_id: &str,
     environment_contract: Option<&RemoteComputerEnvironmentContract>,
 ) -> Result<Option<RemoteComputerJobAssignment>, AppError> {
-    if environment_contract.is_none() {
+    let Some(contract) = environment_contract else {
         return Ok(None);
-    }
-    let contract = environment_contract.expect("checked remote computer contract");
+    };
     let active_assignments: Vec<_> = state
         .list_remote_computer_job_assignments()
         .await?
