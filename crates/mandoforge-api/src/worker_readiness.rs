@@ -1,8 +1,9 @@
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::{
-    WorkerK8sReadiness, WorkerQueueBackendReadiness, manifest_has_kind_name,
-    network_policy_targets_app, project_file_path, read_yaml_manifest_value,
+    K8sAutoscalingManifest, WorkerAutoscalingReadiness, WorkerK8sReadiness,
+    WorkerQueueBackendReadiness, env_i64, manifest_has_kind_name, network_policy_targets_app,
+    project_file_path, read_yaml_manifest_value,
 };
 
 pub(crate) fn worker_queue_backend_readiness(kind: &str) -> WorkerQueueBackendReadiness {
@@ -154,4 +155,115 @@ pub(crate) fn worker_k8s_readiness_from_manifests() -> WorkerK8sReadiness {
         scheduler_manifest_present: project_file_path(scheduler_manifest_path).is_some(),
         scheduler_manifest_path: scheduler_manifest_path.to_string(),
     }
+}
+
+pub(crate) fn worker_autoscaling_readiness_from_manifests(
+    paths: &[&str],
+) -> WorkerAutoscalingReadiness {
+    let mut autoscaling_manifest_paths = Vec::new();
+    let mut configured_min_replicas = env_i64("MANDOFORGE_WORKER_MIN_REPLICAS");
+    let mut configured_max_replicas = env_i64("MANDOFORGE_WORKER_MAX_REPLICAS");
+    let mut scale_target_refs = Vec::new();
+    let mut trigger_types = Vec::new();
+    let mut queue_depth_scaling_present = false;
+
+    for path in paths {
+        let Some(resolved_path) = project_file_path(path) else {
+            continue;
+        };
+        autoscaling_manifest_paths.push((*path).to_string());
+        let Ok(content) = std::fs::read_to_string(resolved_path) else {
+            continue;
+        };
+        let Ok(manifest) = serde_yaml::from_str::<K8sAutoscalingManifest>(&content) else {
+            continue;
+        };
+        let Some(spec) = manifest.spec else {
+            continue;
+        };
+        if let Some(min_replicas) = spec.min_replicas.or(spec.min_replica_count) {
+            configured_min_replicas = Some(
+                configured_min_replicas
+                    .map(|current| current.min(min_replicas))
+                    .unwrap_or(min_replicas),
+            );
+        }
+        if let Some(max_replicas) = spec.max_replicas.or(spec.max_replica_count) {
+            configured_max_replicas = Some(
+                configured_max_replicas
+                    .map(|current| current.max(max_replicas))
+                    .unwrap_or(max_replicas),
+            );
+        }
+        if let Some(target) = spec.scale_target_ref {
+            let kind = target.kind.unwrap_or_else(|| "unknown".to_string());
+            let name = target.name.unwrap_or_else(|| "unknown".to_string());
+            scale_target_refs.push(format!("{kind}/{name}"));
+        } else if let Some(kind) = manifest.kind {
+            scale_target_refs.push(format!("{kind}/unknown"));
+        }
+        for trigger in spec.triggers.unwrap_or_default() {
+            let trigger_type = trigger
+                .trigger_type
+                .unwrap_or_else(|| "unknown".to_string());
+            let metadata = trigger.metadata.unwrap_or_else(|| json!({}));
+            if trigger_type == "prometheus"
+                && metadata
+                    .get("query")
+                    .and_then(Value::as_str)
+                    .is_some_and(|query| {
+                        query.contains("mandoforge_execution_jobs_queued")
+                            || query.contains("queue_depth")
+                    })
+            {
+                queue_depth_scaling_present = true;
+            }
+            trigger_types.push(trigger_type);
+        }
+    }
+
+    let validation_status = if autoscaling_manifest_paths.is_empty() {
+        "missing"
+    } else if queue_depth_scaling_present
+        && scale_target_refs
+            .iter()
+            .any(|target| target == "Deployment/mandoforge-worker")
+    {
+        "queue_depth_configured"
+    } else {
+        "skeleton"
+    }
+    .to_string();
+
+    WorkerAutoscalingReadiness {
+        autoscaling_manifest_present: !autoscaling_manifest_paths.is_empty(),
+        autoscaling_manifest_paths,
+        configured_min_replicas,
+        configured_max_replicas,
+        scale_target_refs,
+        trigger_types,
+        queue_depth_scaling_present,
+        validation_status,
+    }
+}
+
+pub(crate) fn worker_isolated_pool_configured_from_manifests() -> bool {
+    let isolated_deployment_path = "deploy/k8s/worker-isolated-pool.yaml";
+    let isolated_network_policy_path = "deploy/k8s/worker-isolated-pool-networkpolicy.yaml";
+    let isolated_keda_path = "deploy/k8s/worker-isolated-pool-keda.yaml";
+    let deployment_present = manifest_has_kind_name(
+        isolated_deployment_path,
+        "Deployment",
+        "mandoforge-worker-isolated",
+    );
+    let network_policy_present =
+        network_policy_targets_app(isolated_network_policy_path, "mandoforge-worker-isolated");
+    let autoscaling = worker_autoscaling_readiness_from_manifests(&[isolated_keda_path]);
+    deployment_present
+        && network_policy_present
+        && autoscaling.queue_depth_scaling_present
+        && autoscaling
+            .scale_target_refs
+            .iter()
+            .any(|target| target == "Deployment/mandoforge-worker-isolated")
 }
