@@ -2,6 +2,7 @@ use serde_json::{Value, json};
 
 use crate::{
     K8sAutoscalingManifest, WorkerAutoscalingReadiness, WorkerK8sReadiness,
+    WorkerLoadValidationEvidence, WorkerModeReadiness, WorkerProductionOpsReadiness,
     WorkerQueueBackendReadiness, env_i64, manifest_has_kind_name, network_policy_targets_app,
     project_file_path, read_yaml_manifest_value,
 };
@@ -266,4 +267,78 @@ pub(crate) fn worker_isolated_pool_configured_from_manifests() -> bool {
             .scale_target_refs
             .iter()
             .any(|target| target == "Deployment/mandoforge-worker-isolated")
+}
+
+pub(crate) fn build_worker_production_ops_readiness(
+    queue_backend: &WorkerQueueBackendReadiness,
+    worker_mode: &WorkerModeReadiness,
+    k8s: &WorkerK8sReadiness,
+    autoscaling: &WorkerAutoscalingReadiness,
+    load_validation: &WorkerLoadValidationEvidence,
+    failed_jobs: usize,
+    stale_leases: usize,
+) -> WorkerProductionOpsReadiness {
+    let durable_queue = queue_backend.durable;
+    let queue_worker_mode = worker_mode.mode == "queue";
+    let hardened_worker_pod = k8s.hardening_status == "hardened";
+    let queue_depth_autoscaling = autoscaling.validation_status == "queue_depth_configured";
+    let no_failed_jobs = failed_jobs == 0;
+    let no_stale_leases = stale_leases == 0;
+    let mut blocking_reasons = Vec::new();
+
+    if !durable_queue {
+        blocking_reasons.push("execution queue is not durable".to_string());
+    }
+    if !queue_worker_mode {
+        blocking_reasons.push("runtime is not using queue-backed worker mode".to_string());
+    }
+    if !hardened_worker_pod {
+        blocking_reasons.push("worker Pod hardening is incomplete".to_string());
+    }
+    if !queue_depth_autoscaling {
+        blocking_reasons.push("queue-depth autoscaling is not configured".to_string());
+    }
+    if !load_validation.load_validated {
+        blocking_reasons.push("production-like worker load validation has not passed".to_string());
+    }
+    if !load_validation.isolated_worker_pool_configured {
+        blocking_reasons.push("isolated worker pool is not configured".to_string());
+    }
+    if !no_failed_jobs {
+        blocking_reasons.push("failed execution jobs require triage".to_string());
+    }
+    if !no_stale_leases {
+        blocking_reasons.push("stale worker leases require reclaim".to_string());
+    }
+
+    let production_blocked = !blocking_reasons.is_empty();
+    let status = if production_blocked {
+        "blocked"
+    } else {
+        "ready"
+    }
+    .to_string();
+    let message = if production_blocked {
+        format!(
+            "Worker production ops are blocked: {}",
+            blocking_reasons.join("; ")
+        )
+    } else {
+        "Worker production ops have a durable queue, queue worker mode, hardened Pod, queue-depth autoscaling, isolated pool, and validated load evidence".to_string()
+    };
+
+    WorkerProductionOpsReadiness {
+        status,
+        production_blocked,
+        durable_queue,
+        queue_worker_mode,
+        hardened_worker_pod,
+        queue_depth_autoscaling,
+        load_validated: load_validation.load_validated,
+        isolated_worker_pool_configured: load_validation.isolated_worker_pool_configured,
+        no_failed_jobs,
+        no_stale_leases,
+        blocking_reasons,
+        message,
+    }
 }
