@@ -77,6 +77,7 @@ mod state;
 mod stage2_readiness;
 mod runtime_config;
 mod telemetry_events;
+mod tenant_runtime_context;
 mod types;
 mod store_agent_handoffs;
 mod store_approval_groups;
@@ -646,18 +647,6 @@ fn build_router(state: AppState) -> Router {
         .layer(middleware::from_fn(security_headers_middleware))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
-}
-
-impl AppState {
-    fn configured_tenant_id(&self) -> Uuid {
-        let Self { tenant_id, .. } = self;
-        *tenant_id
-    }
-
-    fn current_tenant_id(&self) -> Uuid {
-        current_request_tenant_id(self.configured_tenant_id())
-    }
-
 }
 
 #[cfg(test)]
