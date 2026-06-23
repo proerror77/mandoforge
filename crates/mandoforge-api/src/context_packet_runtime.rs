@@ -1,7 +1,9 @@
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
+use axum::http::HeaderMap;
 use chrono::Utc;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::*;
@@ -2219,4 +2221,1011 @@ impl ToolExecutor for OntologyTypeLookupTool {
         record_ontology_type_lookup(state, &packet, &result).await?;
         Ok(result)
     }
+}
+
+pub(crate) async fn context_packet_for_tool_invocation(
+    state: &AppState,
+    input: &ExecuteTool,
+) -> Result<ContextPacket, AppError> {
+    context_packet_and_grant_for_tool_invocation(state, input)
+        .await
+        .map(|(packet, _)| packet)
+}
+
+pub(crate) async fn context_packet_and_grant_for_tool_invocation(
+    state: &AppState,
+    input: &ExecuteTool,
+) -> Result<(ContextPacket, Option<TaskGrant>), AppError> {
+    let context_packet_id = uuid_tool_arg(
+        &input.args,
+        &["context_packet_id"],
+        "ontology tools require context_packet_id",
+    )?;
+    let packet = state.get_context_packet(context_packet_id).await?;
+    if packet.session_id != input.session_id {
+        return Err(AppError::forbidden(
+            "context_packet_id does not belong to this session",
+        ));
+    }
+    if let Some(task_grant_id) = input.task_grant_id {
+        let grant = state.get_task_grant(task_grant_id).await?;
+        match grant.context_packet_id {
+            Some(bound_packet_id) if bound_packet_id == packet.id => {}
+            Some(_) => {
+                return Err(AppError::forbidden(
+                    "context_packet_id is outside the active TaskGrant boundary",
+                ));
+            }
+            None => {
+                return Err(AppError::forbidden(
+                    "ontology tools require a TaskGrant-bound context_packet_id",
+                ));
+            }
+        }
+        return Ok((packet, Some(grant)));
+    }
+    Ok((packet, None))
+}
+
+pub(crate) fn uuid_tool_arg(
+    args: &Value,
+    keys: &[&str],
+    missing_message: &str,
+) -> Result<Uuid, AppError> {
+    for key in keys {
+        if let Some(value) = args.get(*key).and_then(Value::as_str) {
+            return Uuid::parse_str(value)
+                .map_err(|_| AppError::bad_request(format!("{key} must be a UUID")));
+        }
+    }
+    Err(AppError::bad_request(missing_message))
+}
+
+pub(crate) async fn record_ontology_type_lookup(
+    state: &AppState,
+    packet: &ContextPacket,
+    result: &Value,
+) -> Result<(), AppError> {
+    let details = json!({
+        "context_packet_id": packet.id,
+        "context_packet_version": packet.version,
+        "registry_version": result.get("registry_version").cloned().unwrap_or(Value::Null),
+        "registry_scope": result.get("registry_scope").cloned().unwrap_or(Value::Null),
+        "requested_name": result.get("requested_name").cloned().unwrap_or(Value::Null),
+        "kind": result.get("kind").cloned().unwrap_or(Value::Null),
+        "object_type_count": result
+            .get("object_types")
+            .and_then(Value::as_array)
+            .map(|values| values.len())
+            .unwrap_or(0),
+        "relation_type_count": result
+            .get("relation_types")
+            .and_then(Value::as_array)
+            .map(|values| values.len())
+            .unwrap_or(0),
+    });
+    state
+        .append_event(
+            "tool",
+            Some(packet.id),
+            packet.session_id,
+            "ontology_type.looked_up",
+            details.clone(),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(packet.session_id),
+            "tool",
+            Some(packet.id),
+            "ontology_type.looked_up",
+            "context_packet",
+            Some(packet.id),
+            details,
+        ))
+        .await?;
+    Ok(())
+}
+
+pub(crate) fn tool_registry() -> HashMap<&'static str, Box<dyn ToolExecutor>> {
+    let tools: Vec<Box<dyn ToolExecutor>> = vec![
+        Box::new(ArtifactCreateTool),
+        Box::new(ApprovalRequestTool),
+        Box::new(FileReadTool),
+        Box::new(McpCallTool),
+        Box::new(OntologyTypeLookupTool),
+        Box::new(SemanticLinkExpandTool),
+        Box::new(SemanticObjectFetchTool),
+        Box::new(SemanticObjectSearchTool),
+        Box::new(ShellExecTool),
+        Box::new(SqlSchemaTool),
+        Box::new(SqlQueryTool),
+    ];
+    tools
+        .into_iter()
+        .map(|tool| (tool.descriptor().name, tool))
+        .collect()
+}
+
+pub(crate) fn host_shell_exec_allowed_for_inline_tool() -> bool {
+    std::env::var("MANDOFORGE_ALLOW_HOST_SHELL_EXEC")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
+}
+
+pub(crate) fn tool_descriptors() -> Vec<ToolDescriptor> {
+    let mut descriptors: Vec<_> = tool_registry()
+        .into_values()
+        .map(|tool| tool.descriptor())
+        .collect();
+    descriptors.extend([
+        ToolDescriptor {
+            name: "file.write",
+            risk: "medium",
+            description: "Write files inside the session workspace after approval",
+        },
+        ToolDescriptor {
+            name: "codex.exec",
+            risk: "high",
+            description: "Run Codex CLI in a session workspace",
+        },
+        ToolDescriptor {
+            name: "agent_cli.exec",
+            risk: "high",
+            description: "Run an allowlisted coding-agent CLI profile in a session workspace",
+        },
+        ToolDescriptor {
+            name: "native.connector.call",
+            risk: "high",
+            description: "Commit a native connector side effect through scoped approval-token binding",
+        },
+    ]);
+    descriptors.sort_by_key(|descriptor| descriptor.name);
+    descriptors
+}
+
+pub(crate) async fn authorize_tool_execution(
+    state: &AppState,
+    headers: &HeaderMap,
+    tool_name: &str,
+) -> Result<(), AppError> {
+    let principal = principal_from_request(state, headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.current_tenant_id(),
+        permission: Permission::ToolsExecute,
+        resource_type: format!("tool:{tool_name}"),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await
+}
+
+pub(crate) async fn principal_from_request(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<Principal, AppError> {
+    let tenant_id = resolve_request_tenant_id(state, headers)?;
+    if worker_token_authenticated(headers) {
+        return Ok(Principal {
+            tenant_id,
+            subject_id: header_value(headers, "x-mandoforge-subject")
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("mandoforge-worker")
+                .to_string(),
+            roles: vec![Role::Worker],
+        });
+    }
+
+    let dev_token_authenticated = dev_admin_token_authenticated(headers);
+    if dev_token_authenticated {
+        return Ok(Principal {
+            tenant_id,
+            subject_id: header_value(headers, "x-mandoforge-subject")
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("dev-admin")
+                .to_string(),
+            roles: vec![Role::Admin],
+        });
+    }
+
+    let insecure_dev_auth = insecure_dev_auth_enabled();
+    let trusted_subject_header = trusted_subject_header_enabled();
+    let Some(explicit_subject) = header_value(headers, "x-mandoforge-subject") else {
+        if insecure_dev_auth {
+            let roles = if let Some(value) = header_value(headers, "x-mandoforge-roles") {
+                parse_roles_header(value)?
+            } else {
+                vec![Role::Operator]
+            };
+            return Ok(Principal {
+                tenant_id,
+                subject_id: "demo-operator".to_string(),
+                roles,
+            });
+        }
+        return Err(AppError::unauthorized(
+            "x-mandoforge-subject header is required",
+        ));
+    };
+    if !insecure_dev_auth && !trusted_subject_header {
+        return Err(AppError::unauthorized(
+            "x-mandoforge-subject is only accepted from trusted identity ingress",
+        ));
+    }
+    let subject_id = explicit_subject.trim().to_string();
+    if subject_id.is_empty() {
+        return Err(AppError::bad_request(
+            "x-mandoforge-subject header cannot be empty",
+        ));
+    }
+    let roles = if insecure_dev_auth {
+        if let Some(value) = header_value(headers, "x-mandoforge-roles") {
+            parse_roles_header(value)?
+        } else {
+            state.membership_roles_for_subject(&subject_id).await?
+        }
+    } else if header_value(headers, "x-mandoforge-roles").is_some() {
+        return Err(AppError::forbidden(
+            "x-mandoforge-roles is only accepted in explicit insecure dev auth mode",
+        ));
+    } else {
+        state.membership_roles_for_subject(&subject_id).await?
+    };
+    if roles.is_empty() {
+        return Err(AppError::forbidden("principal has no roles"));
+    }
+
+    Ok(Principal {
+        tenant_id,
+        subject_id,
+        roles,
+    })
+}
+
+pub(crate) fn dev_admin_token_authenticated(headers: &HeaderMap) -> bool {
+    let Some(expected) = std::env::var("MANDOFORGE_DEV_ADMIN_TOKEN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+    let Some(header) = header_value(headers, "authorization") else {
+        return false;
+    };
+    let Some(token) = header.trim().strip_prefix("Bearer ") else {
+        return false;
+    };
+    token.trim() == expected
+}
+
+pub(crate) fn worker_token_authenticated(headers: &HeaderMap) -> bool {
+    let Some(expected) = std::env::var("MANDOFORGE_WORKER_TOKEN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+    let Some(header) = header_value(headers, "authorization") else {
+        return false;
+    };
+    let Some(token) = header.trim().strip_prefix("Bearer ") else {
+        return false;
+    };
+    token.trim() == expected
+}
+
+pub(crate) fn insecure_dev_auth_enabled() -> bool {
+    std::env::var("MANDOFORGE_INSECURE_DEV_AUTH")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(cfg!(test))
+}
+
+pub(crate) fn trusted_tenant_header_enabled() -> bool {
+    std::env::var("MANDOFORGE_TRUST_X_MANDOFORGE_TENANT_ID")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
+pub(crate) fn trusted_subject_header_enabled() -> bool {
+    std::env::var("MANDOFORGE_TRUST_X_MANDOFORGE_SUBJECT")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
+#[allow(dead_code)]
+pub(crate) async fn legacy_principal_from_request(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<Principal, AppError> {
+    let tenant_id = resolve_request_tenant_id(state, headers)?;
+    let explicit_subject = header_value(headers, "x-mandoforge-subject");
+    let subject_id = explicit_subject.unwrap_or("demo-operator").to_string();
+    let roles = if let Some(value) = header_value(headers, "x-mandoforge-roles") {
+        parse_roles_header(value)?
+    } else if explicit_subject.is_some() {
+        state.membership_roles_for_subject(&subject_id).await?
+    } else {
+        vec![Role::Operator]
+    };
+    if roles.is_empty() {
+        return Err(AppError::forbidden("principal has no roles"));
+    }
+
+    Ok(Principal {
+        tenant_id,
+        subject_id,
+        roles,
+    })
+}
+
+pub(crate) fn resolve_request_tenant_id(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<Uuid, AppError> {
+    let requested_tenant_id = header_value(headers, "x-mandoforge-tenant-id")
+        .map(|value| {
+            Uuid::parse_str(value.trim())
+                .map_err(|_| AppError::bad_request("x-mandoforge-tenant-id must be a valid UUID"))
+        })
+        .transpose()?;
+
+    match (state.tenant_runtime_mode, requested_tenant_id) {
+        (TenantRuntimeMode::TenantRouted, Some(tenant_id))
+            if insecure_dev_auth_enabled() || trusted_tenant_header_enabled() =>
+        {
+            Ok(tenant_id)
+        }
+        (TenantRuntimeMode::TenantRouted, Some(_)) => Err(AppError::forbidden(
+            "x-mandoforge-tenant-id is only accepted from trusted tenant-routing ingress",
+        )),
+        (TenantRuntimeMode::TenantRouted, None) => Ok(state.configured_tenant_id()),
+        (TenantRuntimeMode::SingleRuntimeTenant, Some(tenant_id)) => {
+            if tenant_id != state.configured_tenant_id() {
+                return Err(AppError::forbidden(
+                    "x-mandoforge-tenant-id does not match this runtime tenant",
+                ));
+            }
+            Ok(tenant_id)
+        }
+        (TenantRuntimeMode::SingleRuntimeTenant, None) => Ok(state.configured_tenant_id()),
+    }
+}
+
+pub(crate) fn subject_from_headers(headers: &HeaderMap) -> Result<String, AppError> {
+    let Some(subject) = header_value(headers, "x-mandoforge-subject") else {
+        return Err(AppError::bad_request(
+            "x-mandoforge-subject header is required",
+        ));
+    };
+    let subject = subject.trim();
+    if subject.is_empty() {
+        return Err(AppError::bad_request(
+            "x-mandoforge-subject header cannot be empty",
+        ));
+    }
+    Ok(subject.to_string())
+}
+
+pub(crate) fn header_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers.get(name).and_then(|value| value.to_str().ok())
+}
+
+pub(crate) fn parse_roles_header(value: &str) -> Result<Vec<Role>, AppError> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|role| !role.is_empty())
+        .map(|role| match role {
+            "admin" => Ok(Role::Admin),
+            "operator" => Ok(Role::Operator),
+            "worker" => Ok(Role::Worker),
+            "approver" => Ok(Role::Approver),
+            "viewer" => Ok(Role::Viewer),
+            other => Err(AppError::bad_request(format!(
+                "unsupported x-mandoforge-roles value: {other}"
+            ))),
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolInvocationOrigin {
+    ManualRoute,
+    SessionLoop,
+}
+
+pub(crate) fn task_grant_requires_approval_commit_token(
+    grant: &TaskGrant,
+    tool_name: &str,
+) -> bool {
+    grant.connector_scope.get("mode").and_then(Value::as_str) == Some("commit_write")
+        && (tool_name == "mcp.call"
+            || native_connector_tool_name(tool_name)
+            || json_string_array_contains(grant.tool_scope.get("external_write"), tool_name))
+}
+
+pub(crate) fn approval_commit_binding_for_invocation(
+    tool_name: &str,
+    args: &Value,
+    grant: Option<&TaskGrant>,
+) -> Result<Option<ApprovalCommitBinding>, AppError> {
+    let Some(grant) = grant else {
+        return Ok(None);
+    };
+    if !task_grant_requires_approval_commit_token(grant, tool_name) {
+        return Ok(None);
+    }
+    Ok(Some(approval_commit_binding_for_args(tool_name, args)?))
+}
+
+pub(crate) fn approval_commit_binding_for_args(
+    tool_name: &str,
+    args: &Value,
+) -> Result<ApprovalCommitBinding, AppError> {
+    Ok(ApprovalCommitBinding {
+        normalized_args_hash: normalized_json_sha256(args),
+        target_binding: connector_target_binding(tool_name, args)?,
+    })
+}
+
+pub(crate) fn normalized_json_sha256(value: &Value) -> String {
+    let text = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
+    let mut hasher = Sha256::new();
+    hasher.update(text.as_bytes());
+    let digest = hasher.finalize();
+    let hex = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("sha256:{hex}")
+}
+
+pub(crate) fn mcp_call_target_binding(args: &Value) -> Result<Value, AppError> {
+    let request: McpCallRequest = serde_json::from_value(args.clone())?;
+    let mut binding = serde_json::Map::new();
+    binding.insert("server".to_string(), json!(request.server));
+    binding.insert("tool".to_string(), json!(request.tool));
+    if let Some(object) = request.args.as_object() {
+        binding.insert(
+            "payload_digest".to_string(),
+            json!(normalized_json_sha256(&request.args)),
+        );
+        for key in [
+            "side_effect_class",
+            "account",
+            "channel",
+            "recipient",
+            "resource_id",
+            "campaign_id",
+            "ad_account_id",
+            "amount",
+            "amount_usd",
+            "currency",
+            "spend_limit",
+            "spend_limit_usd",
+            "context_packet_id",
+        ] {
+            if let Some(value) = object.get(key) {
+                binding.insert(key.to_string(), value.clone());
+            }
+        }
+        if let Some(content_digest) = object.get("content_digest") {
+            binding.insert("content_digest".to_string(), content_digest.clone());
+        } else if let Some(content) = [
+            "content", "body", "text", "message", "post", "creative", "caption",
+        ]
+        .iter()
+        .find_map(|key| object.get(*key))
+        {
+            binding.insert(
+                "content_digest".to_string(),
+                json!(normalized_json_sha256(content)),
+            );
+        }
+    }
+    Ok(Value::Object(binding))
+}
+
+pub(crate) fn connector_target_binding(tool_name: &str, args: &Value) -> Result<Value, AppError> {
+    if tool_name == "mcp.call" {
+        return mcp_call_target_binding(args);
+    }
+    native_connector_target_binding(tool_name, args)
+}
+
+pub(crate) fn native_connector_tool_name(tool_name: &str) -> bool {
+    tool_name == "native.connector.call" || tool_name.starts_with("native.")
+}
+
+pub(crate) fn native_connector_target_binding(
+    tool_name: &str,
+    args: &Value,
+) -> Result<Value, AppError> {
+    let target = native_connector_call_target(args)?;
+    let object = args
+        .as_object()
+        .ok_or_else(|| AppError::bad_request("native connector args must be a JSON object"))?;
+    let payload = object.get("payload").unwrap_or(args);
+    let mut binding = serde_json::Map::new();
+    binding.insert("tool".to_string(), json!(tool_name));
+    binding.insert("connector_id".to_string(), json!(target.connector_id));
+    binding.insert("operation".to_string(), json!(target.operation));
+    binding.insert(
+        "side_effect_class".to_string(),
+        json!(target.side_effect_class),
+    );
+    binding.insert(
+        "payload_digest".to_string(),
+        json!(normalized_json_sha256(payload)),
+    );
+    for key in [
+        "account",
+        "resource_id",
+        "campaign_id",
+        "ad_account_id",
+        "amount",
+        "amount_usd",
+        "currency",
+        "spend_limit",
+        "spend_limit_usd",
+        "context_packet_id",
+    ] {
+        if let Some(value) = object.get(key) {
+            binding.insert(key.to_string(), value.clone());
+        }
+    }
+    if let Some(content_digest) = object.get("content_digest") {
+        binding.insert("content_digest".to_string(), content_digest.clone());
+    } else if let Some(content) = payload.as_object().and_then(|payload| {
+        [
+            "content", "body", "text", "message", "post", "creative", "caption",
+        ]
+        .iter()
+        .find_map(|key| payload.get(*key))
+    }) {
+        binding.insert(
+            "content_digest".to_string(),
+            json!(normalized_json_sha256(content)),
+        );
+    }
+    Ok(Value::Object(binding))
+}
+
+pub(crate) async fn refresh_tool_call_commit_binding_if_required(
+    state: &AppState,
+    tool_call: ToolCall,
+) -> Result<ToolCall, AppError> {
+    let Some(task_grant_id) = tool_call.task_grant_id else {
+        return Ok(tool_call);
+    };
+    let grant = state.get_task_grant(task_grant_id).await?;
+    if !task_grant_requires_approval_commit_token(&grant, &tool_call.tool_name) {
+        return Ok(tool_call);
+    }
+    let binding = approval_commit_binding_for_args(&tool_call.tool_name, &tool_call.args)?;
+    state
+        .update_tool_call_commit_binding(
+            tool_call.id,
+            Some(binding.normalized_args_hash),
+            binding.target_binding,
+        )
+        .await
+}
+
+pub(crate) async fn execute_tool_invocation(
+    state: &AppState,
+    name: &str,
+    input: ExecuteTool,
+    origin: ToolInvocationOrigin,
+) -> Result<Value, AppError> {
+    let task_grant = enforce_task_grant_for_tool_invocation(state, name, &input).await?;
+    let agent_version = state.agent_version_for_session(input.session_id).await?;
+    let policy = state.policy_for_session(input.session_id).await;
+    let mut policy_decision =
+        policy.evaluate_tool_for_agent_version_with_args(name, &input.args, &agent_version);
+    let commit_binding =
+        approval_commit_binding_for_invocation(name, &input.args, task_grant.as_ref())?;
+    if commit_binding.is_some() && policy_decision.decision != "denied" {
+        policy_decision.decision = "requires_approval";
+        policy_decision.risk_level = "critical".to_string();
+        policy_decision.reason =
+            "commit_write connector calls require ApprovalCommitToken exact digest binding"
+                .to_string();
+    }
+    let session = state.get_session(input.session_id).await?;
+    let agent = state.get_agent(session.agent_id).await?;
+    let semantic_context_gate = evaluate_semantic_context_gate(
+        state,
+        &agent,
+        task_grant.as_ref(),
+        &input,
+        &policy_decision.risk_level,
+        policy_decision.decision,
+    )
+    .await?;
+    let semantic_context_gate_blocked = semantic_context_gate
+        .as_ref()
+        .and_then(|gate| gate.get("status"))
+        .and_then(Value::as_str)
+        == Some("blocked");
+    let mut policy_decision_payload = json!({
+        "decision": policy_decision.decision,
+        "reason": policy_decision.reason.clone(),
+        "agent_version_id": agent_version.id,
+        "agent_version": agent_version.version,
+    });
+    if let Some(gate) = semantic_context_gate.clone() {
+        policy_decision_payload["semantic_context_gate"] = gate;
+    }
+    if let Some(binding) = commit_binding.as_ref() {
+        policy_decision_payload["approval_commit_binding"] = json!({
+            "normalized_args_hash": binding.normalized_args_hash,
+            "target_binding": binding.target_binding
+        });
+    }
+    let call_event = state
+        .append_event(
+            "tool",
+            None,
+            input.session_id,
+            "tool.call",
+            json!({"tool": name, "args": input.args.clone(), "agent_version_id": agent_version.id, "agent_version": agent_version.version}),
+        )
+        .await?;
+    state
+        .append_event(
+            "agent",
+            Some(call_event.id),
+            input.session_id,
+            "agent.tool_use",
+            json!({
+                "event_id": call_event.id,
+                "tool": name,
+                "args": input.args.clone(),
+                "agent_version_id": agent_version.id,
+                "agent_version": agent_version.version
+            }),
+        )
+        .await?;
+    let tool_call = state
+        .insert_tool_call(ToolCall {
+            id: Uuid::new_v4(),
+            session_id: input.session_id,
+            event_id: Some(call_event.id),
+            tool_name: name.to_string(),
+            args: input.args.clone(),
+            task_grant_id: task_grant.as_ref().map(|grant| grant.id),
+            normalized_args_hash: commit_binding
+                .as_ref()
+                .map(|binding| binding.normalized_args_hash.clone()),
+            target_binding: commit_binding
+                .as_ref()
+                .map(|binding| binding.target_binding.clone())
+                .unwrap_or_else(empty_json_object),
+            status: if semantic_context_gate_blocked {
+                "denied"
+            } else {
+                match policy_decision.decision {
+                    "allowed" => "running",
+                    "requires_approval" => "waiting_approval",
+                    "denied" => "denied",
+                    _ => "denied",
+                }
+            }
+            .to_string(),
+            risk_level: policy_decision.risk_level.clone(),
+            policy_decision: policy_decision_payload,
+            result: None,
+            error: None,
+            started_at: if policy_decision.decision == "allowed" && !semantic_context_gate_blocked {
+                Some(Utc::now())
+            } else {
+                None
+            },
+            completed_at: None,
+            created_at: Utc::now(),
+        })
+        .await?;
+
+    if let Some(gate) = semantic_context_gate
+        .as_ref()
+        .filter(|gate| gate.get("status").and_then(Value::as_str) == Some("blocked"))
+    {
+        let reason = semantic_context_gate_block_reason(gate);
+        let result = json!({
+            "status": "denied",
+            "reason": reason,
+            "semantic_context_gate": gate,
+        });
+        state
+            .append_event(
+                "system",
+                Some(tool_call.id),
+                input.session_id,
+                "semantic_context.gate_failed",
+                json!({"tool_call_id": tool_call.id, "tool": name, "content": result}),
+            )
+            .await?;
+        state
+            .update_tool_call_status(tool_call.id, "denied", Some(result.clone()), None)
+            .await?;
+        state
+            .append_audit_log(new_audit_log(
+                Some(input.session_id),
+                "system",
+                Some(tool_call.id),
+                "semantic_context.gate_failed",
+                "tool_call",
+                Some(tool_call.id),
+                json!({
+                    "tool": name,
+                    "risk_level": policy_decision.risk_level.clone(),
+                    "status": "denied",
+                    "semantic_context_gate": gate,
+                }),
+            ))
+            .await?;
+        return Err(AppError::forbidden(reason));
+    }
+
+    if policy_decision.decision == "denied" {
+        let result = json!({"status": "denied", "reason": policy_decision.reason.clone()});
+        state
+            .append_event(
+                "system",
+                Some(tool_call.id),
+                input.session_id,
+                "policy.denied",
+                json!({"tool_call_id": tool_call.id, "tool": name, "content": result}),
+            )
+            .await?;
+        state
+            .update_tool_call_status(tool_call.id, "denied", Some(result.clone()), None)
+            .await?;
+        state
+            .append_audit_log(new_audit_log(
+                Some(input.session_id),
+                "system",
+                Some(tool_call.id),
+                "policy.denied",
+                "tool_call",
+                Some(tool_call.id),
+                json!({"tool": name, "risk_level": policy_decision.risk_level.clone(), "status": "denied"}),
+            ))
+            .await?;
+        return Err(AppError::forbidden(
+            result["reason"].as_str().unwrap_or("tool denied"),
+        ));
+    }
+
+    if policy_decision.decision == "requires_approval" {
+        let created_at = Utc::now();
+        let approval = Approval {
+            id: Uuid::new_v4(),
+            session_id: input.session_id,
+            tool_call_id: Some(tool_call.id),
+            action: name.to_string(),
+            risk_level: policy_decision.risk_level.clone(),
+            reason: policy_decision.reason.clone(),
+            evidence: json!({
+                "tool": name,
+                "args": input.args,
+                "task_grant_id": task_grant.as_ref().map(|grant| grant.id),
+                "approval_commit_binding": commit_binding.as_ref().map(|binding| json!({
+                    "normalized_args_hash": binding.normalized_args_hash,
+                    "target_binding": binding.target_binding
+                }))
+            }),
+            decision_payload: json!({}),
+            status: "pending".to_string(),
+            expires_at: approval_expires_at(created_at, None),
+            created_at,
+            decided_at: None,
+        };
+        let approval = state.insert_approval(approval).await?;
+        let result = json!({
+            "status": "approval_required",
+            "approval_id": approval.id,
+            "reason": policy_decision.reason.clone()
+        });
+        state
+            .append_event(
+                "system",
+                Some(tool_call.id),
+                input.session_id,
+                "policy.requires_approval",
+                json!({"tool_call_id": tool_call.id, "tool": name, "approval_id": approval.id, "content": result}),
+            )
+            .await?;
+        state
+            .update_tool_call_status(tool_call.id, "waiting_approval", Some(result.clone()), None)
+            .await?;
+        state
+            .append_audit_log(new_audit_log(
+                Some(input.session_id),
+                "system",
+                Some(tool_call.id),
+                "policy.requires_approval",
+                "tool_call",
+                Some(tool_call.id),
+                json!({"tool": name, "risk_level": policy_decision.risk_level.clone(), "status": "waiting_approval", "approval_id": approval.id}),
+            ))
+            .await?;
+        state
+            .append_event(
+                "system",
+                Some(approval.id),
+                input.session_id,
+                "approval.requested",
+                json!({"approval_id": approval.id, "action": approval.action, "risk_level": approval.risk_level, "reason": approval.reason, "evidence": approval.evidence, "expires_at": approval.expires_at}),
+            )
+            .await?;
+        state
+            .append_audit_log(new_audit_log(
+                Some(input.session_id),
+                "system",
+                None,
+                "approval.requested",
+                "approval",
+                Some(approval.id),
+                json!({"tool_call_id": approval.tool_call_id, "action": approval.action, "risk_level": approval.risk_level, "expires_at": approval.expires_at}),
+            ))
+            .await?;
+        set_managed_session_status(
+            state,
+            input.session_id,
+            SessionStatus::RequiresAction,
+            "tool approval required",
+        )
+        .await?;
+        return Ok(result);
+    }
+
+    state
+        .append_event(
+            "system",
+            Some(tool_call.id),
+            input.session_id,
+            "policy.allowed",
+            json!({"tool_call_id": tool_call.id, "tool": name, "risk_level": policy_decision.risk_level.clone()}),
+        )
+        .await?;
+
+    let registry = tool_registry();
+    let Some(executor) = registry.get(name) else {
+        let error_payload = json!({"error": "unknown tool"});
+        state
+            .append_event(
+                "tool",
+                Some(tool_call.id),
+                input.session_id,
+                "tool.error",
+                json!({"tool_call_id": tool_call.id, "tool": name, "content": error_payload}),
+            )
+            .await?;
+        state
+            .update_tool_call_status(tool_call.id, "failed", None, Some(error_payload.clone()))
+            .await?;
+        state
+            .append_audit_log(new_audit_log(
+                Some(input.session_id),
+                "tool",
+                Some(tool_call.id),
+                "tool.failed",
+                "tool_call",
+                Some(tool_call.id),
+                json!({"tool": name, "error": error_payload}),
+            ))
+            .await?;
+        return Err(AppError::not_found("unknown tool"));
+    };
+    let result = match executor.execute(&state, &input, &tool_call).await {
+        Ok(result) => result,
+        Err(error) => {
+            let error_payload = json!({"error": error.message.clone()});
+            state
+                .append_event(
+                    "tool",
+                    Some(tool_call.id),
+                    input.session_id,
+                    "tool.error",
+                    json!({"tool_call_id": tool_call.id, "tool": name, "content": error_payload}),
+                )
+                .await?;
+            state
+                .update_tool_call_status(tool_call.id, "failed", None, Some(error_payload.clone()))
+                .await?;
+            state
+                .append_audit_log(new_audit_log(
+                    Some(input.session_id),
+                    "tool",
+                    Some(tool_call.id),
+                    "tool.failed",
+                    "tool_call",
+                    Some(tool_call.id),
+                    json!({"tool": name, "error": error_payload}),
+                ))
+                .await?;
+            return Err(error);
+        }
+    };
+    let status = if result.get("status").and_then(Value::as_str) == Some("approval_required") {
+        "waiting_approval"
+    } else {
+        "completed"
+    };
+    let event_type = if status == "waiting_approval" {
+        "policy.requires_approval"
+    } else {
+        "tool.result"
+    };
+    let result_origin = match origin {
+        ToolInvocationOrigin::ManualRoute => "manual",
+        ToolInvocationOrigin::SessionLoop => "session_loop",
+    };
+    let result_event = state
+        .append_event(
+            if status == "waiting_approval" {
+                "system"
+            } else {
+                "tool"
+            },
+            Some(tool_call.id),
+            input.session_id,
+            event_type,
+            json!({"tool_call_id": tool_call.id, "tool": name, "origin": result_origin, "content": result}),
+        )
+        .await?;
+    if status == "completed" && origin == ToolInvocationOrigin::ManualRoute {
+        project_session_event_to_loop(state, &result_event).await?;
+    }
+    state
+        .append_event(
+            "agent",
+            Some(tool_call.id),
+            input.session_id,
+            "agent.tool_result",
+            json!({"tool_call_id": tool_call.id, "tool": name, "status": status, "content": result}),
+        )
+        .await?;
+    state
+        .update_tool_call_status(tool_call.id, status, Some(result.clone()), None)
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(input.session_id),
+            "tool",
+            Some(tool_call.id),
+            if status == "waiting_approval" {
+                "tool.waiting_approval"
+            } else {
+                "tool.completed"
+            },
+            "tool_call",
+            Some(tool_call.id),
+            json!({"tool": name, "risk_level": policy_decision.risk_level, "status": status}),
+        ))
+        .await?;
+    Ok(result)
 }
