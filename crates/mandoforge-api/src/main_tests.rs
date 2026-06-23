@@ -28931,6 +28931,21 @@ async fn approved_shell_exec_requires_explicit_host_execution_gate() {
     assert_eq!(failed.status, ExecutionJobStatus::Failed);
 }
 
+#[test]
+fn inline_shell_exec_requires_dedicated_gate() {
+    let _env_guard = env_lock().lock().expect("env lock");
+    let _host_shell_exec = EnvVarGuard::set("MANDOFORGE_ALLOW_HOST_SHELL_EXEC", "1");
+    let _inline_shell_exec = EnvVarGuard::remove("MANDOFORGE_ALLOW_INLINE_SHELL_EXEC");
+
+    assert!(
+        !inline_shell_exec_allowed_for_tool(),
+        "host shell approval gate must not enable inline shell execution"
+    );
+
+    let _inline_shell_exec = EnvVarGuard::set("MANDOFORGE_ALLOW_INLINE_SHELL_EXEC", "1");
+    assert!(inline_shell_exec_allowed_for_tool());
+}
+
 #[tokio::test]
 async fn observability_summary_reports_dashboard_backpressure() {
     let app = test_app().await;

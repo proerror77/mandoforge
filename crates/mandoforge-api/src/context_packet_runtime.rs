@@ -1721,9 +1721,9 @@ impl ToolExecutor for ShellExecTool {
             .map_err(|error| {
                 AppError::bad_request(format!("failed to prepare session workspace: {error}"))
             })?;
-        if !host_shell_exec_allowed_for_inline_tool() {
+        if !inline_shell_exec_allowed_for_tool() {
             return Err(AppError::bad_request(
-                "host shell.exec is disabled; use Remote Computer execution or set MANDOFORGE_ALLOW_HOST_SHELL_EXEC=1",
+                "inline shell.exec is disabled; use approved execution jobs or set MANDOFORGE_ALLOW_INLINE_SHELL_EXEC=1 for local development",
             ));
         }
         let runner = shell_runner();
@@ -2347,8 +2347,8 @@ pub(crate) fn tool_registry() -> HashMap<&'static str, Box<dyn ToolExecutor>> {
         .collect()
 }
 
-pub(crate) fn host_shell_exec_allowed_for_inline_tool() -> bool {
-    std::env::var("MANDOFORGE_ALLOW_HOST_SHELL_EXEC")
+pub(crate) fn inline_shell_exec_allowed_for_tool() -> bool {
+    std::env::var("MANDOFORGE_ALLOW_INLINE_SHELL_EXEC")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(false)
 }
