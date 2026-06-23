@@ -456,12 +456,13 @@ impl RemoteComputerRunner for KubernetesRemoteComputerRunner {
         } else {
             None
         };
-        let live_mutation_status_code = mutation_result
-            .as_ref()
-            .and_then(|result| result.as_ref().ok().map(|(status_code, _)| *status_code));
+        let live_mutation_status_code = mutation_result.as_ref().and_then(|result| match result {
+            Ok((status_code, _)) => Some(*status_code),
+            Err(error) => error.status_code,
+        });
         let mutation_failed_message = mutation_result
             .as_ref()
-            .and_then(|result| result.as_ref().err().cloned());
+            .and_then(|result| result.as_ref().err().map(ToString::to_string));
         let exec_failed_message = exec_result
             .as_ref()
             .and_then(|result| result.as_ref().err().cloned());
@@ -567,17 +568,24 @@ async fn call_kubernetes_mutation(
     create: bool,
     pod_name: &str,
     request: &RemoteComputerRunnerDryRunRequest,
-) -> Result<(u16, Value), String> {
-    let access = kubernetes_client_access(config)
-        .ok_or_else(|| "supported Kubernetes API client is not configured".to_string())?;
+) -> Result<(u16, Value), KubernetesMutationError> {
+    let access = kubernetes_client_access(config).ok_or_else(|| {
+        KubernetesMutationError::without_status("supported Kubernetes API client is not configured")
+    })?;
     let token = tokio::fs::read_to_string(&access.bearer_token_path)
         .await
-        .map_err(|err| format!("failed to read bearer token: {err}"))?;
+        .map_err(|err| {
+            KubernetesMutationError::without_status(format!("failed to read bearer token: {err}"))
+        })?;
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(access.danger_accept_invalid_certs)
         .timeout(Duration::from_secs(10))
         .build()
-        .map_err(|err| format!("failed to build Kubernetes HTTP client: {err}"))?;
+        .map_err(|err| {
+            KubernetesMutationError::without_status(format!(
+                "failed to build Kubernetes HTTP client: {err}"
+            ))
+        })?;
     let url = if create {
         format!(
             "{}/api/v1/namespaces/{}/pods",
@@ -590,26 +598,56 @@ async fn call_kubernetes_mutation(
         )
     };
     let request = if create {
-        client
-            .post(url)
-            .bearer_auth(token.trim())
-            .json(&build_kubernetes_pod_request(config, pod_name, request)?)
+        client.post(url).bearer_auth(token.trim()).json(
+            &build_kubernetes_pod_request(config, pod_name, request)
+                .map_err(KubernetesMutationError::without_status)?,
+        )
     } else {
         client.delete(url).bearer_auth(token.trim())
     };
-    let response = request
-        .send()
-        .await
-        .map_err(|err| format!("failed to call Kubernetes Pod API: {err}"))?;
+    let response = request.send().await.map_err(|err| {
+        KubernetesMutationError::without_status(format!("failed to call Kubernetes Pod API: {err}"))
+    })?;
     let status_code = response.status().as_u16();
     let body = response
         .json::<Value>()
         .await
         .unwrap_or_else(|_| json!({"status_code": status_code}));
     if !(200..300).contains(&status_code) {
-        return Err(format!("Kubernetes Pod API returned HTTP {status_code}"));
+        return Err(KubernetesMutationError::with_status(
+            status_code,
+            format!("Kubernetes Pod API returned HTTP {status_code}"),
+        ));
     }
     Ok((status_code, body))
+}
+
+#[derive(Debug, Clone)]
+struct KubernetesMutationError {
+    status_code: Option<u16>,
+    message: String,
+}
+
+impl KubernetesMutationError {
+    fn with_status(status_code: u16, message: impl Into<String>) -> Self {
+        Self {
+            status_code: Some(status_code),
+            message: message.into(),
+        }
+    }
+
+    fn without_status(message: impl Into<String>) -> Self {
+        Self {
+            status_code: None,
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for KubernetesMutationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1456,6 +1494,74 @@ mod tests {
         assert!(response.would_create_pod);
         assert!(!response.live_mutation_attempted);
         assert!(!response.execution_enabled);
+        let _ = tokio::fs::remove_file(token_path).await;
+    }
+
+    #[tokio::test]
+    async fn kubernetes_runner_live_create_preserves_conflict_status_code() {
+        async fn create_pod() -> (axum::http::StatusCode, Json<Value>) {
+            (
+                axum::http::StatusCode::CONFLICT,
+                Json(json!({"kind": "Status", "reason": "AlreadyExists"})),
+            )
+        }
+
+        let token_path =
+            std::env::temp_dir().join(format!("mandoforge-kube-token-{}.txt", Uuid::new_v4()));
+        tokio::fs::write(&token_path, "test-token")
+            .await
+            .expect("write token");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let addr = listener.local_addr().expect("addr");
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/api/v1/namespaces/agent-os/pods", post(create_pod)),
+            )
+            .await
+            .expect("mock kube server");
+        });
+        let config = RemoteComputerRunnerConfig {
+            mode: "kubernetes".to_string(),
+            namespace: "agent-os".to_string(),
+            pod_template_path: test_pod_template_path(),
+            service_account: "mandoforge-remote-computer".to_string(),
+            kubeconfig_path: None,
+            kube_api_url: Some(format!("http://{addr}")),
+            bearer_token_path: Some(token_path.to_string_lossy().to_string()),
+            in_cluster: false,
+            mutation_enabled: true,
+            live_mutation_enabled: true,
+            execution_enabled: false,
+        };
+        let response = KubernetesRemoteComputerRunner
+            .mutate(
+                &config,
+                RemoteComputerRunnerDryRunRequest {
+                    operation: Some("live_create".to_string()),
+                    remote_computer_id: None,
+                    session_id: Some(Uuid::new_v4()),
+                    pod_name: Some("agent-remote-computer-test".to_string()),
+                    metadata: Some(json!({
+                        "session_workspace_path": "/workspace/session",
+                        "artifact_dir": "/workspace/session/artifacts"
+                    })),
+                },
+            )
+            .await;
+
+        assert_eq!(response.status, "mutation_failed");
+        assert!(response.would_create_pod);
+        assert!(response.live_mutation_attempted);
+        assert_eq!(
+            response.live_mutation_status_code,
+            Some(axum::http::StatusCode::CONFLICT.as_u16())
+        );
+        assert!(response.message.contains("HTTP 409"));
+
+        server.abort();
         let _ = tokio::fs::remove_file(token_path).await;
     }
 
