@@ -58,6 +58,7 @@ mod http_shell;
 mod mcp_gateway;
 mod native_connectors;
 mod observability;
+mod ontology_action_profile;
 mod ontology_review;
 mod ontology_source_adapters;
 mod policy;
@@ -465,6 +466,10 @@ pub(crate) use deployment_version::{
 pub(crate) use enterprise_product_readiness::build_enterprise_product_completion_readiness;
 pub(crate) use enterprise_security_readiness::build_enterprise_security_admin_readiness;
 pub(crate) use http_shell::{api_cors_layer, security_headers_middleware};
+pub(crate) use ontology_action_profile::{
+    ontology_action_executor_is_cross_system, ontology_action_has_effects,
+    ontology_default_action_transaction_profile,
+};
 pub(crate) use ontology_review::normalize_ontology_review_decision;
 pub(crate) use policy_runtime::runtime_policy;
 pub(crate) use stage2_readiness::build_stage2_completion_readiness;
@@ -1281,31 +1286,6 @@ fn ontology_seed_action(
         executor,
         transaction_profile,
     }
-}
-
-fn ontology_default_action_transaction_profile(
-    effects: &Value,
-    executor: &Value,
-) -> OntologyActionTransactionProfile {
-    if ontology_action_has_effects(effects) && ontology_action_executor_is_cross_system(executor) {
-        OntologyActionTransactionProfile::ProposalOnly
-    } else {
-        OntologyActionTransactionProfile::LocalSerializable
-    }
-}
-
-fn ontology_action_has_effects(effects: &Value) -> bool {
-    effects
-        .as_array()
-        .map(|values| !values.is_empty())
-        .unwrap_or(false)
-}
-
-fn ontology_action_executor_is_cross_system(executor: &Value) -> bool {
-    matches!(
-        executor.get("type").and_then(Value::as_str),
-        Some("http_api" | "external_api" | "webhook" | "mcp_connector")
-    )
 }
 
 fn ontology_profile_demo_datasets(
