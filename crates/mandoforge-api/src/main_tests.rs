@@ -5780,6 +5780,44 @@ async fn semantic_collections_filter_project_scoped_resources() {
         ),
     )
     .await;
+    let visible_text_scoped_object: SemanticObject = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/semantic-objects",
+            json!({
+                "object_type": "decision",
+                "object_key": "decision:visible-semantic-text-scope",
+                "title": "Visible semantic text scope",
+                "summary": "Visible through a legacy project_scope label.",
+                "semantic_scopes": {"project_scope": "visible-semantic-project"},
+                "source_uri": "memory://semantic/visible-text-scope",
+                "trust_level": "human_verified",
+                "freshness": "current"
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let unresolved_text_scoped_object: SemanticObject = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/semantic-objects",
+            json!({
+                "object_type": "decision",
+                "object_key": "decision:unresolved-semantic-text-scope",
+                "title": "Unresolved semantic text scope",
+                "summary": "Hidden because the project_scope label cannot be resolved.",
+                "semantic_scopes": {"project_scope": "missing-semantic-project"},
+                "source_uri": "memory://semantic/unresolved-text-scope",
+                "trust_level": "human_verified",
+                "freshness": "current"
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
     let visible_link: SemanticLink = request_json(
         app.clone(),
         json_request_with_headers(
@@ -5828,7 +5866,17 @@ async fn semantic_collections_filter_project_scoped_resources() {
     )
     .await;
     assert!(objects.iter().any(|object| object.id == visible_object.id));
+    assert!(
+        objects
+            .iter()
+            .any(|object| object.id == visible_text_scoped_object.id)
+    );
     assert!(!objects.iter().any(|object| object.id == hidden_object.id));
+    assert!(
+        !objects
+            .iter()
+            .any(|object| object.id == unresolved_text_scoped_object.id)
+    );
 
     let links: Vec<SemanticLink> = request_json(
         app.clone(),
@@ -5853,6 +5901,33 @@ async fn semantic_collections_filter_project_scoped_resources() {
             .as_str()
             .unwrap_or_default()
             .contains("no membership")
+    );
+}
+
+#[tokio::test]
+async fn unknown_scoped_resource_type_fails_closed_for_non_admin() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let principal = Principal {
+        tenant_id: state.current_tenant_id(),
+        subject_id: "viewer-unknown-resource".to_string(),
+        roles: vec![Role::Viewer],
+    };
+    let request = AuthorizationRequest {
+        tenant_id: state.current_tenant_id(),
+        permission: Permission::AgentsRead,
+        resource_type: "new_runtime_resource".to_string(),
+        resource_id: Some(Uuid::new_v4()),
+    };
+
+    let error = enforce_resource_scope(&state, &principal, &request)
+        .await
+        .expect_err("unknown scoped resources should fail closed");
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+    assert!(
+        error
+            .message
+            .contains("resource type new_runtime_resource is not scoped for non-admin access"),
+        "unexpected error: {error:?}"
     );
 }
 

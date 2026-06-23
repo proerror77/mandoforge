@@ -12,6 +12,7 @@ use crate::*;
 
 enum ResourceScope {
     Tenant,
+    ScopedUnknown,
     TeamProject {
         team_id: Option<Uuid>,
         project_id: Option<Uuid>,
@@ -117,6 +118,162 @@ async fn session_scope(state: &AppState, session_id: Uuid) -> Result<ResourceSco
     })
 }
 
+async fn team_scope(state: &AppState, team_id: Uuid) -> Result<ResourceScope, AppError> {
+    find_team_by_id(state, team_id).await?;
+    Ok(ResourceScope::TeamProject {
+        team_id: Some(team_id),
+        project_id: None,
+    })
+}
+
+async fn project_scope(state: &AppState, project_id: Uuid) -> Result<ResourceScope, AppError> {
+    let project = find_project_by_id(state, project_id).await?;
+    Ok(ResourceScope::TeamProject {
+        team_id: Some(project.team_id),
+        project_id: Some(project.id),
+    })
+}
+
+async fn organization_exists(state: &AppState, organization_id: Uuid) -> Result<(), AppError> {
+    state
+        .list_organizations()
+        .await?
+        .into_iter()
+        .find(|organization| organization.id == organization_id)
+        .map(|_| ())
+        .ok_or_else(|| AppError::not_found("organization not found"))
+}
+
+async fn find_team_by_id(state: &AppState, team_id: Uuid) -> Result<Team, AppError> {
+    for organization in state.list_organizations().await? {
+        if let Some(team) = state
+            .list_teams(organization.id)
+            .await?
+            .into_iter()
+            .find(|team| team.id == team_id)
+        {
+            return Ok(team);
+        }
+    }
+    Err(AppError::not_found("team not found"))
+}
+
+async fn find_project_by_id(state: &AppState, project_id: Uuid) -> Result<Project, AppError> {
+    for organization in state.list_organizations().await? {
+        for team in state.list_teams(organization.id).await? {
+            if let Some(project) = state
+                .list_projects(team.id)
+                .await?
+                .into_iter()
+                .find(|project| project.id == project_id)
+            {
+                return Ok(project);
+            }
+        }
+    }
+    Err(AppError::not_found("project not found"))
+}
+
+async fn find_membership_by_id(
+    state: &AppState,
+    membership_id: Uuid,
+) -> Result<Membership, AppError> {
+    for organization in state.list_organizations().await? {
+        if let Some(membership) = state
+            .list_memberships(organization.id)
+            .await?
+            .into_iter()
+            .find(|membership| membership.id == membership_id)
+        {
+            return Ok(membership);
+        }
+    }
+    Err(AppError::not_found("membership not found"))
+}
+
+async fn find_tenant_invitation_by_id(
+    state: &AppState,
+    invitation_id: Uuid,
+) -> Result<TenantInvitation, AppError> {
+    for organization in state.list_organizations().await? {
+        if let Some(invitation) = state
+            .list_tenant_invitations(organization.id)
+            .await?
+            .into_iter()
+            .find(|invitation| invitation.id == invitation_id)
+        {
+            return Ok(invitation);
+        }
+    }
+    Err(AppError::not_found("tenant invitation not found"))
+}
+
+async fn find_mcp_server_by_id(
+    state: &AppState,
+    server_id: Uuid,
+) -> Result<McpServerRecord, AppError> {
+    for organization in state.list_organizations().await? {
+        for team in state.list_teams(organization.id).await? {
+            if let Some(server) = state
+                .list_mcp_servers(team.id)
+                .await?
+                .into_iter()
+                .find(|server| server.id == server_id)
+            {
+                return Ok(server);
+            }
+        }
+    }
+    Err(AppError::not_found("mcp server not found"))
+}
+
+async fn find_project_by_scope_label(
+    state: &AppState,
+    label: &str,
+) -> Result<Option<Project>, AppError> {
+    let normalized = label.trim();
+    if normalized.is_empty() {
+        return Ok(None);
+    }
+    let mut matches = Vec::new();
+    for organization in state.list_organizations().await? {
+        for team in state.list_teams(organization.id).await? {
+            matches.extend(
+                state
+                    .list_projects(team.id)
+                    .await?
+                    .into_iter()
+                    .filter(|project| {
+                        project.slug.eq_ignore_ascii_case(normalized)
+                            || project.name.eq_ignore_ascii_case(normalized)
+                    }),
+            );
+        }
+    }
+    Ok((matches.len() == 1).then(|| matches.remove(0)))
+}
+
+async fn find_team_by_scope_label(state: &AppState, label: &str) -> Result<Option<Team>, AppError> {
+    let normalized = label.trim();
+    if normalized.is_empty() {
+        return Ok(None);
+    }
+    let mut matches = Vec::new();
+    for organization in state.list_organizations().await? {
+        matches.extend(
+            state
+                .list_teams(organization.id)
+                .await?
+                .into_iter()
+                .filter(|team| {
+                    team.slug.eq_ignore_ascii_case(normalized)
+                        || team.name.eq_ignore_ascii_case(normalized)
+                }),
+        );
+    }
+    Ok((matches.len() == 1).then(|| matches.remove(0)))
+}
+
 fn uuid_from_json_value(value: &serde_json::Value) -> Option<Uuid> {
     value.as_str().and_then(|value| Uuid::parse_str(value).ok())
 }
@@ -125,21 +282,23 @@ fn uuid_from_semantic_scope(scopes: &serde_json::Value, key: &str) -> Option<Uui
     scopes.get(key).and_then(uuid_from_json_value)
 }
 
+fn text_from_semantic_scope<'a>(scopes: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    scopes
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
 async fn semantic_scopes_scope(
     state: &AppState,
     scopes: &serde_json::Value,
 ) -> Result<ResourceScope, AppError> {
     if let Some(project_id) = uuid_from_semantic_scope(scopes, "project_id") {
-        return Ok(ResourceScope::TeamProject {
-            team_id: None,
-            project_id: Some(project_id),
-        });
+        return project_scope(state, project_id).await;
     }
     if let Some(team_id) = uuid_from_semantic_scope(scopes, "team_id") {
-        return Ok(ResourceScope::TeamProject {
-            team_id: Some(team_id),
-            project_id: None,
-        });
+        return team_scope(state, team_id).await;
     }
     if let Some(session_id) = uuid_from_semantic_scope(scopes, "session_id") {
         return session_scope(state, session_id).await;
@@ -158,6 +317,34 @@ async fn semantic_scopes_scope(
             project_id: work_item.project_id,
         });
     }
+    for key in ["project_scope", "project_slug"] {
+        if let Some(label) = text_from_semantic_scope(scopes, key) {
+            return Ok(match find_project_by_scope_label(state, label).await? {
+                Some(project) => ResourceScope::TeamProject {
+                    team_id: Some(project.team_id),
+                    project_id: Some(project.id),
+                },
+                None => ResourceScope::ScopedUnknown,
+            });
+        }
+    }
+    for key in ["team_scope", "team_slug"] {
+        if let Some(label) = text_from_semantic_scope(scopes, key) {
+            return Ok(match find_team_by_scope_label(state, label).await? {
+                Some(team) => ResourceScope::TeamProject {
+                    team_id: Some(team.id),
+                    project_id: None,
+                },
+                None => ResourceScope::ScopedUnknown,
+            });
+        }
+    }
+    if ["session_scope", "agent_scope", "work_item_scope"]
+        .iter()
+        .any(|key| text_from_semantic_scope(scopes, key).is_some())
+    {
+        return Ok(ResourceScope::ScopedUnknown);
+    }
     Ok(ResourceScope::Tenant)
 }
 
@@ -172,14 +359,8 @@ async fn semantic_source_scope(
         return Ok(ResourceScope::Tenant);
     };
     match owner_type.trim().to_ascii_lowercase().as_str() {
-        "project" => Ok(ResourceScope::TeamProject {
-            team_id: None,
-            project_id: Some(owner_id),
-        }),
-        "team" => Ok(ResourceScope::TeamProject {
-            team_id: Some(owner_id),
-            project_id: None,
-        }),
+        "project" => project_scope(state, owner_id).await,
+        "team" => team_scope(state, owner_id).await,
         "agent" => {
             let agent = state.get_agent(owner_id).await?;
             Ok(ResourceScope::TeamProject {
@@ -237,6 +418,7 @@ async fn scope_visible_to_principal(
     }
     match scope {
         ResourceScope::Tenant => Ok(true),
+        ResourceScope::ScopedUnknown => Ok(false),
         ResourceScope::Session(session_id) => {
             let visible = visible_session_ids_for_principal(state, principal).await?;
             Ok(visible.contains(&session_id))
@@ -306,6 +488,26 @@ async fn resource_scope(
                 project_id: agent.project_id,
             })
         }
+        "organization" => {
+            organization_exists(state, resource_id).await?;
+            Ok(ResourceScope::Tenant)
+        }
+        "team" => team_scope(state, resource_id).await,
+        "project" => project_scope(state, resource_id).await,
+        "membership" => {
+            let membership = find_membership_by_id(state, resource_id).await?;
+            Ok(ResourceScope::TeamProject {
+                team_id: membership.team_id,
+                project_id: membership.project_id,
+            })
+        }
+        "tenant_invitation" => {
+            let invitation = find_tenant_invitation_by_id(state, resource_id).await?;
+            Ok(ResourceScope::TeamProject {
+                team_id: invitation.team_id,
+                project_id: invitation.project_id,
+            })
+        }
         "session" => session_scope(state, resource_id).await,
         "work_item" => {
             let work_item = state.get_work_item(resource_id).await?;
@@ -317,6 +519,34 @@ async fn resource_scope(
         "workflow_run" => {
             let run = state.get_workflow_run(resource_id).await?;
             Ok(ResourceScope::Session(run.primary_session_id))
+        }
+        "tool_call" => {
+            let tool_call = state.get_tool_call(resource_id).await?;
+            Ok(ResourceScope::Session(tool_call.session_id))
+        }
+        "approval" => {
+            let approval = state.get_approval(resource_id).await?;
+            Ok(ResourceScope::Session(approval.session_id))
+        }
+        "manager_plan" | "manager_agent_plan" => {
+            let plan = state.get_manager_agent_plan(resource_id).await?;
+            Ok(ResourceScope::Session(plan.session_id))
+        }
+        "agent_handoff" | "agent_handoff_event" => {
+            let handoff = state.get_agent_handoff_event(resource_id).await?;
+            Ok(ResourceScope::Session(handoff.source_session_id))
+        }
+        "agent_handoff_assignment" => {
+            let assignment = state.get_agent_handoff_assignment(resource_id).await?;
+            Ok(ResourceScope::Session(assignment.source_session_id))
+        }
+        "memory_writeback_candidate" => {
+            let candidate = state.get_memory_writeback_candidate(resource_id).await?;
+            Ok(ResourceScope::Session(candidate.session_id))
+        }
+        "session_thread" => {
+            let thread = state.get_session_thread(resource_id).await?;
+            Ok(ResourceScope::Session(thread.session_id))
         }
         "execution_job" => {
             let job = state.execution_queue.get(resource_id).await?;
@@ -343,6 +573,9 @@ async fn resource_scope(
                 semantic_link_endpoint_scope(state, &link.to_entity_type, &link.to_entity_id)
                     .await?;
             match (from_scope, to_scope) {
+                (ResourceScope::ScopedUnknown, _) | (_, ResourceScope::ScopedUnknown) => {
+                    Ok(ResourceScope::ScopedUnknown)
+                }
                 (ResourceScope::Tenant, scope) | (scope, ResourceScope::Tenant) => Ok(scope),
                 (ResourceScope::Session(session_id), _) => Ok(ResourceScope::Session(session_id)),
                 (scope, ResourceScope::Session(_)) => Ok(scope),
@@ -377,7 +610,52 @@ async fn resource_scope(
                 ))
             }
         }
-        _ => Ok(ResourceScope::Tenant),
+        "agent_release" => {
+            let release = state
+                .list_all_agent_releases()
+                .await?
+                .into_iter()
+                .find(|release| release.id == resource_id)
+                .ok_or_else(|| AppError::not_found("agent release not found"))?;
+            let agent = state.get_agent(release.agent_id).await?;
+            Ok(ResourceScope::TeamProject {
+                team_id: agent.team_id,
+                project_id: agent.project_id,
+            })
+        }
+        "provider" | "providers" => state
+            .list_providers()
+            .await?
+            .into_iter()
+            .find(|provider| provider.id == resource_id)
+            .map(|_| ResourceScope::Tenant)
+            .ok_or_else(|| AppError::not_found("provider not found")),
+        "mcp_server" => {
+            let server = find_mcp_server_by_id(state, resource_id).await?;
+            Ok(ResourceScope::TeamProject {
+                team_id: Some(server.team_id),
+                project_id: None,
+            })
+        }
+        "policy_revision" => {
+            state.get_policy_revision(resource_id).await?;
+            Ok(ResourceScope::Tenant)
+        }
+        "codex_app_server" => {
+            state.get_codex_app_server_run(resource_id).await?;
+            Ok(ResourceScope::Tenant)
+        }
+        "remote_computer" => state
+            .list_remote_computers()
+            .await?
+            .into_iter()
+            .find(|computer| computer.id == resource_id)
+            .map(|_| ResourceScope::Tenant)
+            .ok_or_else(|| AppError::not_found("remote computer not found")),
+        _ => Err(AppError::forbidden(format!(
+            "resource type {} is not scoped for non-admin access",
+            resource_type
+        ))),
     }
 }
 
