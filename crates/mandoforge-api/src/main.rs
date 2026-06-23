@@ -658,34 +658,6 @@ impl AppState {
         current_request_tenant_id(self.configured_tenant_id())
     }
 
-    pub(crate) async fn record_codex_app_server_run(
-        &self,
-        operation: &str,
-        thread_id: Option<String>,
-        turn_id: Option<String>,
-        command_id: Option<String>,
-        request: Value,
-        response: Value,
-    ) -> Result<CodexAppServerRun, AppError> {
-        self.insert_codex_app_server_run(CodexAppServerRun {
-            id: Uuid::new_v4(),
-            operation: operation.to_string(),
-            thread_id,
-            turn_id,
-            command_id,
-            status: response
-                .get("status")
-                .and_then(Value::as_str)
-                .unwrap_or("completed")
-                .to_string(),
-            request,
-            response,
-            error: None,
-            created_at: Utc::now(),
-        })
-        .await
-    }
-
     async fn emit_telemetry_event(&self, event: &SessionEvent) {
         if !self.observability_config.is_enabled() || self.observability_config.sample_ratio <= 0.0
         {
