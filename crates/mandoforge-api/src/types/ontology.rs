@@ -485,6 +485,7 @@ pub(crate) struct OntologyReleaseWorkflowTrigger {
 pub(crate) const ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_PENDING: &str = "pending";
 pub(crate) const ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_TRIGGERED: &str = "triggered";
 pub(crate) const ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_FAILED: &str = "failed";
+pub(crate) const ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_SKIPPED: &str = "skipped";
 
 pub(crate) fn ontology_release_workflow_trigger_status_allowed(status: &str) -> bool {
     matches!(
@@ -492,6 +493,7 @@ pub(crate) fn ontology_release_workflow_trigger_status_allowed(status: &str) -> 
         ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_PENDING
             | ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_TRIGGERED
             | ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_FAILED
+            | ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_SKIPPED
     )
 }
 

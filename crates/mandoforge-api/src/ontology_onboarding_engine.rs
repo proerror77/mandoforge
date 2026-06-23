@@ -4488,6 +4488,17 @@ pub(crate) async fn drain_due_ontology_release_workflow_triggers(
         };
         if release.status != "active" {
             skipped_count += 1;
+            state
+                .complete_ontology_release_workflow_trigger(
+                    trigger.id,
+                    ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_SKIPPED,
+                    None,
+                    Some(format!(
+                        "ontology release status is {}; workflow trigger skipped",
+                        release.status
+                    )),
+                )
+                .await?;
             continue;
         }
         match trigger_workflow_run_from_ontology_release(state, &release, actor_subject).await {
