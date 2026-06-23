@@ -1,5 +1,6 @@
 use anyhow::Result;
 use chrono::Utc;
+use sqlx::error::DatabaseError;
 use uuid::Uuid;
 
 use crate::store_backend::StoreBackend;
@@ -137,7 +138,8 @@ impl AppState {
                 .bind(release.created_at)
                 .bind(release.updated_at)
                 .fetch_one(pool)
-                .await?;
+                .await
+                .map_err(ontology_release_write_error)?;
                 ontology_release_from_row(row)
             }
         }
@@ -218,7 +220,8 @@ impl AppState {
                 .bind(release.updated_at)
                 .bind(expected_status)
                 .fetch_optional(pool)
-                .await?
+                .await
+                .map_err(ontology_release_write_error)?
                 .ok_or_else(|| {
                     AppError::bad_request(
                         "ontology release status conflict: concurrent update detected",
@@ -342,7 +345,8 @@ impl AppState {
                 .bind(now)
                 .bind(now)
                 .fetch_optional(&mut *tx)
-                .await?
+                .await
+                .map_err(ontology_release_write_error)?
                 .ok_or_else(|| {
                     AppError::bad_request(
                         "ontology release status conflict: concurrent update detected",
@@ -449,7 +453,8 @@ impl AppState {
                 .bind(target_id)
                 .bind(now)
                 .fetch_one(&mut *tx)
-                .await?;
+                .await
+                .map_err(ontology_release_write_error)?;
                 let restored = ontology_release_from_row(row)?;
                 tx.commit().await?;
                 Ok((release, restored))
@@ -475,6 +480,34 @@ fn validate_ontology_release_promotable(release: &OntologyRelease) -> Result<(),
         ));
     }
     Ok(())
+}
+
+fn ontology_release_write_error(error: sqlx::Error) -> AppError {
+    let sqlx::Error::Database(database_error) = &error else {
+        return error.into();
+    };
+    if !is_unique_violation(database_error.as_ref()) {
+        return error.into();
+    }
+    AppError::bad_request(ontology_release_unique_violation_message(
+        database_error.constraint(),
+    ))
+}
+
+fn ontology_release_unique_violation_message(constraint: Option<&str>) -> &'static str {
+    match constraint {
+        Some("ontology_releases_tenant_id_domain_scope_version_key") => {
+            "ontology release version already exists for domain"
+        }
+        Some("idx_ontology_releases_one_active_per_domain") => {
+            "ontology release domain already has an active release"
+        }
+        _ => "ontology release already exists",
+    }
+}
+
+fn is_unique_violation(error: &(dyn DatabaseError + '_)) -> bool {
+    error.code().as_deref() == Some("23505")
 }
 
 fn validate_ontology_release_rollback_source(release: &OntologyRelease) -> Result<Uuid, AppError> {
@@ -506,4 +539,29 @@ fn validate_ontology_release_rollback_target(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ontology_release_unique_violation_message;
+
+    #[test]
+    fn ontology_release_unique_constraints_map_to_domain_conflicts() {
+        assert_eq!(
+            ontology_release_unique_violation_message(Some(
+                "ontology_releases_tenant_id_domain_scope_version_key"
+            )),
+            "ontology release version already exists for domain"
+        );
+        assert_eq!(
+            ontology_release_unique_violation_message(Some(
+                "idx_ontology_releases_one_active_per_domain"
+            )),
+            "ontology release domain already has an active release"
+        );
+        assert_eq!(
+            ontology_release_unique_violation_message(Some("unexpected_constraint")),
+            "ontology release already exists"
+        );
+    }
 }

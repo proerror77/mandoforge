@@ -2210,7 +2210,7 @@ impl ToolExecutor for OntologyTypeLookupTool {
                 "domain": packet.semantic_scopes.get("domain_scope").and_then(Value::as_str).unwrap_or("global"),
                 "workflow_scope": packet.semantic_scopes.get("workflow_scope").and_then(Value::as_str),
                 "memory_scope": packet.semantic_scopes.get("memory_scope").and_then(Value::as_str),
-                "release_model": "core registry scoped by ContextPacket; domain ontology releases are not yet materialized"
+                "release_model": "core registry scoped by ContextPacket; active domain ontology release metadata is pinned when available"
             },
             "ontology_scope": render_ontology_scope(&packet.semantic_scopes),
             "requested_name": requested_name,

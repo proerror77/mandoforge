@@ -450,7 +450,7 @@ async fn get_context_packet(
         &headers,
         Permission::SessionsRead,
         "context_packet",
-        Some(packet.session_id),
+        Some(packet.id),
     )
     .await?;
     Ok(Json(packet))
@@ -468,7 +468,7 @@ async fn render_context_packet(
         &headers,
         Permission::SessionsRead,
         "context_packet",
-        Some(packet.session_id),
+        Some(packet.id),
     )
     .await?;
     Ok(Json(

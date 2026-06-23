@@ -5646,6 +5646,217 @@ async fn semantic_kernel_persists_sources_objects_links_and_audit() {
 }
 
 #[tokio::test]
+async fn semantic_collections_filter_project_scoped_resources() {
+    let app = test_app().await;
+    let admin_headers = [
+        ("x-mandoforge-subject", "admin-1"),
+        ("x-mandoforge-roles", "admin"),
+    ];
+    let organization: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/organizations",
+            json!({"name": "Semantic Scope Org", "slug": "semantic-scope-org"}),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let organization_id = organization["id"].as_str().expect("organization id");
+    let team: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/organizations/{organization_id}/teams"),
+            json!({"name": "Semantic Scope Team", "slug": "semantic-scope-team"}),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let team_id = team["id"].as_str().expect("team id");
+    let visible_project: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/teams/{team_id}/projects"),
+            json!({"name": "Visible Semantic Project", "slug": "visible-semantic-project"}),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let hidden_project: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/teams/{team_id}/projects"),
+            json!({"name": "Hidden Semantic Project", "slug": "hidden-semantic-project"}),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let visible_project_id = visible_project["id"].as_str().expect("visible project id");
+    let hidden_project_id = hidden_project["id"].as_str().expect("hidden project id");
+    let _: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/organizations/{organization_id}/memberships"),
+            json!({
+                "user_id": "semantic-project-viewer",
+                "team_id": team_id,
+                "project_id": visible_project_id,
+                "role": "viewer"
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+
+    let visible_source: SemanticSource = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/semantic-sources",
+            json!({
+                "source_type": "repo_doc",
+                "source_uri": "repo://visible/semantic.md",
+                "display_name": "Visible Semantic Source",
+                "owner_type": "project",
+                "owner_id": visible_project_id
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let hidden_source: SemanticSource = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/semantic-sources",
+            json!({
+                "source_type": "repo_doc",
+                "source_uri": "repo://hidden/semantic.md",
+                "display_name": "Hidden Semantic Source",
+                "owner_type": "project",
+                "owner_id": hidden_project_id
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let visible_object: SemanticObject = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/semantic-objects",
+            json!({
+                "source_id": visible_source.id,
+                "object_type": "decision",
+                "object_key": "decision:visible-semantic-scope",
+                "title": "Visible semantic scope",
+                "summary": "Visible to the project member.",
+                "trust_level": "human_verified",
+                "freshness": "current"
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let hidden_object: SemanticObject = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/semantic-objects",
+            json!({
+                "source_id": hidden_source.id,
+                "object_type": "decision",
+                "object_key": "decision:hidden-semantic-scope",
+                "title": "Hidden semantic scope",
+                "summary": "Hidden from the project member.",
+                "trust_level": "human_verified",
+                "freshness": "current"
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let visible_link: SemanticLink = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/semantic-links",
+            json!({
+                "from_entity_type": "semantic_object",
+                "from_entity_id": visible_object.id.to_string(),
+                "relation_type": "supports",
+                "to_entity_type": "semantic_object",
+                "to_entity_id": visible_object.id.to_string()
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let hidden_link: SemanticLink = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/semantic-links",
+            json!({
+                "from_entity_type": "semantic_object",
+                "from_entity_id": hidden_object.id.to_string(),
+                "relation_type": "supports",
+                "to_entity_type": "semantic_object",
+                "to_entity_id": hidden_object.id.to_string()
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+
+    let viewer_headers = [("x-mandoforge-subject", "semantic-project-viewer")];
+    let sources: Vec<SemanticSource> = request_json(
+        app.clone(),
+        json_request_with_headers("GET", "/api/semantic-sources", json!({}), &viewer_headers),
+    )
+    .await;
+    assert!(sources.iter().any(|source| source.id == visible_source.id));
+    assert!(!sources.iter().any(|source| source.id == hidden_source.id));
+
+    let objects: Vec<SemanticObject> = request_json(
+        app.clone(),
+        json_request_with_headers("GET", "/api/semantic-objects", json!({}), &viewer_headers),
+    )
+    .await;
+    assert!(objects.iter().any(|object| object.id == visible_object.id));
+    assert!(!objects.iter().any(|object| object.id == hidden_object.id));
+
+    let links: Vec<SemanticLink> = request_json(
+        app.clone(),
+        json_request_with_headers("GET", "/api/semantic-links", json!({}), &viewer_headers),
+    )
+    .await;
+    assert!(links.iter().any(|link| link.id == visible_link.id));
+    assert!(!links.iter().any(|link| link.id == hidden_link.id));
+
+    let (status, hidden_error) = request_value(
+        app,
+        Request::builder()
+            .uri(format!("/api/semantic-objects/{}", hidden_object.id))
+            .header("x-mandoforge-subject", "semantic-project-viewer")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(
+        hidden_error["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no membership")
+    );
+}
+
+#[tokio::test]
 async fn ontology_registry_exposes_core_objects_and_allowed_relations() {
     let app = test_app().await;
 
@@ -23676,7 +23887,7 @@ async fn context_packets_are_versioned_persisted_and_include_semantic_objects() 
     assert_eq!(
         ontology_lookup["registry_scope"]["release_model"],
         json!(
-            "core registry scoped by ContextPacket; domain ontology releases are not yet materialized"
+            "core registry scoped by ContextPacket; active domain ontology release metadata is pinned when available"
         )
     );
     assert_eq!(

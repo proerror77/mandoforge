@@ -14,7 +14,7 @@ use crate::{
     CreateSemanticIngestionBatch, CreateSemanticLink, CreateSemanticObject, CreateSemanticSource,
     CreateSemanticSynthesisRun, ExpandSemanticLinksRequest, ExpandSemanticLinksResponse,
     ExpandSemanticOntologyRequest, FetchSemanticObjectRequest, FetchSemanticObjectResponse,
-    MemoryWritebackCandidate, Permission, ResolveSemanticConflictRequest,
+    MemoryWritebackCandidate, Permission, Principal, ResolveSemanticConflictRequest,
     ReviewMemoryWritebackCandidate, ReviewOntologyProposalRequest, RunSemanticDreamingRequest,
     SemanticGovernanceRunRequest, SemanticGovernanceRunResult, SemanticGraphSnapshot,
     SemanticIngestionBatchResult, SemanticLink, SemanticObject, SemanticProductQuery,
@@ -30,11 +30,12 @@ use crate::{
     normalize_semantic_conflict_strategy, ontology_builder_candidate_types,
     ontology_builder_evidence_objects, principal_from_request,
     record_memory_writeback_candidate_review, record_semantic_link_audit,
-    record_semantic_object_audit, record_semantic_source_audit, semantic_object_matched_fields,
-    semantic_object_matches_product_query, semantic_ontology_builder_prompt_packet,
-    semantic_retrieval_backend_registry_from_env, validate_handoff_token,
-    validate_semantic_ingestion_batch, validate_semantic_link_against_ontology,
-    visible_session_ids_for_principal,
+    record_semantic_object_audit, record_semantic_source_audit, semantic_link_visible_to_principal,
+    semantic_object_matched_fields, semantic_object_matches_product_query,
+    semantic_object_visible_to_principal, semantic_ontology_builder_prompt_packet,
+    semantic_retrieval_backend_registry_from_env, semantic_source_visible_to_principal,
+    validate_handoff_token, validate_semantic_ingestion_batch,
+    validate_semantic_link_against_ontology, visible_session_ids_for_principal,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -144,19 +145,55 @@ pub(crate) fn router() -> Router<AppState> {
         )
 }
 
+async fn visible_semantic_sources_for_principal(
+    state: &AppState,
+    principal: &Principal,
+) -> Result<Vec<SemanticSource>, AppError> {
+    let mut visible = Vec::new();
+    for source in state.list_semantic_sources().await? {
+        if semantic_source_visible_to_principal(state, principal, &source).await? {
+            visible.push(source);
+        }
+    }
+    Ok(visible)
+}
+
+async fn visible_semantic_objects_for_principal(
+    state: &AppState,
+    principal: &Principal,
+) -> Result<Vec<SemanticObject>, AppError> {
+    let mut visible = Vec::new();
+    for object in state.list_semantic_objects().await? {
+        if semantic_object_visible_to_principal(state, principal, &object).await? {
+            visible.push(object);
+        }
+    }
+    Ok(visible)
+}
+
+async fn visible_semantic_links_for_principal(
+    state: &AppState,
+    principal: &Principal,
+) -> Result<Vec<SemanticLink>, AppError> {
+    let mut visible = Vec::new();
+    for link in state.list_semantic_links().await? {
+        if semantic_link_visible_to_principal(state, principal, &link).await? {
+            visible.push(link);
+        }
+    }
+    Ok(visible)
+}
+
 async fn list_semantic_sources(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<SemanticSource>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::AgentsRead,
-        "semantic_sources",
-        None,
-    )
-    .await?;
-    Ok(Json(state.list_semantic_sources().await?))
+    let principal =
+        authorize_collection_request(&state, &headers, Permission::AgentsRead, "semantic_sources")
+            .await?;
+    Ok(Json(
+        visible_semantic_sources_for_principal(&state, &principal).await?,
+    ))
 }
 
 async fn create_semantic_source(
@@ -250,15 +287,12 @@ async fn list_semantic_objects(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<SemanticObject>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::AgentsRead,
-        "semantic_objects",
-        None,
-    )
-    .await?;
-    Ok(Json(state.list_semantic_objects().await?))
+    let principal =
+        authorize_collection_request(&state, &headers, Permission::AgentsRead, "semantic_objects")
+            .await?;
+    Ok(Json(
+        visible_semantic_objects_for_principal(&state, &principal).await?,
+    ))
 }
 
 async fn create_semantic_object(
@@ -307,7 +341,7 @@ async fn fetch_semantic_object(
         &headers,
         Permission::SessionsRead,
         "context_packet",
-        Some(packet.session_id),
+        Some(packet.id),
     )
     .await?;
     let response = fetch_semantic_object_for_context(
@@ -362,22 +396,16 @@ async fn search_semantic_objects(
     headers: HeaderMap,
     Query(query): Query<SemanticProductQuery>,
 ) -> Result<Json<SemanticSearchResponse>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::AgentsRead,
-        "semantic_search",
-        None,
-    )
-    .await?;
+    let principal =
+        authorize_collection_request(&state, &headers, Permission::AgentsRead, "semantic_search")
+            .await?;
     let query_text = query
         .q
         .as_ref()
         .and_then(|value| normalize_optional_text(value.clone()))
         .unwrap_or_default();
     let limit = query.limit.unwrap_or(50).clamp(1, 200);
-    let mut results = state
-        .list_semantic_objects()
+    let mut results = visible_semantic_objects_for_principal(&state, &principal)
         .await?
         .into_iter()
         .filter(|object| semantic_object_matches_product_query(object, &query))
@@ -433,21 +461,15 @@ async fn get_semantic_graph(
     headers: HeaderMap,
     Query(query): Query<SemanticProductQuery>,
 ) -> Result<Json<SemanticGraphSnapshot>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::AgentsRead,
-        "semantic_graph",
-        None,
-    )
-    .await?;
-    let objects = state
-        .list_semantic_objects()
+    let principal =
+        authorize_collection_request(&state, &headers, Permission::AgentsRead, "semantic_graph")
+            .await?;
+    let objects = visible_semantic_objects_for_principal(&state, &principal)
         .await?
         .into_iter()
         .filter(|object| semantic_object_matches_product_query(object, &query))
         .collect::<Vec<_>>();
-    let links = state.list_semantic_links().await?;
+    let links = visible_semantic_links_for_principal(&state, &principal).await?;
     Ok(Json(build_semantic_graph_snapshot(
         objects,
         links,
@@ -460,23 +482,21 @@ async fn get_semantic_workbench(
     headers: HeaderMap,
     Query(query): Query<SemanticProductQuery>,
 ) -> Result<Json<Value>, AppError> {
-    authorize_request(
+    let principal = authorize_collection_request(
         &state,
         &headers,
         Permission::AgentsRead,
         "semantic_workbench",
-        None,
     )
     .await?;
-    let objects = state
-        .list_semantic_objects()
+    let objects = visible_semantic_objects_for_principal(&state, &principal)
         .await?
         .into_iter()
         .filter(|object| semantic_object_matches_product_query(object, &query))
         .collect::<Vec<_>>();
     let graph = build_semantic_graph_snapshot(
         objects.clone(),
-        state.list_semantic_links().await?,
+        visible_semantic_links_for_principal(&state, &principal).await?,
         Utc::now(),
     );
     let mut domains = BTreeMap::<String, Value>::new();
@@ -579,12 +599,11 @@ async fn run_semantic_governance(
     headers: HeaderMap,
     Json(input): Json<SemanticGovernanceRunRequest>,
 ) -> Result<Json<SemanticGovernanceRunResult>, AppError> {
-    authorize_request(
+    let principal = authorize_collection_request(
         &state,
         &headers,
         Permission::AgentsWrite,
         "semantic_governance",
-        None,
     )
     .await?;
     let conflict_strategy = normalize_semantic_conflict_strategy(&input.conflict_strategy)?;
@@ -599,13 +618,12 @@ async fn run_semantic_governance(
         freshness: None,
         limit: None,
     };
-    let objects = state
-        .list_semantic_objects()
+    let objects = visible_semantic_objects_for_principal(&state, &principal)
         .await?
         .into_iter()
         .filter(|object| semantic_object_matches_product_query(object, &query))
         .collect::<Vec<_>>();
-    let links = state.list_semantic_links().await?;
+    let links = visible_semantic_links_for_principal(&state, &principal).await?;
     let graph = build_semantic_graph_snapshot(objects.clone(), links, Utc::now());
     let stale_objects = objects
         .iter()
@@ -641,7 +659,6 @@ async fn run_semantic_governance(
         conflicts: graph.conflicts.clone(),
         graph,
     };
-    let principal = principal_from_request(&state, &headers).await?;
     state
         .append_audit_log(new_audit_log(
             None,
@@ -1433,15 +1450,12 @@ async fn list_semantic_links(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<SemanticLink>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::AgentsRead,
-        "semantic_links",
-        None,
-    )
-    .await?;
-    Ok(Json(state.list_semantic_links().await?))
+    let principal =
+        authorize_collection_request(&state, &headers, Permission::AgentsRead, "semantic_links")
+            .await?;
+    Ok(Json(
+        visible_semantic_links_for_principal(&state, &principal).await?,
+    ))
 }
 
 async fn create_semantic_link(
@@ -1474,7 +1488,7 @@ async fn expand_semantic_links(
         &headers,
         Permission::SessionsRead,
         "context_packet",
-        Some(packet.session_id),
+        Some(packet.id),
     )
     .await?;
     let response = expand_semantic_links_for_context(&state, &packet, input).await?;
