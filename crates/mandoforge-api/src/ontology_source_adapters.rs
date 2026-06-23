@@ -229,7 +229,7 @@ pub fn adapt_csv(
         .headers()
         .map_err(|e| AppError::bad_request(format!("CSV header error: {e}")))?
         .iter()
-        .map(|h| to_snake_case(h))
+        .map(to_snake_case)
         .collect();
 
     let mut all_rows: Vec<csv::StringRecord> = Vec::new();

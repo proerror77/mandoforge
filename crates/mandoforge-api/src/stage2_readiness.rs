@@ -612,10 +612,11 @@ pub(crate) fn parse_stage2_open_gaps(audit_content: &str) -> Vec<String> {
         if !in_gaps {
             continue;
         }
-        if let Some((number, text)) = trimmed.split_once(". ") {
-            if number.chars().all(|char| char.is_ascii_digit()) && !text.trim().is_empty() {
-                gaps.push(text.trim().to_string());
-            }
+        if let Some((number, text)) = trimmed.split_once(". ")
+            && number.chars().all(|char| char.is_ascii_digit())
+            && !text.trim().is_empty()
+        {
+            gaps.push(text.trim().to_string());
         }
     }
     gaps

@@ -509,11 +509,10 @@ async fn get_semantic_workbench(
             .partitions
             .iter()
             .find(|partition| partition.partition_key == conflict.partition_key)
+            && let Some(entry) = domains.get_mut(&partition.domain_scope)
         {
-            if let Some(entry) = domains.get_mut(&partition.domain_scope) {
-                let count = entry["conflict_count"].as_u64().unwrap_or(0);
-                entry["conflict_count"] = json!(count + 1);
-            }
+            let count = entry["conflict_count"].as_u64().unwrap_or(0);
+            entry["conflict_count"] = json!(count + 1);
         }
     }
     let domain_pilots = if domains.is_empty() {

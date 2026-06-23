@@ -155,12 +155,12 @@ impl AppState {
                     .ontology_releases
                     .get(&release.id)
                     .ok_or_else(|| AppError::not_found("ontology release not found"))?;
-                if let Some(expected) = expected_status {
-                    if existing.status != expected {
-                        return Err(AppError::bad_request(
-                            "ontology release status conflict: concurrent update detected",
-                        ));
-                    }
+                if let Some(expected) = expected_status
+                    && existing.status != expected
+                {
+                    return Err(AppError::bad_request(
+                        "ontology release status conflict: concurrent update detected",
+                    ));
                 }
                 store.ontology_releases.insert(release.id, release.clone());
                 Ok(release)

@@ -30,7 +30,7 @@ pub(crate) async fn execute_due_policy_rollouts(
     });
 
     let mut result = if let Some(revision) = due_revisions.into_iter().next() {
-        let activated_revision = activate_policy_revision_for_runtime(&state, revision.id).await?;
+        let activated_revision = activate_policy_revision_for_runtime(state, revision.id).await?;
         PolicyScheduledRolloutRun {
             status: "activated".to_string(),
             activated_revision_id: Some(activated_revision.id),
@@ -157,7 +157,7 @@ pub(crate) fn build_policy_rollout_orchestration_readiness(
     let latest_controller_execution =
         latest_validation.and_then(|log| log.details.get("controller_execution"));
     let latest_controller_status = latest_validation
-        .and_then(|_| latest_controller_execution)
+        .and(latest_controller_execution)
         .and_then(|execution| execution.get("status"))
         .and_then(Value::as_str)
         .map(str::to_string);

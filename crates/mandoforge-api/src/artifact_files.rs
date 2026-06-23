@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::AppError;
 
@@ -34,12 +34,12 @@ pub(crate) struct DiscoveredArtifactFile {
 }
 
 pub(crate) async fn discover_artifact_files(
-    root: &PathBuf,
+    root: &Path,
     max_files: usize,
     max_file_bytes: u64,
 ) -> Result<Vec<DiscoveredArtifactFile>, AppError> {
     let mut files = Vec::new();
-    let mut directories = vec![root.clone()];
+    let mut directories = vec![root.to_path_buf()];
     let mut visited_directories = 0_usize;
     while let Some(directory) = directories.pop() {
         visited_directories += 1;
@@ -88,7 +88,7 @@ pub(crate) async fn discover_artifact_files(
     Ok(files)
 }
 
-pub(crate) fn artifact_type_from_path(path: &PathBuf) -> String {
+pub(crate) fn artifact_type_from_path(path: &Path) -> String {
     match path
         .extension()
         .and_then(|extension| extension.to_str())

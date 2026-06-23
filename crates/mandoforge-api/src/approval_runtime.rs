@@ -45,8 +45,8 @@ pub(crate) async fn decide_approval(
             .execute_approved_tool(&state, &updated)
             .await?;
         match outcome {
-            ExecutionWorkerOutcome::Completed { job } => {
-                if job.is_none() {
+            ExecutionWorkerOutcome::Completed { job_id } => {
+                if job_id.is_none() {
                     project_session_event_to_loop(&state, &decision_event).await?;
                 }
             }
@@ -369,7 +369,7 @@ pub(crate) fn next_due_escalation_rule(
         .iter()
         .filter(|rule| rule.status == "active")
         .filter(|rule| rule.risk_level == approval.risk_level)
-        .filter(|rule| previous_order.map_or(true, |order| rule.order_index > order))
+        .filter(|rule| previous_order.is_none_or(|order| rule.order_index > order))
         .filter(|rule| age_seconds >= rule.after_seconds)
         .min_by_key(|rule| (rule.order_index, rule.created_at))
         .cloned()
@@ -791,7 +791,7 @@ pub(crate) fn build_approval_notification_delivery_run_summary(
         .iter()
         .filter_map(approval_notification_delivery_run_from_audit_log)
         .collect();
-    recent_runs.sort_by(|left, right| right.ran_at.cmp(&left.ran_at));
+    recent_runs.sort_by_key(|run| std::cmp::Reverse(run.ran_at));
     let run_count = recent_runs.len();
     let delivered_run_count = recent_runs
         .iter()
@@ -1748,7 +1748,7 @@ pub(crate) fn approval_notification_policy_url(
     if let Some(target_env) = policy.target_env.as_ref() {
         return std::env::var(target_env)
             .ok()
-            .and_then(|value| (!value.trim().is_empty()).then(|| value));
+            .and_then(|value| (!value.trim().is_empty()).then_some(value));
     }
     match policy.channel.as_str() {
         "webhook" => state.approval_webhook_url.clone(),

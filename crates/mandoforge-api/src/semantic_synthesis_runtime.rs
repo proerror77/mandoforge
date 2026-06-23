@@ -480,17 +480,17 @@ pub(crate) async fn generate_memory_writeback_candidates(
     let include_approvals = input.include_approvals.unwrap_or(true);
 
     let mut proposed = Vec::new();
-    if include_session_summary {
-        if let Some(event) = events.iter().rev().find(|event| {
+    if include_session_summary
+        && let Some(event) = events.iter().rev().find(|event| {
             matches!(
                 event.event_type.as_str(),
                 "session.loop.idle" | "session.completed"
             )
-        }) {
-            proposed.push(memory_candidate_from_session(
-                &session, &agent, event, &events, &artifacts, &approvals, &handoffs,
-            ));
-        }
+        })
+    {
+        proposed.push(memory_candidate_from_session(
+            &session, &agent, event, &events, &artifacts, &approvals, &handoffs,
+        ));
     }
     if include_artifacts {
         for artifact in &artifacts {

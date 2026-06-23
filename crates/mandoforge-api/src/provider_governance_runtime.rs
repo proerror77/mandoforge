@@ -650,7 +650,7 @@ pub(crate) fn build_provider_governance_summary(
                 .base_url
                 .as_deref()
                 .map(str::trim)
-                .map_or(true, str::is_empty)
+                .is_none_or(str::is_empty)
         {
             attention_items.push(ProviderGovernanceAttentionItem {
                 provider_id: provider.id,
@@ -1003,7 +1003,7 @@ pub(crate) fn build_provider_policy_gate_report(
                 .base_url
                 .as_deref()
                 .map(str::trim)
-                .map_or(true, str::is_empty)
+                .is_none_or(str::is_empty)
         {
             blockers.push("provider requires base_url".to_string());
             recommendations.push("configure provider base_url before production use".to_string());
@@ -1081,7 +1081,7 @@ pub(crate) fn build_provider_policy_gate_run_summary(
         .iter()
         .filter_map(provider_policy_gate_run_from_audit_log)
         .collect();
-    recent_runs.sort_by(|left, right| right.ran_at.cmp(&left.ran_at));
+    recent_runs.sort_by_key(|run| std::cmp::Reverse(run.ran_at));
     let run_count = recent_runs.len();
     let passed_run_count = recent_runs
         .iter()

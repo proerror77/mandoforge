@@ -97,14 +97,13 @@ async fn validate_scheduler_deployment(
         .get("status")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("skipped");
-    let status = if readiness.blocking_reasons.iter().any(|reason| {
+    let has_blocking_reason = readiness.blocking_reasons.iter().any(|reason| {
         reason != "scheduler deployment controller has no recent validated evidence"
             && reason != "scheduler deployment controller evidence is stale"
-    }) {
-        "blocked"
-    } else if controller_required && !controller_configured {
-        "blocked"
-    } else if controller_required && controller_status != "validated" {
+    });
+    let controller_blocks_required_validation =
+        controller_required && (!controller_configured || controller_status != "validated");
+    let status = if has_blocking_reason || controller_blocks_required_validation {
         "blocked"
     } else if controller_configured && controller_status != "validated" {
         "failed"

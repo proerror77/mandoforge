@@ -344,17 +344,17 @@ fn evaluate_agent_version_policy(
         });
     }
 
-    if let Some(allowed_tools) = policy.get("allowed_tools") {
-        if !json_string_array_contains(Some(allowed_tools), name) {
-            return Some(ToolPolicyDecision {
-                decision: "denied",
-                risk_level: tool_risk_level(name).to_string(),
-                reason: format!(
-                    "{name} is not allowed by agent version {} policy",
-                    agent_version.version
-                ),
-            });
-        }
+    if let Some(allowed_tools) = policy.get("allowed_tools")
+        && !json_string_array_contains(Some(allowed_tools), name)
+    {
+        return Some(ToolPolicyDecision {
+            decision: "denied",
+            risk_level: tool_risk_level(name).to_string(),
+            reason: format!(
+                "{name} is not allowed by agent version {} policy",
+                agent_version.version
+            ),
+        });
     }
 
     if let Some(risk) = approval_required_risk(policy.get("approval_required"), name) {

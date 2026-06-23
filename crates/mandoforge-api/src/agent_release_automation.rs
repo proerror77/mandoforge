@@ -626,7 +626,7 @@ pub(crate) fn build_agent_release_automation_run_summary(
         .iter()
         .filter_map(agent_release_automation_run_from_audit_log)
         .collect();
-    recent_runs.sort_by(|left, right| right.ran_at.cmp(&left.ran_at));
+    recent_runs.sort_by_key(|run| std::cmp::Reverse(run.ran_at));
     let run_count = recent_runs.len();
     let processed_run_count = recent_runs
         .iter()

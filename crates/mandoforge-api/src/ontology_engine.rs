@@ -273,8 +273,6 @@ pub(crate) fn ontology_active_release_evidence_class(
         .any(|release| release.release_class == "production_like_pilot")
     {
         "production_like_pilot".to_string()
-    } else if active_releases.is_empty() {
-        "repo_controlled".to_string()
     } else {
         "repo_controlled".to_string()
     }

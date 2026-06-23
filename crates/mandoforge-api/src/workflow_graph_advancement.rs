@@ -99,30 +99,30 @@ pub(crate) async fn advance_workflow_graph_after_step_update(
             let fan_in_payload = workflow_graph_fan_in_payload(&ready_step.fan_in);
             let fan_out_payload =
                 workflow_graph_fan_out_payload(fan_out_max_parallel, active_parallel_count);
-            if let Some(max_parallel) = fan_out_max_parallel {
-                if active_parallel_count >= max_parallel {
-                    record_workflow_transition(
-                        state,
-                        run,
-                        Some(step),
-                        None,
-                        "fan_out",
-                        "deferred",
-                        json!({
-                            "source": "step_graph_fan_out",
-                            "max_parallel": max_parallel,
-                            "active_parallel_count": active_parallel_count,
-                            "dependencies": ready_step.fan_in.dependencies,
-                            "graph_step": graph_step
-                        }),
-                        json!({
-                            "deferred_step_key": workflow_graph_step_key(graph_step)?,
-                            "reason": "fan_out_max_parallel_reached"
-                        }),
-                    )
-                    .await?;
-                    continue;
-                }
+            if let Some(max_parallel) = fan_out_max_parallel
+                && active_parallel_count >= max_parallel
+            {
+                record_workflow_transition(
+                    state,
+                    run,
+                    Some(step),
+                    None,
+                    "fan_out",
+                    "deferred",
+                    json!({
+                        "source": "step_graph_fan_out",
+                        "max_parallel": max_parallel,
+                        "active_parallel_count": active_parallel_count,
+                        "dependencies": ready_step.fan_in.dependencies,
+                        "graph_step": graph_step
+                    }),
+                    json!({
+                        "deferred_step_key": workflow_graph_step_key(graph_step)?,
+                        "reason": "fan_out_max_parallel_reached"
+                    }),
+                )
+                .await?;
+                continue;
             }
             let branch_payload = if let Some(evaluation) =
                 workflow_graph_step_condition_evaluation(graph_step, &existing_steps)?

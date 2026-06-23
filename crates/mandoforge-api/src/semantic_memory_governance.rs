@@ -258,12 +258,11 @@ pub(crate) fn collect_session_ids_from_json(value: &Value, session_ids: &mut Has
     match value {
         Value::Object(object) => {
             for (key, value) in object {
-                if key == "session_id" || key.ends_with("_session_id") {
-                    if let Some(candidate) = value.as_str() {
-                        if let Ok(session_id) = Uuid::parse_str(candidate) {
-                            session_ids.insert(session_id);
-                        }
-                    }
+                if (key == "session_id" || key.ends_with("_session_id"))
+                    && let Some(candidate) = value.as_str()
+                    && let Ok(session_id) = Uuid::parse_str(candidate)
+                {
+                    session_ids.insert(session_id);
                 }
                 collect_session_ids_from_json(value, session_ids);
             }

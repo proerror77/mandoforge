@@ -201,10 +201,10 @@ impl AppState {
                     .get(&team_id)
                     .map(|team| team.organization_id)
                     .ok_or_else(|| AppError::not_found("active team not found"))?;
-                if !store
+                if store
                     .organizations
                     .get(&organization_id)
-                    .is_some_and(|organization| organization.archived_at.is_none())
+                    .is_none_or(|organization| organization.archived_at.is_some())
                 {
                     return Err(AppError::not_found("active team not found"));
                 }
@@ -1608,22 +1608,22 @@ impl AppState {
                     .get(&membership_id)
                     .cloned()
                     .ok_or_else(|| AppError::not_found("membership not found"))?;
-                if membership.role == "admin" {
-                    if let Some(organization_id) = membership.organization_id {
-                        let remaining_admin_count = store
-                            .memberships
-                            .values()
-                            .filter(|candidate| {
-                                candidate.id != membership_id
-                                    && candidate.organization_id == Some(organization_id)
-                                    && candidate.role == "admin"
-                            })
-                            .count();
-                        if remaining_admin_count == 0 {
-                            return Err(AppError::bad_request(
-                                "cannot delete the last admin membership",
-                            ));
-                        }
+                if membership.role == "admin"
+                    && let Some(organization_id) = membership.organization_id
+                {
+                    let remaining_admin_count = store
+                        .memberships
+                        .values()
+                        .filter(|candidate| {
+                            candidate.id != membership_id
+                                && candidate.organization_id == Some(organization_id)
+                                && candidate.role == "admin"
+                        })
+                        .count();
+                    if remaining_admin_count == 0 {
+                        return Err(AppError::bad_request(
+                            "cannot delete the last admin membership",
+                        ));
                     }
                 }
                 store.memberships.remove(&membership_id);
@@ -1641,26 +1641,26 @@ impl AppState {
                 .await?
                 .ok_or_else(|| AppError::not_found("membership not found"))?;
                 let membership = membership_from_row(row)?;
-                if membership.role == "admin" {
-                    if let Some(organization_id) = membership.organization_id {
-                        let remaining_admin_count: i64 = sqlx::query_scalar(
-                            "SELECT COUNT(*)
+                if membership.role == "admin"
+                    && let Some(organization_id) = membership.organization_id
+                {
+                    let remaining_admin_count: i64 = sqlx::query_scalar(
+                        "SELECT COUNT(*)
                              FROM memberships
                              WHERE tenant_id = $1
                                AND organization_id = $2
                                AND role = 'admin'
                                AND id <> $3",
-                        )
-                        .bind(self.current_tenant_id())
-                        .bind(organization_id)
-                        .bind(membership_id)
-                        .fetch_one(pool)
-                        .await?;
-                        if remaining_admin_count == 0 {
-                            return Err(AppError::bad_request(
-                                "cannot delete the last admin membership",
-                            ));
-                        }
+                    )
+                    .bind(self.current_tenant_id())
+                    .bind(organization_id)
+                    .bind(membership_id)
+                    .fetch_one(pool)
+                    .await?;
+                    if remaining_admin_count == 0 {
+                        return Err(AppError::bad_request(
+                            "cannot delete the last admin membership",
+                        ));
                     }
                 }
                 sqlx::query("DELETE FROM memberships WHERE tenant_id = $1 AND id = $2")

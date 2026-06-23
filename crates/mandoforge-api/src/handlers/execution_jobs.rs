@@ -80,9 +80,8 @@ async fn list_execution_jobs(
             .into_iter()
             .filter(|job| visible_session_ids.contains(&job.session_id))
             .filter(|job| {
-                worker_environment_id.map_or(true, |environment_id| {
-                    job.environment_id == Some(environment_id)
-                })
+                worker_environment_id
+                    .is_none_or(|environment_id| job.environment_id == Some(environment_id))
             })
             .filter(|job| {
                 worker_pool.as_ref().is_none_or(|_| {
@@ -170,9 +169,8 @@ async fn list_session_loop_jobs(
             .into_iter()
             .filter(|job| visible_session_ids.contains(&job.session_id))
             .filter(|job| {
-                worker_environment_id.map_or(true, |environment_id| {
-                    job.environment_id == Some(environment_id)
-                })
+                worker_environment_id
+                    .is_none_or(|environment_id| job.environment_id == Some(environment_id))
             })
             .filter(|job| {
                 worker_pool.as_ref().is_none_or(|_| {

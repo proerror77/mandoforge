@@ -440,10 +440,10 @@ impl AppState {
         session_id: Uuid,
         trigger_event_id: Option<Uuid>,
     ) -> Result<Option<i64>, AppError> {
-        if let Some(trigger_event_id) = trigger_event_id {
-            if let Some(seq) = self.session_event_seq(session_id, trigger_event_id).await? {
-                return Ok(Some(seq));
-            }
+        if let Some(trigger_event_id) = trigger_event_id
+            && let Some(seq) = self.session_event_seq(session_id, trigger_event_id).await?
+        {
+            return Ok(Some(seq));
         }
         self.latest_session_event_seq(session_id).await
     }

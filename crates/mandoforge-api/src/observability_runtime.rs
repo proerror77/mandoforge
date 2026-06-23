@@ -331,18 +331,18 @@ pub(crate) async fn execute_observability_remediation_with_lookup<F>(
 where
     F: Fn(&str) -> Option<String>,
 {
-    let before_summary = build_observability_summary(&state).await?;
+    let before_summary = build_observability_summary(state).await?;
     let before = before_summary.backpressure;
     let mut actions = Vec::new();
     let controller_configured = observability_remediation_controller_configured(&lookup);
     let approval_escalation_run = if before.pending_approvals > 0 {
         actions.push("approval_escalation_due_run".to_string());
-        Some(execute_due_approval_escalations(&state).await?)
+        Some(execute_due_approval_escalations(state).await?)
     } else {
         None
     };
     let codex_app_server_stale_polls = execute_stale_codex_app_server_polls(
-        &state,
+        state,
         CodexAppServerStalePollRequest::default(),
         "system",
         "observability",
@@ -359,7 +359,7 @@ where
     if before.failed_jobs > 0 || before.failed_sessions > 0 || before.failed_tool_calls > 0 {
         actions.push("manual_failure_triage_required".to_string());
     }
-    let after_summary = build_observability_summary(&state).await?;
+    let after_summary = build_observability_summary(state).await?;
     let mut controller_execution = json!({
         "attempted": false,
         "status": "skipped",

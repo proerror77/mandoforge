@@ -629,16 +629,16 @@ fn provider_plan_from_content(content: &str) -> Option<Vec<String>> {
     if trimmed.is_empty() {
         return None;
     }
-    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
-        if let Some(plan) = value.get("plan").and_then(Value::as_array) {
-            let steps: Vec<_> = plan
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect();
-            if !steps.is_empty() {
-                return Some(steps);
-            }
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed)
+        && let Some(plan) = value.get("plan").and_then(Value::as_array)
+    {
+        let steps: Vec<_> = plan
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect();
+        if !steps.is_empty() {
+            return Some(steps);
         }
     }
     Some(

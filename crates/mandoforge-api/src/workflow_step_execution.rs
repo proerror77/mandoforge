@@ -709,9 +709,9 @@ pub(crate) fn workflow_compensation_adapter_blockers(
         }
     } else if step.status != "queued" {
         if step.status == "running" {
-            if !step
+            if step
                 .lease_expires_at
-                .is_some_and(|lease_expires_at| lease_expires_at <= now)
+                .is_none_or(|lease_expires_at| lease_expires_at > now)
             {
                 blockers.push("already_claimed".to_string());
             }
@@ -1260,7 +1260,7 @@ pub(crate) async fn activate_due_workflow_steps_for_run(
             continue;
         };
         let previous_status = "scheduled";
-        record_workflow_step_run_updated(state, run, &updated, &previous_status).await?;
+        record_workflow_step_run_updated(state, run, &updated, previous_status).await?;
         record_workflow_transition(
             state,
             run,

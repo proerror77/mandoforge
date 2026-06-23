@@ -1602,7 +1602,7 @@ pub(crate) fn missing_semantic_scope_keys(scopes: &Value) -> Vec<String> {
             &REQUIRED_SEMANTIC_SCOPE_KEYS
         };
     required_keys
-        .into_iter()
+        .iter()
         .filter(|key| {
             scopes
                 .get(*key)
@@ -3140,7 +3140,7 @@ pub(crate) async fn execute_tool_invocation(
             .await?;
         return Err(AppError::not_found("unknown tool"));
     };
-    let result = match executor.execute(&state, &input, &tool_call).await {
+    let result = match executor.execute(state, &input, &tool_call).await {
         Ok(result) => result,
         Err(error) => {
             let error_payload = json!({"error": error.message.clone()});

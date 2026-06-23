@@ -457,12 +457,12 @@ fn validate_remote_computer_profile_schema(
         return Ok(());
     }
     for key in ["pool", "profile", "namespace", "remote_computer_id"] {
-        if let Some(value) = profile.get(key) {
-            if !value.is_string() {
-                return Err(AppError::bad_request(format!(
-                    "remote_computer_profile.{key} must be a string"
-                )));
-            }
+        if let Some(value) = profile.get(key)
+            && !value.is_string()
+        {
+            return Err(AppError::bad_request(format!(
+                "remote_computer_profile.{key} must be a string"
+            )));
         }
     }
     if let Some(selector) = profile.get("metadata_selector") {

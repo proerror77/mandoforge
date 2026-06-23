@@ -594,9 +594,9 @@ pub(crate) async fn run_session_loop(
         ))
         .await?;
 
-    let (provider_label, provider) = provider_client_for_session(&state, id).await?;
+    let (provider_label, provider) = provider_client_for_session(state, id).await?;
     let provider_response = run_provider_harness(
-        &state,
+        state,
         id,
         provider.as_ref(),
         &provider_label,
@@ -617,13 +617,13 @@ pub(crate) async fn run_session_loop(
         )
         .await?;
 
-    let session_task_grant_id = active_task_grant_for_session(&state, id)
+    let session_task_grant_id = active_task_grant_for_session(state, id)
         .await?
         .map(|(_, grant)| grant.id);
     let mut waiting_for_approval = false;
     for tool_call in provider_response.tool_calls {
         let result = execute_tool_invocation(
-            &state,
+            state,
             &tool_call.tool_name,
             ExecuteTool {
                 session_id: id,

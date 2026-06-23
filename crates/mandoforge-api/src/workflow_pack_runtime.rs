@@ -1674,33 +1674,33 @@ pub(crate) async fn workflow_pack_project_action_types(
             )
             .await?;
         }
-        if let Some(object_type_id) = workflow_pack_value_string(&action_type, "object_type") {
-            if let Some(object_type) = ontology_object_types.get(&object_type_id) {
-                link_count += workflow_pack_create_semantic_link_if_absent(
-                    state,
-                    &action_object,
-                    "acts_on_object_type",
-                    object_type,
-                    json!({"source": "workflow_pack_action_type", "action_id": action.id}),
-                )
-                .await?;
-            }
+        if let Some(object_type_id) = workflow_pack_value_string(&action_type, "object_type")
+            && let Some(object_type) = ontology_object_types.get(&object_type_id)
+        {
+            link_count += workflow_pack_create_semantic_link_if_absent(
+                state,
+                &action_object,
+                "acts_on_object_type",
+                object_type,
+                json!({"source": "workflow_pack_action_type", "action_id": action.id}),
+            )
+            .await?;
         }
-        if let Some(connector_id) = workflow_pack_value_string(&action_type, "connector_id") {
-            if let Some(connector) = component_objects.get(&format!("connector:{connector_id}")) {
-                link_count += workflow_pack_create_semantic_link_if_absent(
-                    state,
-                    &action_object,
-                    "uses_connector",
-                    connector,
-                    json!({
-                        "source": "workflow_pack_action_type",
-                        "action_id": action.id,
-                        "operation_id": workflow_pack_value_string(&action_type, "operation_id"),
-                    }),
-                )
-                .await?;
-            }
+        if let Some(connector_id) = workflow_pack_value_string(&action_type, "connector_id")
+            && let Some(connector) = component_objects.get(&format!("connector:{connector_id}"))
+        {
+            link_count += workflow_pack_create_semantic_link_if_absent(
+                state,
+                &action_object,
+                "uses_connector",
+                connector,
+                json!({
+                    "source": "workflow_pack_action_type",
+                    "action_id": action.id,
+                    "operation_id": workflow_pack_value_string(&action_type, "operation_id"),
+                }),
+            )
+            .await?;
         }
     }
     Ok(WorkflowPackActionProjection {
@@ -2409,13 +2409,13 @@ pub(crate) async fn assess_workflow_pack_connector_quality(
                     server.name
                 )),
             }
-            if let Some(tool_name) = bound_tool_name.as_deref() {
-                if !server.tool_allowlist.iter().any(|tool| tool == tool_name) {
-                    connector_blockers.push(format!(
-                        "bound MCP server {} does not allow tool {}",
-                        server.name, tool_name
-                    ));
-                }
+            if let Some(tool_name) = bound_tool_name.as_deref()
+                && !server.tool_allowlist.iter().any(|tool| tool == tool_name)
+            {
+                connector_blockers.push(format!(
+                    "bound MCP server {} does not allow tool {}",
+                    server.name, tool_name
+                ));
             }
         }
 
@@ -2502,7 +2502,6 @@ pub(crate) async fn assess_workflow_pack_connector_quality(
             blockers.extend(
                 connector_blockers
                     .iter()
-                    .cloned()
                     .map(|blocker| format!("connector {}: {}", connector.id, blocker)),
             );
             "blocked".to_string()
@@ -2673,26 +2672,24 @@ pub(crate) fn workflow_pack_connector_required_tenant_fields(
     let mut fields = BTreeSet::new();
     if let Some(account_profile) =
         workflow_pack_profile_value(manifest, package_dir, "connector-account")?
-    {
-        if let Some(tenant_binding) = account_profile
+        && let Some(tenant_binding) = account_profile
             .get("accounts")
             .and_then(Value::as_object)
             .and_then(|accounts| accounts.get(&connector.id))
             .and_then(|account| account.get("tenant_binding"))
             .and_then(Value::as_object)
-        {
-            fields.extend(tenant_binding.keys().map(ToString::to_string));
-        }
+    {
+        fields.extend(tenant_binding.keys().map(ToString::to_string));
     }
 
-    if let Some(connector_file) = workflow_pack_connector_file(package_dir, connector)? {
-        if let Some(required_fields) = workflow_pack_connector_yaml_array(
+    if let Some(connector_file) = workflow_pack_connector_file(package_dir, connector)?
+        && let Some(required_fields) = workflow_pack_connector_yaml_array(
             &connector_file,
             &connector.id,
             &["readiness_probes", "tenant_scope_probe", "required_fields"],
-        ) {
-            fields.extend(required_fields);
-        }
+        )
+    {
+        fields.extend(required_fields);
     }
     Ok(fields)
 }
