@@ -43,6 +43,7 @@ const CONSOLE_DEV_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-sr
 mod authorization;
 mod artifact_files;
 mod codex_app_server;
+mod deployment_version;
 mod error;
 mod eval_judge;
 mod execution;
@@ -444,6 +445,11 @@ use shell_runner::docker_shell_args;
 use shell_runner::{shell_command, shell_runner};
 pub(crate) use state::AppState;
 use store_backend::{MemoryStore, StoreBackend};
+pub(crate) use deployment_version::{
+    deployment_expected_value_matches, deployment_version_from_env,
+};
+#[cfg(test)]
+pub(crate) use deployment_version::deployment_version_from_lookup;
 pub(crate) use runtime_config::{
     approval_email_relay_url_from_env, approval_slack_webhook_url_from_env,
     approval_webhook_url_from_env, codex_app_server_client_from_env,
@@ -646,49 +652,6 @@ fn api_cors_layer() -> CorsLayer {
     } else {
         CorsLayer::new()
     }
-}
-
-fn deployment_expected_value_matches(expected: Option<&str>, running: Option<&str>) -> bool {
-    expected
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .is_none_or(|expected| running == Some(expected))
-}
-
-fn deployment_version_from_env() -> DeploymentVersion {
-    deployment_version_from_lookup(|key| std::env::var(key).ok())
-}
-
-fn deployment_version_from_lookup<F>(lookup: F) -> DeploymentVersion
-where
-    F: Fn(&str) -> Option<String>,
-{
-    let image_tag = trimmed_lookup(&lookup, "MANDOFORGE_IMAGE_TAG");
-    let git_sha = trimmed_lookup(&lookup, "MANDOFORGE_GIT_SHA")
-        .or_else(|| trimmed_lookup(&lookup, "GITHUB_SHA"));
-    let build_time = trimmed_lookup(&lookup, "MANDOFORGE_BUILD_TIME");
-    let source = if image_tag.is_some() || git_sha.is_some() || build_time.is_some() {
-        "runtime_env".to_string()
-    } else {
-        "local_cargo_run".to_string()
-    };
-    DeploymentVersion {
-        service: "mandoforge-api".to_string(),
-        cargo_package_version: env!("CARGO_PKG_VERSION").to_string(),
-        image_tag,
-        git_sha,
-        build_time,
-        source,
-    }
-}
-
-fn trimmed_lookup<F>(lookup: &F, key: &str) -> Option<String>
-where
-    F: Fn(&str) -> Option<String>,
-{
-    lookup(key)
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
 }
 
 async fn build_enterprise_security_admin_readiness(
