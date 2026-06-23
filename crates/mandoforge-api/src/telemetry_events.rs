@@ -1,7 +1,28 @@
 use serde_json::{Value, json};
+use tracing::warn;
 use uuid::Uuid;
 
-use crate::SessionEvent;
+use crate::{AppState, SessionEvent, TelemetryEvent};
+
+impl AppState {
+    pub(crate) async fn emit_telemetry_event(&self, event: &SessionEvent) {
+        if !self.observability_config.is_enabled() || self.observability_config.sample_ratio <= 0.0
+        {
+            return;
+        }
+        let telemetry_event = TelemetryEvent {
+            name: event.event_type.clone(),
+            attributes: telemetry_attributes_for_event(event, self.current_tenant_id()),
+        };
+        if let Err(error) = self
+            .telemetry_exporter
+            .export_event(&self.observability_config, telemetry_event)
+            .await
+        {
+            warn!(%error.message, "telemetry export failed");
+        }
+    }
+}
 
 pub(crate) fn telemetry_attributes_for_event(event: &SessionEvent, tenant_id: Uuid) -> Value {
     let category = event.event_type.split('.').next().unwrap_or("event");

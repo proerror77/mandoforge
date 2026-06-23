@@ -33,7 +33,7 @@ use tokio::{
     sync::RwLock,
 };
 use tower_http::{services::ServeDir, trace::TraceLayer};
-use tracing::{info, warn};
+use tracing::info;
 use uuid::Uuid;
 
 const DEFAULT_TENANT_ID: &str = "00000000-0000-4000-8000-000000000001";
@@ -467,7 +467,7 @@ pub(crate) use http_shell::{api_cors_layer, security_headers_middleware};
 pub(crate) use ontology_review::normalize_ontology_review_decision;
 pub(crate) use policy_runtime::runtime_policy;
 pub(crate) use stage2_readiness::build_stage2_completion_readiness;
-pub(crate) use telemetry_events::{telemetry_attributes_for_event, telemetry_status_for_event};
+pub(crate) use telemetry_events::telemetry_status_for_event;
 #[cfg(test)]
 pub(crate) use deployment_version::deployment_version_from_lookup;
 #[cfg(test)]
@@ -658,23 +658,6 @@ impl AppState {
         current_request_tenant_id(self.configured_tenant_id())
     }
 
-    async fn emit_telemetry_event(&self, event: &SessionEvent) {
-        if !self.observability_config.is_enabled() || self.observability_config.sample_ratio <= 0.0
-        {
-            return;
-        }
-        let telemetry_event = TelemetryEvent {
-            name: event.event_type.clone(),
-            attributes: telemetry_attributes_for_event(event, self.current_tenant_id()),
-        };
-        if let Err(error) = self
-            .telemetry_exporter
-            .export_event(&self.observability_config, telemetry_event)
-            .await
-        {
-            warn!(%error.message, "telemetry export failed");
-        }
-    }
 }
 
 #[cfg(test)]
