@@ -6,6 +6,407 @@ use uuid::Uuid;
 
 use crate::*;
 
+pub(crate) async fn decide_approval(
+    state: AppState,
+    approval_id: Uuid,
+    status: &str,
+    decider_subject: Option<String>,
+) -> Result<Json<Approval>, AppError> {
+    let approval = state.get_approval(approval_id).await?;
+    if approval.status != "pending" {
+        return Err(AppError::bad_request(
+            "only pending approvals can be decided",
+        ));
+    }
+    if approval_is_expired(&approval) {
+        expire_approval_record(&state, approval_id).await?;
+        return Err(AppError::bad_request("approval expired"));
+    }
+    let updated = state.decide_approval(approval_id, status).await?;
+    if status == "approved" {
+        maybe_issue_approval_commit_token(&state, &updated, decider_subject.as_deref()).await?;
+    }
+    let decision_result = match status {
+        "rejected" => record_rejected_approval_tool_result(&state, &updated).await?,
+        _ => None,
+    };
+    let decision_event = state
+        .append_event(
+            "user",
+            Some(approval_id),
+            updated.session_id,
+            &format!("approval.{status}"),
+            json!({"approval_id": approval_id, "decision": status}),
+        )
+        .await?;
+    if status == "approved" {
+        let outcome = state
+            .execution_worker
+            .execute_approved_tool(&state, &updated)
+            .await?;
+        match outcome {
+            ExecutionWorkerOutcome::Completed { job } => {
+                if job.is_none() {
+                    project_session_event_to_loop(&state, &decision_event).await?;
+                }
+            }
+            ExecutionWorkerOutcome::Queued => {
+                set_managed_session_status(
+                    &state,
+                    updated.session_id,
+                    SessionStatus::Running,
+                    "approved execution queued for worker",
+                )
+                .await?;
+            }
+        }
+    } else if status == "rejected" {
+        project_session_event_to_loop(&state, &decision_event).await?;
+    }
+    state
+        .append_audit_log(new_audit_log(
+            Some(updated.session_id),
+            "user",
+            Some(approval_id),
+            &format!("approval.{status}"),
+            "approval",
+            Some(approval_id),
+            json!({
+                "tool_call_id": updated.tool_call_id,
+                "decision": status,
+                "tool_result_status": decision_result.map(|tool_call| tool_call.status),
+            }),
+        ))
+        .await?;
+    Ok(Json(updated))
+}
+
+async fn maybe_issue_approval_commit_token(
+    state: &AppState,
+    approval: &Approval,
+    approver_subject: Option<&str>,
+) -> Result<Option<ApprovalCommitToken>, AppError> {
+    let Some(tool_call_id) = approval.tool_call_id else {
+        return Ok(None);
+    };
+    let tool_call = state.get_tool_call(tool_call_id).await?;
+    let Some(task_grant_id) = tool_call.task_grant_id else {
+        return Ok(None);
+    };
+    let grant = state.get_task_grant(task_grant_id).await?;
+    if !task_grant_requires_approval_commit_token(&grant, &tool_call.tool_name) {
+        return Ok(None);
+    }
+    if state
+        .approval_commit_token_for_approval(approval.id)
+        .await?
+        .is_some()
+    {
+        return Ok(None);
+    }
+    let binding = approval_commit_binding_for_args(&tool_call.tool_name, &tool_call.args)?;
+    if tool_call.normalized_args_hash.as_deref() != Some(binding.normalized_args_hash.as_str())
+        || tool_call.target_binding != binding.target_binding
+    {
+        return Err(AppError::forbidden(
+            "approval commit binding does not match current tool call args",
+        ));
+    }
+    let created_at = Utc::now();
+    let token = state
+        .create_approval_commit_token(ApprovalCommitToken {
+            id: Uuid::new_v4(),
+            approval_id: approval.id,
+            tool_call_id: tool_call.id,
+            task_grant_id,
+            session_id: approval.session_id,
+            tool_name: tool_call.tool_name.clone(),
+            normalized_args_hash: binding.normalized_args_hash,
+            target_binding: binding.target_binding,
+            approver_subject: approver_subject.unwrap_or("unknown").to_string(),
+            status: "issued".to_string(),
+            expires_at: approval
+                .expires_at
+                .unwrap_or_else(|| created_at + ChronoDuration::minutes(15)),
+            consumed_at: None,
+            created_at,
+        })
+        .await?;
+    state
+        .append_event(
+            "system",
+            Some(token.id),
+            approval.session_id,
+            "approval_commit_token.issued",
+            json!({
+                "approval_commit_token_id": token.id,
+                "approval_id": approval.id,
+                "tool_call_id": token.tool_call_id,
+                "task_grant_id": token.task_grant_id,
+                "tool": token.tool_name,
+                "normalized_args_hash": token.normalized_args_hash,
+                "target_binding": token.target_binding,
+                "expires_at": token.expires_at
+            }),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(approval.session_id),
+            "system",
+            Some(token.id),
+            "approval_commit_token.issued",
+            "approval_commit_token",
+            Some(token.id),
+            json!({
+                "approval_id": approval.id,
+                "tool_call_id": token.tool_call_id,
+                "task_grant_id": token.task_grant_id,
+                "tool": token.tool_name,
+                "normalized_args_hash": token.normalized_args_hash,
+                "target_binding": token.target_binding
+            }),
+        ))
+        .await?;
+    Ok(Some(token))
+}
+
+pub(crate) async fn consume_valid_approval_commit_token_for_tool_call(
+    state: &AppState,
+    approval: &Approval,
+    tool_call: &ToolCall,
+) -> Result<ApprovalCommitToken, AppError> {
+    let token = state
+        .approval_commit_token_for_approval(approval.id)
+        .await?
+        .ok_or_else(|| AppError::forbidden("approval commit token is required"))?;
+    if token.status != "issued" {
+        return Err(AppError::forbidden("approval commit token is not issued"));
+    }
+    if token.expires_at <= Utc::now() {
+        return Err(AppError::forbidden("approval commit token is expired"));
+    }
+    if token.tool_call_id != tool_call.id
+        || token.session_id != approval.session_id
+        || token.tool_name != tool_call.tool_name
+    {
+        return Err(AppError::forbidden(
+            "approval commit token does not match tool call",
+        ));
+    }
+    let Some(task_grant_id) = tool_call.task_grant_id else {
+        return Err(AppError::forbidden(
+            "approval commit token requires task grant binding",
+        ));
+    };
+    if token.task_grant_id != task_grant_id {
+        return Err(AppError::forbidden(
+            "approval commit token task grant does not match tool call",
+        ));
+    }
+    let grant = state.get_task_grant(task_grant_id).await?;
+    if grant.status != "active" {
+        return Err(AppError::forbidden("task grant is not active"));
+    }
+    if grant
+        .expires_at
+        .is_some_and(|expires_at| expires_at <= Utc::now())
+    {
+        return Err(AppError::forbidden("task grant is expired"));
+    }
+    if !task_grant_requires_approval_commit_token(&grant, &tool_call.tool_name) {
+        return Err(AppError::forbidden(
+            "approval commit token is only valid for commit_write effects",
+        ));
+    }
+    if let Some(reason) =
+        task_grant_connector_invocation_denial(&grant, &tool_call.tool_name, &tool_call.args)?
+    {
+        return Err(AppError::forbidden(reason));
+    }
+    let binding = approval_commit_binding_for_args(&tool_call.tool_name, &tool_call.args)?;
+    if token.normalized_args_hash != binding.normalized_args_hash
+        || token.target_binding != binding.target_binding
+    {
+        return Err(AppError::forbidden(
+            "approval commit token digest does not match current tool call args",
+        ));
+    }
+    let consumed = state.consume_approval_commit_token(token.id).await?;
+    state
+        .append_event(
+            "system",
+            Some(consumed.id),
+            approval.session_id,
+            "approval_commit_token.consumed",
+            json!({
+                "approval_commit_token_id": consumed.id,
+                "approval_id": approval.id,
+                "tool_call_id": tool_call.id,
+                "task_grant_id": consumed.task_grant_id,
+                "tool": consumed.tool_name,
+                "normalized_args_hash": consumed.normalized_args_hash
+            }),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(approval.session_id),
+            "worker",
+            Some(consumed.id),
+            "approval_commit_token.consumed",
+            "approval_commit_token",
+            Some(consumed.id),
+            json!({
+                "approval_id": approval.id,
+                "tool_call_id": tool_call.id,
+                "task_grant_id": consumed.task_grant_id,
+                "tool": consumed.tool_name,
+                "normalized_args_hash": consumed.normalized_args_hash
+            }),
+        ))
+        .await?;
+    Ok(consumed)
+}
+
+async fn record_rejected_approval_tool_result(
+    state: &AppState,
+    approval: &Approval,
+) -> Result<Option<ToolCall>, AppError> {
+    let Some(tool_call_id) = approval.tool_call_id else {
+        return Ok(None);
+    };
+    let tool_call = state.get_tool_call(tool_call_id).await?;
+    let result = json!({
+        "status": "denied",
+        "approval": "rejected",
+        "approval_id": approval.id,
+        "reason": approval.reason,
+    });
+    let tool_result_event = state
+        .append_event(
+            "tool",
+            Some(tool_call.id),
+            approval.session_id,
+            "tool.result",
+            json!({
+                "tool_call_id": tool_call.id,
+                "tool": tool_call.tool_name,
+                "content": result,
+            }),
+        )
+        .await?;
+    project_session_event_to_loop(state, &tool_result_event).await?;
+    state
+        .append_event(
+            "agent",
+            Some(tool_call.id),
+            approval.session_id,
+            "agent.tool_result",
+            json!({
+                "tool_call_id": tool_call.id,
+                "tool": tool_call.tool_name,
+                "status": "denied",
+                "content": result,
+            }),
+        )
+        .await?;
+    let updated = state
+        .update_tool_call_status(tool_call.id, "denied", Some(result.clone()), None)
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(approval.session_id),
+            "tool",
+            Some(tool_call.id),
+            "tool.denied",
+            "tool_call",
+            Some(tool_call.id),
+            json!({
+                "tool": tool_call.tool_name,
+                "approval_id": approval.id,
+                "decision": "rejected",
+                "status": "denied",
+            }),
+        ))
+        .await?;
+    Ok(Some(updated))
+}
+
+pub(crate) fn approval_is_expired(approval: &Approval) -> bool {
+    approval_is_expired_at(approval, Utc::now())
+}
+
+pub(crate) fn approval_is_expired_at(approval: &Approval, now: DateTime<Utc>) -> bool {
+    approval.status == "pending"
+        && approval
+            .expires_at
+            .is_some_and(|expires_at| expires_at <= now)
+}
+
+pub(crate) fn next_due_escalation_rule(
+    approval: &Approval,
+    rules: &[ApprovalEscalationRule],
+    now: DateTime<Utc>,
+) -> Option<ApprovalEscalationRule> {
+    let previous_rule_id = approval
+        .evidence
+        .get("escalation")
+        .and_then(|value| value.get("rule_id"))
+        .and_then(Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok());
+    let previous_order = previous_rule_id.and_then(|rule_id| {
+        rules
+            .iter()
+            .find(|rule| rule.id == rule_id)
+            .map(|rule| rule.order_index)
+    });
+    let age_seconds = now
+        .signed_duration_since(approval.created_at)
+        .num_seconds()
+        .max(0) as i32;
+    rules
+        .iter()
+        .filter(|rule| rule.status == "active")
+        .filter(|rule| rule.risk_level == approval.risk_level)
+        .filter(|rule| previous_order.map_or(true, |order| rule.order_index > order))
+        .filter(|rule| age_seconds >= rule.after_seconds)
+        .min_by_key(|rule| (rule.order_index, rule.created_at))
+        .cloned()
+}
+
+pub(crate) async fn expire_approval_record(
+    state: &AppState,
+    approval_id: Uuid,
+) -> Result<Approval, AppError> {
+    let approval = state.get_approval(approval_id).await?;
+    if approval.status != "pending" {
+        return Ok(approval);
+    }
+    let updated = state.decide_approval(approval_id, "expired").await?;
+    state
+        .append_event(
+            "system",
+            Some(approval_id),
+            updated.session_id,
+            "approval.expired",
+            json!({"approval_id": approval_id, "decision": "expired", "expires_at": updated.expires_at}),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(updated.session_id),
+            "system",
+            Some(approval_id),
+            "approval.expired",
+            "approval",
+            Some(approval_id),
+            json!({"tool_call_id": updated.tool_call_id, "decision": "expired", "expires_at": updated.expires_at}),
+        ))
+        .await?;
+    Ok(updated)
+}
+
 pub(crate) fn approval_expires_at(
     created_at: DateTime<Utc>,
     expires_in_seconds: Option<&Value>,
