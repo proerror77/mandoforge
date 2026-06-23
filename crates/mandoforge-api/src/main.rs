@@ -60,6 +60,7 @@ mod observability;
 mod ontology_review;
 mod ontology_source_adapters;
 mod policy;
+mod policy_runtime;
 mod provider;
 mod remote_computer_events;
 mod remote_computer_execution_transport;
@@ -462,6 +463,7 @@ pub(crate) use deployment_version::{
 pub(crate) use enterprise_product_readiness::build_enterprise_product_completion_readiness;
 pub(crate) use enterprise_security_readiness::build_enterprise_security_admin_readiness;
 pub(crate) use ontology_review::normalize_ontology_review_decision;
+pub(crate) use policy_runtime::runtime_policy;
 pub(crate) use stage2_readiness::build_stage2_completion_readiness;
 pub(crate) use telemetry_events::{telemetry_attributes_for_event, telemetry_status_for_event};
 #[cfg(test)]
@@ -672,18 +674,6 @@ fn api_cors_layer() -> CorsLayer {
     }
 }
 
-fn runtime_policy(policy: PolicyConfig) -> Arc<RwLock<PolicyRuntime>> {
-    Arc::new(RwLock::new(PolicyRuntime {
-        active_revision_id: None,
-        active: policy,
-        staged: None,
-    }))
-}
-
-fn session_rollout_bucket(session_id: Uuid) -> u8 {
-    (session_id.as_u128() % 100) as u8
-}
-
 impl AppState {
     fn configured_tenant_id(&self) -> Uuid {
         let Self { tenant_id, .. } = self;
@@ -692,73 +682,6 @@ impl AppState {
 
     fn current_tenant_id(&self) -> Uuid {
         current_request_tenant_id(self.configured_tenant_id())
-    }
-
-    async fn active_policy(&self) -> PolicyConfig {
-        self.policy.read().await.active.clone()
-    }
-
-    async fn policy_for_session(&self, session_id: Uuid) -> PolicyConfig {
-        let runtime = self.policy.read().await;
-        if let Some(staged) = runtime.staged.as_ref() {
-            if session_rollout_bucket(session_id) < staged.rollout_percent {
-                return staged.policy.clone();
-            }
-        }
-        runtime.active.clone()
-    }
-
-    async fn activate_runtime_policy(
-        &self,
-        revision_id: Uuid,
-        policy: PolicyConfig,
-        rollout_percent: u8,
-    ) {
-        let mut runtime = self.policy.write().await;
-        if rollout_percent >= 100 {
-            runtime.active_revision_id = Some(revision_id);
-            runtime.active = policy;
-            runtime.staged = None;
-        } else {
-            runtime.staged = Some(StagedPolicyRuntime {
-                revision_id,
-                rollout_percent,
-                policy,
-            });
-        }
-    }
-
-    async fn policy_runtime_status(&self) -> PolicyRuntimeStatus {
-        let runtime = self.policy.read().await;
-        PolicyRuntimeStatus {
-            active_revision_id: runtime.active_revision_id,
-            staged_revision_id: runtime.staged.as_ref().map(|staged| staged.revision_id),
-            staged_rollout_percent: runtime.staged.as_ref().map(|staged| staged.rollout_percent),
-            rollout_active: runtime.staged.is_some(),
-        }
-    }
-
-    async fn cancel_staged_policy_rollout(&self) -> Result<PolicyRuntimeStatus, AppError> {
-        let mut runtime = self.policy.write().await;
-        if runtime.staged.take().is_none() {
-            return Err(AppError::bad_request("no staged policy rollout is active"));
-        }
-        Ok(PolicyRuntimeStatus {
-            active_revision_id: runtime.active_revision_id,
-            staged_revision_id: None,
-            staged_rollout_percent: None,
-            rollout_active: false,
-        })
-    }
-
-    async fn rollback_runtime_policy(&self, revision: &PolicyRevision) -> Result<(), AppError> {
-        let policy = serde_json::from_value::<PolicyConfig>(revision.body.clone())
-            .map_err(|error| AppError::bad_request(format!("invalid rollback policy: {error}")))?;
-        let mut runtime = self.policy.write().await;
-        runtime.active_revision_id = Some(revision.id);
-        runtime.active = policy;
-        runtime.staged = None;
-        Ok(())
     }
 
     pub(crate) async fn record_codex_app_server_run(
