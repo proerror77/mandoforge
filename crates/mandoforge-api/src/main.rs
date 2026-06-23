@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use axum::{
     Json, Router,
     extract::{Request, State},
-    http::{HeaderMap, HeaderName, HeaderValue},
+    http::HeaderMap,
     middleware::{self, Next},
     response::Response,
 };
@@ -32,7 +32,7 @@ use tokio::{
     net::TcpStream,
     sync::RwLock,
 };
-use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
+use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -54,6 +54,7 @@ mod execution;
 mod execution_queue;
 mod execution_queue_broker;
 mod handlers;
+mod http_shell;
 mod mcp_gateway;
 mod native_connectors;
 mod observability;
@@ -462,6 +463,7 @@ pub(crate) use deployment_version::{
 };
 pub(crate) use enterprise_product_readiness::build_enterprise_product_completion_readiness;
 pub(crate) use enterprise_security_readiness::build_enterprise_security_admin_readiness;
+pub(crate) use http_shell::{api_cors_layer, security_headers_middleware};
 pub(crate) use ontology_review::normalize_ontology_review_decision;
 pub(crate) use policy_runtime::runtime_policy;
 pub(crate) use stage2_readiness::build_stage2_completion_readiness;
@@ -644,34 +646,6 @@ fn build_router(state: AppState) -> Router {
         .layer(middleware::from_fn(security_headers_middleware))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
-}
-
-async fn security_headers_middleware(request: Request, next: Next) -> Response {
-    let mut response = next.run(request).await;
-    let csp = if console_loopback_connect_allowed() {
-        CONSOLE_DEV_CONTENT_SECURITY_POLICY
-    } else {
-        CONSOLE_CONTENT_SECURITY_POLICY
-    };
-    response.headers_mut().insert(
-        HeaderName::from_static("content-security-policy"),
-        HeaderValue::from_static(csp),
-    );
-    response
-}
-
-fn console_loopback_connect_allowed() -> bool {
-    insecure_dev_auth_enabled()
-        || env_bool("MANDOFORGE_CONSOLE_ALLOW_LOOPBACK_CONNECT")
-        || env_bool("MANDOFORGE_ALLOW_INSECURE_CONSOLE_LOOPBACK")
-}
-
-fn api_cors_layer() -> CorsLayer {
-    if insecure_dev_auth_enabled() {
-        CorsLayer::permissive()
-    } else {
-        CorsLayer::new()
-    }
 }
 
 impl AppState {
