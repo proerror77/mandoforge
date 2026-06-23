@@ -1,0 +1,39 @@
+id: pr-review-analyzer
+name: PR Review Analyzer
+description: >
+  Performs a structured code review of a pull request diff. Produces
+  an overall verdict (approve / request_changes / comment) and
+  optional line-level review comments.
+role: analyst
+
+system_prompt: |
+  You are a senior software engineer performing a code review.
+
+  Given a pull request title, description, and diff, produce a structured review:
+
+  1. **Summary** — 2-3 sentences on what the PR does
+  2. **Verdict** — one of: APPROVE / REQUEST_CHANGES / COMMENT
+  3. **Key concerns** — list of issues that must be addressed (if any)
+  4. **Suggestions** — list of non-blocking improvement suggestions
+  5. **Line comments** — specific inline comments tied to file+line if needed
+
+  Focus on: correctness, security, test coverage, API contract, and performance.
+  Be direct and specific. Do not flag style issues unless they affect readability.
+
+output_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum: [APPROVE, REQUEST_CHANGES, COMMENT]
+    body: { type: string }
+    line_comments:
+      type: array
+      items:
+        type: object
+        properties:
+          path: { type: string }
+          line: { type: integer }
+          body: { type: string }
+        required: [path, line, body]
+  required: [action, body]

@@ -37,6 +37,13 @@ impl ExecutionQueue {
         Self { backend }
     }
 
+    /// Returns the Postgres LISTEN channel name for this queue, if the backend
+    /// supports push notifications. Workers subscribe to this channel to avoid
+    /// polling — they are woken immediately when a job is enqueued.
+    pub(crate) fn notify_channel(&self) -> Option<String> {
+        self.backend.notify_channel()
+    }
+
     pub(crate) async fn enqueue(
         &self,
         request: ExecutionJobRequest,
@@ -107,6 +114,10 @@ impl ExecutionQueue {
 #[async_trait]
 pub(crate) trait ExecutionQueueBackend: Send + Sync {
     fn backend_kind(&self) -> &'static str;
+
+    fn notify_channel(&self) -> Option<String> {
+        None
+    }
 
     async fn enqueue(&self, request: ExecutionJobRequest) -> Result<ExecutionJob, AppError>;
 
@@ -465,6 +476,10 @@ impl ExecutionQueueBackend for PostgresExecutionQueue {
         "postgres"
     }
 
+    fn notify_channel(&self) -> Option<String> {
+        Some(format!("mf_queue_{}", self.current_tenant_id().simple()))
+    }
+
     async fn enqueue(&self, request: ExecutionJobRequest) -> Result<ExecutionJob, AppError> {
         let job = new_execution_job(request);
         sqlx::query(
@@ -490,6 +505,13 @@ impl ExecutionQueueBackend for PostgresExecutionQueue {
         .bind(&job.last_error)
         .execute(&self.pool)
         .await?;
+        // Wake any workers listening on this tenant's channel immediately.
+        let channel = format!("mf_queue_{}", self.current_tenant_id().simple());
+        let _ = sqlx::query("SELECT pg_notify($1, $2)")
+            .bind(&channel)
+            .bind(job.id.to_string())
+            .execute(&self.pool)
+            .await;
         Ok(job)
     }
 

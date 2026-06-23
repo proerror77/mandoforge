@@ -26,6 +26,10 @@ spec:
           env:
             - name: MANDOFORGE_REMOTE_COMPUTER_MODE
               value: "skeleton"
+            - name: MANDOFORGE_WORKSPACE_ROOT
+              value: "/workspace"
+            - name: MANDOFORGE_SESSION_WORKSPACE
+              value: "/workspace"
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: false

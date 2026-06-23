@@ -1,6 +1,6 @@
 # Agent Remote Computer Plan
 
-This plan records the target architecture for making MandoForge agents run inside Kubernetes Pod-based remote computers. The current repo has a control-plane skeleton plus an active on-demand Pod provisioning path. It has a queue-backed worker, Docker shell sandbox support, Kubernetes API/worker/scheduler skeletons, worker readiness, a Remote Computer Pod template, restricted service account, RWX PVC placeholder, JuiceFS CSI example, warm-pool example, KEDA scaling example, deny-by-default NetworkPolicy, `GET /api/remote-computers/readiness`, `GET /api/remote-computers/runner/readiness`, fail-closed runner dry-run/mutate routes, persisted Remote Computer lease lifecycle APIs, persisted session attachment state, and on-demand Pod creation when no warm-pool Remote Computer is available. It does not yet mount a real shared distributed state filesystem or provide full session-to-Pod runtime attach.
+This plan records the target architecture for making MandoForge agents run inside Kubernetes Pod-based remote computers. The current repo has a control-plane skeleton plus an active assigned-Pod execution path behind explicit gates. It has a queue-backed worker, Docker shell sandbox support, Kubernetes API/worker/scheduler skeletons, worker readiness, a Remote Computer Pod template, restricted service account, RWX PVC placeholder, JuiceFS CSI example, warm-pool example, KEDA scaling example, deny-by-default NetworkPolicy, `GET /api/remote-computers/readiness`, `GET /api/remote-computers/runner/readiness`, fail-closed runner dry-run/mutate routes, persisted Remote Computer lease lifecycle APIs, persisted session attachment state, warm-pool claim, on-demand Pod creation when no warm-pool Remote Computer is available, and Kubernetes `pods/exec` transport for approved `file.write`, `shell.exec`, `codex.exec`, and `agent_cli.exec` jobs when all runtime gates are enabled. It does not yet mount a real shared distributed state filesystem or provide a production warm-pool controller.
 
 ## Managed Agents Alignment
 
@@ -79,7 +79,8 @@ Covered today:
 - Kubernetes dry-runs return the planned API path, namespace, pod name, and template path so future live calls have an auditable request plan before mutation is enabled.
 - Kubernetes live mutation is gated by both `MANDOFORGE_REMOTE_COMPUTER_MUTATION_ENABLED` and `MANDOFORGE_REMOTE_COMPUTER_LIVE_MUTATION_ENABLED`; it remains Admin-only.
 - `remote_computer_session_attachments` persists session-to-lease attach/release state and stale attach detection without moving tool execution into Pods.
-- `remote_computer_job_assignments` persists approved execution-job-to-lease handoff plans, and worker runs acknowledge that handoff plus a reserved Pod exec transport plan in timeline/audit without moving execution into Pods.
+- `remote_computer_job_assignments` persists approved execution-job-to-lease handoff plans. Worker runs acknowledge handoff, emit a Pod exec transport plan, and can execute approved `file.write`, `shell.exec`, `codex.exec`, and `agent_cli.exec` inside the assigned Pod when `MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT=kubernetes`, `MANDOFORGE_REMOTE_COMPUTER_EXECUTION_ENABLED=true`, and the Kubernetes runner live mutation gates are enabled.
+- Remote execution uses a session-scoped workspace under `/workspace/sessions/{session_id}` so multiple jobs in the same session reuse the same lease and directory, while concurrent jobs for the same session do not claim a second Pod.
 - `POST /api/remote-computers/reclaim-stale` reclaims stale attachments and expired leases with event/audit records and no tool execution.
 - `/api/scheduler/due-plan` and `/api/scheduler/run-due` include Remote Computer stale reclaim in the aggregate operations path.
 - **On-demand Pod provisioning** (`provision_remote_computer_pod_for_job`): when no warm-pool Remote Computer is available, the execution engine creates a Kubernetes Pod, polls until Running phase, persists the DB record with a unique pod-name index (`remote_computers(tenant_id, pod_name)`), and leases it to the job. Requires `MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT=kubernetes` plus the triple mutation gate. Pod-ready polling is configurable via `MANDOFORGE_REMOTE_COMPUTER_POD_READY_TIMEOUT_SECONDS` (default 60s) and `MANDOFORGE_REMOTE_COMPUTER_POD_READY_POLL_INTERVAL_MS` (default 2000ms).
@@ -87,12 +88,11 @@ Covered today:
 
 Not covered today:
 
-- No actual session-to-Pod runtime attach; session attachment remains control-plane state only.
-- No actual execution-job transport into Pods; job assignment is control-plane handoff state only.
-- Pod exec transport is planned with API path evidence but remains reserved/fail-closed.
+- Session attachment APIs remain control-plane state; worker execution uses job assignments and session-scoped lease reuse as the runtime attach path.
+- Pod exec transport is implemented but remains fail-closed until the explicit Kubernetes runner, execution, mutation, and live-mutation gates are enabled.
 - No real distributed Memory/Notes/Skills mount in the default deployment; the default deployment has only the mounted state layout and conflict contract.
 - No production distributed filesystem integration yet; JuiceFS exists as an example manifest only, while CephFS, Longhorn RWX, cloud file storage, or object-backed sync remain future provider options.
-- No production warm pool assignment; the warm-pool manifest is an opt-in skeleton only.
+- Warm-pool Remote Computer records can be claimed by the worker when present, but there is not yet a production controller that registers and recycles prewarmed Pods automatically.
 - The artifact discovery sidecar is present but disabled by default; there is still no production artifact/state sync daemon running against real leased Pods.
 - No production KEDA/HPA queue-depth scaling for remote computer pools; the KEDA manifest is an opt-in example only.
 
@@ -237,7 +237,7 @@ Stage 2 acceptance for this slice:
 Stage 3 should make Remote Computer the primary sandbox substrate.
 
 1. Implement session-to-Pod lease allocation.
-2. Execute `shell.exec`, `codex.exec`, and selected tool runners inside the leased Pod.
+2. Execute `shell.exec`, `codex.exec`, `file.write`, and `agent_cli.exec` inside the leased Pod behind explicit Kubernetes transport gates. The initial implementation is present; hardening remains around state sync, artifact sidecar session injection, and live-cluster operational runbooks.
 3. Add artifact and event sync from Pod to MandoForge.
 4. Add warm pool controller.
 5. Wire the KEDA queue-depth and pool-pressure example to real Prometheus metrics and an opt-in overlay.
@@ -271,15 +271,15 @@ Stage 3 acceptance:
 
 ## Immediate Next Slice
 
-After the Kubernetes adapter skeleton, the next coherent implementation slice should be:
+After assigned-Pod execution, the next coherent implementation slice should be:
 
 ```text
-Add Remote Computer live Kubernetes client behind explicit opt-in
+Harden Remote Computer session lifecycle and state/artifact sync
 ```
 
 Concrete deliverables:
 
-- Add create/delete HTTP calls behind the existing API server / bearer token / kubeconfig config boundary.
-- Keep create/delete operations disabled unless a live-cluster flag and policy gate are both set.
-- Keep `shell.exec` and `codex.exec` on the approved worker path until Pod lifecycle telemetry is reliable.
-- Add tests proving live-client failures are audited and still do not bypass Tool Router, Policy Engine, or Approval Engine.
+- Add a warm-pool controller that registers prewarmed Pods as available Remote Computers, resets dirty workspaces, and refills the pool.
+- Promote artifact discovery from disabled sidecar skeleton to assignment-aware session sidecar injection.
+- Add session terminal cleanup that releases or deletes Pods based on on-demand vs warm-pool origin.
+- Add live-cluster runbooks and tests proving Pod replacement, stale cleanup, and artifact sync do not bypass Tool Router, Policy Engine, or Approval Engine.

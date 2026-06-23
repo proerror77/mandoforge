@@ -10,12 +10,12 @@ use crate::{
     ApprovalGroup, ApprovalNotificationChannelPolicy, Artifact, AuditLog, CodexAppServerRun,
     ContextPacket, CostAlertRoute, DynamicWorkflowPlan, Environment, EvalCase, EvalDataset,
     EvalRun, ManagerAgentPlan, McpServerRecord, Membership, MemoryWritebackCandidate,
-    OntologyRelease, Organization, PolicyRevision, Project, ProviderAccess, ProviderRecord,
-    RemoteComputer, RemoteComputerAttachment, RemoteComputerJobAssignment, RemoteComputerLease,
-    RemoteComputerSidecarHeartbeat, RemoteComputerStateLock, SecretRecord, SemanticLink,
-    SemanticObject, SemanticSource, Session, SessionEvent, SessionLoopJob, SessionThread, Squad,
-    SquadMember, TaskGrant, Team, TenantInvitation, ToolCall, UsageRollup, WorkItem,
-    WorkItemActivityEntry, WorkItemAssignment, WorkItemReview, WorkflowDefinition,
+    OntologyRelease, Organization, PolicyRevision, Project, ProjectGitHubBinding, ProviderAccess,
+    ProviderRecord, RemoteComputer, RemoteComputerAttachment, RemoteComputerJobAssignment,
+    RemoteComputerLease, RemoteComputerSidecarHeartbeat, RemoteComputerStateLock, SecretRecord,
+    SemanticLink, SemanticObject, SemanticSource, Session, SessionEvent, SessionLoopJob,
+    SessionThread, Squad, SquadMember, TaskGrant, Team, TenantInvitation, ToolCall, UsageRollup,
+    WorkItem, WorkItemActivityEntry, WorkItemAssignment, WorkItemReview, WorkflowDefinition,
     WorkflowPackBinding, WorkflowPackInstallation, WorkflowPackProfileAsset,
     WorkflowPackRuntimeObject, WorkflowRun, WorkflowStepRun, WorkflowTransition,
 };
@@ -88,6 +88,7 @@ pub(crate) struct MemoryStore {
     pub(crate) ontology_releases: HashMap<Uuid, OntologyRelease>,
     pub(crate) context_packets: HashMap<Uuid, ContextPacket>,
     pub(crate) memory_writeback_candidates: HashMap<Uuid, MemoryWritebackCandidate>,
+    pub(crate) project_github_bindings: HashMap<Uuid, ProjectGitHubBinding>,
 }
 
 #[derive(Clone)]

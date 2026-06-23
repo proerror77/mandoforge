@@ -89,6 +89,41 @@ pub(crate) fn is_supported_ecommerce_connector(connector_id: &str) -> bool {
     )
 }
 
+pub(crate) fn is_supported_github_connector(connector_id: &str) -> bool {
+    connector_id == "github-connector"
+}
+
+pub(crate) async fn execute_github_connector_call(args: &Value) -> Result<Value, AppError> {
+    let call = NativeConnectorCall::from_args(args)?;
+    if !is_supported_github_connector(&call.connector_id) {
+        return Err(AppError::bad_request(format!(
+            "unsupported github connector {}",
+            call.connector_id
+        )));
+    }
+    let live_enabled =
+        env_bool(LIVE_ENABLED_ENV) || env_bool("MANDOFORGE_GITHUB_CONNECTOR_LIVE_ENABLED");
+    let resolve_secrets = live_enabled && !call.dry_run;
+    let request = build_github_request(&call, resolve_secrets)?;
+    if call.dry_run || !live_enabled {
+        return Ok(json!({
+            "status": if call.dry_run { "dry_run_prepared" } else { "live_disabled" },
+            "connector_id": call.connector_id,
+            "operation": call.operation,
+            "live_enabled": live_enabled,
+            "request": request.redacted(),
+        }));
+    }
+    let response = execute_http_request(&request).await?;
+    Ok(json!({
+        "status": "live_called",
+        "connector_id": call.connector_id,
+        "operation": call.operation,
+        "request": request.redacted(),
+        "response": response,
+    }))
+}
+
 pub(crate) fn build_native_connector_production_readiness() -> NativeConnectorProductionReadiness {
     let specs = native_connector_production_specs();
     let live_enabled = env_bool(LIVE_ENABLED_ENV) || env_bool(ECOMMERCE_LIVE_ENABLED_ENV);
@@ -294,6 +329,20 @@ fn native_connector_production_specs() -> Vec<NativeConnectorProductionSpec> {
             webhook_ingestion_env: "MANDOFORGE_AMAZON_SPAPI_WEBHOOK_INGESTION_URL",
             compensation_policy_env: "MANDOFORGE_AMAZON_SPAPI_COMPENSATION_POLICY",
             deployment_evidence_archive_env: "MANDOFORGE_AMAZON_SPAPI_DEPLOYMENT_EVIDENCE_ARCHIVE",
+        },
+        NativeConnectorProductionSpec {
+            connector_id: "github-connector",
+            provider: "github-rest-v3",
+            manifest_path: "packs/swe-review/connectors/github-connector.yaml",
+            required_secret_refs: vec!["GITHUB_TOKEN"],
+            sandbox_base_url_env: "MANDOFORGE_GITHUB_SANDBOX_BASE_URL",
+            live_base_url_env: "MANDOFORGE_GITHUB_LIVE_BASE_URL",
+            token_refresh_controller_env: "MANDOFORGE_GITHUB_TOKEN_REFRESH_CONTROLLER_URL",
+            rate_limit_policy_env: "MANDOFORGE_GITHUB_RATE_LIMIT_POLICY",
+            reconciliation_controller_env: "MANDOFORGE_GITHUB_RECONCILIATION_CONTROLLER_URL",
+            webhook_ingestion_env: "MANDOFORGE_GITHUB_WEBHOOK_INGESTION_URL",
+            compensation_policy_env: "MANDOFORGE_GITHUB_COMPENSATION_POLICY",
+            deployment_evidence_archive_env: "MANDOFORGE_GITHUB_DEPLOYMENT_EVIDENCE_ARCHIVE",
         },
     ]
 }
@@ -560,6 +609,193 @@ impl LiveHttpRequest {
             "secret_refs": self.secret_refs,
         })
     }
+}
+
+fn build_github_request(
+    call: &NativeConnectorCall,
+    resolve_secrets: bool,
+) -> Result<LiveHttpRequest, AppError> {
+    let token = connector_secret("GITHUB_TOKEN", resolve_secrets)?;
+    let base = call
+        .payload
+        .get("__adapter_base_url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.trim_end_matches('/').to_string())
+        .or_else(|| std::env::var("MANDOFORGE_GITHUB_LIVE_BASE_URL").ok())
+        .unwrap_or_else(|| "https://api.github.com".to_string());
+
+    let owner = payload_string_field(&call.payload, "owner")?;
+    let repo = payload_string_field(&call.payload, "repo")?;
+    validate_github_path_segment(&owner)?;
+    validate_github_path_segment(&repo)?;
+
+    let (method, path, body) = match call.operation.as_str() {
+        "get_issue" => {
+            let n = payload_string_field(&call.payload, "issue_number")?;
+            ("GET", format!("/repos/{owner}/{repo}/issues/{n}"), None)
+        }
+        "get_pull_request" => {
+            let n = payload_string_field(&call.payload, "pull_number")?;
+            ("GET", format!("/repos/{owner}/{repo}/pulls/{n}"), None)
+        }
+        "list_issues" => ("GET", format!("/repos/{owner}/{repo}/issues"), None),
+        "list_pull_requests" => ("GET", format!("/repos/{owner}/{repo}/pulls"), None),
+        "create_comment" => {
+            let n = payload_string_field(&call.payload, "issue_number")?;
+            let body_val = json!({
+                "body": call.payload.get("body").cloned().unwrap_or(Value::Null)
+            });
+            (
+                "POST",
+                format!("/repos/{owner}/{repo}/issues/{n}/comments"),
+                Some(body_val),
+            )
+        }
+        "approve_pr" => {
+            let n = payload_string_field(&call.payload, "pull_number")?;
+            let body_val = json!({
+                "event": "APPROVE",
+                "body": call.payload.get("body").cloned().unwrap_or(Value::Null)
+            });
+            (
+                "POST",
+                format!("/repos/{owner}/{repo}/pulls/{n}/reviews"),
+                Some(body_val),
+            )
+        }
+        "request_changes" => {
+            let n = payload_string_field(&call.payload, "pull_number")?;
+            let body_val = json!({
+                "event": "REQUEST_CHANGES",
+                "body": call.payload.get("body").cloned().unwrap_or(Value::Null)
+            });
+            (
+                "POST",
+                format!("/repos/{owner}/{repo}/pulls/{n}/reviews"),
+                Some(body_val),
+            )
+        }
+        "merge_pr" => {
+            let n = payload_string_field(&call.payload, "pull_number")?;
+            let merge_method = call
+                .payload
+                .get("merge_method")
+                .and_then(Value::as_str)
+                .unwrap_or("squash");
+            let body_val = json!({ "merge_method": merge_method });
+            (
+                "PUT",
+                format!("/repos/{owner}/{repo}/pulls/{n}/merge"),
+                Some(body_val),
+            )
+        }
+        "create_pr" => {
+            let body_val = json!({
+                "title": call.payload.get("title").cloned().unwrap_or(Value::Null),
+                "head": call.payload.get("head").cloned().unwrap_or(Value::Null),
+                "base": call.payload.get("base").cloned().unwrap_or(Value::Null),
+                "body": call.payload.get("body").cloned().unwrap_or(Value::Null),
+                "draft": call.payload.get("draft").cloned().unwrap_or(json!(false)),
+            });
+            (
+                "POST",
+                format!("/repos/{owner}/{repo}/pulls"),
+                Some(body_val),
+            )
+        }
+        op => {
+            return Err(AppError::bad_request(format!(
+                "unsupported github connector operation: {op}"
+            )));
+        }
+    };
+
+    let mut headers = BTreeMap::new();
+    headers.insert("Authorization".to_string(), format!("Bearer {token}"));
+    headers.insert(
+        "Accept".to_string(),
+        "application/vnd.github+json".to_string(),
+    );
+    headers.insert("X-GitHub-Api-Version".to_string(), "2022-11-28".to_string());
+    headers.insert(
+        "User-Agent".to_string(),
+        "mandoforge-github-connector/1.0".to_string(),
+    );
+
+    let query = if method == "GET" {
+        payload_query_params(&call.payload)
+    } else {
+        BTreeMap::new()
+    };
+
+    let method_str: &'static str = match method {
+        "GET" => "GET",
+        "POST" => "POST",
+        "PUT" => "PUT",
+        _ => "GET",
+    };
+
+    Ok(LiveHttpRequest {
+        adapter: "github_connector",
+        method: method_str,
+        url: format!("{base}{path}"),
+        headers,
+        query,
+        body,
+        secret_refs: vec!["GITHUB_TOKEN".to_string()],
+    })
+}
+
+fn validate_github_path_segment(segment: &str) -> Result<(), AppError> {
+    if segment.is_empty()
+        || segment.contains("..")
+        || segment.contains('/')
+        || segment.contains('\0')
+    {
+        return Err(AppError::bad_request(
+            "github connector: invalid path segment — must not be empty or contain ../ or null bytes",
+        ));
+    }
+    Ok(())
+}
+
+fn payload_string_field(payload: &Map<String, Value>, key: &str) -> Result<String, AppError> {
+    payload
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToString::to_string)
+        .ok_or_else(|| {
+            AppError::bad_request(format!("github connector payload missing field: {key}"))
+        })
+}
+
+fn payload_query_params(payload: &Map<String, Value>) -> BTreeMap<String, String> {
+    let skip = [
+        "owner",
+        "repo",
+        "issue_number",
+        "pull_number",
+        "__adapter_base_url",
+        "__adapter_endpoint_path",
+        "dry_run",
+    ];
+    payload
+        .iter()
+        .filter(|(k, _)| !skip.contains(&k.as_str()))
+        .filter_map(|(k, v)| {
+            let s = match v {
+                Value::String(s) => s.clone(),
+                Value::Number(n) => n.to_string(),
+                Value::Bool(b) => b.to_string(),
+                _ => return None,
+            };
+            Some((k.clone(), s))
+        })
+        .collect()
 }
 
 fn build_live_request(
@@ -1286,9 +1522,9 @@ mod tests {
 
         assert_eq!(readiness.status, "blocked");
         assert!(!readiness.live_enabled);
-        assert_eq!(readiness.connector_count, 6);
+        assert_eq!(readiness.connector_count, 7);
         assert_eq!(readiness.ready_connector_count, 0);
-        assert_eq!(readiness.blocked_connector_count, 6);
+        assert_eq!(readiness.blocked_connector_count, 7);
         assert!(
             readiness
                 .connectors

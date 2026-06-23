@@ -1,12 +1,14 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+use uuid::Uuid;
 
-use crate::AppError;
+use crate::{AppError, AppState, CodexAppServerRun};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -76,6 +78,36 @@ pub(crate) struct CodexInterruptResponse {
     pub(crate) turn_id: String,
     #[serde(default)]
     pub(crate) status: Option<String>,
+}
+
+impl AppState {
+    pub(crate) async fn record_codex_app_server_run(
+        &self,
+        operation: &str,
+        thread_id: Option<String>,
+        turn_id: Option<String>,
+        command_id: Option<String>,
+        request: Value,
+        response: Value,
+    ) -> Result<CodexAppServerRun, AppError> {
+        self.insert_codex_app_server_run(CodexAppServerRun {
+            id: Uuid::new_v4(),
+            operation: operation.to_string(),
+            thread_id,
+            turn_id,
+            command_id,
+            status: response
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("completed")
+                .to_string(),
+            request,
+            response,
+            error: None,
+            created_at: Utc::now(),
+        })
+        .await
+    }
 }
 
 #[allow(dead_code)]

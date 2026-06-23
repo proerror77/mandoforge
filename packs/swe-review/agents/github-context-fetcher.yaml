@@ -1,0 +1,31 @@
+id: github-context-fetcher
+name: GitHub Context Fetcher
+description: >
+  Fetches full context for an issue or PR: body, comments, linked issues,
+  file diff (for PRs), and recent commit messages.
+role: tool_executor
+connector_refs:
+  - github-connector
+tools:
+  - connector: github-connector
+    operation: get_issue
+  - connector: github-connector
+    operation: get_pull_request
+  - connector: github-connector
+    operation: get_pull_request_diff
+  - connector: github-connector
+    operation: list_issues
+
+system_prompt: >
+  You are a context-fetching agent. Your only job is to retrieve relevant
+  information from GitHub using the available tools and return a structured
+  summary. Do not analyze or comment — only fetch and summarize the raw data.
+
+output_schema:
+  type: object
+  properties:
+    summary: { type: string }
+    diff: { type: string }
+    linked_issues: { type: array, items: { type: object } }
+    recent_comments: { type: array, items: { type: object } }
+  required: [summary]

@@ -140,6 +140,15 @@ pub(crate) fn session_thread_from_row(row: PgRow) -> Result<SessionThread, AppEr
 pub(crate) fn agent_version_from_row(row: PgRow) -> Result<AgentVersion, AppError> {
     let tools: Value = row.try_get("tools")?;
     let tool_names: Value = row.try_get("tool_names")?;
+    let mcp_server_ids: Value = row
+        .try_get("mcp_server_ids")
+        .unwrap_or_else(|_| serde_json::json!([]));
+    let skill_ids: Value = row
+        .try_get("skill_ids")
+        .unwrap_or_else(|_| serde_json::json!([]));
+    let workflow_pack_ids: Value = row
+        .try_get("workflow_pack_ids")
+        .unwrap_or_else(|_| serde_json::json!([]));
     Ok(AgentVersion {
         id: row.try_get("id")?,
         agent_id: row.try_get("agent_id")?,
@@ -150,6 +159,15 @@ pub(crate) fn agent_version_from_row(row: PgRow) -> Result<AgentVersion, AppErro
         tool_names: json_array_from_row(tool_names, "agent_versions.tool_names")?,
         runtime_config: row.try_get("runtime_config")?,
         approval_policy: row.try_get("approval_policy")?,
+        mcp_server_ids: json_array_from_row(mcp_server_ids, "agent_versions.mcp_server_ids")?,
+        skill_ids: json_array_from_row(skill_ids, "agent_versions.skill_ids")?,
+        workflow_pack_ids: json_array_from_row(
+            workflow_pack_ids,
+            "agent_versions.workflow_pack_ids",
+        )?,
+        semantic_scopes: row
+            .try_get("semantic_scopes")
+            .unwrap_or_else(|_| serde_json::json!({})),
         created_at: row.try_get("created_at")?,
     })
 }

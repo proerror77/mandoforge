@@ -1,0 +1,42 @@
+id: swe_pr_review
+name: SWE PR Review
+description: >
+  Triggered when a pull request is opened, synchronized, or reopened.
+  Fetches the diff and linked issues, runs a structured code review,
+  and posts review comments — approving, requesting changes, or commenting.
+trigger_type: webhook
+execution_strategy: sequential
+
+step_graph:
+  - key: fetch_context
+    type: agent
+    agent_ref: github-context-fetcher
+    input_mapping:
+      event_type: "$.input.action"
+      repo: "$.input.repository.full_name"
+      pr_number: "$.input.pull_request.number"
+      pr_title: "$.input.pull_request.title"
+      pr_body: "$.input.pull_request.body"
+      base_sha: "$.input.pull_request.base.sha"
+      head_sha: "$.input.pull_request.head.sha"
+    on_success: review
+
+  - key: review
+    type: agent
+    agent_ref: pr-review-analyzer
+    input_mapping:
+      context: "$.steps.fetch_context.output"
+      pr_title: "$.input.pull_request.title"
+      pr_body: "$.input.pull_request.body"
+      diff: "$.steps.fetch_context.output.diff"
+    on_success: post_result
+
+  - key: post_result
+    type: agent
+    agent_ref: result-poster
+    input_mapping:
+      repo: "$.input.repository.full_name"
+      pr_number: "$.input.pull_request.number"
+      review_action: "$.steps.review.output.action"
+      review_body: "$.steps.review.output.body"
+      line_comments: "$.steps.review.output.line_comments"

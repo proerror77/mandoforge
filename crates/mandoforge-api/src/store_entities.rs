@@ -205,6 +205,10 @@ impl AppState {
             tool_names: agent.tools.clone(),
             runtime_config,
             approval_policy: json!({}),
+            mcp_server_ids: agent.mcp_server_ids.clone(),
+            skill_ids: agent.skill_ids.clone(),
+            workflow_pack_ids: agent.workflow_pack_ids.clone(),
+            semantic_scopes: agent.semantic_scopes.clone(),
             created_at: Utc::now(),
         };
         match &self.store {
@@ -218,8 +222,8 @@ impl AppState {
             }
             StoreBackend::Postgres(pool) => {
                 sqlx::query(
-                        "INSERT INTO agent_versions (id, agent_id, version, model, system_prompt, tools, tool_names, runtime_config, approval_policy, created_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $6, $7, $8, $9)
+                        "INSERT INTO agent_versions (id, agent_id, version, model, system_prompt, tools, tool_names, runtime_config, approval_policy, mcp_server_ids, skill_ids, workflow_pack_ids, semantic_scopes, created_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                      ON CONFLICT (agent_id, version) DO NOTHING",
                 )
                 .bind(agent_version.id)
@@ -228,8 +232,13 @@ impl AppState {
                 .bind(&agent.model)
                 .bind(&agent.system_prompt)
                 .bind(json!(agent.tools))
+                .bind(json!(&agent_version.tool_names))
                 .bind(&agent_version.runtime_config)
                 .bind(&agent_version.approval_policy)
+                .bind(json!(&agent.mcp_server_ids))
+                .bind(json!(&agent.skill_ids))
+                .bind(json!(&agent.workflow_pack_ids))
+                .bind(&agent.semantic_scopes)
                 .bind(agent_version.created_at)
                 .execute(pool)
                 .await?;
@@ -259,7 +268,7 @@ impl AppState {
                     return Err(AppError::not_found("agent not found"));
                 }
                 let rows = sqlx::query(
-                    "SELECT av.id, av.agent_id, av.version, av.model, av.system_prompt, av.tools, av.tool_names, av.runtime_config, av.approval_policy, av.created_at
+                    "SELECT av.id, av.agent_id, av.version, av.model, av.system_prompt, av.tools, av.tool_names, av.runtime_config, av.approval_policy, av.mcp_server_ids, av.skill_ids, av.workflow_pack_ids, av.semantic_scopes, av.created_at
                      FROM agent_versions av
                      JOIN agents a ON a.id = av.agent_id
                      WHERE a.tenant_id = $1 AND av.agent_id = $2
@@ -294,7 +303,7 @@ impl AppState {
                 .ok_or_else(|| AppError::not_found("agent version not found")),
             StoreBackend::Postgres(pool) => {
                 let row = sqlx::query(
-                    "SELECT av.id, av.agent_id, av.version, av.model, av.system_prompt, av.tools, av.tool_names, av.runtime_config, av.approval_policy, av.created_at
+                    "SELECT av.id, av.agent_id, av.version, av.model, av.system_prompt, av.tools, av.tool_names, av.runtime_config, av.approval_policy, av.mcp_server_ids, av.skill_ids, av.workflow_pack_ids, av.semantic_scopes, av.created_at
                      FROM agent_versions av
                      JOIN agents a ON a.id = av.agent_id
                      WHERE a.tenant_id = $1 AND av.agent_id = $2 AND av.version = $3",
@@ -329,7 +338,7 @@ impl AppState {
             }
             StoreBackend::Postgres(pool) => {
                 let row = sqlx::query(
-                    "SELECT av.id, av.agent_id, av.version, av.model, av.system_prompt, av.tools, av.tool_names, av.runtime_config, av.approval_policy, av.created_at
+                    "SELECT av.id, av.agent_id, av.version, av.model, av.system_prompt, av.tools, av.tool_names, av.runtime_config, av.approval_policy, av.mcp_server_ids, av.skill_ids, av.workflow_pack_ids, av.semantic_scopes, av.created_at
                      FROM agents a
                      JOIN agent_versions av ON av.agent_id = a.id AND av.version = a.current_version
                      WHERE a.tenant_id = $1 AND a.id = $2 AND a.archived_at IS NULL",
@@ -373,7 +382,7 @@ impl AppState {
             }
             StoreBackend::Postgres(pool) => {
                 let row = sqlx::query(
-                    "SELECT av.id, av.agent_id, av.version, av.model, av.system_prompt, av.tools, av.tool_names, av.runtime_config, av.approval_policy, av.created_at
+                    "SELECT av.id, av.agent_id, av.version, av.model, av.system_prompt, av.tools, av.tool_names, av.runtime_config, av.approval_policy, av.mcp_server_ids, av.skill_ids, av.workflow_pack_ids, av.semantic_scopes, av.created_at
                      FROM sessions s
                      JOIN agents a ON a.id = s.agent_id
                      JOIN agent_versions av ON av.agent_id = s.agent_id

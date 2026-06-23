@@ -1,0 +1,31 @@
+// Type modules are introduced incrementally by owner domain.
+// Keep this shell empty until a domain move lands in its own commit.
+pub(crate) mod agent;
+pub(crate) mod agent_handoff;
+pub(crate) mod approval;
+pub(crate) mod artifact;
+pub(crate) mod audit;
+pub(crate) mod codex_app_server;
+pub(crate) mod collaboration;
+pub(crate) mod context_packet;
+pub(crate) mod defaults;
+pub(crate) mod deployment;
+pub(crate) mod eval;
+pub(crate) mod github;
+pub(crate) mod mcp;
+pub(crate) mod observability;
+pub(crate) mod ontology;
+pub(crate) mod policy;
+pub(crate) mod provider;
+pub(crate) mod remote_computer;
+pub(crate) mod scheduler;
+pub(crate) mod semantic;
+pub(crate) mod session;
+pub(crate) mod tenant;
+pub(crate) mod tool_call;
+pub(crate) mod tools;
+pub(crate) mod usage;
+pub(crate) mod vault;
+pub(crate) mod worker;
+pub(crate) mod workflow;
+pub(crate) mod workflow_pack;

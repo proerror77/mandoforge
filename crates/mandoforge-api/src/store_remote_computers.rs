@@ -406,6 +406,17 @@ impl AppState {
                         "execution job already has an active remote computer assignment",
                     ));
                 }
+                if store
+                    .remote_computer_job_assignments
+                    .values()
+                    .any(|assignment| {
+                        assignment.session_id == session_id && assignment.status == "assigned"
+                    })
+                {
+                    return Err(AppError::bad_request(
+                        "session already has an active remote computer assignment",
+                    ));
+                }
                 let assignment = new_remote_computer_job_assignment(
                     execution_job_id,
                     session_id,
@@ -444,6 +455,21 @@ impl AppState {
                 if duplicate.is_some() {
                     return Err(AppError::bad_request(
                         "execution job already has an active remote computer assignment",
+                    ));
+                }
+                let duplicate_session = sqlx::query(
+                    "SELECT id
+                     FROM remote_computer_job_assignments
+                     WHERE tenant_id = $1 AND session_id = $2 AND status = 'assigned'
+                     LIMIT 1",
+                )
+                .bind(self.current_tenant_id())
+                .bind(session_id)
+                .fetch_optional(pool)
+                .await?;
+                if duplicate_session.is_some() {
+                    return Err(AppError::bad_request(
+                        "session already has an active remote computer assignment",
                     ));
                 }
                 let assignment = new_remote_computer_job_assignment(

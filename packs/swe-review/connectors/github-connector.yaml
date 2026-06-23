@@ -1,0 +1,31 @@
+id: github-connector
+name: GitHub Connector
+provider: github-rest-v3
+description: Executes GitHub REST API v3 operations for issue and PR management.
+
+required_secret_refs:
+  - GITHUB_TOKEN
+
+supported_operations:
+  - get_issue
+  - get_pull_request
+  - list_issues
+  - list_pull_requests
+  - get_pull_request_diff
+  - create_comment
+  - approve_pr
+  - request_changes
+  - merge_pr
+  - create_pr
+
+base_url:
+  live: "https://api.github.com"
+  sandbox_env: MANDOFORGE_GITHUB_SANDBOX_BASE_URL
+
+auth:
+  type: bearer
+  secret_ref: GITHUB_TOKEN
+
+headers:
+  Accept: application/vnd.github+json
+  X-GitHub-Api-Version: "2022-11-28"
