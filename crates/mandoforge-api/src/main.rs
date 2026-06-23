@@ -184,7 +184,9 @@ use remote_computer_runner::{
     RemoteComputerRunnerDryRunResponse, RemoteComputerRunnerReadiness,
     remote_computer_runner_for_config,
 };
-pub(crate) use worker_readiness::worker_queue_backend_readiness;
+pub(crate) use worker_readiness::{
+    worker_k8s_readiness_from_manifests, worker_queue_backend_readiness,
+};
 pub(crate) use types::agent::{
     Agent, AgentRelease, AgentReleaseAttentionItem, AgentReleaseAutomationRun,
     AgentReleaseAutomationRunAttentionItem, AgentReleaseAutomationRunRecord,
@@ -41936,115 +41938,6 @@ fn worker_load_validation_evidence_from_audit_logs(
             "durable queue + hardened worker Pod + queue-depth autoscaling + isolated worker pool + production-like load test"
                 .to_string(),
         message,
-    }
-}
-
-fn worker_k8s_readiness_from_manifests() -> WorkerK8sReadiness {
-    let worker_manifest_path = "deploy/k8s/worker.yaml";
-    let service_account_manifest_path = "deploy/k8s/worker-serviceaccount.yaml";
-    let network_policy_path = "deploy/k8s/worker-networkpolicy.yaml";
-    let scheduler_manifest_path = "deploy/k8s/scheduler.yaml";
-
-    let worker_manifest = read_yaml_manifest_value(worker_manifest_path).and_then(|manifest| {
-        (manifest.get("kind").and_then(Value::as_str) == Some("Deployment")).then_some(manifest)
-    });
-    let worker_manifest_present = worker_manifest.is_some();
-    let service_account_name = worker_manifest
-        .as_ref()
-        .and_then(|manifest| manifest.pointer("/spec/template/spec/serviceAccountName"))
-        .and_then(Value::as_str)
-        .map(ToString::to_string);
-    let automount_service_account_token_disabled = worker_manifest
-        .as_ref()
-        .and_then(|manifest| manifest.pointer("/spec/template/spec/automountServiceAccountToken"))
-        .and_then(Value::as_bool)
-        == Some(false);
-    let pod_run_as_non_root = worker_manifest
-        .as_ref()
-        .and_then(|manifest| manifest.pointer("/spec/template/spec/securityContext/runAsNonRoot"))
-        .and_then(Value::as_bool)
-        == Some(true);
-    let seccomp_runtime_default = worker_manifest
-        .as_ref()
-        .and_then(|manifest| {
-            manifest.pointer("/spec/template/spec/securityContext/seccompProfile/type")
-        })
-        .and_then(Value::as_str)
-        == Some("RuntimeDefault");
-    let worker_container = worker_manifest
-        .as_ref()
-        .and_then(|manifest| manifest.pointer("/spec/template/spec/containers"))
-        .and_then(Value::as_array)
-        .and_then(|containers| {
-            containers
-                .iter()
-                .find(|container| container.get("name").and_then(Value::as_str) == Some("worker"))
-        });
-    let container_allow_privilege_escalation_disabled = worker_container
-        .and_then(|container| container.pointer("/securityContext/allowPrivilegeEscalation"))
-        .and_then(Value::as_bool)
-        == Some(false);
-    let container_read_only_root_filesystem = worker_container
-        .and_then(|container| container.pointer("/securityContext/readOnlyRootFilesystem"))
-        .and_then(Value::as_bool)
-        == Some(true);
-    let container_drops_all_capabilities = worker_container
-        .and_then(|container| container.pointer("/securityContext/capabilities/drop"))
-        .and_then(Value::as_array)
-        .is_some_and(|drops| drops.iter().any(|drop| drop.as_str() == Some("ALL")));
-    let resources_requests_configured = worker_container
-        .and_then(|container| container.pointer("/resources/requests"))
-        .and_then(Value::as_object)
-        .is_some_and(|requests| requests.contains_key("cpu") && requests.contains_key("memory"));
-    let resources_limits_configured = worker_container
-        .and_then(|container| container.pointer("/resources/limits"))
-        .and_then(Value::as_object)
-        .is_some_and(|limits| limits.contains_key("cpu") && limits.contains_key("memory"));
-    let service_account_manifest_present = service_account_name.as_deref().is_some_and(|name| {
-        manifest_has_kind_name(service_account_manifest_path, "ServiceAccount", name)
-    });
-    let network_policy_present =
-        network_policy_targets_app(network_policy_path, "mandoforge-worker");
-
-    let hardening_complete = worker_manifest_present
-        && service_account_manifest_present
-        && automount_service_account_token_disabled
-        && pod_run_as_non_root
-        && seccomp_runtime_default
-        && container_allow_privilege_escalation_disabled
-        && container_read_only_root_filesystem
-        && container_drops_all_capabilities
-        && resources_requests_configured
-        && resources_limits_configured
-        && network_policy_present;
-    let hardening_status = if hardening_complete {
-        "hardened"
-    } else if worker_manifest_present {
-        "incomplete"
-    } else {
-        "missing"
-    }
-    .to_string();
-
-    WorkerK8sReadiness {
-        worker_manifest_present,
-        worker_manifest_path: worker_manifest_path.to_string(),
-        service_account_name,
-        service_account_manifest_present,
-        service_account_manifest_path: service_account_manifest_path.to_string(),
-        automount_service_account_token_disabled,
-        pod_run_as_non_root,
-        seccomp_runtime_default,
-        container_allow_privilege_escalation_disabled,
-        container_read_only_root_filesystem,
-        container_drops_all_capabilities,
-        resources_requests_configured,
-        resources_limits_configured,
-        network_policy_present,
-        network_policy_path: network_policy_path.to_string(),
-        hardening_status,
-        scheduler_manifest_present: project_file_path(scheduler_manifest_path).is_some(),
-        scheduler_manifest_path: scheduler_manifest_path.to_string(),
     }
 }
 
