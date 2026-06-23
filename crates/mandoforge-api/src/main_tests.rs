@@ -1585,6 +1585,8 @@ mod scheduler_deployment_tests;
 mod scheduler_due_run_tests;
 #[path = "main_tests/tenant_worker_controller_tests.rs"]
 mod tenant_worker_controller_tests;
+#[path = "main_tests/worker_readiness_tests.rs"]
+mod worker_readiness_tests;
 
 #[tokio::test]
 async fn ontology_release_promote_refreshes_stale_rollback_target() {

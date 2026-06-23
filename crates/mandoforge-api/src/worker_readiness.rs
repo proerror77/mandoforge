@@ -5,7 +5,7 @@ use crate::{
     AppError, AppState, ExecutionJobStatus, K8sAutoscalingManifest, WorkerAutoscalingReadiness,
     WorkerJobSummary, WorkerK8sReadiness, WorkerLeaseSummary, WorkerLoadValidationEvidence,
     WorkerModeReadiness, WorkerProductionOpsReadiness, WorkerQueueBackendReadiness,
-    WorkerReadinessAttentionItem, WorkerReadinessReport, env_i64, manifest_has_kind_name,
+    WorkerReadinessAttentionItem, WorkerReadinessReport, env_bool, env_i64, manifest_has_kind_name,
     network_policy_targets_app, project_file_path, read_yaml_manifest_value,
     worker_load_validation_evidence,
 };
@@ -120,6 +120,13 @@ pub(crate) async fn build_worker_readiness(
             kind: "inline_worker_mode".to_string(),
             severity: "warning".to_string(),
             message: "approved tools still execute in the API process; use MANDOFORGE_EXECUTION_WORKER=queue for production drains".to_string(),
+        });
+    }
+    if host_shell_runner_exposed() {
+        attention_items.push(WorkerReadinessAttentionItem {
+            kind: "host_shell_runner_enabled".to_string(),
+            severity: "critical".to_string(),
+            message: "host shell.exec is explicitly enabled while MANDOFORGE_SHELL_RUNNER resolves to host; use Remote Computer Pod exec or a sandboxed runner before production".to_string(),
         });
     }
     if queue_backend.kind == "memory" {
@@ -615,6 +622,9 @@ pub(crate) fn build_worker_production_ops_readiness(
     if !no_stale_leases {
         blocking_reasons.push("stale worker leases require reclaim".to_string());
     }
+    if host_shell_runner_exposed() {
+        blocking_reasons.push("host shell runner is enabled for approved shell.exec".to_string());
+    }
 
     let production_blocked = !blocking_reasons.is_empty();
     let status = if production_blocked {
@@ -646,4 +656,8 @@ pub(crate) fn build_worker_production_ops_readiness(
         blocking_reasons,
         message,
     }
+}
+
+fn host_shell_runner_exposed() -> bool {
+    env_bool("MANDOFORGE_ALLOW_HOST_SHELL_EXEC") && crate::shell_runner::shell_runner() == "host"
 }
