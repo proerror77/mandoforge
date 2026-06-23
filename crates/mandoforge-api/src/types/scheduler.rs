@@ -6,9 +6,10 @@ use uuid::Uuid;
 use crate::{
     AgentReleaseAutomationRun, ApprovalEscalationDueRun, CodexAppServerStalePollRun,
     CostAlertDelivery, McpServerRolloutDueRun, McpServerScheduledHealthRun,
-    PolicyScheduledRolloutRun, ProviderPolicyGateRun, RemoteComputerReclaimRun,
-    RemoteComputerSidecarSupervisionRun, SemanticAgingPolicySweep, SemanticSynthesisScheduleSweep,
-    UsageFinanceExportDelivery, WorkflowScheduledStepActivationSweep,
+    OntologyReleaseWorkflowTriggerDrain, PolicyScheduledRolloutRun, ProviderPolicyGateRun,
+    RemoteComputerReclaimRun, RemoteComputerSidecarSupervisionRun, SemanticAgingPolicySweep,
+    SemanticSynthesisScheduleSweep, UsageFinanceExportDelivery,
+    WorkflowScheduledStepActivationSweep,
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -32,6 +33,8 @@ pub(crate) struct SchedulerDueRun {
     pub(crate) semantic_synthesis_schedules: Option<SemanticSynthesisScheduleSweep>,
     #[serde(default)]
     pub(crate) semantic_aging_policies: Option<SemanticAgingPolicySweep>,
+    #[serde(default)]
+    pub(crate) ontology_release_workflow_triggers: Option<OntologyReleaseWorkflowTriggerDrain>,
     pub(crate) mcp_health_runs: Vec<McpServerScheduledHealthRun>,
     pub(crate) mcp_rollout_runs: Vec<McpServerRolloutDueRun>,
     pub(crate) codex_app_server_stale_polls: CodexAppServerStalePollRun,

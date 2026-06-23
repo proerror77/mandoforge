@@ -114,6 +114,7 @@ mod store_github_bindings;
 mod store_governance;
 mod store_manager_plans;
 mod store_memory_writeback;
+mod store_ontology_release_workflow_triggers;
 mod store_ontology_releases;
 mod store_policy_revisions;
 mod store_releases;
@@ -400,7 +401,8 @@ pub(crate) use types::ontology::{
     OntologyOnboardingField, OntologyOnboardingMaterializationResult,
     OntologyOnboardingProposalDraft, OntologyOnboardingRun, OntologyOnboardingToolSpec,
     OntologyOnboardingToolSpecResponse, OntologyPromptPacket, OntologyRegistry,
-    OntologyRelationType, OntologyRelease, OntologyReleaseListQuery, OntologyReviewGraph,
+    OntologyRelationType, OntologyRelease, OntologyReleaseListQuery,
+    OntologyReleaseWorkflowTrigger, OntologyReleaseWorkflowTriggerDrain, OntologyReviewGraph,
     OntologyReviewGraphEdge, OntologyReviewGraphNode, OntologySeedActionMapping,
     OntologySeedMetricMapping, OntologySeedObjectMapping, OntologySeedPack,
     OntologySeedPackSummary, OntologySeedRelationMapping, OntologySourceBundle,

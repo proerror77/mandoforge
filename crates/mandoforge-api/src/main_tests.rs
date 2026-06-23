@@ -1,3 +1,5 @@
+#![allow(clippy::await_holding_lock)]
+
 use super::*;
 use axum::{
     body::{Body, to_bytes},
@@ -1553,95 +1555,10 @@ async fn ontology_release_promote_supersedes_previous_active_release() {
     assert_eq!(old.status, "superseded");
 }
 
-#[tokio::test]
-async fn ontology_release_promote_triggers_workflow_run_with_action_catalog() {
-    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
-    let definition =
-        ontology_release_trigger_workflow_definition_for_test(&state, "commerce").await;
-    let release =
-        ontology_release_candidate_for_test(&state, "commerce-vtest-trigger-workflow").await;
-    gate_ontology_release_with_actor(&state, release.id, "test")
-        .await
-        .expect("gate");
-
-    let active = promote_ontology_release_with_actor(&state, release.id, "test")
-        .await
-        .expect("promote");
-
-    let runs = state.list_workflow_runs().await.expect("workflow runs");
-    let run = runs
-        .iter()
-        .find(|run| {
-            run.workflow_definition_id == definition.id
-                && run.input_payload["ontology_release_id"] == json!(active.id)
-        })
-        .expect("workflow run triggered by ontology release");
-    assert_eq!(run.status, "queued");
-    assert_eq!(
-        run.input_payload["trigger"],
-        json!("ontology_release.promoted")
-    );
-    assert_eq!(run.input_payload["ontology_version"], json!(active.version));
-    assert_eq!(run.input_payload["domain_scope"], json!("commerce"));
-    assert_eq!(
-        run.input_payload["ontology_release"]["release_class"],
-        json!("repo_controlled")
-    );
-    assert_eq!(run.input_payload["action_catalog"]["tool_count"], json!(1));
-    let tool_specs = run.input_payload["action_catalog"]["tool_specs"]
-        .as_array()
-        .expect("tool specs");
-    assert!(
-        tool_specs
-            .iter()
-            .any(|spec| spec["name"] == json!("commerce.refund_order"))
-    );
-
-    let events = state
-        .list_events(run.primary_session_id)
-        .await
-        .expect("session events");
-    assert!(events.iter().any(|event| {
-        event.event_type == "ontology_release.workflow_run_triggered"
-            && event.payload["ontology_release_id"] == json!(active.id)
-    }));
-    let audit_logs = state.list_audit_logs(None).await.expect("audit logs");
-    assert!(audit_logs.iter().any(|log| {
-        log.action == "ontology_release.workflow_run_triggered"
-            && log.details["workflow_run_id"] == json!(run.id)
-    }));
-}
-
-#[tokio::test]
-async fn ontology_release_workflow_trigger_is_idempotent_per_release() {
-    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
-    let definition =
-        ontology_release_trigger_workflow_definition_for_test(&state, "commerce").await;
-    let release =
-        ontology_release_candidate_for_test(&state, "commerce-vtest-trigger-idempotent").await;
-    gate_ontology_release_with_actor(&state, release.id, "test")
-        .await
-        .expect("gate");
-    let active = promote_ontology_release_with_actor(&state, release.id, "test")
-        .await
-        .expect("promote");
-
-    trigger_workflow_run_from_ontology_release(&state, &active, "test")
-        .await
-        .expect("repeat trigger");
-
-    let matching_runs = state
-        .list_workflow_runs()
-        .await
-        .expect("workflow runs")
-        .into_iter()
-        .filter(|run| {
-            run.workflow_definition_id == definition.id
-                && run.input_payload["ontology_release_id"] == json!(active.id)
-        })
-        .count();
-    assert_eq!(matching_runs, 1);
-}
+#[path = "main_tests/ontology_release_workflow_trigger_tests.rs"]
+mod ontology_release_workflow_trigger_tests;
+#[path = "main_tests/remote_computer_lease_tests.rs"]
+mod remote_computer_lease_tests;
 
 #[tokio::test]
 async fn ontology_release_promote_refreshes_stale_rollback_target() {
@@ -5073,7 +4990,7 @@ fn codex_app_server_production_ops_requires_controller_when_configured() {
         true,
         &trace_summary,
         0,
-        &[stale_poll_audit.clone()],
+        std::slice::from_ref(&stale_poll_audit),
         base_time + chrono::Duration::minutes(5),
         true,
         false,
@@ -17241,6 +17158,8 @@ async fn migration_paths_include_stage2_migrations_in_order() {
     assert!(names.contains(&"0065_ontology_onboarding_runs.sql"));
     assert!(names.contains(&"0066_workflow_schedules.sql"));
     assert!(names.contains(&"0067_task_grants_constraints.sql"));
+    assert!(names.contains(&"0068_remote_computer_active_lease_unique.sql"));
+    assert!(names.contains(&"0069_ontology_release_workflow_triggers.sql"));
     assert!(
         names.windows(2).all(|window| window[0] <= window[1]),
         "migrations should run lexicographically: {names:?}"
@@ -17296,6 +17215,7 @@ fn tenant_rls_migration_covers_tracked_tables() {
         include_str!("../../../db/migrations/0061_ontology_releases.sql"),
         include_str!("../../../db/migrations/0065_ontology_onboarding_runs.sql"),
         include_str!("../../../db/migrations/0066_workflow_schedules.sql"),
+        include_str!("../../../db/migrations/0069_ontology_release_workflow_triggers.sql"),
     ]
     .join("\n");
     assert!(migration.contains("mandoforge_current_tenant_id"));
@@ -17867,7 +17787,7 @@ async fn remote_computer_state_locks_prevent_concurrent_state_writes() {
     )
     .await;
     assert_eq!(released.status, "released");
-    assert_eq!(released.released_at.is_some(), true);
+    assert!(released.released_at.is_some());
 
     let locks: Vec<RemoteComputerStateLock> = request_json(
         app.clone(),
@@ -23425,42 +23345,6 @@ async fn tenant_routed_header_requires_trusted_ingress() {
 }
 
 #[tokio::test]
-async fn remote_computer_lease_rejects_non_positive_duration() {
-    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
-    let computer = state
-        .create_remote_computer(CreateRemoteComputer {
-            name: "lease-duration-test".to_string(),
-            profile: None,
-            namespace: None,
-            pod_name: None,
-            workspace_path: None,
-            state_mount_path: None,
-            metadata: None,
-        })
-        .await
-        .expect("create remote computer");
-
-    let error = state
-        .create_remote_computer_lease(
-            computer.id,
-            CreateRemoteComputerLease {
-                session_id: None,
-                worker_id: Some("worker-1".to_string()),
-                lease_seconds: Some(0),
-                metadata: None,
-            },
-        )
-        .await
-        .expect_err("zero lease duration should fail");
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
-    assert!(
-        error
-            .message
-            .contains("remote computer lease_seconds must be positive")
-    );
-}
-
-#[tokio::test]
 async fn policy_rollout_can_rollback_and_run_due_activation() {
     let app = test_app().await;
 
@@ -25277,7 +25161,7 @@ async fn vault_kms_recovery_controller_executes_external_boundary() {
         "admin-1",
         generated_at,
         &kms,
-        &[secret_record.clone()],
+        std::slice::from_ref(&secret_record),
         &readiness,
     )
     .await
@@ -30946,7 +30830,7 @@ async fn mcp_call_executes_through_tool_router_and_gateway_policy() {
     )
     .await;
     assert_eq!(rollout.rollout["status"], "pending");
-    assert_eq!(rollout.preflight_health.expect("preflight").healthy, true);
+    assert!(rollout.preflight_health.expect("preflight").healthy);
     assert!(
         rollout
             .server
@@ -38279,9 +38163,24 @@ async fn workflow_step_run_endpoint_claims_and_executes_session_loop() {
         executed["step"]["output_payload"]["worker_execution"]["worker_id"],
         json!("worker-whiskey-1")
     );
-    assert!(executed["step"]["approval_ids"].as_array().unwrap().len() >= 1);
-    assert!(executed["step"]["tool_call_ids"].as_array().unwrap().len() >= 1);
-    assert!(executed["step"]["artifact_ids"].as_array().unwrap().len() >= 1);
+    assert!(
+        !executed["step"]["approval_ids"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !executed["step"]["tool_call_ids"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !executed["step"]["artifact_ids"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
 
     let events: Vec<SessionEvent> = request_json(
         app.clone(),
@@ -43902,6 +43801,27 @@ async fn queue_backed_worker_claims_available_warm_pool_remote_computer() {
     )
     .await;
     assert_eq!(computer.status, "available");
+    let newer_computer: RemoteComputer = request_json(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri("/api/remote-computers")
+            .header("content-type", "application/json")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::from(
+                json!({
+                    "name": "warm-pool-remote-computer-newer",
+                    "profile": "workspace-write",
+                    "pod_name": "agent-remote-computer-warm-newer",
+                    "metadata": {"warm_pool": true, "pool": "warm"}
+                })
+                .to_string(),
+            ))
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(newer_computer.status, "available");
 
     let requeued: execution_queue::ExecutionJob = request_json(
         app.clone(),
@@ -43928,7 +43848,13 @@ async fn queue_backed_worker_claims_available_warm_pool_remote_computer() {
     let lease = leases
         .iter()
         .find(|lease| lease.remote_computer_id == computer.id)
-        .expect("warm pool lease was claimed");
+        .expect("oldest warm pool lease was claimed");
+    assert!(
+        leases
+            .iter()
+            .all(|lease| lease.remote_computer_id != newer_computer.id),
+        "newer warm pool computer should remain idle until older candidates are claimed"
+    );
     assert_eq!(lease.session_id, Some(session.id));
     assert_eq!(lease.worker_id.as_deref(), Some("warm-pool-worker"));
     assert_eq!(

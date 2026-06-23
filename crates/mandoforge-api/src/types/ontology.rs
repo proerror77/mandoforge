@@ -469,6 +469,31 @@ pub(crate) struct OntologyRelease {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OntologyReleaseWorkflowTrigger {
+    pub(crate) id: Uuid,
+    pub(crate) ontology_release_id: Uuid,
+    pub(crate) workflow_definition_id: Uuid,
+    pub(crate) workflow_run_id: Option<Uuid>,
+    pub(crate) status: String,
+    pub(crate) attempt_count: i32,
+    pub(crate) claimed_at: Option<DateTime<Utc>>,
+    pub(crate) error_message: Option<String>,
+    pub(crate) created_at: DateTime<Utc>,
+    pub(crate) updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OntologyReleaseWorkflowTriggerDrain {
+    pub(crate) status: String,
+    pub(crate) checked_at: DateTime<Utc>,
+    pub(crate) retryable_count: usize,
+    pub(crate) triggered_count: usize,
+    pub(crate) skipped_count: usize,
+    pub(crate) failed_count: usize,
+    pub(crate) trigger_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct OntologyEngineReadiness {
     pub(crate) generated_at: DateTime<Utc>,
     pub(crate) status: String,

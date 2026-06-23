@@ -180,6 +180,22 @@ impl AppState {
                 let mut store = inner.write().await;
                 let computer = store
                     .remote_computers
+                    .get(&remote_computer_id)
+                    .ok_or_else(|| AppError::not_found("Remote computer not found"))?;
+                if computer.status != "available" {
+                    return Err(AppError::bad_request(
+                        "Remote computer is not available for lease",
+                    ));
+                }
+                if store.remote_computer_leases.values().any(|existing| {
+                    existing.remote_computer_id == remote_computer_id && existing.status == "leased"
+                }) {
+                    return Err(AppError::bad_request(
+                        "Remote computer already has an active lease",
+                    ));
+                }
+                let computer = store
+                    .remote_computers
                     .get_mut(&remote_computer_id)
                     .ok_or_else(|| AppError::not_found("Remote computer not found"))?;
                 computer.status = "leased".to_string();
@@ -187,17 +203,32 @@ impl AppState {
                 store.remote_computer_leases.insert(lease.id, lease.clone());
             }
             StoreBackend::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
                 let updated = sqlx::query(
                     "UPDATE remote_computers
                      SET status = 'leased', updated_at = $1
-                     WHERE tenant_id = $2 AND id = $3",
+                     WHERE tenant_id = $2 AND id = $3 AND status = 'available'",
                 )
                 .bind(now)
                 .bind(self.current_tenant_id())
                 .bind(remote_computer_id)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await?;
                 if updated.rows_affected() == 0 {
+                    let exists: Option<(Uuid,)> = sqlx::query_as(
+                        "SELECT id
+                         FROM remote_computers
+                         WHERE tenant_id = $1 AND id = $2",
+                    )
+                    .bind(self.current_tenant_id())
+                    .bind(remote_computer_id)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+                    if exists.is_some() {
+                        return Err(AppError::bad_request(
+                            "Remote computer is not available for lease",
+                        ));
+                    }
                     return Err(AppError::not_found("Remote computer not found"));
                 }
                 sqlx::query(
@@ -216,8 +247,9 @@ impl AppState {
                 .bind(&lease.metadata)
                 .bind(lease.created_at)
                 .bind(lease.updated_at)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await?;
+                tx.commit().await?;
             }
         }
         Ok(lease)
@@ -234,6 +266,24 @@ impl AppState {
         match &self.store {
             StoreBackend::Memory(inner) => {
                 let mut store = inner.write().await;
+                let existing = store
+                    .remote_computer_leases
+                    .get(&lease_id)
+                    .cloned()
+                    .ok_or_else(|| AppError::not_found("Remote computer lease not found"))?;
+                if status == "leased" && existing.status != "leased" {
+                    return Err(AppError::bad_request(
+                        "Remote computer lease is not active for heartbeat",
+                    ));
+                }
+                if (status == "released" || status == "failed") && existing.status == status {
+                    return Ok(existing);
+                }
+                if (status == "released" || status == "failed") && existing.status != "leased" {
+                    return Err(AppError::bad_request(
+                        "Remote computer lease is not active for status transition",
+                    ));
+                }
                 let lease = store
                     .remote_computer_leases
                     .get_mut(&lease_id)
@@ -250,22 +300,55 @@ impl AppState {
                 }
                 lease.updated_at = now;
                 let lease = lease.clone();
-                if status == "released" || status == "failed" {
-                    if let Some(computer) =
+                let has_other_active_lease =
+                    store.remote_computer_leases.values().any(|existing| {
+                        existing.id != lease.id
+                            && existing.remote_computer_id == lease.remote_computer_id
+                            && existing.status == "leased"
+                    });
+                if !has_other_active_lease
+                    && (status == "released" || status == "failed")
+                    && let Some(computer) =
                         store.remote_computers.get_mut(&lease.remote_computer_id)
-                    {
-                        computer.status = if status == "released" {
-                            "available"
-                        } else {
-                            "attention"
-                        }
-                        .to_string();
-                        computer.updated_at = now;
+                {
+                    computer.status = if status == "released" {
+                        "available"
+                    } else {
+                        "attention"
                     }
+                    .to_string();
+                    computer.updated_at = now;
                 }
                 Ok(lease)
             }
             StoreBackend::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let existing_row = sqlx::query(
+                    "SELECT id, remote_computer_id, session_id, status, worker_id, lease_expires_at, heartbeat_at, metadata, created_at, updated_at
+                     FROM remote_computer_leases
+                     WHERE tenant_id = $1 AND id = $2
+                     FOR UPDATE",
+                )
+                .bind(self.current_tenant_id())
+                .bind(lease_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or_else(|| AppError::not_found("Remote computer lease not found"))?;
+                let existing = remote_computer_lease_from_row(existing_row)?;
+                if status == "leased" && existing.status != "leased" {
+                    return Err(AppError::bad_request(
+                        "Remote computer lease is not active for heartbeat",
+                    ));
+                }
+                if (status == "released" || status == "failed") && existing.status == status {
+                    tx.commit().await?;
+                    return Ok(existing);
+                }
+                if (status == "released" || status == "failed") && existing.status != "leased" {
+                    return Err(AppError::bad_request(
+                        "Remote computer lease is not active for status transition",
+                    ));
+                }
                 let row = sqlx::query(
                     "UPDATE remote_computer_leases
                      SET status = $1,
@@ -285,28 +368,45 @@ impl AppState {
                 .bind(now)
                 .bind(self.current_tenant_id())
                 .bind(lease_id)
-                .fetch_optional(pool)
+                .fetch_optional(&mut *tx)
                 .await?
                 .ok_or_else(|| AppError::not_found("Remote computer lease not found"))?;
                 let lease = remote_computer_lease_from_row(row)?;
                 if status == "released" || status == "failed" {
+                    let has_other_active_lease: Option<(Uuid,)> = sqlx::query_as(
+                        "SELECT id
+                         FROM remote_computer_leases
+                         WHERE tenant_id = $1
+                           AND remote_computer_id = $2
+                           AND status = 'leased'
+                           AND id <> $3
+                         LIMIT 1",
+                    )
+                    .bind(self.current_tenant_id())
+                    .bind(lease.remote_computer_id)
+                    .bind(lease.id)
+                    .fetch_optional(&mut *tx)
+                    .await?;
                     let computer_status = if status == "released" {
                         "available"
                     } else {
                         "attention"
                     };
-                    sqlx::query(
-                        "UPDATE remote_computers
-                         SET status = $1, updated_at = $2
-                         WHERE tenant_id = $3 AND id = $4",
-                    )
-                    .bind(computer_status)
-                    .bind(now)
-                    .bind(self.current_tenant_id())
-                    .bind(lease.remote_computer_id)
-                    .execute(pool)
-                    .await?;
+                    if has_other_active_lease.is_none() {
+                        sqlx::query(
+                            "UPDATE remote_computers
+                             SET status = $1, updated_at = $2
+                             WHERE tenant_id = $3 AND id = $4",
+                        )
+                        .bind(computer_status)
+                        .bind(now)
+                        .bind(self.current_tenant_id())
+                        .bind(lease.remote_computer_id)
+                        .execute(&mut *tx)
+                        .await?;
+                    }
                 }
+                tx.commit().await?;
                 Ok(lease)
             }
         }
@@ -626,7 +726,7 @@ impl AppState {
                 let active_conflict = store.remote_computer_state_locks.values().any(|existing| {
                     existing.lock_key == lock_key
                         && existing.status == "held"
-                        && !existing.expires_at.is_some_and(|expires| expires <= now)
+                        && existing.expires_at.is_none_or(|expires| expires > now)
                 });
                 if active_conflict {
                     return Err(AppError::bad_request(
@@ -889,12 +989,12 @@ impl AppState {
                         "only active remote computer leases can be attached",
                     ));
                 }
-                if let Some(leased_session_id) = lease.session_id {
-                    if leased_session_id != input.session_id {
-                        return Err(AppError::bad_request(
-                            "attachment session must match the lease session",
-                        ));
-                    }
+                if let Some(leased_session_id) = lease.session_id
+                    && leased_session_id != input.session_id
+                {
+                    return Err(AppError::bad_request(
+                        "attachment session must match the lease session",
+                    ));
                 }
                 if store
                     .remote_computer_attachments
@@ -945,12 +1045,12 @@ impl AppState {
                         "only active remote computer leases can be attached",
                     ));
                 }
-                if let Some(leased_session_id) = lease.session_id {
-                    if leased_session_id != input.session_id {
-                        return Err(AppError::bad_request(
-                            "attachment session must match the lease session",
-                        ));
-                    }
+                if let Some(leased_session_id) = lease.session_id
+                    && leased_session_id != input.session_id
+                {
+                    return Err(AppError::bad_request(
+                        "attachment session must match the lease session",
+                    ));
                 }
                 let duplicate = sqlx::query(
                     "SELECT id
@@ -1139,12 +1239,12 @@ fn validate_remote_computer_job_assignment_lease(
             "only active remote computer leases can receive execution handoff",
         ));
     }
-    if let Some(leased_session_id) = lease.session_id {
-        if leased_session_id != session_id {
-            return Err(AppError::bad_request(
-                "execution handoff session must match the lease session",
-            ));
-        }
+    if let Some(leased_session_id) = lease.session_id
+        && leased_session_id != session_id
+    {
+        return Err(AppError::bad_request(
+            "execution handoff session must match the lease session",
+        ));
     }
     Ok(())
 }

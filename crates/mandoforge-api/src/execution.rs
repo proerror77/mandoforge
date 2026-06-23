@@ -6,6 +6,7 @@ use std::{
 
 use anyhow::Result;
 use async_trait::async_trait;
+use axum::http::StatusCode;
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -78,7 +79,7 @@ pub(crate) trait ExecutionWorker: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub(crate) enum ExecutionWorkerOutcome {
-    Completed { job: Option<ExecutionJob> },
+    Completed { job_id: Option<Uuid> },
     Queued,
 }
 
@@ -96,11 +97,11 @@ impl ExecutionWorker for InlineExecutionWorker {
         approval: &Approval,
     ) -> Result<ExecutionWorkerOutcome, AppError> {
         let Some(job) = enqueue_approved_job(state, approval).await? else {
-            return Ok(ExecutionWorkerOutcome::Completed { job: None });
+            return Ok(ExecutionWorkerOutcome::Completed { job_id: None });
         };
         let completed = run_execution_job(state, job.id, "inline").await?;
         Ok(ExecutionWorkerOutcome::Completed {
-            job: Some(completed),
+            job_id: Some(completed.id),
         })
     }
 }
@@ -119,7 +120,7 @@ impl ExecutionWorker for QueueBackedExecutionWorker {
         approval: &Approval,
     ) -> Result<ExecutionWorkerOutcome, AppError> {
         let Some(job) = enqueue_approved_job(state, approval).await? else {
-            return Ok(ExecutionWorkerOutcome::Completed { job: None });
+            return Ok(ExecutionWorkerOutcome::Completed { job_id: None });
         };
         state
             .append_event(
@@ -1133,20 +1134,12 @@ async fn claim_remote_computer_warm_pool_lease_for_job(
     worker_id: &str,
     contract: &RemoteComputerEnvironmentContract,
 ) -> Result<Option<crate::RemoteComputerLease>, AppError> {
-    let leased_remote_computer_ids: HashSet<_> = state
-        .list_remote_computer_leases()
-        .await?
-        .into_iter()
-        .filter(|lease| lease.status == "leased")
-        .map(|lease| lease.remote_computer_id)
-        .collect();
-    let Some(computer) = state
+    let mut candidates = state
         .list_remote_computers()
         .await?
         .into_iter()
         .filter(|computer| {
             computer.status == "available"
-                && !leased_remote_computer_ids.contains(&computer.id)
                 && contract.matches_computer(computer)
                 && computer
                     .metadata
@@ -1154,28 +1147,59 @@ async fn claim_remote_computer_warm_pool_lease_for_job(
                     .and_then(Value::as_bool)
                     .unwrap_or(false)
         })
-        .max_by_key(|computer| computer.updated_at)
-    else {
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|computer| std::cmp::Reverse(computer.updated_at));
+    if candidates.is_empty() {
         return Ok(None);
+    }
+    let mut last_race_error = None;
+    let (computer, lease) = loop {
+        let Some(computer) = candidates.pop() else {
+            return Ok(None);
+        };
+        match state
+            .create_remote_computer_lease(
+                computer.id,
+                CreateRemoteComputerLease {
+                    session_id: Some(job.session_id),
+                    worker_id: Some(worker_id.to_string()),
+                    lease_seconds: Some(REMOTE_COMPUTER_DEFAULT_LEASE_SECONDS),
+                    metadata: Some(json!({
+                        "handoff_mode": "environment-warm-pool-lease",
+                        "source": "run_execution_job",
+                        "execution_job_id": job.id,
+                        "tool_call_id": job.tool_call_id,
+                        "session_workspace_path": remote_session_workspace_path(&computer, job.session_id),
+                        "environment_contract": contract.evidence()
+                    })),
+                },
+            )
+            .await
+        {
+            Ok(lease) => break (computer, lease),
+            Err(error) if remote_computer_lease_race_error(&error) => {
+                last_race_error = Some(error.message);
+                continue;
+            }
+            Err(error) => return Err(error),
+        }
     };
-    let lease = state
-        .create_remote_computer_lease(
-            computer.id,
-            CreateRemoteComputerLease {
-                session_id: Some(job.session_id),
-                worker_id: Some(worker_id.to_string()),
-                lease_seconds: Some(REMOTE_COMPUTER_DEFAULT_LEASE_SECONDS),
-                metadata: Some(json!({
-                    "handoff_mode": "environment-warm-pool-lease",
-                    "source": "run_execution_job",
+    if let Some(error) = last_race_error {
+        state
+            .append_event(
+                "worker",
+                Some(job.id),
+                job.session_id,
+                "remote_computer.warm_pool_claim_race_recovered",
+                json!({
                     "execution_job_id": job.id,
                     "tool_call_id": job.tool_call_id,
-                    "session_workspace_path": remote_session_workspace_path(&computer, job.session_id),
-                    "environment_contract": contract.evidence()
-                })),
-            },
-        )
-        .await?;
+                    "recovered_remote_computer_id": computer.id,
+                    "last_race_error": error,
+                }),
+            )
+            .await?;
+    }
     let details = json!({
         "lease_id": lease.id,
         "remote_computer_id": lease.remote_computer_id,
@@ -1305,16 +1329,18 @@ async fn provision_remote_computer_pod_for_job(
             .await
         {
             Ok(computer) => computer,
-            Err(_) => {
+            Err(error) => {
                 // Duplicate insert — another worker won the race; use the existing record
-                state
+                if let Some(existing) = state
                     .list_remote_computers()
                     .await?
                     .into_iter()
                     .find(|c| c.pod_name.as_deref() == Some(&pod_name))
-                    .ok_or_else(|| {
-                        AppError::internal("Pod created but record not found after conflict")
-                    })?
+                {
+                    existing
+                } else {
+                    return Err(error);
+                }
             }
         }
     };
@@ -1372,6 +1398,15 @@ async fn provision_remote_computer_pod_for_job(
         ))
         .await?;
     Ok(Some(lease))
+}
+
+fn remote_computer_lease_race_error(error: &AppError) -> bool {
+    error.status == StatusCode::BAD_REQUEST
+        && matches!(
+            error.message.as_str(),
+            "Remote computer is not available for lease"
+                | "Remote computer already has an active lease"
+        )
 }
 
 async fn finalize_remote_computer_assignment_for_job(
@@ -3470,15 +3505,15 @@ fn codex_app_server_final_message(result: &Value) -> Option<String> {
         "text",
     ] {
         if let Some(value) = result.get(key) {
-            if let Some(message) = value.as_str() {
-                if let Some(message) = non_empty_string(message) {
-                    return Some(message);
-                }
+            if let Some(message) = value.as_str()
+                && let Some(message) = non_empty_string(message)
+            {
+                return Some(message);
             }
-            if let Some(message) = string_value_at(value, &["content"]) {
-                if let Some(message) = non_empty_string(&message) {
-                    return Some(message);
-                }
+            if let Some(message) = string_value_at(value, &["content"])
+                && let Some(message) = non_empty_string(&message)
+            {
+                return Some(message);
             }
         }
     }
@@ -3736,14 +3771,13 @@ async fn bound_agent_cli_profile(
         .into_iter()
         .filter(|assignment| assignment.specialist_session_id == session_id)
         .max_by_key(|assignment| assignment.created_at)
+        && let Some(profile_id) = assignment.runtime_profile_id
     {
-        if let Some(profile_id) = assignment.runtime_profile_id {
-            let profile = state.get_agent_runtime_profile(profile_id).await?;
-            return Ok(Some(BoundAgentCliProfile {
-                name: profile.name,
-                source: "handoff",
-            }));
-        }
+        let profile = state.get_agent_runtime_profile(profile_id).await?;
+        return Ok(Some(BoundAgentCliProfile {
+            name: profile.name,
+            source: "handoff",
+        }));
     }
 
     let agent = state.get_agent(session.agent_id).await?;
@@ -4484,13 +4518,13 @@ fn runtime_adapter_output_schema_from_args(args: &[String]) -> Option<Value> {
                 })
             });
         }
-        if let Some(path) = arg.strip_prefix("--output-schema=") {
-            if !path.trim().is_empty() {
-                return Some(json!({
-                    "path": path,
-                    "source": "cli_args"
-                }));
-            }
+        if let Some(path) = arg.strip_prefix("--output-schema=")
+            && !path.trim().is_empty()
+        {
+            return Some(json!({
+                "path": path,
+                "source": "cli_args"
+            }));
         }
     }
     None
@@ -4690,15 +4724,15 @@ fn runtime_adapter_final_message(adapter_event_type: &str, event: &Value) -> Opt
         "result",
     ] {
         if let Some(value) = event.get(key) {
-            if let Some(message) = value.as_str() {
-                if !message.trim().is_empty() {
-                    return Some(message.to_string());
-                }
+            if let Some(message) = value.as_str()
+                && !message.trim().is_empty()
+            {
+                return Some(message.to_string());
             }
-            if let Some(message) = string_value_at(value, &["content"]) {
-                if !message.trim().is_empty() {
-                    return Some(message);
-                }
+            if let Some(message) = string_value_at(value, &["content"])
+                && !message.trim().is_empty()
+            {
+                return Some(message);
             }
         }
     }

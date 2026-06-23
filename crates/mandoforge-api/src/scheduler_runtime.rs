@@ -19,7 +19,7 @@ pub(crate) async fn build_scheduler_orchestration_summary(
         .filter(|log| log.action == "scheduler.run_due")
         .filter_map(scheduler_run_history_item)
         .collect();
-    recent_runs.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    recent_runs.sort_by_key(|run| std::cmp::Reverse(run.created_at));
     recent_runs.truncate(10);
     let last_run = recent_runs.first();
     let mut attention_items = Vec::new();
@@ -662,12 +662,13 @@ pub(crate) async fn build_scheduler_due_plan(
             "no scheduled workflow steps are pending"
         },
     ));
-    if let Some(item) = actions.last_mut() {
-        if workflow_scheduled_due_count == 0 && workflow_scheduled_total > 0 {
-            item.status = "waiting".to_string();
-            item.severity = "info".to_string();
-            item.skipped_count = workflow_scheduled_total;
-        }
+    if let Some(item) = actions.last_mut()
+        && workflow_scheduled_due_count == 0
+        && workflow_scheduled_total > 0
+    {
+        item.status = "waiting".to_string();
+        item.severity = "info".to_string();
+        item.skipped_count = workflow_scheduled_total;
     }
 
     let (
@@ -711,6 +712,23 @@ pub(crate) async fn build_scheduler_due_plan(
             "semantic aging policies exist but none are due"
         } else {
             "no semantic aging policies are registered"
+        },
+    ));
+
+    let retryable_ontology_release_triggers = state
+        .retryable_ontology_release_workflow_triggers(100)
+        .await?;
+    actions.push(scheduler_due_plan_item(
+        "ontology",
+        "ontology_release_workflow_trigger_retry",
+        "auto",
+        retryable_ontology_release_triggers.len(),
+        0,
+        retryable_ontology_release_triggers.len(),
+        if retryable_ontology_release_triggers.is_empty() {
+            "no failed or stale ontology release workflow trigger needs retry"
+        } else {
+            "retry failed or stale ontology release workflow triggers"
         },
     ));
 
@@ -905,6 +923,8 @@ pub(crate) async fn execute_scheduler_due_tasks(
     let semantic_synthesis_schedules =
         execute_due_semantic_synthesis_schedules(state, checked_at).await?;
     let semantic_aging_policies = execute_due_semantic_aging_policies(state, checked_at).await?;
+    let ontology_release_workflow_triggers =
+        drain_due_ontology_release_workflow_triggers(state, "system", 100).await?;
     let usage = build_usage_summary(state).await?;
     let cost_alerts = build_cost_alerts(&usage.provider_budgets, checked_at);
     let active_alert_route_count = state
@@ -983,6 +1003,11 @@ pub(crate) async fn execute_scheduler_due_tasks(
     if semantic_aging_policies.archived_count > 0 || semantic_aging_policies.failed_count > 0 {
         actions.push("semantic_aging_policies_processed".to_string());
     }
+    if ontology_release_workflow_triggers.triggered_count > 0
+        || ontology_release_workflow_triggers.failed_count > 0
+    {
+        actions.push("ontology_release_workflow_triggers_processed".to_string());
+    }
     if cost_alert_delivery.is_some() {
         actions.push("usage_cost_alert_delivery_processed".to_string());
     }
@@ -1029,6 +1054,7 @@ pub(crate) async fn execute_scheduler_due_tasks(
         workflow_scheduled_steps: Some(workflow_scheduled_steps),
         semantic_synthesis_schedules: Some(semantic_synthesis_schedules),
         semantic_aging_policies: Some(semantic_aging_policies),
+        ontology_release_workflow_triggers: Some(ontology_release_workflow_triggers),
         mcp_health_runs,
         mcp_rollout_runs,
         codex_app_server_stale_polls,
@@ -1064,6 +1090,9 @@ pub(crate) async fn execute_scheduler_due_tasks(
                 "semantic_synthesis_schedule_failed_count": run.semantic_synthesis_schedules.as_ref().map(|semantic| semantic.failed_count).unwrap_or(0),
                 "semantic_aging_policy_status": run.semantic_aging_policies.as_ref().map(|semantic| semantic.status.clone()),
                 "semantic_aging_policy_archived_count": run.semantic_aging_policies.as_ref().map(|semantic| semantic.archived_count).unwrap_or(0),
+                "ontology_release_workflow_trigger_status": run.ontology_release_workflow_triggers.as_ref().map(|trigger| trigger.status.clone()),
+                "ontology_release_workflow_trigger_triggered_count": run.ontology_release_workflow_triggers.as_ref().map(|trigger| trigger.triggered_count).unwrap_or(0),
+                "ontology_release_workflow_trigger_failed_count": run.ontology_release_workflow_triggers.as_ref().map(|trigger| trigger.failed_count).unwrap_or(0),
                 "cost_alert_delivery_status": run.cost_alert_delivery.as_ref().map(|delivery| delivery.status.clone()),
                 "remote_computer_sidecar_supervision_status": run.remote_computer_sidecar_supervision.status,
                 "remote_computer_sidecar_missing_heartbeat_count": run.remote_computer_sidecar_supervision.missing_heartbeat_count,
