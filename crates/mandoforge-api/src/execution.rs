@@ -1199,8 +1199,9 @@ async fn claim_remote_computer_warm_pool_lease_for_job(
 
 /// Creates a Pod on-demand for jobs that find no available warm-pool Remote Computer.
 /// Requires the full triple-gate (`mutation_enabled`, `live_mutation_enabled`, `execution_enabled`)
-/// plus `MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT=kubernetes` to be active; otherwise returns `Ok(None)`
-/// so the caller can fall through to local execution.
+/// plus `MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT=kubernetes` to be active; otherwise returns
+/// `Ok(None)`. Environment-bound Remote Computer jobs then fail closed at assignment validation
+/// instead of falling back to host execution.
 async fn provision_remote_computer_pod_for_job(
     state: &AppState,
     job: &ExecutionJob,
@@ -1241,7 +1242,7 @@ async fn provision_remote_computer_pod_for_job(
                 },
             )
             .await;
-        // Gates not open or runner blocked — fall through to local execution
+        // Gates not open or runner blocked; environment-bound callers fail closed at assignment validation.
         if create_response.status == "blocked" {
             return Ok(None);
         }
