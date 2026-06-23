@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use axum::{
     extract::{Request, State},
@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::*;
 
+#[derive(Clone)]
 enum ResourceScope {
     Tenant,
     ScopedUnknown,
@@ -305,6 +306,26 @@ async fn semantic_object_scope(
     semantic_scopes_scope(state, &object.semantic_scopes).await
 }
 
+async fn semantic_object_scope_with_source_scopes(
+    state: &AppState,
+    object: &SemanticObject,
+    source_scopes: &HashMap<Uuid, ResourceScope>,
+) -> Result<ResourceScope, AppError> {
+    if let Some(source_id) = object.source_id {
+        let scope = match source_scopes.get(&source_id) {
+            Some(scope) => scope.clone(),
+            None => {
+                let source = state.get_semantic_source(source_id).await?;
+                semantic_source_scope(state, &source).await?
+            }
+        };
+        if !matches!(scope, ResourceScope::Tenant) {
+            return Ok(scope);
+        }
+    }
+    semantic_scopes_scope(state, &object.semantic_scopes).await
+}
+
 async fn semantic_link_endpoint_scope(
     state: &AppState,
     entity_type: &str,
@@ -319,10 +340,39 @@ async fn semantic_link_endpoint_scope(
     semantic_object_scope(state, &object).await
 }
 
+async fn semantic_link_endpoint_scope_with_object_scopes(
+    state: &AppState,
+    entity_type: &str,
+    entity_id: &str,
+    object_scopes: &HashMap<Uuid, ResourceScope>,
+) -> Result<ResourceScope, AppError> {
+    if entity_type != "semantic_object" {
+        return Ok(ResourceScope::Tenant);
+    }
+    let object_id = Uuid::parse_str(entity_id)
+        .map_err(|_| AppError::forbidden("semantic link endpoint is not a valid object id"))?;
+    match object_scopes.get(&object_id) {
+        Some(scope) => Ok(scope.clone()),
+        None => {
+            let object = state.get_semantic_object(object_id).await?;
+            semantic_object_scope(state, &object).await
+        }
+    }
+}
+
 async fn scope_visible_to_principal(
     state: &AppState,
     principal: &Principal,
     scope: ResourceScope,
+) -> Result<bool, AppError> {
+    scope_visible_to_principal_with_sessions(state, principal, scope, None).await
+}
+
+async fn scope_visible_to_principal_with_sessions(
+    state: &AppState,
+    principal: &Principal,
+    scope: ResourceScope,
+    visible_session_ids: Option<&HashSet<Uuid>>,
 ) -> Result<bool, AppError> {
     if principal.roles.contains(&Role::Admin) {
         return Ok(true);
@@ -331,8 +381,12 @@ async fn scope_visible_to_principal(
         ResourceScope::Tenant => Ok(true),
         ResourceScope::ScopedUnknown => Ok(false),
         ResourceScope::Session(session_id) => {
-            let visible = visible_session_ids_for_principal(state, principal).await?;
-            Ok(visible.contains(&session_id))
+            if let Some(visible_session_ids) = visible_session_ids {
+                Ok(visible_session_ids.contains(&session_id))
+            } else {
+                let visible = visible_session_ids_for_principal(state, principal).await?;
+                Ok(visible.contains(&session_id))
+            }
         }
         ResourceScope::TeamProject {
             team_id,
@@ -353,22 +407,58 @@ async fn scope_visible_to_principal(
     }
 }
 
-pub(crate) async fn semantic_source_visible_to_principal(
+pub(crate) async fn visible_semantic_sources_for_principal(
     state: &AppState,
     principal: &Principal,
-    source: &SemanticSource,
-) -> Result<bool, AppError> {
-    let scope = semantic_source_scope(state, source).await?;
-    scope_visible_to_principal(state, principal, scope).await
+) -> Result<Vec<SemanticSource>, AppError> {
+    let sources = state.list_semantic_sources().await?;
+    if principal.roles.contains(&Role::Admin) {
+        return Ok(sources);
+    }
+    let visible_session_ids = visible_session_ids_for_principal(state, principal).await?;
+    let mut visible = Vec::new();
+    for source in sources {
+        let scope = semantic_source_scope(state, &source).await?;
+        if scope_visible_to_principal_with_sessions(
+            state,
+            principal,
+            scope,
+            Some(&visible_session_ids),
+        )
+        .await?
+        {
+            visible.push(source);
+        }
+    }
+    Ok(visible)
 }
 
-pub(crate) async fn semantic_object_visible_to_principal(
+pub(crate) async fn visible_semantic_objects_for_principal(
     state: &AppState,
     principal: &Principal,
-    object: &SemanticObject,
-) -> Result<bool, AppError> {
-    let scope = semantic_object_scope(state, object).await?;
-    scope_visible_to_principal(state, principal, scope).await
+) -> Result<Vec<SemanticObject>, AppError> {
+    let objects = state.list_semantic_objects().await?;
+    if principal.roles.contains(&Role::Admin) {
+        return Ok(objects);
+    }
+    let visible_session_ids = visible_session_ids_for_principal(state, principal).await?;
+    let source_scopes = semantic_source_scope_cache(state).await?;
+    let mut visible = Vec::new();
+    for object in objects {
+        let scope =
+            semantic_object_scope_with_source_scopes(state, &object, &source_scopes).await?;
+        if scope_visible_to_principal_with_sessions(
+            state,
+            principal,
+            scope,
+            Some(&visible_session_ids),
+        )
+        .await?
+        {
+            visible.push(object);
+        }
+    }
+    Ok(visible)
 }
 
 pub(crate) async fn semantic_link_visible_to_principal(
@@ -384,6 +474,81 @@ pub(crate) async fn semantic_link_visible_to_principal(
     let to_scope =
         semantic_link_endpoint_scope(state, &link.to_entity_type, &link.to_entity_id).await?;
     scope_visible_to_principal(state, principal, to_scope).await
+}
+
+pub(crate) async fn visible_semantic_links_for_principal(
+    state: &AppState,
+    principal: &Principal,
+) -> Result<Vec<SemanticLink>, AppError> {
+    let links = state.list_semantic_links().await?;
+    if principal.roles.contains(&Role::Admin) {
+        return Ok(links);
+    }
+    let visible_session_ids = visible_session_ids_for_principal(state, principal).await?;
+    let source_scopes = semantic_source_scope_cache(state).await?;
+    let object_scopes = semantic_object_scope_cache(state, &source_scopes).await?;
+    let mut visible = Vec::new();
+    for link in links {
+        let from_scope = semantic_link_endpoint_scope_with_object_scopes(
+            state,
+            &link.from_entity_type,
+            &link.from_entity_id,
+            &object_scopes,
+        )
+        .await?;
+        if !scope_visible_to_principal_with_sessions(
+            state,
+            principal,
+            from_scope,
+            Some(&visible_session_ids),
+        )
+        .await?
+        {
+            continue;
+        }
+        let to_scope = semantic_link_endpoint_scope_with_object_scopes(
+            state,
+            &link.to_entity_type,
+            &link.to_entity_id,
+            &object_scopes,
+        )
+        .await?;
+        if scope_visible_to_principal_with_sessions(
+            state,
+            principal,
+            to_scope,
+            Some(&visible_session_ids),
+        )
+        .await?
+        {
+            visible.push(link);
+        }
+    }
+    Ok(visible)
+}
+
+async fn semantic_source_scope_cache(
+    state: &AppState,
+) -> Result<HashMap<Uuid, ResourceScope>, AppError> {
+    let mut scopes = HashMap::new();
+    for source in state.list_semantic_sources().await? {
+        scopes.insert(source.id, semantic_source_scope(state, &source).await?);
+    }
+    Ok(scopes)
+}
+
+async fn semantic_object_scope_cache(
+    state: &AppState,
+    source_scopes: &HashMap<Uuid, ResourceScope>,
+) -> Result<HashMap<Uuid, ResourceScope>, AppError> {
+    let mut scopes = HashMap::new();
+    for object in state.list_semantic_objects().await? {
+        scopes.insert(
+            object.id,
+            semantic_object_scope_with_source_scopes(state, &object, source_scopes).await?,
+        );
+    }
+    Ok(scopes)
 }
 
 async fn resource_scope(
