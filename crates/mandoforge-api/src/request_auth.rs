@@ -557,7 +557,7 @@ async fn resource_scope(
     resource_id: Uuid,
 ) -> Result<ResourceScope, AppError> {
     match resource_type {
-        "agent" => {
+        "agent" | "agent_inbox" => {
             let agent = state.get_agent(resource_id).await?;
             Ok(ResourceScope::TeamProject {
                 team_id: agent.team_id,

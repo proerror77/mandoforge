@@ -940,7 +940,7 @@ async fn get_memory_writeback_candidate(
         &headers,
         Permission::SessionsRead,
         "memory_writeback_candidate",
-        Some(candidate.session_id),
+        Some(candidate.id),
     )
     .await?;
     Ok(Json(candidate))
@@ -958,7 +958,7 @@ async fn approve_memory_writeback_candidate(
         &headers,
         Permission::ApprovalsDecide,
         "memory_writeback_candidate",
-        Some(candidate.session_id),
+        Some(candidate.id),
     )
     .await?;
     if candidate.status != "pending" {
@@ -1029,7 +1029,7 @@ async fn reject_memory_writeback_candidate(
         &headers,
         Permission::ApprovalsDecide,
         "memory_writeback_candidate",
-        Some(candidate.session_id),
+        Some(candidate.id),
     )
     .await?;
     if candidate.status != "pending" {

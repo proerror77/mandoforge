@@ -24025,6 +24025,25 @@ async fn memory_writeback_candidates_require_review_before_durable_memory() {
         .iter()
         .find(|candidate| candidate.candidate_type == "approval_decision")
         .expect("approval decision candidate");
+    let listed_before_review: Vec<MemoryWritebackCandidate> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!(
+                "/api/sessions/{}/memory-writeback-candidates",
+                session.id
+            ))
+            .header("x-mandoforge-subject", "operator-1")
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(
+        listed_before_review
+            .iter()
+            .any(|candidate| candidate.id == approval_candidate.id),
+        "generated approval candidate should be durable before review"
+    );
     let approved_candidate: MemoryWritebackCandidate = request_json(
         app.clone(),
         json_request_with_headers(
@@ -26712,10 +26731,16 @@ fn copy_dir_all(source: &Path, target: &Path) -> std::io::Result<()> {
 
 async fn request_json<T: for<'de> Deserialize<'de>>(app: Router, request: Request<Body>) -> T {
     let response = app.oneshot(request).await.expect("request succeeds");
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
     let body = to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("read response body");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "unexpected response body: {}",
+        String::from_utf8_lossy(&body)
+    );
     serde_json::from_slice(&body).expect("json response")
 }
 
