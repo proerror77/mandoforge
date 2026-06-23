@@ -16,15 +16,16 @@ use uuid::Uuid;
 use crate::{
     AppError, AppState, CreateRemoteComputerJobAssignment, ExecutionJobStatus, Permission,
     RemoteComputerJobAssignment, RemoteComputerRunnerConfig, RemoteComputerRunnerDryRunRequest,
-    SessionLoopJob, SessionStatus, StoreBackend, WorkerLoadValidationRun, WorkerReadinessReport,
-    authorize_collection_request, authorize_execution_job_run, authorize_request,
-    authorize_session_loop_job_run, build_worker_readiness, enforce_worker_environment_binding,
-    enforce_worker_pool_binding, environment_worker_pool, execute_worker_load_validation,
-    header_value, new_audit_log, reconcile_workflow_steps_after_session_loop_job,
-    record_remote_computer_job_assignment_event, remote_computer_pod_execution_requested_from_env,
-    remote_computer_runner_for_config, run_execution_job, run_session_loop,
-    session_accepts_worker_execution, set_managed_session_status,
-    visible_session_ids_for_principal,
+    Role, SessionLoopJob, SessionStatus, StoreBackend, WorkerLoadValidationRun,
+    WorkerReadinessReport, authorize_collection_request, authorize_execution_job_run,
+    authorize_request, authorize_session_loop_job_run, build_worker_readiness,
+    enforce_worker_environment_binding, enforce_worker_pool_binding, environment_worker_pool,
+    execute_worker_load_validation, header_value, new_audit_log,
+    reconcile_workflow_steps_after_session_loop_job, record_remote_computer_job_assignment_event,
+    remote_computer_pod_execution_requested_from_env, remote_computer_runner_for_config,
+    run_execution_job, run_session_loop, session_accepts_worker_execution,
+    set_managed_session_status, visible_session_ids_for_principal,
+    worker_environment_scope_required, worker_scope_headers_present,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -65,6 +66,14 @@ async fn list_execution_jobs(
     let principal =
         authorize_collection_request(&state, &headers, Permission::SessionsRead, "execution_jobs")
             .await?;
+    if principal.roles.contains(&Role::Worker)
+        && worker_environment_scope_required()
+        && !worker_scope_headers_present(&headers)?
+    {
+        return Err(AppError::bad_request(
+            "worker polling requires x-mandoforge-environment-id or x-mandoforge-worker-pool",
+        ));
+    }
     let worker_environment_id = worker_environment_id_from_headers(&headers)?;
     let worker_pool = worker_pool_from_headers(&headers);
     let worker_pool_environment_ids =
@@ -157,6 +166,14 @@ async fn list_session_loop_jobs(
         "session_loop_jobs",
     )
     .await?;
+    if principal.roles.contains(&Role::Worker)
+        && worker_environment_scope_required()
+        && !worker_scope_headers_present(&headers)?
+    {
+        return Err(AppError::bad_request(
+            "worker polling requires x-mandoforge-environment-id or x-mandoforge-worker-pool",
+        ));
+    }
     let worker_environment_id = worker_environment_id_from_headers(&headers)?;
     let worker_pool = worker_pool_from_headers(&headers);
     let worker_pool_environment_ids =

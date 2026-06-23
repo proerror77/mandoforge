@@ -211,6 +211,99 @@ async fn execution_job_environment_is_snapshotted_at_enqueue() {
 }
 
 #[tokio::test]
+async fn worker_scope_required_blocks_unscoped_environment_job_claim() {
+    let _scope_required = EnvVarGuard::set("MANDOFORGE_REQUIRE_WORKER_ENVIRONMENT_SCOPE", "1");
+    let state = test_state_with_worker(Arc::new(QueueBackedExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let app = build_router(state.clone());
+    let agents = state.list_agents().await.expect("list seeded agents");
+    let agent = agents.first().expect("seeded agent");
+    let environment: Environment = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/environments",
+            json!({
+                "name": "Scoped Worker Queue",
+                "environment_type": "local",
+                "worker_queue_binding": {"queue": "scoped-worker"},
+                "release_state": "active",
+                "status": "enabled"
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let session: Session = request_json(
+        app.clone(),
+        json_request(
+            "POST",
+            "/api/sessions",
+            json!({
+                "agent_id": agent.id,
+                "environment_id": environment.id,
+                "title": "scoped worker claim"
+            }),
+        ),
+    )
+    .await;
+
+    let approval_required: Value = request_json(
+        app.clone(),
+        json_request(
+            "POST",
+            "/api/tools/file.write/execute",
+            json!({
+                "session_id": session.id,
+                "args": {
+                    "path": "scoped.md",
+                    "content": "queued"
+                }
+            }),
+        ),
+    )
+    .await;
+    let approval_id = approval_required["approval_id"]
+        .as_str()
+        .expect("approval id");
+    let approved: Approval = request_json(
+        app.clone(),
+        approve_request(format!("/api/approvals/{approval_id}/approve")),
+    )
+    .await;
+    let job = state
+        .execution_queue
+        .list()
+        .await
+        .expect("execution jobs")
+        .into_iter()
+        .find(|job| job.approval_id == approved.id)
+        .expect("approved execution job");
+
+    let (status, body) = request_value(
+        app,
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/execution-jobs/{}/run", job.id))
+            .header("x-mandoforge-subject", "worker-1")
+            .header("x-mandoforge-roles", "worker")
+            .header("x-mandoforge-worker-id", "worker-1")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("x-mandoforge-environment-id"))
+    );
+}
+
+#[tokio::test]
 async fn session_rejects_unknown_environment() {
     let app = test_app().await;
     let agents: Vec<Agent> = request_json(
