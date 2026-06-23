@@ -3,6 +3,7 @@ pub(crate) mod deploy;
 pub(crate) mod overview;
 pub(crate) mod packs;
 pub(crate) mod semantic;
+pub(crate) mod semantic_i18n;
 pub(crate) mod settings;
 pub(crate) mod workflows;
 pub(crate) mod wizard;
