@@ -295,3 +295,38 @@ async fn ontology_release_workflow_trigger_drain_retries_failed_trigger() {
     assert!(trigger.workflow_run_id.is_some());
     assert!(trigger.error_message.is_none());
 }
+
+#[tokio::test]
+async fn ontology_release_workflow_trigger_rejects_unknown_status() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let trigger = state
+        .claim_ontology_release_workflow_trigger(Uuid::new_v4(), Uuid::new_v4())
+        .await
+        .expect("claim trigger")
+        .expect("claimed trigger");
+
+    let error = state
+        .complete_ontology_release_workflow_trigger(trigger.id, "done", None, None)
+        .await
+        .expect_err("unknown trigger status should be rejected");
+    assert!(
+        error
+            .message
+            .contains("unsupported ontology release workflow trigger status"),
+        "{error:?}"
+    );
+
+    let stored = state
+        .list_ontology_release_workflow_triggers()
+        .await
+        .expect("workflow triggers")
+        .into_iter()
+        .find(|stored| stored.id == trigger.id)
+        .expect("stored trigger");
+    assert_eq!(
+        stored.status,
+        ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_PENDING
+    );
+    assert!(stored.workflow_run_id.is_none());
+    assert!(stored.error_message.is_none());
+}

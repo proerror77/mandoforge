@@ -482,6 +482,19 @@ pub(crate) struct OntologyReleaseWorkflowTrigger {
     pub(crate) updated_at: DateTime<Utc>,
 }
 
+pub(crate) const ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_PENDING: &str = "pending";
+pub(crate) const ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_TRIGGERED: &str = "triggered";
+pub(crate) const ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_FAILED: &str = "failed";
+
+pub(crate) fn ontology_release_workflow_trigger_status_allowed(status: &str) -> bool {
+    matches!(
+        status,
+        ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_PENDING
+            | ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_TRIGGERED
+            | ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_FAILED
+    )
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct OntologyReleaseWorkflowTriggerDrain {
     pub(crate) status: String,

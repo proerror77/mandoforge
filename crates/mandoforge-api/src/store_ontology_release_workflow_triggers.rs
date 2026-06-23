@@ -4,7 +4,11 @@ use uuid::Uuid;
 
 use crate::store_backend::StoreBackend;
 use crate::store_rows::workflow_run_from_row;
-use crate::{AppError, AppState, OntologyReleaseWorkflowTrigger, WorkflowRun};
+use crate::{
+    AppError, AppState, ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_FAILED,
+    ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_PENDING, OntologyReleaseWorkflowTrigger, WorkflowRun,
+    ontology_release_workflow_trigger_status_allowed,
+};
 
 const DEFAULT_TRIGGER_RECLAIM_SECONDS: i64 = 300;
 
@@ -28,10 +32,14 @@ impl AppState {
                                 && trigger.workflow_definition_id == workflow_definition_id
                         })
                 {
-                    let stale_pending = trigger.status == "pending"
+                    let stale_pending = trigger.status
+                        == ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_PENDING
                         && trigger.claimed_at.unwrap_or(trigger.updated_at) <= stale_before;
-                    if trigger.status == "failed" || stale_pending {
-                        trigger.status = "pending".to_string();
+                    if trigger.status == ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_FAILED
+                        || stale_pending
+                    {
+                        trigger.status =
+                            ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_PENDING.to_string();
                         trigger.attempt_count += 1;
                         trigger.claimed_at = Some(now);
                         trigger.workflow_run_id = None;
@@ -46,7 +54,7 @@ impl AppState {
                     ontology_release_id,
                     workflow_definition_id,
                     workflow_run_id: None,
-                    status: "pending".to_string(),
+                    status: ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_PENDING.to_string(),
                     attempt_count: 1,
                     claimed_at: Some(now),
                     error_message: None,
@@ -98,6 +106,11 @@ impl AppState {
         workflow_run_id: Option<Uuid>,
         error_message: Option<String>,
     ) -> Result<OntologyReleaseWorkflowTrigger, AppError> {
+        if !ontology_release_workflow_trigger_status_allowed(status) {
+            return Err(AppError::bad_request(format!(
+                "unsupported ontology release workflow trigger status: {status}"
+            )));
+        }
         let now = Utc::now();
         match &self.store {
             StoreBackend::Memory(inner) => {
@@ -155,8 +168,8 @@ impl AppState {
                     .ontology_release_workflow_triggers
                     .values()
                     .filter(|trigger| {
-                        trigger.status == "failed"
-                            || (trigger.status == "pending"
+                        trigger.status == ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_FAILED
+                            || (trigger.status == ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_PENDING
                                 && trigger.claimed_at.unwrap_or(trigger.updated_at) <= stale_before)
                     })
                     .cloned()

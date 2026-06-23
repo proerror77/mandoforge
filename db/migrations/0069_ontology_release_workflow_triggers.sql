@@ -4,7 +4,7 @@ CREATE TABLE IF NOT EXISTS ontology_release_workflow_triggers (
     ontology_release_id UUID NOT NULL REFERENCES ontology_releases(id) ON DELETE CASCADE,
     workflow_definition_id UUID NOT NULL REFERENCES workflow_definitions(id) ON DELETE CASCADE,
     workflow_run_id UUID REFERENCES workflow_runs(id) ON DELETE SET NULL,
-    status TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'triggered', 'failed')),
     attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
     claimed_at TIMESTAMPTZ,
     error_message TEXT,

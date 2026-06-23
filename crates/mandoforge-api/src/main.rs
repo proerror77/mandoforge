@@ -394,7 +394,9 @@ pub(crate) use types::ontology::{
     ConfidenceCalibrationResponse, CreateOntologyOnboardingRunRequest,
     CreateOntologyReleaseCandidateRequest, CuratedDatasetDraft, EntityResolutionCandidate,
     EntityResolutionDecisionDraft, EntityResolutionRequest, EntityResolutionResponse,
-    EntityResolutionRetrievalHit, ExpandSemanticOntologyRequest, OntologyActionTransactionProfile,
+    EntityResolutionRetrievalHit, ExpandSemanticOntologyRequest,
+    ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_FAILED,
+    ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_PENDING, OntologyActionTransactionProfile,
     OntologyBuilderDag, OntologyBuilderEdge, OntologyBuilderExecutionLevel, OntologyBuilderNode,
     OntologyDatasetProfile, OntologyEngineReadiness, OntologyEngineReadinessCheck,
     OntologyForeignKeyCandidate, OntologyObjectType, OntologyOnboardingDataset,
@@ -411,6 +413,7 @@ pub(crate) use types::ontology::{
     SchemaUnderstandingCandidate, SchemaUnderstandingRequest, SchemaUnderstandingResponse,
     SubgraphProposalDraft, SubgraphProposalMember, SubgraphProposalRequest,
     SubgraphProposalResponse, TaxonomyLayerCandidate,
+    ontology_release_workflow_trigger_status_allowed,
 };
 pub(crate) use types::policy::{
     CreatePolicyRevision, PolicyActivationWindow, PolicyDiffChange, PolicyGateCaseInput,
