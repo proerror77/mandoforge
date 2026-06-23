@@ -4269,20 +4269,55 @@ pub(crate) async fn trigger_workflow_run_from_ontology_release(
     }
 
     let mut first_run = None;
+    let mut first_error = None;
     for definition in definitions {
-        if let Some(run) = trigger_workflow_run_from_ontology_release_definition(
+        match trigger_workflow_run_from_ontology_release_definition(
             state,
             release,
             actor_subject,
             &definition,
         )
-        .await?
-            && first_run.is_none()
+        .await
         {
-            first_run = Some(run);
+            Ok(Some(run)) => {
+                if first_run.is_none() {
+                    first_run = Some(run);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                state
+                    .append_audit_log(new_audit_log(
+                        None,
+                        "system",
+                        None,
+                        "ontology_release.workflow_definition_trigger_failed",
+                        "workflow_definition",
+                        Some(definition.id),
+                        json!({
+                            "subject": actor_subject,
+                            "release_id": release.id,
+                            "ontology_release_id": release.id,
+                            "version": release.version,
+                            "domain_scope": release.domain_scope,
+                            "workflow_definition_id": definition.id,
+                            "error": error.message.clone(),
+                        }),
+                    ))
+                    .await?;
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
         }
     }
-    Ok(first_run)
+    if first_run.is_some() {
+        Ok(first_run)
+    } else if let Some(error) = first_error {
+        Err(error)
+    } else {
+        Ok(None)
+    }
 }
 
 async fn trigger_workflow_run_from_ontology_release_definition(
