@@ -18,12 +18,12 @@ use crate::{
     RunProviderProductionRollout, UpdateProviderAccess, UpdateProviderStatus, authorize_request,
     build_provider_governance_summary, build_provider_policy_gate_report,
     build_provider_policy_gate_run_summary, decide_provider_status_approval,
-    enforce_resource_scope, execute_provider_policy_gate,
-    execute_provider_production_rollback_with_lookup, execute_provider_production_rollout_with_lookup,
-    execute_provider_deployment_controller, new_audit_log, normalize_provider_api_key_ref,
-    normalize_provider_status, optional_trimmed, principal_from_request,
-    provider_by_id, provider_deployment_controller_configured,
-    provider_deployment_controller_required, provider_health,
+    enforce_resource_scope, execute_provider_deployment_controller, execute_provider_policy_gate,
+    execute_provider_production_rollback_with_lookup,
+    execute_provider_production_rollout_with_lookup, new_audit_log, normalize_provider_api_key_ref,
+    normalize_provider_status, optional_trimmed, principal_from_request, provider_by_id,
+    provider_deployment_controller_configured, provider_deployment_controller_required,
+    provider_health,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -449,7 +449,9 @@ async fn request_provider_status_approval(
     });
     let mut config = provider.config.as_object().cloned().unwrap_or_default();
     config.insert("pending_status_approval".to_string(), approval.clone());
-    let updated = state.update_provider_config(id, Value::Object(config)).await?;
+    let updated = state
+        .update_provider_config(id, Value::Object(config))
+        .await?;
     state
         .append_audit_log(new_audit_log(
             None,
@@ -521,7 +523,9 @@ async fn rotate_provider_api_key_ref(
     let mut config = provider.config.as_object().cloned().unwrap_or_default();
     config.insert("api_key_ref".to_string(), Value::String(new_ref.clone()));
     config.remove("api_key_env");
-    let updated = state.update_provider_config(id, Value::Object(config)).await?;
+    let updated = state
+        .update_provider_config(id, Value::Object(config))
+        .await?;
     state
         .append_audit_log(new_audit_log(
             None,

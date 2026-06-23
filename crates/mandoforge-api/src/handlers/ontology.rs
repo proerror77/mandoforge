@@ -1,9 +1,4 @@
-use axum::{
-    Json, Router,
-    extract::State,
-    http::HeaderMap,
-    routing::get,
-};
+use axum::{Json, Router, extract::State, http::HeaderMap, routing::get};
 
 use crate::{
     AppError, AppState, OntologyEngineReadiness, OntologyRegistry, Permission, authorize_request,

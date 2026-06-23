@@ -16,9 +16,8 @@ use crate::{
     SendSessionEvents, Session, SessionEvent, SessionThread, StreamEventsQuery, ToolCall,
     append_incoming_session_event, append_user_message_event, authorize_collection_request,
     authorize_request, authorize_session_run, enqueue_session_loop, ensure_primary_session_thread,
-    generate_and_persist_context_packet, principal_from_request,
-    project_session_event_to_loop, render_execution_context_for_packet,
-    store_events, visible_session_ids_for_principal,
+    generate_and_persist_context_packet, principal_from_request, project_session_event_to_loop,
+    render_execution_context_for_packet, store_events, visible_session_ids_for_principal,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -64,10 +63,8 @@ async fn stream_events(
     Path(id): Path<Uuid>,
     Query(query): Query<StreamEventsQuery>,
     headers: HeaderMap,
-) -> Result<
-    Sse<impl futures_core::Stream<Item = Result<Event, std::convert::Infallible>>>,
-    AppError,
-> {
+) -> Result<Sse<impl futures_core::Stream<Item = Result<Event, std::convert::Infallible>>>, AppError>
+{
     authorize_request(
         &state,
         &headers,

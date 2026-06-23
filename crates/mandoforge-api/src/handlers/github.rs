@@ -1,8 +1,8 @@
 use axum::{
+    Json, Router,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     routing::{get, post},
-    Json, Router,
 };
 use bytes::Bytes;
 use chrono::Utc;
@@ -19,10 +19,7 @@ pub(crate) fn router() -> Router<AppState> {
             "/api/github/project-bindings",
             get(list_bindings).post(upsert_binding),
         )
-        .route(
-            "/api/github/project-bindings/{id}",
-            get(get_binding),
-        )
+        .route("/api/github/project-bindings/{id}", get(get_binding))
 }
 
 // ── Webhook ───────────────────────────────────────────────────────────────────
@@ -76,8 +73,7 @@ async fn github_webhook(
     let definition = definitions
         .into_iter()
         .find(|d| {
-            d.pack_installation_id == Some(binding.pack_installation_id)
-                && d.name == workflow_name
+            d.pack_installation_id == Some(binding.pack_installation_id) && d.name == workflow_name
         })
         .ok_or_else(|| {
             AppError::not_found(format!(
@@ -90,11 +86,7 @@ async fn github_webhook(
     Ok(StatusCode::ACCEPTED)
 }
 
-fn verify_github_signature(
-    headers: &HeaderMap,
-    body: &[u8],
-    secret: &str,
-) -> Result<(), AppError> {
+fn verify_github_signature(headers: &HeaderMap, body: &[u8], secret: &str) -> Result<(), AppError> {
     let sig_header = headers
         .get("X-Hub-Signature-256")
         .and_then(|v| v.to_str().ok())

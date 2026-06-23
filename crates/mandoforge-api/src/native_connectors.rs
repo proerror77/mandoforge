@@ -101,7 +101,8 @@ pub(crate) async fn execute_github_connector_call(args: &Value) -> Result<Value,
             call.connector_id
         )));
     }
-    let live_enabled = env_bool(LIVE_ENABLED_ENV) || env_bool("MANDOFORGE_GITHUB_CONNECTOR_LIVE_ENABLED");
+    let live_enabled =
+        env_bool(LIVE_ENABLED_ENV) || env_bool("MANDOFORGE_GITHUB_CONNECTOR_LIVE_ENABLED");
     let resolve_secrets = live_enabled && !call.dry_run;
     let request = build_github_request(&call, resolve_secrets)?;
     if call.dry_run || !live_enabled {
@@ -707,7 +708,7 @@ fn build_github_request(
         op => {
             return Err(AppError::bad_request(format!(
                 "unsupported github connector operation: {op}"
-            )))
+            )));
         }
     };
 
@@ -717,10 +718,7 @@ fn build_github_request(
         "Accept".to_string(),
         "application/vnd.github+json".to_string(),
     );
-    headers.insert(
-        "X-GitHub-Api-Version".to_string(),
-        "2022-11-28".to_string(),
-    );
+    headers.insert("X-GitHub-Api-Version".to_string(), "2022-11-28".to_string());
     headers.insert(
         "User-Agent".to_string(),
         "mandoforge-github-connector/1.0".to_string(),
@@ -770,11 +768,21 @@ fn payload_string_field(payload: &Map<String, Value>, key: &str) -> Result<Strin
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .map(ToString::to_string)
-        .ok_or_else(|| AppError::bad_request(format!("github connector payload missing field: {key}")))
+        .ok_or_else(|| {
+            AppError::bad_request(format!("github connector payload missing field: {key}"))
+        })
 }
 
 fn payload_query_params(payload: &Map<String, Value>) -> BTreeMap<String, String> {
-    let skip = ["owner", "repo", "issue_number", "pull_number", "__adapter_base_url", "__adapter_endpoint_path", "dry_run"];
+    let skip = [
+        "owner",
+        "repo",
+        "issue_number",
+        "pull_number",
+        "__adapter_base_url",
+        "__adapter_endpoint_path",
+        "dry_run",
+    ];
     payload
         .iter()
         .filter(|(k, _)| !skip.contains(&k.as_str()))

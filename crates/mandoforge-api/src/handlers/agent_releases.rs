@@ -13,15 +13,15 @@ use crate::{
     AgentReleaseDeploymentValidationRun, AgentReleaseOrchestrationValidationRun,
     AgentReleaseRolloutSummary, AppError, AppState, AuthorizationRequest, CreateAgentRelease,
     Permission, RejectAgentReleasePromotion, RequestAgentReleasePromotion,
-    agent_release_rollback_controller_configured, agent_release_rollback_controller_required,
-    authorize_request, build_agent_release_automation_run_summary,
-    build_agent_release_rollout_summary, dedupe_strings, enforce_resource_scope,
-    execute_agent_release_deployment_controller, execute_agent_release_orchestration_controller,
-    execute_agent_release_rollback_controller, execute_due_agent_release_promotions,
-    new_audit_log, normalize_release_automation_policy, optional_trimmed, principal_from_request,
     agent_release_deployment_controller_configured, agent_release_deployment_controller_required,
     agent_release_orchestration_controller_configured,
-    agent_release_orchestration_controller_required,
+    agent_release_orchestration_controller_required, agent_release_rollback_controller_configured,
+    agent_release_rollback_controller_required, authorize_request,
+    build_agent_release_automation_run_summary, build_agent_release_rollout_summary,
+    dedupe_strings, enforce_resource_scope, execute_agent_release_deployment_controller,
+    execute_agent_release_orchestration_controller, execute_agent_release_rollback_controller,
+    execute_due_agent_release_promotions, new_audit_log, normalize_release_automation_policy,
+    optional_trimmed, principal_from_request,
 };
 
 pub(crate) fn router() -> Router<AppState> {

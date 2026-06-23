@@ -1,9 +1,8 @@
 use serde_json::json;
 
 use crate::{
-    AppError, AppState, RemoteComputerAttachment, RemoteComputerJobAssignment,
-    RemoteComputerLease, RemoteComputerSidecarHeartbeat, RemoteComputerStateLock, execution_queue,
-    new_audit_log,
+    AppError, AppState, RemoteComputerAttachment, RemoteComputerJobAssignment, RemoteComputerLease,
+    RemoteComputerSidecarHeartbeat, RemoteComputerStateLock, execution_queue, new_audit_log,
 };
 
 pub(crate) async fn record_remote_computer_lease_event(

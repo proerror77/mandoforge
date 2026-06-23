@@ -4,8 +4,8 @@ use crate::{
     EnterpriseProductCompletionLane, EnterpriseProductCompletionReadiness, project_file_path,
 };
 
-pub(crate) fn build_enterprise_product_completion_readiness(
-) -> EnterpriseProductCompletionReadiness {
+pub(crate) fn build_enterprise_product_completion_readiness() -> EnterpriseProductCompletionReadiness
+{
     let contract_path = "docs/enterprise-product-completion-contract.md";
     let contract_present = project_file_path(contract_path)
         .map(|path| path.is_file())

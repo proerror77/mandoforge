@@ -8,9 +8,8 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
-    AuthorizationRequest,
-    AppError, AppState, Approval, ApprovalEscalationDueRun, ApprovalEscalationRule,
-    ApprovalGroup, CreateApprovalEscalationRule, CreateApprovalGroup, EscalateApproval,
+    AppError, AppState, Approval, ApprovalEscalationDueRun, ApprovalEscalationRule, ApprovalGroup,
+    AuthorizationRequest, CreateApprovalEscalationRule, CreateApprovalGroup, EscalateApproval,
     ModifyApproval, Permission, approval_is_expired, authorize_approval_decision,
     authorize_collection_request, authorize_request, decide_approval, enforce_resource_scope,
     escalate_approval_record, execute_due_approval_escalations, expire_approval_record,

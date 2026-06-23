@@ -9,36 +9,35 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::authorization::{AuthorizationRequest, Permission};
-use crate::remote_computer_runner::{remote_computer_runner_for_config, RemoteComputerRunnerConfig};
+use crate::remote_computer_runner::{
+    RemoteComputerRunnerConfig, remote_computer_runner_for_config,
+};
 use crate::{
     AppError, AppState, Artifact, CreateRemoteComputer, CreateRemoteComputerAttachment,
     CreateRemoteComputerLease, CreateRemoteComputerSidecarHeartbeat, CreateRemoteComputerStateLock,
-    ReleaseRemoteComputerStateLock, RemoteComputer, RemoteComputerAttachment,
-    RemoteComputerJobAssignment, RemoteComputerLease,
-    RemoteComputerArtifactDiscoverRequest, RemoteComputerArtifactSyncRequest,
-    RemoteComputerArtifactSyncResponse, RemoteComputerReadinessReport, RemoteComputerReclaimRun,
-    RemoteComputerRunnerDryRunRequest, RemoteComputerRunnerDryRunResponse,
-    RemoteComputerRunnerReadiness, RemoteComputerSidecarHeartbeat,
-    RemoteComputerSidecarRecoveryRun, RemoteComputerStateLock,
-    RemoteComputerStateSyncValidationRun,
+    ReleaseRemoteComputerStateLock, RemoteComputer, RemoteComputerArtifactDiscoverRequest,
+    RemoteComputerArtifactSyncRequest, RemoteComputerArtifactSyncResponse,
+    RemoteComputerAttachment, RemoteComputerJobAssignment, RemoteComputerLease,
+    RemoteComputerReadinessReport, RemoteComputerReclaimRun, RemoteComputerRunnerDryRunRequest,
+    RemoteComputerRunnerDryRunResponse, RemoteComputerRunnerReadiness,
+    RemoteComputerSidecarHeartbeat, RemoteComputerSidecarRecoveryRun, RemoteComputerStateLock,
+    RemoteComputerStateSyncValidationRun, UpdateRemoteComputerAttachment,
+    UpdateRemoteComputerLease, artifact_type_from_path,
     authorize_remote_computer_state_lock_release, authorize_request,
-    artifact_type_from_path,
     build_remote_computer_execution_transport_readiness,
     build_remote_computer_production_path_payload, build_remote_computer_readiness,
     build_remote_computer_runner_readiness, build_worker_readiness, dedupe_strings,
-    discover_artifact_files,
+    discover_artifact_files, enforce_resource_scope,
     ensure_remote_computer_heartbeat_refs_match_session,
-    ensure_remote_computer_lock_refs_match_session,
-    enforce_resource_scope, execute_remote_computer_state_sync_controller,
-    execute_remote_computer_sidecar_recovery, execute_remote_computer_stale_reclaim,
-    new_audit_log, principal_from_request,
-    record_remote_computer_attachment_event, record_remote_computer_lease_event,
-    record_remote_computer_sidecar_heartbeat_event, record_remote_computer_state_lock_event,
-    remote_computer_runner_request_is_exec, remote_computer_runner_response_for_audit,
-    remote_computer_state_sync_base_issues, remote_computer_state_sync_controller_configured,
+    ensure_remote_computer_lock_refs_match_session, execute_remote_computer_sidecar_recovery,
+    execute_remote_computer_stale_reclaim, execute_remote_computer_state_sync_controller,
+    new_audit_log, normalize_codex_artifact_path, normalize_remote_computer_artifact_dir,
+    principal_from_request, record_remote_computer_attachment_event,
+    record_remote_computer_lease_event, record_remote_computer_sidecar_heartbeat_event,
+    record_remote_computer_state_lock_event, remote_computer_runner_request_is_exec,
+    remote_computer_runner_response_for_audit, remote_computer_state_sync_base_issues,
+    remote_computer_state_sync_controller_configured,
     remote_computer_state_sync_controller_required,
-    normalize_codex_artifact_path, normalize_remote_computer_artifact_dir,
-    UpdateRemoteComputerAttachment, UpdateRemoteComputerLease,
 };
 
 pub(crate) fn router() -> Router<AppState> {

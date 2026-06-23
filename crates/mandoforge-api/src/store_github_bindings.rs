@@ -16,7 +16,8 @@ impl AppState {
                     .project_github_bindings
                     .values()
                     .find(|b| {
-                        b.repo_full_name.eq_ignore_ascii_case(&binding.repo_full_name)
+                        b.repo_full_name
+                            .eq_ignore_ascii_case(&binding.repo_full_name)
                     })
                     .map(|b| b.id);
                 let id = existing_id.unwrap_or(binding.id);
@@ -116,7 +117,9 @@ impl AppState {
                 .bind(self.current_tenant_id())
                 .fetch_all(pool)
                 .await?;
-                rows.into_iter().map(project_github_binding_from_row).collect()
+                rows.into_iter()
+                    .map(project_github_binding_from_row)
+                    .collect()
             }
         }
     }

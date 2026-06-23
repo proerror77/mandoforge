@@ -8,14 +8,12 @@ use chrono::Utc;
 use serde_json::{Value, json};
 
 use crate::{
-    AuthorizationRequest,
-    AppError, AppState, ObservabilityCollectorClusterRolloutValidationRun,
+    AppError, AppState, AuthorizationRequest, ObservabilityCollectorClusterRolloutValidationRun,
     ObservabilityCollectorReadiness, ObservabilityRemediationPlan, ObservabilityRemediationRun,
     ObservabilitySummary, Permission, authorize_request,
-    build_observability_collector_deployment_readiness,
-    build_observability_collector_readiness, build_observability_remediation_plan,
-    build_observability_summary, dedupe_strings, enforce_resource_scope,
-    execute_observability_collector_cluster_controller,
+    build_observability_collector_deployment_readiness, build_observability_collector_readiness,
+    build_observability_remediation_plan, build_observability_summary, dedupe_strings,
+    enforce_resource_scope, execute_observability_collector_cluster_controller,
     execute_observability_collector_deployment_controller,
     execute_observability_remediation_with_lookup, new_audit_log,
     observability_collector_cluster_controller_configured,

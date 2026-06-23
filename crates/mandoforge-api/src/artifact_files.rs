@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use crate::AppError;
 
-pub(crate) fn normalize_codex_artifact_path(path: Option<&str>) -> Result<Option<String>, AppError> {
+pub(crate) fn normalize_codex_artifact_path(
+    path: Option<&str>,
+) -> Result<Option<String>, AppError> {
     let Some(path) = path.map(str::trim).filter(|path| !path.is_empty()) else {
         return Ok(None);
     };

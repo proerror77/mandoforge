@@ -17,7 +17,8 @@ use crate::{
     materialize_workflow_handoff_assignment, normalize_handoff_human_escalation_status,
     normalize_optional_text, record_agent_handoff_assignment_audit_and_events,
     record_agent_handoff_assignment_remote_computer_event, record_agent_handoff_audit_and_event,
-    session_thread_event_payload, transition_agent_handoff_event, visible_session_ids_for_principal,
+    session_thread_event_payload, transition_agent_handoff_event,
+    visible_session_ids_for_principal,
 };
 
 pub(crate) fn router() -> Router<AppState> {

@@ -4,9 +4,9 @@ use serde_json::{Value, json};
 use crate::{
     AppError, AppState, EnterpriseSecurityAdminCheck, EnterpriseSecurityAdminReadiness,
     approval_email_relay_url_from_env, approval_slack_webhook_url_from_env,
-    build_approval_notification_delivery_run_summary,
-    build_approval_notification_routing_summary, build_tenant_isolation_readiness,
-    build_vault_readiness_report, env_bool, secret_provider_health_from_lookup,
+    build_approval_notification_delivery_run_summary, build_approval_notification_routing_summary,
+    build_tenant_isolation_readiness, build_vault_readiness_report, env_bool,
+    secret_provider_health_from_lookup,
 };
 
 pub(crate) async fn build_enterprise_security_admin_readiness(
