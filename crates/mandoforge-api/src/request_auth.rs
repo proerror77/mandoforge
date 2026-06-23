@@ -119,7 +119,7 @@ async fn session_scope(state: &AppState, session_id: Uuid) -> Result<ResourceSco
 }
 
 async fn team_scope(state: &AppState, team_id: Uuid) -> Result<ResourceScope, AppError> {
-    find_team_by_id(state, team_id).await?;
+    state.get_team(team_id).await?;
     Ok(ResourceScope::TeamProject {
         team_id: Some(team_id),
         project_id: None,
@@ -127,7 +127,7 @@ async fn team_scope(state: &AppState, team_id: Uuid) -> Result<ResourceScope, Ap
 }
 
 async fn project_scope(state: &AppState, project_id: Uuid) -> Result<ResourceScope, AppError> {
-    let project = find_project_by_id(state, project_id).await?;
+    let project = state.get_project(project_id).await?;
     Ok(ResourceScope::TeamProject {
         team_id: Some(project.team_id),
         project_id: Some(project.id),
@@ -135,96 +135,7 @@ async fn project_scope(state: &AppState, project_id: Uuid) -> Result<ResourceSco
 }
 
 async fn organization_exists(state: &AppState, organization_id: Uuid) -> Result<(), AppError> {
-    state
-        .list_organizations()
-        .await?
-        .into_iter()
-        .find(|organization| organization.id == organization_id)
-        .map(|_| ())
-        .ok_or_else(|| AppError::not_found("organization not found"))
-}
-
-async fn find_team_by_id(state: &AppState, team_id: Uuid) -> Result<Team, AppError> {
-    for organization in state.list_organizations().await? {
-        if let Some(team) = state
-            .list_teams(organization.id)
-            .await?
-            .into_iter()
-            .find(|team| team.id == team_id)
-        {
-            return Ok(team);
-        }
-    }
-    Err(AppError::not_found("team not found"))
-}
-
-async fn find_project_by_id(state: &AppState, project_id: Uuid) -> Result<Project, AppError> {
-    for organization in state.list_organizations().await? {
-        for team in state.list_teams(organization.id).await? {
-            if let Some(project) = state
-                .list_projects(team.id)
-                .await?
-                .into_iter()
-                .find(|project| project.id == project_id)
-            {
-                return Ok(project);
-            }
-        }
-    }
-    Err(AppError::not_found("project not found"))
-}
-
-async fn find_membership_by_id(
-    state: &AppState,
-    membership_id: Uuid,
-) -> Result<Membership, AppError> {
-    for organization in state.list_organizations().await? {
-        if let Some(membership) = state
-            .list_memberships(organization.id)
-            .await?
-            .into_iter()
-            .find(|membership| membership.id == membership_id)
-        {
-            return Ok(membership);
-        }
-    }
-    Err(AppError::not_found("membership not found"))
-}
-
-async fn find_tenant_invitation_by_id(
-    state: &AppState,
-    invitation_id: Uuid,
-) -> Result<TenantInvitation, AppError> {
-    for organization in state.list_organizations().await? {
-        if let Some(invitation) = state
-            .list_tenant_invitations(organization.id)
-            .await?
-            .into_iter()
-            .find(|invitation| invitation.id == invitation_id)
-        {
-            return Ok(invitation);
-        }
-    }
-    Err(AppError::not_found("tenant invitation not found"))
-}
-
-async fn find_mcp_server_by_id(
-    state: &AppState,
-    server_id: Uuid,
-) -> Result<McpServerRecord, AppError> {
-    for organization in state.list_organizations().await? {
-        for team in state.list_teams(organization.id).await? {
-            if let Some(server) = state
-                .list_mcp_servers(team.id)
-                .await?
-                .into_iter()
-                .find(|server| server.id == server_id)
-            {
-                return Ok(server);
-            }
-        }
-    }
-    Err(AppError::not_found("mcp server not found"))
+    state.get_organization(organization_id).await.map(|_| ())
 }
 
 async fn find_project_by_scope_label(
@@ -495,14 +406,14 @@ async fn resource_scope(
         "team" => team_scope(state, resource_id).await,
         "project" => project_scope(state, resource_id).await,
         "membership" => {
-            let membership = find_membership_by_id(state, resource_id).await?;
+            let membership = state.get_membership(resource_id).await?;
             Ok(ResourceScope::TeamProject {
                 team_id: membership.team_id,
                 project_id: membership.project_id,
             })
         }
         "tenant_invitation" => {
-            let invitation = find_tenant_invitation_by_id(state, resource_id).await?;
+            let invitation = state.get_tenant_invitation(resource_id).await?;
             Ok(ResourceScope::TeamProject {
                 team_id: invitation.team_id,
                 project_id: invitation.project_id,
@@ -631,7 +542,7 @@ async fn resource_scope(
             .map(|_| ResourceScope::Tenant)
             .ok_or_else(|| AppError::not_found("provider not found")),
         "mcp_server" => {
-            let server = find_mcp_server_by_id(state, resource_id).await?;
+            let server = state.get_mcp_server_by_id(resource_id).await?;
             Ok(ResourceScope::TeamProject {
                 team_id: Some(server.team_id),
                 project_id: None,
