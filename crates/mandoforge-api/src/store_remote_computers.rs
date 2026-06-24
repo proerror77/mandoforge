@@ -87,11 +87,11 @@ impl AppState {
         }
         match &self.store {
             StoreBackend::Memory(inner) => {
-                inner
-                    .write()
-                    .await
-                    .remote_computers
-                    .insert(record.id, record.clone());
+                let mut store = inner.write().await;
+                if store.remote_computers.contains_key(&record.id) {
+                    return Err(AppError::bad_request("remote computer already exists"));
+                }
+                store.remote_computers.insert(record.id, record.clone());
             }
             StoreBackend::Postgres(pool) => {
                 sqlx::query(
@@ -116,6 +116,41 @@ impl AppState {
             }
         }
         Ok(record)
+    }
+
+    pub(crate) async fn delete_remote_computer_if_unleased(
+        &self,
+        remote_computer_id: Uuid,
+    ) -> Result<bool, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                if store
+                    .remote_computer_leases
+                    .values()
+                    .any(|lease| lease.remote_computer_id == remote_computer_id)
+                {
+                    return Ok(false);
+                }
+                Ok(store.remote_computers.remove(&remote_computer_id).is_some())
+            }
+            StoreBackend::Postgres(pool) => {
+                let result = sqlx::query(
+                    "DELETE FROM remote_computers
+                     WHERE tenant_id = $1 AND id = $2
+                       AND NOT EXISTS (
+                         SELECT 1
+                         FROM remote_computer_leases
+                         WHERE tenant_id = $1 AND remote_computer_id = $2
+                       )",
+                )
+                .bind(self.current_tenant_id())
+                .bind(remote_computer_id)
+                .execute(pool)
+                .await?;
+                Ok(result.rows_affected() > 0)
+            }
+        }
     }
 
     pub(crate) async fn list_remote_computer_leases(

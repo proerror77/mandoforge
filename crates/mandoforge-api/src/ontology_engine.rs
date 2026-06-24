@@ -26,7 +26,7 @@ pub(crate) async fn build_ontology_engine_readiness(
         .collect::<Vec<_>>();
     let active_releases = releases
         .iter()
-        .filter(|release| release.status == ONTOLOGY_RELEASE_STATUS_ACTIVE)
+        .filter(|release| ontology_release_current_status(&release.status))
         .collect::<Vec<_>>();
     let lifecycle_release_evidence_class =
         ontology_active_release_evidence_class(&lifecycle_releases);

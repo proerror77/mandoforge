@@ -38,6 +38,42 @@ async fn remote_computer_lease_rejects_non_positive_duration() {
 }
 
 #[tokio::test]
+async fn remote_computer_rejects_duplicate_caller_supplied_id() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let id = Uuid::new_v4();
+    state
+        .create_remote_computer(CreateRemoteComputer {
+            id: Some(id),
+            name: "duplicate-id-test".to_string(),
+            profile: None,
+            namespace: None,
+            pod_name: None,
+            workspace_path: None,
+            state_mount_path: None,
+            metadata: None,
+        })
+        .await
+        .expect("create remote computer");
+
+    let error = state
+        .create_remote_computer(CreateRemoteComputer {
+            id: Some(id),
+            name: "duplicate-id-overwrite".to_string(),
+            profile: None,
+            namespace: None,
+            pod_name: None,
+            workspace_path: None,
+            state_mount_path: None,
+            metadata: None,
+        })
+        .await
+        .expect_err("duplicate id should fail");
+
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    assert!(error.message.contains("already exists"));
+}
+
+#[tokio::test]
 async fn remote_computer_rejects_second_active_lease_until_released() {
     let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
     let computer = state

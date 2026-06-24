@@ -4589,6 +4589,15 @@ pub(crate) async fn drain_due_ontology_release_workflow_triggers(
                     .await?;
             }
             Err(error) => {
+                let trigger_after_retry = state
+                    .get_ontology_release_workflow_trigger(trigger.id)
+                    .await?;
+                if trigger_after_retry.status == ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_TRIGGERED
+                    && trigger_after_retry.workflow_run_id.is_some()
+                {
+                    triggered_count += 1;
+                    continue;
+                }
                 failed_count += 1;
                 update_ontology_release_workflow_trigger_status(
                     state,

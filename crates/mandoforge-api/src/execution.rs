@@ -1372,6 +1372,9 @@ async fn provision_remote_computer_pod_for_job(
     {
         Ok(lease) => lease,
         Err(error) => {
+            if remote_computer_lease_race_error(&error) {
+                return Err(error);
+            }
             if created_pod {
                 let cleanup_error = cleanup_on_demand_remote_computer_pod_after_failed_provision(
                     state,
@@ -1383,6 +1386,7 @@ async fn provision_remote_computer_pod_for_job(
                     "remote_computer_lease_failed",
                 )
                 .await;
+                let _ = state.delete_remote_computer_if_unleased(computer.id).await;
                 return Err(remote_computer_pod_provision_error(
                     error.message,
                     cleanup_error,
