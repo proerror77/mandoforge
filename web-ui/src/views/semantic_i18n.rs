@@ -5,7 +5,11 @@ pub(crate) type SemanticLang = UiLang;
 
 pub(crate) fn localized_status(lang: SemanticLang, status: &str) -> String {
     if lang == SemanticLang::En {
-        return status.to_string();
+        return match status {
+            "active_trigger_failed" => "Active, trigger failed",
+            other => other,
+        }
+        .to_string();
     }
     match status {
         "approved" => "已批准",
