@@ -5,7 +5,10 @@ use uuid::Uuid;
 
 use crate::store_backend::StoreBackend;
 use crate::store_rows::ontology_release_from_row;
-use crate::{AppError, AppState, OntologyRelease};
+use crate::{
+    AppError, AppState, ONTOLOGY_RELEASE_STATUS_ACTIVE, OntologyRelease,
+    ontology_release_current_status,
+};
 
 impl AppState {
     pub(crate) async fn list_ontology_releases(&self) -> Result<Vec<OntologyRelease>, AppError> {
@@ -82,7 +85,9 @@ impl AppState {
         let releases = self
             .list_ontology_releases_for_domain(Some(domain_scope))
             .await?;
-        Ok(releases.into_iter().find(|r| r.status == "active"))
+        Ok(releases
+            .into_iter()
+            .find(|release| ontology_release_current_status(&release.status)))
     }
 
     pub(crate) async fn create_ontology_release(
@@ -251,7 +256,7 @@ impl AppState {
                     .ontology_releases
                     .values()
                     .filter(|candidate| {
-                        candidate.status == "active"
+                        ontology_release_current_status(&candidate.status)
                             && candidate
                                 .domain_scope
                                 .eq_ignore_ascii_case(&release.domain_scope)
@@ -279,7 +284,7 @@ impl AppState {
                 promoted.rollback_target_release_id =
                     previous_active.as_ref().map(|active| active.id);
                 promoted.parent_release_id = previous_active.as_ref().map(|active| active.id);
-                promoted.status = "active".to_string();
+                promoted.status = ONTOLOGY_RELEASE_STATUS_ACTIVE.to_string();
                 promoted.promoted_by = Some(actor_subject.to_string());
                 promoted.promoted_at = Some(now);
                 promoted.updated_at = now;
@@ -303,7 +308,8 @@ impl AppState {
                 let active_rows = sqlx::query(
                     "SELECT id, version, domain_scope, source_run_id, parent_release_id, rollback_target_release_id, status, release_class, object_count, relation_count, action_count, migration_policy, gate_result, materialized_object_ids, materialized_link_ids, evidence_refs, promoted_by, promoted_at, rolled_back_by, rolled_back_at, archived_at, created_at, updated_at
                      FROM ontology_releases
-                     WHERE tenant_id = $1 AND lower(domain_scope) = lower($2) AND status = 'active'
+                     WHERE tenant_id = $1 AND lower(domain_scope) = lower($2)
+                       AND status IN ('active', 'active_trigger_failed')
                      ORDER BY promoted_at DESC NULLS LAST, created_at DESC
                      FOR UPDATE",
                 )
@@ -319,7 +325,8 @@ impl AppState {
                 sqlx::query(
                     "UPDATE ontology_releases
                      SET status = 'superseded', updated_at = $3
-                     WHERE tenant_id = $1 AND lower(domain_scope) = lower($2) AND status = 'active'",
+                     WHERE tenant_id = $1 AND lower(domain_scope) = lower($2)
+                       AND status IN ('active', 'active_trigger_failed')",
                 )
                 .bind(self.current_tenant_id())
                 .bind(&release.domain_scope)
@@ -391,7 +398,7 @@ impl AppState {
                 let restored = store.ontology_releases.get_mut(&target_id).ok_or_else(|| {
                     AppError::not_found("ontology release rollback target not found")
                 })?;
-                restored.status = "active".to_string();
+                restored.status = ONTOLOGY_RELEASE_STATUS_ACTIVE.to_string();
                 restored.rolled_back_by = None;
                 restored.rolled_back_at = None;
                 restored.updated_at = now;
@@ -431,7 +438,8 @@ impl AppState {
                          rolled_back_by = $3,
                          rolled_back_at = $4,
                          updated_at = $5
-                     WHERE tenant_id = $1 AND id = $2 AND status = 'active'",
+                     WHERE tenant_id = $1 AND id = $2
+                       AND status IN ('active', 'active_trigger_failed')",
                 )
                 .bind(self.current_tenant_id())
                 .bind(release_id)
@@ -499,7 +507,8 @@ fn ontology_release_unique_violation_message(constraint: Option<&str>) -> &'stat
         Some("ontology_releases_tenant_id_domain_scope_version_key") => {
             "ontology release version already exists for domain"
         }
-        Some("idx_ontology_releases_one_active_per_domain") => {
+        Some("idx_ontology_releases_one_active_per_domain")
+        | Some("idx_ontology_releases_one_current_per_domain") => {
             "ontology release domain already has an active release"
         }
         _ => "ontology release already exists",
@@ -511,7 +520,7 @@ fn is_unique_violation(error: &(dyn DatabaseError + '_)) -> bool {
 }
 
 fn validate_ontology_release_rollback_source(release: &OntologyRelease) -> Result<Uuid, AppError> {
-    if release.status != "active" {
+    if !ontology_release_current_status(&release.status) {
         return Err(AppError::bad_request(
             "only active ontology releases can be rolled back",
         ));
@@ -556,6 +565,12 @@ mod tests {
         assert_eq!(
             ontology_release_unique_violation_message(Some(
                 "idx_ontology_releases_one_active_per_domain"
+            )),
+            "ontology release domain already has an active release"
+        );
+        assert_eq!(
+            ontology_release_unique_violation_message(Some(
+                "idx_ontology_releases_one_current_per_domain"
             )),
             "ontology release domain already has an active release"
         );

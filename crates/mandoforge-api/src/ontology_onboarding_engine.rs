@@ -4216,10 +4216,19 @@ pub(crate) async fn promote_ontology_release_with_actor(
             }),
         ))
         .await?;
-    if let Err(error) =
+    let release = if let Err(error) =
         trigger_workflow_run_from_ontology_release(state, &release, actor_subject).await
     {
         let error_message = error.message.clone();
+        let release = update_ontology_release_workflow_trigger_status(
+            state,
+            &release,
+            ONTOLOGY_RELEASE_STATUS_ACTIVE_TRIGGER_FAILED,
+            "failed",
+            actor_subject,
+            Some(error_message.clone()),
+        )
+        .await?;
         state
             .append_audit_log(new_audit_log(
                 None,
@@ -4233,11 +4242,15 @@ pub(crate) async fn promote_ontology_release_with_actor(
                     "release_id": release.id,
                     "version": release.version,
                     "domain_scope": release.domain_scope,
+                    "status": release.status,
                     "error": error_message,
                 }),
             ))
             .await?;
-    }
+        release
+    } else {
+        release
+    };
     Ok(release)
 }
 
@@ -4311,13 +4324,58 @@ pub(crate) async fn trigger_workflow_run_from_ontology_release(
             }
         }
     }
-    if first_run.is_some() {
-        Ok(first_run)
-    } else if let Some(error) = first_error {
+    if let Some(error) = first_error {
         Err(error)
+    } else if first_run.is_some() {
+        Ok(first_run)
     } else {
         Ok(None)
     }
+}
+
+async fn update_ontology_release_workflow_trigger_status(
+    state: &AppState,
+    release: &OntologyRelease,
+    release_status: &str,
+    trigger_status: &str,
+    actor_subject: &str,
+    error_message: Option<String>,
+) -> Result<OntologyRelease, AppError> {
+    let mut current = state.get_ontology_release(release.id).await?;
+    if !ontology_release_current_status(&current.status) {
+        return Ok(current);
+    }
+    let expected_status = current.status.clone();
+    current.status = release_status.to_string();
+    current.gate_result = ontology_release_gate_result_with_workflow_trigger_status(
+        current.gate_result,
+        trigger_status,
+        actor_subject,
+        error_message,
+    );
+    current.updated_at = Utc::now();
+    state
+        .update_ontology_release(current, Some(expected_status.as_str()))
+        .await
+}
+
+fn ontology_release_gate_result_with_workflow_trigger_status(
+    gate_result: Value,
+    trigger_status: &str,
+    actor_subject: &str,
+    error_message: Option<String>,
+) -> Value {
+    let mut gate_result = gate_result.as_object().cloned().unwrap_or_default();
+    gate_result.insert(
+        "workflow_trigger".to_string(),
+        json!({
+            "status": trigger_status,
+            "checked_at": Utc::now(),
+            "checked_by": actor_subject,
+            "error": error_message,
+        }),
+    );
+    Value::Object(gate_result)
 }
 
 async fn trigger_workflow_run_from_ontology_release_definition(
@@ -4486,7 +4544,7 @@ pub(crate) async fn drain_due_ontology_release_workflow_triggers(
                 continue;
             }
         };
-        if release.status != "active" {
+        if !ontology_release_current_status(&release.status) {
             skipped_count += 1;
             state
                 .complete_ontology_release_workflow_trigger(
@@ -4502,7 +4560,20 @@ pub(crate) async fn drain_due_ontology_release_workflow_triggers(
             continue;
         }
         match trigger_workflow_run_from_ontology_release(state, &release, actor_subject).await {
-            Ok(Some(_)) => triggered_count += 1,
+            Ok(Some(_)) => {
+                triggered_count += 1;
+                if release.status == ONTOLOGY_RELEASE_STATUS_ACTIVE_TRIGGER_FAILED {
+                    update_ontology_release_workflow_trigger_status(
+                        state,
+                        &release,
+                        ONTOLOGY_RELEASE_STATUS_ACTIVE,
+                        "triggered",
+                        actor_subject,
+                        None,
+                    )
+                    .await?;
+                }
+            }
             Ok(None) => {
                 skipped_count += 1;
                 state
@@ -4518,7 +4589,25 @@ pub(crate) async fn drain_due_ontology_release_workflow_triggers(
                     .await?;
             }
             Err(error) => {
+                let trigger_after_retry = state
+                    .get_ontology_release_workflow_trigger(trigger.id)
+                    .await?;
+                if trigger_after_retry.status == ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_TRIGGERED
+                    && trigger_after_retry.workflow_run_id.is_some()
+                {
+                    triggered_count += 1;
+                    continue;
+                }
                 failed_count += 1;
+                update_ontology_release_workflow_trigger_status(
+                    state,
+                    &release,
+                    ONTOLOGY_RELEASE_STATUS_ACTIVE_TRIGGER_FAILED,
+                    "failed",
+                    actor_subject,
+                    Some(error.message.clone()),
+                )
+                .await?;
                 state
                     .complete_ontology_release_workflow_trigger(
                         trigger.id,
@@ -4697,7 +4786,7 @@ pub(crate) async fn archive_ontology_release_with_actor(
     actor_subject: &str,
 ) -> Result<OntologyRelease, AppError> {
     let mut release = state.get_ontology_release(release_id).await?;
-    if release.status == "active" {
+    if ontology_release_current_status(&release.status) {
         return Err(AppError::bad_request(
             "active ontology releases cannot be archived",
         ));
@@ -4708,7 +4797,7 @@ pub(crate) async fn archive_ontology_release_with_actor(
         .await?
         .into_iter()
         .any(|candidate| {
-            candidate.status == "active"
+            ontology_release_current_status(&candidate.status)
                 && candidate.rollback_target_release_id == Some(release.id)
                 && candidate
                     .domain_scope

@@ -394,10 +394,11 @@ pub(crate) use types::ontology::{
     ConfidenceCalibrationResponse, CreateOntologyOnboardingRunRequest,
     CreateOntologyReleaseCandidateRequest, CuratedDatasetDraft, EntityResolutionCandidate,
     EntityResolutionDecisionDraft, EntityResolutionRequest, EntityResolutionResponse,
-    EntityResolutionRetrievalHit, ExpandSemanticOntologyRequest,
-    ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_FAILED,
+    EntityResolutionRetrievalHit, ExpandSemanticOntologyRequest, ONTOLOGY_RELEASE_STATUS_ACTIVE,
+    ONTOLOGY_RELEASE_STATUS_ACTIVE_TRIGGER_FAILED, ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_FAILED,
     ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_PENDING,
-    ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_SKIPPED, OntologyActionTransactionProfile,
+    ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_SKIPPED,
+    ONTOLOGY_RELEASE_WORKFLOW_TRIGGER_STATUS_TRIGGERED, OntologyActionTransactionProfile,
     OntologyBuilderDag, OntologyBuilderEdge, OntologyBuilderExecutionLevel, OntologyBuilderNode,
     OntologyDatasetProfile, OntologyEngineReadiness, OntologyEngineReadinessCheck,
     OntologyForeignKeyCandidate, OntologyObjectType, OntologyOnboardingDataset,
@@ -413,7 +414,7 @@ pub(crate) use types::ontology::{
     ReviewOntologyOnboardingProposalRequest, ReviewOntologyProposalRequest,
     SchemaUnderstandingCandidate, SchemaUnderstandingRequest, SchemaUnderstandingResponse,
     SubgraphProposalDraft, SubgraphProposalMember, SubgraphProposalRequest,
-    SubgraphProposalResponse, TaxonomyLayerCandidate,
+    SubgraphProposalResponse, TaxonomyLayerCandidate, ontology_release_current_status,
     ontology_release_workflow_trigger_status_allowed,
 };
 pub(crate) use types::policy::{

@@ -6111,9 +6111,14 @@ async fn ontology_engine_readiness_uses_promoted_release_evidence() {
     gate_ontology_release_with_actor(&state, release.id, "test")
         .await
         .expect("gate release");
-    promote_ontology_release_with_actor(&state, release.id, "test")
+    let mut release = promote_ontology_release_with_actor(&state, release.id, "test")
         .await
         .expect("promote release");
+    release.status = ONTOLOGY_RELEASE_STATUS_ACTIVE_TRIGGER_FAILED.to_string();
+    state
+        .update_ontology_release(release, Some(ONTOLOGY_RELEASE_STATUS_ACTIVE))
+        .await
+        .expect("mark trigger-failed release current");
 
     let readiness = build_ontology_engine_readiness(&state)
         .await

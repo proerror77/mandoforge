@@ -26,7 +26,7 @@ pub(crate) fn OntologyReleaseControl(props: &OntologyReleaseControlProps) -> Htm
         .releases
         .iter()
         .rev()
-        .find(|release| release.status == "active")
+        .find(|release| ontology_release_current_status(&release.status))
         .cloned();
     let latest_release = props.releases.iter().rev().next().cloned();
     let candidate_count = props
@@ -153,9 +153,9 @@ fn OntologyReleaseRow(props: &OntologyReleaseRowProps) -> Html {
         .to_string();
     let can_gate = matches!(props.release.status.as_str(), "candidate" | "failed_gate");
     let can_promote = props.release.status == "candidate" && gate_status == "passed";
-    let can_rollback =
-        props.release.status == "active" && props.release.rollback_target_release_id.is_some();
-    let can_archive = props.release.status != "active" && props.release.status != "archived";
+    let current_release = ontology_release_current_status(&props.release.status);
+    let can_rollback = current_release && props.release.rollback_target_release_id.is_some();
+    let can_archive = !current_release && props.release.status != "archived";
     let gate = {
         let id = props.release.id.clone();
         let on_gate = props.on_gate.clone();
@@ -205,6 +205,10 @@ fn OntologyReleaseRow(props: &OntologyReleaseRowProps) -> Html {
             </div>
         </article>
     }
+}
+
+fn ontology_release_current_status(status: &str) -> bool {
+    matches!(status, "active" | "active_trigger_failed")
 }
 
 fn release_readiness_rows(lang: SemanticLang, readiness: &Value) -> Vec<(String, String, String)> {

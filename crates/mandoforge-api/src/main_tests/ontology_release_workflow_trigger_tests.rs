@@ -153,6 +153,8 @@ async fn ontology_release_workflow_trigger_failure_does_not_block_other_definiti
     let active = promote_ontology_release_with_actor(&state, release.id, "test")
         .await
         .expect("promote");
+    assert_eq!(active.status, ONTOLOGY_RELEASE_STATUS_ACTIVE_TRIGGER_FAILED);
+    assert_eq!(active.gate_result["workflow_trigger"]["status"], "failed");
 
     let runs = state.list_workflow_runs().await.expect("workflow runs");
     assert!(runs.iter().any(|run| {
@@ -373,9 +375,15 @@ async fn ontology_release_workflow_trigger_drain_retries_failed_trigger() {
     gate_ontology_release_with_actor(&state, release.id, "test")
         .await
         .expect("gate");
-    let active = promote_ontology_release_with_actor(&state, release.id, "test")
+    let mut active = promote_ontology_release_with_actor(&state, release.id, "test")
         .await
         .expect("promote without matching definition");
+    active.status = ONTOLOGY_RELEASE_STATUS_ACTIVE_TRIGGER_FAILED.to_string();
+    active.gate_result["workflow_trigger"] = json!({"status": "failed"});
+    state
+        .update_ontology_release(active.clone(), Some(ONTOLOGY_RELEASE_STATUS_ACTIVE))
+        .await
+        .expect("mark trigger failed active");
     let definition =
         ontology_release_trigger_workflow_definition_for_test(&state, "commerce").await;
     let failed_claim = state
@@ -416,6 +424,95 @@ async fn ontology_release_workflow_trigger_drain_retries_failed_trigger() {
     assert_eq!(trigger.status, "triggered");
     assert!(trigger.workflow_run_id.is_some());
     assert!(trigger.error_message.is_none());
+    let restored = state
+        .get_ontology_release(active.id)
+        .await
+        .expect("restored release");
+    assert_eq!(restored.status, ONTOLOGY_RELEASE_STATUS_ACTIVE);
+    assert_eq!(
+        restored.gate_result["workflow_trigger"]["status"],
+        "triggered"
+    );
+}
+
+#[tokio::test]
+async fn ontology_release_workflow_trigger_drain_keeps_success_when_other_definition_fails() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let valid_definition =
+        ontology_release_trigger_workflow_definition_for_test(&state, "commerce").await;
+    let release =
+        ontology_release_candidate_for_test(&state, "commerce-vtest-trigger-drain-partial").await;
+    gate_ontology_release_with_actor(&state, release.id, "test")
+        .await
+        .expect("gate");
+    let mut active = promote_ontology_release_with_actor(&state, release.id, "test")
+        .await
+        .expect("promote");
+    assert_eq!(active.status, ONTOLOGY_RELEASE_STATUS_ACTIVE);
+    active.status = ONTOLOGY_RELEASE_STATUS_ACTIVE_TRIGGER_FAILED.to_string();
+    state
+        .update_ontology_release(active.clone(), Some(ONTOLOGY_RELEASE_STATUS_ACTIVE))
+        .await
+        .expect("mark trigger failed active");
+    let failed_claim = state
+        .list_ontology_release_workflow_triggers()
+        .await
+        .expect("workflow triggers")
+        .into_iter()
+        .find(|trigger| {
+            trigger.ontology_release_id == active.id
+                && trigger.workflow_definition_id == valid_definition.id
+        })
+        .expect("valid trigger");
+    state
+        .complete_ontology_release_workflow_trigger(
+            failed_claim.id,
+            "failed",
+            None,
+            Some("simulated retry failure".to_string()),
+        )
+        .await
+        .expect("mark valid trigger failed");
+    let mut invalid_definition = valid_definition.clone();
+    invalid_definition.id = Uuid::new_v4();
+    invalid_definition.name = "Ontology release drain missing agent".to_string();
+    invalid_definition.entrypoint = "ontology-release-drain-missing-agent".to_string();
+    invalid_definition.default_agent_id = Uuid::new_v4();
+    invalid_definition.created_at = Utc::now() + ChronoDuration::seconds(1);
+    invalid_definition.updated_at = invalid_definition.created_at;
+    state
+        .create_workflow_definition(invalid_definition.clone())
+        .await
+        .expect("invalid matching definition");
+
+    let drain = drain_due_ontology_release_workflow_triggers(&state, "test", 10)
+        .await
+        .expect("drain workflow triggers");
+
+    assert_eq!(drain.retryable_count, 1);
+    assert_eq!(drain.triggered_count, 1);
+    assert_eq!(drain.failed_count, 0);
+    let triggers = state
+        .list_ontology_release_workflow_triggers()
+        .await
+        .expect("workflow triggers");
+    let valid_trigger = triggers
+        .iter()
+        .find(|trigger| {
+            trigger.ontology_release_id == active.id
+                && trigger.workflow_definition_id == valid_definition.id
+        })
+        .expect("valid trigger");
+    assert_eq!(valid_trigger.status, "triggered");
+    assert!(valid_trigger.workflow_run_id.is_some());
+    let invalid_trigger = triggers
+        .iter()
+        .find(|trigger| {
+            trigger.ontology_release_id == active.id
+                && trigger.workflow_definition_id == invalid_definition.id
+        })
+        .expect("invalid trigger");
+    assert_eq!(invalid_trigger.status, "failed");
 }
 
 #[tokio::test]

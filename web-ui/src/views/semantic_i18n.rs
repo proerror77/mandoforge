@@ -5,7 +5,11 @@ pub(crate) type SemanticLang = UiLang;
 
 pub(crate) fn localized_status(lang: SemanticLang, status: &str) -> String {
     if lang == SemanticLang::En {
-        return status.to_string();
+        return match status {
+            "active_trigger_failed" => "Active, trigger failed",
+            other => other,
+        }
+        .to_string();
     }
     match status {
         "approved" => "已批准",
@@ -27,6 +31,7 @@ pub(crate) fn localized_status(lang: SemanticLang, status: &str) -> String {
         "blocked" => "已阻塞",
         "pilot_ready" => "试点就绪",
         "active" => "运行中",
+        "active_trigger_failed" => "运行中，触发失败",
         "completed" => "已完成",
         "proposal_only" => "仅提案",
         "profiled" => "已画像",

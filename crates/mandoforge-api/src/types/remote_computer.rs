@@ -296,6 +296,8 @@ pub(crate) struct RemoteComputerSidecarHeartbeat {
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct CreateRemoteComputer {
+    #[serde(default)]
+    pub(crate) id: Option<Uuid>,
     pub(crate) name: String,
     pub(crate) profile: Option<String>,
     pub(crate) namespace: Option<String>,

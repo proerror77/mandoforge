@@ -205,6 +205,34 @@ impl AppState {
         }
     }
 
+    pub(crate) async fn get_ontology_release_workflow_trigger(
+        &self,
+        trigger_id: Uuid,
+    ) -> Result<OntologyReleaseWorkflowTrigger, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => inner
+                .read()
+                .await
+                .ontology_release_workflow_triggers
+                .get(&trigger_id)
+                .cloned()
+                .ok_or_else(|| AppError::not_found("ontology release workflow trigger not found")),
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "SELECT id, ontology_release_id, workflow_definition_id, workflow_run_id, status, attempt_count, claimed_at, error_message, created_at, updated_at
+                     FROM ontology_release_workflow_triggers
+                     WHERE tenant_id = $1 AND id = $2",
+                )
+                .bind(self.current_tenant_id())
+                .bind(trigger_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("ontology release workflow trigger not found"))?;
+                ontology_release_workflow_trigger_from_row(row)
+            }
+        }
+    }
+
     pub(crate) async fn ontology_release_workflow_run_for_trigger(
         &self,
         ontology_release_id: Uuid,

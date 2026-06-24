@@ -16,13 +16,17 @@ pub(crate) async fn build_ontology_engine_readiness(
         .filter(|release| {
             matches!(
                 release.status.as_str(),
-                "candidate" | "active" | "superseded" | "rolled_back"
+                "candidate"
+                    | ONTOLOGY_RELEASE_STATUS_ACTIVE
+                    | ONTOLOGY_RELEASE_STATUS_ACTIVE_TRIGGER_FAILED
+                    | "superseded"
+                    | "rolled_back"
             )
         })
         .collect::<Vec<_>>();
     let active_releases = releases
         .iter()
-        .filter(|release| release.status == "active")
+        .filter(|release| ontology_release_current_status(&release.status))
         .collect::<Vec<_>>();
     let lifecycle_release_evidence_class =
         ontology_active_release_evidence_class(&lifecycle_releases);
