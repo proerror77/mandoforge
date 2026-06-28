@@ -1,0 +1,62 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mandoforge-remote-computer-production-state
+  labels:
+    app.kubernetes.io/name: mandoforge
+    app.kubernetes.io/component: remote-computer-production-state
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mandoforge
+        app.kubernetes.io/component: remote-computer-production-state
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: remote-computer-production-state
+          image: mandoforge-api:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /app/scripts/remote-computer-production-state-gate.sh
+          envFrom:
+            - secretRef:
+                name: mandoforge-stage2-controller-env
+          env:
+            - name: EVIDENCE_DIR
+              value: /evidence/remote-computer-production-state
+            - name: SOURCE_EVIDENCE_DIR
+              value: /evidence
+            - name: REMOTE_COMPUTER_EVIDENCE_DIR
+              value: /evidence/remote-computer
+            - name: WORKER_REMOTE_COMPUTER_EVIDENCE_DIR
+              value: /evidence/worker-remote-computer
+            - name: REMOTE_COMPUTER_SESSION_POD_LIFECYCLE_EVIDENCE_FILE
+              value: /evidence/remote-computer-session-pod-lifecycle-evidence.json
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          volumeMounts:
+            - name: evidence
+              mountPath: /evidence
+      volumes:
+        - name: evidence
+          persistentVolumeClaim:
+            claimName: mandoforge-stage2-production-evidence

@@ -4,6 +4,8 @@ metadata:
   name: mandoforge-agent-remote-computer-warm-pool
 spec:
   scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
     name: mandoforge-agent-remote-computer-warm-pool
   minReplicaCount: 1
   maxReplicaCount: 10

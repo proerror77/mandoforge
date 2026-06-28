@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 concurrency:
@@ -21,7 +22,7 @@ jobs:
     name: Static gates
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -32,9 +33,8 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             ~/.cargo/bin/trunk
-            target
             web-ui/target
-          key: static-yew-${{ runner.os }}-${{ hashFiles('web-ui/Cargo.toml') }}
+          key: static-yew-${{ runner.os }}-${{ hashFiles('web-ui/Cargo.lock') }}
           restore-keys: |
             static-yew-${{ runner.os }}-
       - name: Install kubectl
@@ -56,6 +56,9 @@ jobs:
         run: |
           node --check scripts/stage2-mock-controller.js
       - run: scripts/verify-static-ui-assets.sh
+      - run: node scripts/verify-ui-api-truth-gate.mjs
+      - run: STATIC_ONLY=1 scripts/ontology-release-workflow-trigger-gate.sh
+      - run: STATIC_ONLY=1 scripts/product-surfaces-production-gate.sh
       - name: Check shell syntax
         shell: bash
         run: |
@@ -67,13 +70,14 @@ jobs:
       - run: scripts/verify-workflow-pack-connector-quality-seed.sh
       - run: scripts/verify-observability-k8s-manifests.sh
       - run: scripts/verify-remote-computer-k8s-manifests.sh
+      - run: scripts/verify-stage2-evidence-k8s-manifests.sh
       - run: kubectl kustomize deploy/k8s >/tmp/mandoforge-kustomize.out && wc -l /tmp/mandoforge-kustomize.out
 
   rust:
     name: Rust tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Cache Cargo registry and target
         uses: actions/cache@v4
@@ -102,6 +106,7 @@ jobs:
             librsvg2-dev
       - run: cargo fetch --locked
       - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --locked --all-targets -- -D warnings
       - run: cargo test --workspace --locked --all-targets -- --test-threads=1
       - run: scripts/verify-workflow-pack-manifest.sh
       - name: Agent OS core evidence gate

@@ -17,7 +17,7 @@ impl AppState {
             runtime_profile_id: None,
             agent_role: "manager".to_string(),
             provider: "openai-compatible".to_string(),
-            model: "gpt-5.4-mini".to_string(),
+            model: "gpt-5.5-mini".to_string(),
             system_prompt: "You are a general-purpose orchestrator. Use tools through the runtime only, request approval before risky actions, and preserve an auditable timeline.".to_string(),
             tools: vec![
                 "file.read".to_string(),

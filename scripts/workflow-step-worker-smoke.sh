@@ -166,7 +166,7 @@ agent_file="$(fetch_json POST /api/agents "$(
     kind: "specialist",
     agent_role: "specialist",
     provider: "openai-compatible",
-    model: "gpt-5.4-mini",
+    model: "gpt-5.5-mini",
     tools: ["file.read", "sql.get_schema", "sql.query", "shell.exec", "artifact.create"],
     semantic_scopes: $scopes,
     release_state: "active"

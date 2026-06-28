@@ -118,7 +118,7 @@ AGENT_ID="$(
       kind: "specialist",
       agent_role: "specialist",
       provider: "openai-compatible",
-      model: "gpt-5.4-mini",
+      model: "gpt-5.5-mini",
       runtime_profile_id: $profile_id,
       tools: ["agent_cli.exec"]
     }')" \

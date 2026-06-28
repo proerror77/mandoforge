@@ -1,6 +1,118 @@
 use super::*;
 
 #[tokio::test]
+async fn provider_runtime_production_mode_blocks_env_fallback() {
+    let _lock = env_lock().lock().expect("env lock");
+    let _provider_runtime_env = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+    let _provider_base_url = EnvVarGuard::remove("MANDOFORGE_PROVIDER_BASE_URL");
+    let _provider_api_key = EnvVarGuard::remove("MANDOFORGE_PROVIDER_API_KEY");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("agents")
+        .into_iter()
+        .next()
+        .expect("agent");
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "production provider fallback".to_string(),
+            message: None,
+        })
+        .await
+        .expect("session");
+
+    let error = match provider_client_for_session(&state, session.id).await {
+        Ok(_) => panic!("production mode accepts provider fallback"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+    assert!(
+        error
+            .message
+            .contains("production provider runtime requires stored active provider")
+    );
+}
+
+#[tokio::test]
+async fn provider_runtime_production_mode_blocks_mock_provider() {
+    let _lock = env_lock().lock().expect("env lock");
+    let _provider_runtime_env = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    state
+        .create_provider(CreateProviderRecord {
+            provider_type: "mock".to_string(),
+            name: "openai-compatible".to_string(),
+            base_url: None,
+            default_model: Some("gpt-5.5".to_string()),
+            config: empty_json_object(),
+        })
+        .await
+        .expect("mock provider");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("agents")
+        .into_iter()
+        .next()
+        .expect("agent");
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "production mock provider".to_string(),
+            message: None,
+        })
+        .await
+        .expect("session");
+
+    let error = match provider_client_for_session(&state, session.id).await {
+        Ok(_) => panic!("production mode accepts mock provider"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+    assert!(
+        error
+            .message
+            .contains("uses mock runtime in production mode")
+    );
+}
+
+#[tokio::test]
+async fn provider_runtime_status_reports_production_mode() {
+    let _lock = env_lock().lock().expect("env lock");
+    let _provider_runtime_env = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+    let app = build_router(test_state_with_worker(Arc::new(InlineExecutionWorker)));
+
+    let runtime: Value = request_json(
+        app,
+        Request::builder()
+            .method("GET")
+            .uri("/api/providers/runtime")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+
+    assert_eq!(runtime["mode"], json!("production"));
+    assert_eq!(runtime["production_mode"], json!(true));
+    assert!(
+        runtime["contract"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("forbids mock providers")
+    );
+}
+
+#[tokio::test]
 async fn provider_deployment_controller_executes_external_boundary() {
     let payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -159,7 +271,7 @@ async fn provider_production_rollout_executes_external_controller() {
             provider_type: "mock".to_string(),
             name: "controller-backed-provider".to_string(),
             base_url: None,
-            default_model: Some("gpt-5.4-mini".to_string()),
+            default_model: Some("gpt-5.5-mini".to_string()),
             config: json!({"budget": {"daily_request_limit": 10}}),
         })
         .await
@@ -245,7 +357,7 @@ async fn provider_production_rollback_executes_external_controller() {
             provider_type: "mock".to_string(),
             name: "rollback-provider".to_string(),
             base_url: None,
-            default_model: Some("gpt-5.4-mini".to_string()),
+            default_model: Some("gpt-5.5-mini".to_string()),
             config: json!({"budget": {"daily_request_limit": 10}}),
         })
         .await

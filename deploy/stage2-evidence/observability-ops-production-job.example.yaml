@@ -1,0 +1,58 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mandoforge-observability-ops-production
+  labels:
+    app.kubernetes.io/name: mandoforge
+    app.kubernetes.io/component: observability-ops-production
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mandoforge
+        app.kubernetes.io/component: observability-ops-production
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: observability-ops-production
+          image: mandoforge-api:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /app/scripts/observability-ops-production-gate.sh
+          envFrom:
+            - secretRef:
+                name: mandoforge-stage2-controller-env
+          env:
+            - name: EVIDENCE_DIR
+              value: /evidence/observability-ops-production-gate
+            - name: SOURCE_EVIDENCE_DIR
+              value: /evidence/observability-ops-production
+            - name: OBSERVABILITY_OPS_EVIDENCE_FILE
+              value: /evidence/observability-ops-production/summary.json
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          volumeMounts:
+            - name: evidence
+              mountPath: /evidence
+      volumes:
+        - name: evidence
+          persistentVolumeClaim:
+            claimName: mandoforge-stage2-production-evidence

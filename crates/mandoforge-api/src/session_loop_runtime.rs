@@ -339,6 +339,12 @@ pub(crate) async fn provider_client_for_session(
         enforce_provider_budget(state, &provider).await?;
         let provider_type = provider.provider_type.trim().to_ascii_lowercase();
         if matches!(provider_type.as_str(), "mock" | "mock_openai_compatible") {
+            if provider_runtime_production_mode() {
+                return Err(AppError::forbidden(format!(
+                    "provider {} uses mock runtime in production mode",
+                    provider.name
+                )));
+            }
             return Ok((provider.name, Box::new(MockProviderClient)));
         }
         if matches!(
@@ -368,8 +374,26 @@ pub(crate) async fn provider_client_for_session(
             provider.provider_type
         )));
     }
+    if provider_runtime_production_mode() {
+        return Err(AppError::forbidden(format!(
+            "production provider runtime requires stored active provider {}",
+            agent.provider
+        )));
+    }
     let fallback = provider_client_from_env().await?;
     Ok((agent.provider, fallback))
+}
+
+pub(crate) fn provider_runtime_production_mode() -> bool {
+    std::env::var("MANDOFORGE_PROVIDER_RUNTIME_ENV")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "production" | "prod"
+            )
+        })
+        .unwrap_or(false)
 }
 
 pub(crate) async fn stored_provider_api_key(provider: &ProviderRecord) -> Result<String, AppError> {

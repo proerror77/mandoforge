@@ -50,9 +50,17 @@ pub(crate) fn DeployView(props: &DeployProps) -> Html {
                         props.lang,
                         &props.data.enterprise_product_readiness.data,
                         &props.data.native_connector_production_readiness.data,
+                        &props.data.provider_runtime.data,
                         &props.data.remote_computer_production_path.data,
                         &props.data.usage.data,
+                        &props.data.usage_finance_operations.data,
                     )} />
+                </Panel>
+                <Panel title={props.lang.text("Production Launch Safety", "生产启动安全")}>
+                    <Rows empty={props.lang.text("No production launch safety artifacts.", "没有生产启动安全产物。")} rows={production_launch_safety_rows(props.lang)} />
+                </Panel>
+                <Panel title={props.lang.text("Provider Runtime", "Provider 运行时")}>
+                    <JsonPreview value={props.data.provider_runtime.data.clone()} />
                 </Panel>
                 <Panel title={props.lang.text("Live Connector Production", "真实连接器生产状态")}>
                     <JsonPreview value={props.data.native_connector_production_readiness.data.clone()} />
@@ -62,6 +70,9 @@ pub(crate) fn DeployView(props: &DeployProps) -> Html {
                 </Panel>
                 <Panel title={props.lang.text("Usage and Finance", "用量与成本")}>
                     <JsonPreview value={props.data.usage.data.clone()} />
+                </Panel>
+                <Panel title={props.lang.text("Finance Operations", "财务运营")}>
+                    <JsonPreview value={props.data.usage_finance_operations.data.clone()} />
                 </Panel>
             </div>
         </div>
@@ -102,14 +113,18 @@ fn customer_grade_evidence_rows(
     lang: UiLang,
     readiness: &EnterpriseProductReadiness,
     connector_readiness: &Value,
+    provider_runtime: &Value,
     remote_path: &Value,
     usage: &Value,
+    finance_operations: &Value,
 ) -> Vec<(String, String, String)> {
     let evidence_text = [
         readiness_text(readiness),
         compact_json(connector_readiness),
+        compact_json(provider_runtime),
         compact_json(remote_path),
         compact_json(usage),
+        compact_json(finance_operations),
     ]
     .join("\n")
     .to_ascii_lowercase();
@@ -182,7 +197,7 @@ impl EvidenceRequirement {
                 "pilot_ready".to_string(),
                 lang.text(self.title, self.zh_title).to_string(),
                 if lang == UiLang::En {
-                    format!("Mentioned in current evidence (`{keyword}`), but not proven customer-grade ready.")
+                    format!("Mentioned in current evidence (`{keyword}`), but not accepted as customer-grade evidence yet.")
                 } else {
                     format!("当前证据提到 `{keyword}`，但还没有证明达到客户级就绪。")
                 },
@@ -194,6 +209,40 @@ impl EvidenceRequirement {
             ),
         }
     }
+}
+
+// Returns static rows representing the existence of production-launch safety artifacts on disk.
+// Status is hardcoded to "ready" because this panel only confirms the files are present in the
+// repository — it does NOT reflect runtime state (e.g. whether the PVC is bound or preflight
+// passed in the target cluster). A future /api/deployment/launch-safety endpoint should drive
+// these rows dynamically.
+fn production_launch_safety_rows(lang: UiLang) -> Vec<(String, String, String)> {
+    vec![
+        (
+            "ready".to_string(),
+            lang.text("Secret delivery contract", "密钥交付契约").to_string(),
+            lang.text(
+                "deploy/k8s/secret-delivery-contract.yaml — declares how secrets are delivered to the pod at runtime via projected volumes.",
+                "deploy/k8s/secret-delivery-contract.yaml — 声明密钥在运行时通过 projected volumes 交付到 Pod 的方式。",
+            ).to_string(),
+        ),
+        (
+            "ready".to_string(),
+            lang.text("Workspace PVC", "工作区持久卷").to_string(),
+            lang.text(
+                "deploy/k8s/workspace-pvc.yaml — persistent volume claim for agent workspace storage; required by remote computer pods.",
+                "deploy/k8s/workspace-pvc.yaml — 代理工作区存储的持久卷声明，远程电脑 Pod 必须依赖此资源。",
+            ).to_string(),
+        ),
+        (
+            "ready".to_string(),
+            lang.text("Production launch preflight", "生产启动预检").to_string(),
+            lang.text(
+                "scripts/production-launch-preflight.sh — gates production launch by verifying secrets, PVC, manifests, and readiness endpoints before any customer-facing rollout.",
+                "scripts/production-launch-preflight.sh — 在任何面向客户的发布前，通过验证密钥、PVC、清单和就绪端点来把关生产启动。",
+            ).to_string(),
+        ),
+    ]
 }
 
 fn readiness_text(readiness: &EnterpriseProductReadiness) -> String {
@@ -210,6 +259,10 @@ fn readiness_text(readiness: &EnterpriseProductReadiness) -> String {
         parts.push(lane.current_evidence_class.clone());
         parts.push(lane.required_evidence_class.clone());
         parts.push(lane.production_target.clone());
+        parts.push(lane.current_boundary.clone());
+        parts.extend(lane.readiness_endpoints.clone());
+        parts.extend(lane.evidence_scripts.clone());
+        parts.extend(lane.required_evidence.clone());
         parts.extend(lane.blockers.clone());
         parts.extend(lane.next_actions.clone());
     }

@@ -1236,6 +1236,7 @@ async fn provision_remote_computer_pod_for_job(
                     session_id: Some(job.session_id),
                     pod_name: Some(pod_name.clone()),
                     metadata: Some(json!({
+                        "tenant_id": state.current_tenant_id(),
                         "assignment_id": "",
                         "session_workspace_path": remote_session_workspace_path_from_base("/workspace", job.session_id),
                         "artifact_dir": remote_session_artifacts_path_from_base("/workspace", job.session_id),

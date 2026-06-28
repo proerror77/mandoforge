@@ -912,6 +912,13 @@ artifact_issue() {
         return 0
       fi
       ;;
+    remote-computer-session-pod-lifecycle-evidence.json)
+      local gate_output
+      if ! gate_output="$(env EVIDENCE_DIR="$root/.remote-computer-production-state-gate" SOURCE_EVIDENCE_DIR="$root" REMOTE_COMPUTER_EVIDENCE_DIR="$root/remote-computer" WORKER_REMOTE_COMPUTER_EVIDENCE_DIR="$root/worker-remote-computer" REMOTE_COMPUTER_SESSION_POD_LIFECYCLE_EVIDENCE_FILE="$path" scripts/remote-computer-production-state-gate.sh 2>&1)"; then
+        printf '%s rejected by Remote Computer production state gate: %s' "$relative_path" "$(printf '%s' "$gate_output" | tr '\n' ' ' | cut -c1-500)"
+        return 0
+      fi
+      ;;
     tenant-routing-validation-evidence.json)
       local evidence_status
       local validation_status
@@ -1135,6 +1142,98 @@ artifact_issue() {
       fi
       if [[ -z "$checked_at" ]]; then
         printf '%s checked_at is missing' "$relative_path"
+        return 0
+      fi
+      ;;
+    provider-production-rollout-evidence.json)
+      local evidence_status
+      local rollout_status
+      local environment
+      local provider_count
+      local provider_id_count
+      local enforcement_blocked
+      local controller_configured
+      local controller_status
+      local rollout_id
+      local ran_at
+      evidence_status="$(jq -r '.status // "unknown"' "$path")"
+      rollout_status="$(jq -r '.response.status // "unknown"' "$path")"
+      environment="$(jq -r '.response.environment // "unknown"' "$path")"
+      provider_count="$(jq -r '.response.provider_count // 0' "$path")"
+      provider_id_count="$(jq -r '[.response.provider_ids[]?] | length' "$path")"
+      enforcement_blocked="$(jq -r '.response.enforcement.production_blocked // true' "$path")"
+      controller_configured="$(jq -r '.response.controller_configured // false' "$path")"
+      controller_status="$(jq -r '.response.controller_execution.status // "unknown"' "$path")"
+      rollout_id="$(jq -r '.response.id // ""' "$path")"
+      ran_at="$(jq -r '.response.ran_at // ""' "$path")"
+      if [[ "$evidence_status" != "captured" ]]; then
+        printf '%s evidence_status=%s' "$relative_path" "$evidence_status"
+        return 0
+      fi
+      if [[ "$rollout_status" != "applied" || "$controller_status" != "applied" ]]; then
+        printf '%s status=%s controller_status=%s' "$relative_path" "$rollout_status" "$controller_status"
+        return 0
+      fi
+      if [[ "$environment" != "production" && "$environment" != "prod" ]]; then
+        printf '%s environment=%s is not production' "$relative_path" "$environment"
+        return 0
+      fi
+      if [[ "$controller_configured" != "true" || "$enforcement_blocked" != "false" ]]; then
+        printf '%s controller or enforcement evidence incomplete' "$relative_path"
+        return 0
+      fi
+      if [[ ! "$provider_count" =~ ^[0-9]+$ || "$provider_count" == "0" || "$provider_id_count" != "$provider_count" ]]; then
+        printf '%s provider_count=%s provider_id_count=%s' "$relative_path" "$provider_count" "$provider_id_count"
+        return 0
+      fi
+      if [[ -z "$rollout_id" || -z "$ran_at" ]]; then
+        printf '%s lacks audit id or timestamp' "$relative_path"
+        return 0
+      fi
+      ;;
+    provider-production-rollback-evidence.json)
+      local evidence_status
+      local rollback_status
+      local environment
+      local provider_count
+      local provider_id_count
+      local controller_configured
+      local controller_status
+      local rollback_id
+      local source_rollout_id
+      local ran_at
+      evidence_status="$(jq -r '.status // "unknown"' "$path")"
+      rollback_status="$(jq -r '.response.status // "unknown"' "$path")"
+      environment="$(jq -r '.response.environment // "unknown"' "$path")"
+      provider_count="$(jq -r '.response.provider_count // 0' "$path")"
+      provider_id_count="$(jq -r '[.response.provider_ids[]?] | length' "$path")"
+      controller_configured="$(jq -r '.response.controller_configured // false' "$path")"
+      controller_status="$(jq -r '.response.controller_execution.status // "unknown"' "$path")"
+      rollback_id="$(jq -r '.response.id // ""' "$path")"
+      source_rollout_id="$(jq -r '.response.source_rollout_id // ""' "$path")"
+      ran_at="$(jq -r '.response.ran_at // ""' "$path")"
+      if [[ "$evidence_status" != "captured" ]]; then
+        printf '%s evidence_status=%s' "$relative_path" "$evidence_status"
+        return 0
+      fi
+      if [[ "$rollback_status" != "rolled_back" || "$controller_status" != "rolled_back" ]]; then
+        printf '%s status=%s controller_status=%s' "$relative_path" "$rollback_status" "$controller_status"
+        return 0
+      fi
+      if [[ "$environment" != "production" && "$environment" != "prod" ]]; then
+        printf '%s environment=%s is not production' "$relative_path" "$environment"
+        return 0
+      fi
+      if [[ "$controller_configured" != "true" ]]; then
+        printf '%s controller evidence incomplete' "$relative_path"
+        return 0
+      fi
+      if [[ ! "$provider_count" =~ ^[0-9]+$ || "$provider_count" == "0" || "$provider_id_count" != "$provider_count" ]]; then
+        printf '%s provider_count=%s provider_id_count=%s' "$relative_path" "$provider_count" "$provider_id_count"
+        return 0
+      fi
+      if [[ -z "$rollback_id" || -z "$source_rollout_id" || -z "$ran_at" ]]; then
+        printf '%s lacks audit id, source rollout id, or timestamp' "$relative_path"
         return 0
       fi
       ;;
@@ -1520,6 +1619,132 @@ artifact_issue() {
         return 0
       fi
       ;;
+    product-surfaces/summary.json)
+      local summary_status
+      local evidence_class
+      local target_id
+      local target_kind
+      local target_environment
+      local target_base_url
+      local target_git_sha
+      local target_image_tag
+      local audit_id
+      local checked_at
+      local support_owner
+      local archive_uri
+      local immutable
+      local archive_digest
+      local retention_policy
+
+      summary_status="$(jq -r '.status // "unknown"' "$path")"
+      evidence_class="$(jq -r '.evidence_class // .required_evidence_class // ""' "$path")"
+      target_id="$(jq -r '.target.id // .target.deployment_id // .target.cluster_id // ""' "$path")"
+      target_kind="$(jq -r '.target.kind // "unknown"' "$path")"
+      target_environment="$(jq -r '.target.environment // ""' "$path")"
+      target_base_url="$(jq -r '.target.base_url // ""' "$path")"
+      target_git_sha="$(jq -r '.target.git_sha // ""' "$path")"
+      target_image_tag="$(jq -r '.target.image_tag // ""' "$path")"
+      audit_id="$(jq -r '.audit_id // .audit_log_id // .trace_id // .run_id // ""' "$path")"
+      checked_at="$(jq -r '.checked_at // .validated_at // .completed_at // .timestamp // ""' "$path")"
+      support_owner="$(jq -r '.support_owner // .product_owner // .oncall_owner // ""' "$path")"
+      archive_uri="$(jq -r '.evidence_archive.uri // .archive.uri // ""' "$path")"
+      immutable="$(jq -r '.evidence_archive.immutable // .archive.immutable // false' "$path")"
+      archive_digest="$(jq -r '.evidence_archive.digest // .archive.digest // ""' "$path")"
+      retention_policy="$(jq -r '.evidence_archive.retention_policy // .archive.retention_policy // ""' "$path")"
+
+      case "$summary_status" in
+        ready|validated|completed|passed) ;;
+        *)
+          printf '%s status=%s' "$relative_path" "$summary_status"
+          return 0
+          ;;
+      esac
+      if [[ "$evidence_class" != "customer_grade" ]]; then
+        printf '%s evidence_class=%s is not customer_grade' "$relative_path" "${evidence_class:-<empty>}"
+        return 0
+      fi
+      if ! is_production_identity_value "$target_id" || ! is_production_identity_value "$target_base_url"; then
+        printf '%s target id or base_url is pilot/mock/local' "$relative_path"
+        return 0
+      fi
+      if [[ "$target_environment" != "production" || -z "$target_git_sha" || -z "$target_image_tag" ]]; then
+        printf '%s target lacks production environment, git SHA, or image tag' "$relative_path"
+        return 0
+      fi
+      case "$target_kind" in
+        production_product_surface|production_ui|customer_grade_deployment|kubernetes_cluster|managed_agent_cluster) ;;
+        *)
+          printf '%s target_kind=%s is not production-grade' "$relative_path" "$target_kind"
+          return 0
+          ;;
+      esac
+      if [[ -z "$audit_id" || -z "$checked_at" || -z "$support_owner" ]]; then
+        printf '%s lacks audit id, timestamp, or support owner' "$relative_path"
+        return 0
+      fi
+      if [[ "$immutable" != "true" || -z "$archive_uri" || -z "$archive_digest" || -z "$retention_policy" ]]; then
+        printf '%s lacks immutable archive metadata' "$relative_path"
+        return 0
+      fi
+      jq -e '
+        def ready: . == "ready" or . == "validated" or . == "completed" or . == "passed";
+        def surface($id): first(.surfaces[]? | select(.id == $id));
+        def routes_checked($id):
+          ((surface($id).routes // []) | length) > 0
+          and all(surface($id).routes[]?;
+            (.method // "") != ""
+            and (.path // "" | startswith("/api/"))
+            and ((.status // 0) >= 200 and (.status // 0) < 300)
+            and (.schema_checked == true)
+          );
+        all(["admin-console", "operator-console", "builder-console", "ops-console"][];
+          (surface(.).status // "unknown" | ready)
+          and (surface(.).live_api_readback == true)
+          and (surface(.).authorization_boundaries_checked == true)
+          and (surface(.).no_fake_completion_state == true)
+          and routes_checked(.)
+        )
+        and (.live_api_truth.status // "unknown" | ready)
+        and (.live_api_truth.route_coverage_tested == true)
+        and (.live_api_truth.live_endpoint_coverage_tested == true)
+        and (.live_api_truth.backend_authorization_checked == true)
+        and (.live_api_truth.unauthenticated_rejected == true)
+        and (.live_api_truth.forbidden_role_rejected == true)
+        and (.live_api_truth.fake_completion_scan_passed == true)
+        and (.live_api_truth.stale_or_mock_data_scan_passed == true)
+      ' "$path" >/dev/null || {
+        printf '%s lacks live API truth or per-surface route evidence' "$relative_path"
+        return 0
+      }
+      ;;
+    enterprise-security-production-controls/summary.json)
+      local gate_output
+      if ! gate_output="$(env EVIDENCE_DIR="$root/.enterprise-security-production-controls-gate" ENTERPRISE_SECURITY_CONTROLS_EVIDENCE_FILE="$path" scripts/enterprise-security-production-controls-gate.sh 2>&1)"; then
+        printf '%s rejected by enterprise security production controls gate: %s' "$relative_path" "$(printf '%s' "$gate_output" | tr '\n' ' ' | cut -c1-500)"
+        return 0
+      fi
+      ;;
+    observability-ops-production/summary.json)
+      local gate_output
+      if ! gate_output="$(env EVIDENCE_DIR="$root/.observability-ops-production-gate" OBSERVABILITY_OPS_EVIDENCE_FILE="$path" scripts/observability-ops-production-gate.sh 2>&1)"; then
+        printf '%s rejected by observability ops production gate: %s' "$relative_path" "$(printf '%s' "$gate_output" | tr '\n' ' ' | cut -c1-500)"
+        return 0
+      fi
+      ;;
+    live-connector-production-semantics/*/summary.json)
+      local gate_output
+      if ! gate_output="$(env EVIDENCE_DIR="$root/.live-connector-production-semantics-gate" SOURCE_EVIDENCE_DIR="$root/live-connector-production-semantics" scripts/live-connector-production-semantics-gate.sh 2>&1)"; then
+        printf '%s rejected by live connector production semantics gate: %s' "$relative_path" "$(printf '%s' "$gate_output" | tr '\n' ' ' | cut -c1-500)"
+        return 0
+      fi
+      ;;
+    runtime-production-recovery-evidence.json)
+      local gate_output
+      if ! gate_output="$(env EVIDENCE_DIR="$root/.runtime-production-readiness-gate" SOURCE_EVIDENCE_DIR="$root" RUNTIME_PRODUCTION_RECOVERY_EVIDENCE_FILE="$path" scripts/runtime-production-readiness-gate.sh 2>&1)"; then
+        printf '%s rejected by runtime production readiness gate: %s' "$relative_path" "$(printf '%s' "$gate_output" | tr '\n' ' ' | cut -c1-500)"
+        return 0
+      fi
+      ;;
   esac
 }
 
@@ -1805,6 +2030,7 @@ verify_semantic_artifacts() {
     remote-computer-state-sync-evidence.json
     remote-computer-sidecar-recovery-evidence.json
     worker-remote-computer/summary.json
+    remote-computer-session-pod-lifecycle-evidence.json
     tenant-routing-validation-evidence.json
     policy-rollout-orchestration-validation-evidence.json
     policy-rollout-due-run-evidence.json
@@ -1816,6 +2042,16 @@ verify_semantic_artifacts() {
     finance-export-delivery-evidence.json
     finance-export-delivery-observer.json
     managed-session-restart-resume-evidence.json
+    product-surfaces/summary.json
+    enterprise-security-production-controls/summary.json
+    observability-ops-production/summary.json
+    live-connector-production-semantics/tmall-top/summary.json
+    live-connector-production-semantics/taobao-open-platform/summary.json
+    live-connector-production-semantics/xiaohongshu-shop/summary.json
+    live-connector-production-semantics/xianyu-goofish/summary.json
+    live-connector-production-semantics/tiktok-shop-open-api/summary.json
+    live-connector-production-semantics/amazon-selling-partner-api/summary.json
+    runtime-production-recovery-evidence.json
   )
 
   for artifact in "${required_artifacts[@]}"; do

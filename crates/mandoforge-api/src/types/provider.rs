@@ -103,6 +103,13 @@ pub(crate) struct ProviderGovernanceSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ProviderRuntimeStatus {
+    pub(crate) mode: String,
+    pub(crate) production_mode: bool,
+    pub(crate) contract: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ProviderGovernanceAttentionItem {
     pub(crate) provider_id: Uuid,
     pub(crate) provider_name: String,

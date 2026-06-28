@@ -2,23 +2,30 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: agent-os
 resources:
-  - ../stage2-evidence/stage2-production-evidence-pvc.example.yaml
-  - ../stage2-evidence/stage2-production-evidence-gate-job.example.yaml
-  - ../stage2-evidence/stage2-completion-audit-job.example.yaml
-  - ../stage2-evidence/observability-collector-evidence-job.example.yaml
-  - ../stage2-evidence/remote-computer-evidence-job.example.yaml
-  - ../stage2-evidence/worker-remote-computer-evidence-job.example.yaml
-  - ../stage2-evidence/provider-governance-evidence-job.example.yaml
-  - ../stage2-evidence/tenant-isolation-evidence-job.example.yaml
-  - ../stage2-evidence/vault-evidence-job.example.yaml
-  - ../stage2-evidence/approval-notification-evidence-job.example.yaml
-  - ../stage2-evidence/worker-evidence-job.example.yaml
-  - ../stage2-evidence/scheduler-evidence-job.example.yaml
-  - ../stage2-evidence/policy-rollout-evidence-job.example.yaml
-  - ../stage2-evidence/codex-app-server-evidence-job.example.yaml
-  - ../stage2-evidence/mcp-gateway-evidence-job.example.yaml
-  - ../stage2-evidence/eval-release-evidence-job.example.yaml
-  - ../stage2-evidence/finance-evidence-job.example.yaml
+  - stage2-production-evidence-pvc.yaml
+  - stage2-production-evidence-gate-job.yaml
+  - runtime-production-evidence-job.yaml
+  - stage2-completion-audit-job.yaml
+  - observability-collector-evidence-job.yaml
+  - observability-ops-production-job.yaml
+  - remote-computer-evidence-job.yaml
+  - worker-remote-computer-evidence-job.yaml
+  - remote-computer-production-state-job.yaml
+  - live-connector-production-semantics-job.yaml
+  - ontology-release-workflow-trigger-job.yaml
+  - provider-governance-evidence-job.yaml
+  - tenant-isolation-evidence-job.yaml
+  - vault-evidence-job.yaml
+  - approval-notification-evidence-job.yaml
+  - enterprise-security-production-controls-job.yaml
+  - product-surfaces-production-job.yaml
+  - worker-evidence-job.yaml
+  - scheduler-evidence-job.yaml
+  - policy-rollout-evidence-job.yaml
+  - codex-app-server-evidence-job.yaml
+  - mcp-gateway-evidence-job.yaml
+  - eval-release-evidence-job.yaml
+  - finance-evidence-job.yaml
 images:
   - name: mandoforge-api
     newName: ghcr.io/proerror77/mandoforge/mandoforge-api

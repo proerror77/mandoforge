@@ -60,11 +60,11 @@ To use a real OpenAI-compatible provider instead of the deterministic mock:
 ```bash
 MANDOFORGE_PROVIDER_BASE_URL=https://api.openai.com \
 MANDOFORGE_PROVIDER_API_KEY=... \
-MANDOFORGE_PROVIDER_MODEL=gpt-5.4-mini \
+MANDOFORGE_PROVIDER_MODEL=gpt-5.5-mini \
 cargo run -p mandoforge-api
 ```
 
-When either provider env var is absent, the runtime falls back to the mock provider so local tests and demos remain repeatable.
+In development mode, missing provider env vars fall back to the deterministic mock. In production mode (`MANDOFORGE_PROVIDER_RUNTIME_ENV=production`), session execution requires a stored active non-mock provider.
 
 To run approved `shell.exec` calls through Docker instead of the host shell:
 
@@ -124,9 +124,9 @@ BASE_URL=http://127.0.0.1:8787 ./scripts/stage1-demo.sh
 
 Before shared-cluster use:
 
-- Replace `deploy/k8s/secret.example.yaml`.
+- Do not apply `deploy/k8s/secret.example.yaml` to production. The default manifests include only `deploy/k8s/secret-delivery-contract.yaml`; create `mandoforge-secrets` through a reviewed secret delivery path before applying `deploy/k8s`.
 - Add NetworkPolicy before enabling shell, Codex, HTTP, or MCP workers.
-- Replace `emptyDir` workspaces with durable artifact storage.
+- Review the workspace PVC, backup policy, and retention policy.
 - Split sandbox and Codex execution into separate worker Deployments.
 
 ## Agent OS Core Evidence

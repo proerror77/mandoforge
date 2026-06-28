@@ -133,6 +133,11 @@ fn App() -> Html {
             5_000,
             true,
         ),
+        provider_runtime: use_polling::<Value>(
+            "/api/providers/runtime",
+            5_000,
+            poll_system_ops_detail,
+        ),
         observability: use_polling::<ObservabilitySummary>(
             "/api/observability",
             3_000,
@@ -144,6 +149,11 @@ fn App() -> Html {
             poll_capability_detail,
         ),
         usage: use_polling::<Value>("/api/usage", 5_000, poll_system_ops_detail),
+        usage_finance_operations: use_polling::<Value>(
+            "/api/usage/finance-operations/summary",
+            5_000,
+            poll_system_ops_detail,
+        ),
         memory_governance: use_polling::<Value>(
             "/api/memory-governance/summary",
             5_000,
@@ -1498,6 +1508,8 @@ fn count_loading(data: &ConsoleData) -> usize {
         data.deployment_version.status,
         data.enterprise_product_readiness.status,
         data.native_connector_production_readiness.status,
+        data.provider_runtime.status,
+        data.usage_finance_operations.status,
         data.ontology_engine_readiness.status,
     ]
     .into_iter()
@@ -1516,6 +1528,8 @@ fn count_errors(data: &ConsoleData) -> usize {
         data.deployment_version.status,
         data.enterprise_product_readiness.status,
         data.native_connector_production_readiness.status,
+        data.provider_runtime.status,
+        data.usage_finance_operations.status,
         data.ontology_engine_readiness.status,
     ]
     .into_iter()

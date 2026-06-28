@@ -4,8 +4,9 @@ namespace: agent-os
 resources:
   - namespace.yaml
   - configmap.yaml
-  - secret.example.yaml
+  - secret-delivery-contract.yaml
   - postgres.yaml
+  - workspace-pvc.yaml
   - otel-collector.yaml
   - otel-collector-networkpolicy.yaml
   - api.yaml

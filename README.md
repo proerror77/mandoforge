@@ -304,7 +304,7 @@ OpenAI-compatible provider:
 ```bash
 MANDOFORGE_PROVIDER_BASE_URL=https://api.openai.com \
 MANDOFORGE_PROVIDER_API_KEY=... \
-MANDOFORGE_PROVIDER_MODEL=gpt-5.4-mini \
+MANDOFORGE_PROVIDER_MODEL=gpt-5.5-mini \
 cargo run -p mandoforge-api
 ```
 

@@ -795,7 +795,7 @@ async fn scheduler_due_run_orchestrates_due_automation_across_teams() {
                 json!({
                     "provider_type": "mock",
                     "name": "scheduler-alert-mock",
-                    "default_model": "gpt-5.4-mini",
+                    "default_model": "gpt-5.5-mini",
                     "config": {
                         "budget": {"daily_request_limit": 1},
                         "pricing": {"per_request_cents": 1.0}
@@ -819,7 +819,7 @@ async fn scheduler_due_run_orchestrates_due_automation_across_teams() {
                     "name": "scheduler alert agent",
                     "kind": "orchestrator",
                     "provider": "scheduler-alert-mock",
-                    "model": "gpt-5.4-mini",
+                    "model": "gpt-5.5-mini",
                     "tools": ["file.read", "sql.get_schema", "sql.query", "shell.exec"]
                 })
                 .to_string(),

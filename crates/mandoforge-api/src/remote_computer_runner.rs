@@ -442,14 +442,41 @@ impl RemoteComputerRunner for KubernetesRemoteComputerRunner {
         } else {
             None
         };
-        let exec_command = request
-            .metadata
-            .as_ref()
-            .and_then(|metadata| metadata.get("command"))
-            .and_then(|value| value.as_str())
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "true".to_string());
+        let exec_command = {
+            let command_value = request
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("command"));
+            match command_value {
+                Some(value) if value.is_string() => value
+                    .as_str()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "true".to_string()),
+                Some(value) if value.is_array() => {
+                    // Support JSON array form: ["sh", "-c", "echo hello"]
+                    // Join elements as space-separated shell tokens.
+                    let parts: Vec<&str> = value
+                        .as_array()
+                        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+                        .unwrap_or_default();
+                    if parts.is_empty() {
+                        "true".to_string()
+                    } else {
+                        parts.join(" ")
+                    }
+                }
+                Some(_) => {
+                    // Unknown command value type — fall back to no-op rather
+                    // than silently executing an unintended command.
+                    tracing::warn!(
+                        "remote_computer exec: metadata.command is neither a string nor an array; defaulting to \"true\""
+                    );
+                    "true".to_string()
+                }
+                None => "true".to_string(),
+            }
+        };
         let exec_gates_open = readiness.configured
             && config.execution_enabled
             && config.live_mutation_enabled
@@ -1073,7 +1100,7 @@ fn build_kubernetes_pod_request(
         .unwrap_or("/workspace/artifacts")
         .to_string();
     let mut pod = load_kubernetes_pod_template(config)?;
-    patch_pod_metadata(&mut pod, config, pod_name)?;
+    patch_pod_metadata(&mut pod, config, pod_name, request)?;
     patch_pod_spec(&mut pod, config)?;
     patch_container_env(
         &mut pod,
@@ -1135,6 +1162,7 @@ fn patch_pod_metadata(
     pod: &mut Value,
     config: &RemoteComputerRunnerConfig,
     pod_name: &str,
+    request: &RemoteComputerRunnerDryRunRequest,
 ) -> Result<(), String> {
     let object = pod
         .as_object_mut()
@@ -1155,6 +1183,24 @@ fn patch_pod_metadata(
         .ok_or_else(|| "Pod template metadata.labels must be an object".to_string())?;
     labels.insert("app".to_string(), json!("mandoforge-agent-remote-computer"));
     labels.insert("mandoforge.io/runner".to_string(), json!("remote-computer"));
+    insert_optional_pod_tracking_label(labels, "mandoforge.io/session-id", request.session_id);
+    insert_optional_pod_tracking_label(
+        labels,
+        "mandoforge.io/remote-computer-id",
+        request.remote_computer_id,
+    );
+    insert_optional_pod_tracking_metadata_label(
+        labels,
+        request,
+        "tenant_id",
+        "mandoforge.io/tenant-id",
+    );
+    insert_optional_pod_tracking_metadata_label(
+        labels,
+        request,
+        "lease_id",
+        "mandoforge.io/lease-id",
+    );
     let annotations = metadata
         .entry("annotations")
         .or_insert_with(|| json!({}))
@@ -1164,7 +1210,89 @@ fn patch_pod_metadata(
         "mandoforge.io/template-path".to_string(),
         json!(config.pod_template_path),
     );
+    annotations.insert(
+        "mandoforge.io/lifecycle".to_string(),
+        json!("session-bound"),
+    );
+    insert_optional_pod_tracking_annotation(
+        annotations,
+        "mandoforge.io/session-id",
+        request.session_id,
+    );
+    insert_optional_pod_tracking_annotation(
+        annotations,
+        "mandoforge.io/remote-computer-id",
+        request.remote_computer_id,
+    );
+    insert_optional_pod_tracking_metadata_annotation(
+        annotations,
+        request,
+        "tenant_id",
+        "mandoforge.io/tenant-id",
+    );
+    insert_optional_pod_tracking_metadata_annotation(
+        annotations,
+        request,
+        "lease_id",
+        "mandoforge.io/lease-id",
+    );
     Ok(())
+}
+
+fn insert_optional_pod_tracking_label(
+    labels: &mut serde_json::Map<String, Value>,
+    key: &str,
+    id: Option<Uuid>,
+) {
+    if let Some(id) = id {
+        labels.insert(key.to_string(), json!(id.to_string()));
+    }
+}
+
+fn insert_optional_pod_tracking_metadata_label(
+    labels: &mut serde_json::Map<String, Value>,
+    request: &RemoteComputerRunnerDryRunRequest,
+    metadata_key: &str,
+    label_key: &str,
+) {
+    let Some(value) = request
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get(metadata_key))
+        .and_then(Value::as_str)
+        .filter(|value| valid_kubernetes_label_value(value))
+    else {
+        return;
+    };
+    labels.insert(label_key.to_string(), json!(value));
+}
+
+fn insert_optional_pod_tracking_annotation(
+    annotations: &mut serde_json::Map<String, Value>,
+    key: &str,
+    id: Option<Uuid>,
+) {
+    if let Some(id) = id {
+        annotations.insert(key.to_string(), json!(id.to_string()));
+    }
+}
+
+fn insert_optional_pod_tracking_metadata_annotation(
+    annotations: &mut serde_json::Map<String, Value>,
+    request: &RemoteComputerRunnerDryRunRequest,
+    metadata_key: &str,
+    annotation_key: &str,
+) {
+    let Some(value) = request
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get(metadata_key))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return;
+    };
+    annotations.insert(annotation_key.to_string(), json!(value));
 }
 
 fn patch_pod_spec(pod: &mut Value, config: &RemoteComputerRunnerConfig) -> Result<(), String> {
@@ -1249,6 +1377,22 @@ fn valid_kubernetes_name(value: &str) -> bool {
             .chars()
             .last()
             .is_some_and(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit())
+}
+
+fn valid_kubernetes_label_value(value: &str) -> bool {
+    let value = value.trim();
+    value.len() <= 63
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.')
+        && value
+            .chars()
+            .next()
+            .is_none_or(|ch| ch.is_ascii_alphanumeric())
+        && value
+            .chars()
+            .last()
+            .is_none_or(|ch| ch.is_ascii_alphanumeric())
 }
 
 fn kubernetes_bearer_token_configured(config: &RemoteComputerRunnerConfig) -> bool {
@@ -1993,6 +2137,26 @@ mod tests {
             assert_eq!(body["kind"], "Pod");
             assert_eq!(body["metadata"]["name"], "agent-remote-computer-test");
             assert_eq!(
+                body["metadata"]["labels"]["mandoforge.io/session-id"],
+                "00000000-0000-0000-0000-000000000000"
+            );
+            assert_eq!(
+                body["metadata"]["labels"]["mandoforge.io/remote-computer-id"],
+                "00000000-0000-0000-0000-000000000001"
+            );
+            assert_eq!(
+                body["metadata"]["labels"]["mandoforge.io/tenant-id"],
+                "00000000-0000-0000-0000-000000000002"
+            );
+            assert_eq!(
+                body["metadata"]["labels"]["mandoforge.io/lease-id"],
+                "00000000-0000-0000-0000-000000000003"
+            );
+            assert_eq!(
+                body["metadata"]["annotations"]["mandoforge.io/lifecycle"],
+                "session-bound"
+            );
+            assert_eq!(
                 body["spec"]["serviceAccountName"],
                 "mandoforge-remote-computer"
             );
@@ -2106,7 +2270,9 @@ mod tests {
                     pod_name: Some("agent-remote-computer-test".to_string()),
                     metadata: Some(json!({
                         "artifact_discovery_enabled": true,
-                        "assignment_id": "assignment-1"
+                        "assignment_id": "assignment-1",
+                        "tenant_id": Uuid::from_u128(2).to_string(),
+                        "lease_id": Uuid::from_u128(3).to_string()
                     })),
                 },
             )

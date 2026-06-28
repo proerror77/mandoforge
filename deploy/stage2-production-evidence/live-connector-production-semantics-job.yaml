@@ -1,0 +1,56 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mandoforge-live-connector-production-semantics
+  labels:
+    app.kubernetes.io/name: mandoforge
+    app.kubernetes.io/component: live-connector-production-semantics
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mandoforge
+        app.kubernetes.io/component: live-connector-production-semantics
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: live-connector-production-semantics
+          image: mandoforge-api:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /app/scripts/live-connector-production-semantics-gate.sh
+          envFrom:
+            - secretRef:
+                name: mandoforge-stage2-controller-env
+          env:
+            - name: EVIDENCE_DIR
+              value: /evidence/live-connector-production-semantics-gate
+            - name: SOURCE_EVIDENCE_DIR
+              value: /evidence/live-connector-production-semantics
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          volumeMounts:
+            - name: evidence
+              mountPath: /evidence
+      volumes:
+        - name: evidence
+          persistentVolumeClaim:
+            claimName: mandoforge-stage2-production-evidence
