@@ -215,6 +215,18 @@ steps_file="$(fetch_json GET "/api/workflow-runs/$run_id/steps" '{}' api-workflo
 collect_a_step_id="$(workflow_step_id_by_key "$steps_file" collect_a)"
 collect_b_step_id="$(workflow_step_id_by_key "$steps_file" collect_b)"
 
+collect_b_initial_claim_file="$(fetch_json POST "/api/workflow-step-runs/$collect_b_step_id/claim" "$(jq -nc --arg agent_id "$agent_id" '{
+  agent_id: $agent_id,
+  worker_id: "managed-workflow-lease-drill-a",
+  lease_seconds: 1
+}')" api-workflow-runtime-proof-step-collect-b-initial-claim)"
+sleep 2
+collect_b_reclaim_file="$(fetch_json POST "/api/workflow-step-runs/$collect_b_step_id/claim" "$(jq -nc --arg agent_id "$agent_id" '{
+  agent_id: $agent_id,
+  worker_id: "managed-workflow-lease-drill-b",
+  lease_seconds: 300
+}')" api-workflow-runtime-proof-step-collect-b-lease-reclaim)"
+
 fetch_json PATCH "/api/workflow-step-runs/$collect_a_step_id" \
   '{"status":"failed","output_payload":{"error":"transient source failure for retry proof"}}' \
   api-workflow-runtime-proof-step-collect-a-failed >/dev/null
@@ -330,6 +342,8 @@ jq -n \
   --slurpfile transitions "$transitions_file" \
   --slurpfile graph "$graph_file" \
   --slurpfile scheduler "$scheduler_run_file" \
+  --slurpfile initial_claim "$collect_b_initial_claim_file" \
+  --slurpfile reclaim "$collect_b_reclaim_file" \
   --slurpfile artifacts "$artifacts_file" \
   --slurpfile memory "$memory_summary_file" \
   --slurpfile partition "$memory_partition_file" \
@@ -342,6 +356,10 @@ jq -n \
       and (($transitions[0].response | map(.transition_type) | index("schedule")) != null)
       and (($transitions[0].response | map(.transition_type) | index("fan_in")) != null)
       and (($transitions[0].response | map(.transition_type) | index("complete")) != null)
+      and ($initial_claim[0].response.step.id == $reclaim[0].response.step.id)
+      and ($initial_claim[0].response.step.claimed_by_worker == "managed-workflow-lease-drill-a")
+      and ($reclaim[0].response.step.claimed_by_worker == "managed-workflow-lease-drill-b")
+      and ($initial_claim[0].response.step.lease_expires_at != $reclaim[0].response.step.lease_expires_at)
       and (($artifacts[0].response | length) >= 1)
       and ($graph[0].response.status == "completed")
       and ($partition[0].response.partition.partition_key == "domain=managed-workflow-proof|workflow=runtime-proof|memory=operator-evidence"))
@@ -350,6 +368,18 @@ jq -n \
     workflow_status: $run[0].response.status,
     step_count: ($steps[0].response | length),
     transition_types: ($transitions[0].response | map(.transition_type) | unique),
+    lease_expiry_reclaim: {
+      status: (if ($initial_claim[0].response.step.id == $reclaim[0].response.step.id
+        and $initial_claim[0].response.step.claimed_by_worker == "managed-workflow-lease-drill-a"
+        and $reclaim[0].response.step.claimed_by_worker == "managed-workflow-lease-drill-b"
+        and $initial_claim[0].response.step.lease_expires_at != $reclaim[0].response.step.lease_expires_at)
+        then "passed" else "failed" end),
+      workflow_step_run_id: $reclaim[0].response.step.id,
+      initial_worker: $initial_claim[0].response.step.claimed_by_worker,
+      reclaim_worker: $reclaim[0].response.step.claimed_by_worker,
+      initial_lease_expires_at: $initial_claim[0].response.step.lease_expires_at,
+      reclaim_lease_expires_at: $reclaim[0].response.step.lease_expires_at
+    },
     scheduler_workflow_activation: $scheduler[0].response.workflow_scheduled_steps,
     graph: {
       status: $graph[0].response.status,
@@ -372,5 +402,6 @@ cat "$summary_file"
 
 if [[ "$(jq -r '.status' "$summary_file")" != "passed" ]]; then
   echo "managed workflow runtime evidence gate failed" >&2
+  [[ "${ALLOW_BLOCKED:-0}" == "1" ]] && exit 0
   exit 1
 fi

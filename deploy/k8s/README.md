@@ -19,12 +19,14 @@ It contains:
 - Scheduler CronJob for due policy, approval, release, and MCP automation, using a dedicated ServiceAccount with token automount disabled and Secret-sourced scheduler subject, role, and shared token headers.
 - Postgres StatefulSet and Service.
 - ConfigMap for runtime configuration.
-- Example Secret for local/dev credentials.
-- Workspace `emptyDir` volume for Stage 1.
+- Example Secret template for local/dev credentials. It is intentionally not part of the default kustomization; create `mandoforge-secrets` out of band before starting Pods.
+- Secret delivery contract ConfigMap documenting that production must supply `mandoforge-secrets` through an external secret manager, External Secrets Operator, SealedSecret, or equivalent controlled path.
+- Durable workspace PVC for API-owned workspaces.
 
-Apply locally after building and publishing an image:
+Create a local/dev Secret, then apply locally after building and publishing an image:
 
 ```bash
+kubectl apply -n agent-os -f deploy/k8s/secret.example.yaml
 kubectl apply -k deploy/k8s
 kubectl -n agent-os port-forward svc/mandoforge-api 8787:8787
 ```
@@ -37,9 +39,9 @@ kubectl kustomize deploy
 
 Production notes:
 
-- Replace the example Secret before deployment.
+- Do not apply `secret.example.yaml` to production. The default manifests include only the secret delivery contract; create `mandoforge-secrets` from a secret manager, External Secrets Operator, SealedSecret, or equivalent reviewed delivery path.
 - Prefer external Postgres or a mature Postgres Operator for production.
-- Replace `emptyDir` workspaces with PVC or object-storage-backed artifact sync before long-running workers.
+- Review the workspace PVC storage class, backup policy, and retention policy before long-running workers.
 - Review and adapt the worker NetworkPolicy before enabling shell, Codex, HTTP, or MCP execution in shared clusters.
 - Keep Codex and sandbox execution disabled or tightly constrained before multi-tenant use; the current worker drains jobs through the API execution endpoint.
 - Treat `worker-hpa.yaml` and `worker-keda.yaml` as autoscaling pilot manifests. KEDA is wired to a Prometheus queue-depth query, but you still need production metrics, load validation, and isolation policy before claiming production autoscaling.

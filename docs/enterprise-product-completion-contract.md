@@ -37,6 +37,36 @@ Enterprise completion requires `customer_grade` evidence for required lanes.
 
 ## Required Lanes
 
+### production-deployment-safety
+
+The default deployment path must be fail-closed before any production launch.
+Local examples can remain in the repo, but they must not be applied by the
+default production manifests.
+
+Required evidence:
+
+- Default Kubernetes kustomization does not apply example Secrets.
+- Example Secret files do not contain usable default database credentials.
+- Default Kubernetes kustomization includes a no-secret delivery contract for
+  externally supplied `mandoforge-secrets`.
+- API-owned workspace state does not use `emptyDir`; it is backed by a reviewed
+  PVC or object-storage-backed workspace path.
+- Production launch preflight verifies static deployment safety before running
+  live API readiness gates.
+- Production Secrets are delivered out of band through a reviewed secret manager,
+  External Secrets Operator, SealedSecret, or equivalent controlled path.
+
+Primary repo surfaces:
+
+- `deploy/k8s/kustomization.yaml`
+- `deploy/k8s/api.yaml`
+- `deploy/k8s/workspace-pvc.yaml`
+- `deploy/k8s/secret-delivery-contract.yaml`
+- `deploy/k8s/secret.example.yaml`
+- `scripts/production-launch-preflight.sh`
+- `scripts/verify-stage2-evidence-k8s-manifests.sh`
+- `GET /api/enterprise-product/readiness`
+
 ### runtime-production
 
 The runtime must prove that managed sessions, event logs, tool calls, approvals,
@@ -51,10 +81,15 @@ Required evidence:
   artifacts, audit logs, workflow runs, semantic objects, and context packets.
 - Session-loop jobs and execution jobs recover after API restart, worker
   restart, queue restart, and partial tool failure.
+- Production provider runtime forbids mock providers and env/mock fallback for
+  session-loop execution.
 - Every external side effect has an idempotency key or equivalent duplicate
   prevention mechanism.
 - Dead-letter, manual replay, and audit trail paths exist for failed jobs.
 - SSE replay and timeline APIs work under reconnect and backpressure tests.
+- `runtime-production-recovery-evidence.json` binds backup/restore,
+  dead-letter/manual replay, and idempotency drills to the same production
+  runtime target.
 
 Primary repo surfaces:
 
@@ -62,9 +97,11 @@ Primary repo surfaces:
 - `docs/runtime-truth-audit.md`
 - `GET /api/enterprise-product/readiness`
 - `scripts/enterprise-product-readiness-gate.sh`
+- `scripts/runtime-production-readiness-gate.sh`
 - `scripts/agent-os-core-evidence-gate.sh`
 - `scripts/managed-session-runtime-evidence-gate.sh`
 - `scripts/worker-evidence-gate.sh`
+- `scripts/provider-governance-evidence-gate.sh`
 
 ### remote-computer-multinode
 
@@ -78,16 +115,23 @@ Required evidence:
 - Workspace, notes, memory, skills, and artifacts use lock-aware sync semantics.
 - Warm-pool pods, assigned pods, sidecars, leases, and recovery controllers work
   across at least two schedulable nodes.
+- Remote Computer standalone evidence and worker/Remote Computer combined
+  evidence bind to the same production cluster, state claim, and distributed
+  backend.
 - Pod execution cannot bypass Tool Router, Policy, Approval, Audit, or timeline
   recording.
 - NetworkPolicy, resource limits, cleanup, and tenant isolation are enforced.
 - Sidecar heartbeat, stale lease cleanup, and replacement recovery are evidenced.
+- Session Pod lifecycle evidence covers live create, Running, approved exec,
+  heartbeat, lease release, Pod deletion, and orphan sweep with matching
+  session and Remote Computer labels.
 
 Primary repo surfaces:
 
 - `docs/agent-remote-computer-plan.md`
 - `docs/whiskey-adoption-completion-audit.md`
 - `GET /api/remote-computers/production-path`
+- `scripts/remote-computer-production-state-gate.sh`
 - `scripts/remote-computer-evidence-gate.sh`
 - `scripts/worker-remote-computer-evidence-gate.sh`
 - `scripts/whiskey-remote-computer-k3s-verify.sh`
@@ -126,6 +170,7 @@ Primary repo surfaces:
 - `crates/mandoforge-api/src/execution.rs`
 - `GET /api/native-connectors/production-readiness`
 - `scripts/native-connector-production-readiness-gate.sh`
+- `scripts/live-connector-production-semantics-gate.sh`
 - `scripts/verify-ecommerce-platform-closed-loop.sh`
 - `scripts/verify-ecommerce-tmall-context-os.sh`
 - `scripts/workflow-pack-evidence-gate.sh`
@@ -138,6 +183,14 @@ Required platform promotion:
 - Amazon Selling Partner API
 - Lark/Feishu MCP and native enterprise connectors
 
+Customer-grade completion must also archive per-connector production semantics
+evidence under `live-connector-production-semantics/<connector-id>/summary.json`
+for the promoted ecommerce connector family. The evidence must prove live/sandbox
+separation, token refresh/expiry/rotation, rate-limit/error taxonomy, idempotent
+writes with external reconciliation, webhook or polling provenance, compensation
+or explicit non-compensable policy, secret redaction, and immutable deployment
+archive metadata.
+
 ### ontology-engine
 
 The semantic layer must become a versioned ontology service with reviewable
@@ -148,6 +201,9 @@ Required evidence:
 - Core ontology objects and relations are versioned and queryable.
 - Domain ontologies are versioned per pack or domain and can be promoted,
   rolled back, and migrated.
+- Promoted ontology releases trigger matching downstream WorkflowRuns with
+  idempotent trigger evidence, workflow run readback, scheduler drain readback,
+  and durable audit logs.
 - Ontology relation constraints are enforced before policy decisions rely on
   semantic links.
 - Ontology Builder creates reviewable proposals and approved ontology changes
@@ -165,13 +221,15 @@ Primary repo surfaces:
 - `crates/mandoforge-api/src/store_context_packets.rs`
 - `GET /api/ontology/engine-readiness`
 - `scripts/ontology-engine-readiness-gate.sh`
+- `scripts/ontology-release-workflow-trigger-gate.sh`
 - `scripts/verify-ecommerce-tmall-context-os.sh`
 
 Current boundary:
 
 The repo is ontology-ready and has Context OS primitives. Enterprise completion
 requires a promoted ontology registry, domain ontology lifecycle, migration
-policy, and operator-facing release workflow.
+policy, operator-facing release workflow, and archived customer-grade evidence
+that ontology promotion drives the next WorkflowRun.
 
 ### workflowpack-enterprise-lifecycle
 
@@ -188,6 +246,8 @@ Required evidence:
   readiness, approval policy, and rollback readiness.
 - Pack updates preserve compatibility and migration evidence.
 - Released packs can be canaried, rolled back, and compared across versions.
+- Managed workflow runtime evidence proves scheduler retry, fan-in completion,
+  durable transitions, and expired step lease reclaim.
 
 Primary repo surfaces:
 
@@ -218,10 +278,18 @@ Primary repo surfaces:
 
 - `GET /api/enterprise-security/admin-readiness`
 - `scripts/enterprise-security-admin-readiness-gate.sh`
+- `scripts/enterprise-security-production-controls-gate.sh`
 - `scripts/tenant-isolation-evidence-gate.sh`
 - `scripts/vault-evidence-gate.sh`
 - `scripts/approval-notification-evidence-gate.sh`
 - `scripts/stage2-production-evidence-preflight.sh`
+
+Customer-grade completion must archive production controls evidence at
+`enterprise-security-production-controls/summary.json`. The evidence must prove
+SSO/OIDC or SAML plus SCIM, tenant RLS and ABAC, production KMS rotation and
+recovery, delegated approval and break-glass audit, SIEM delivery with tenant,
+session, and tool-call correlation, retention/legal-hold/export/delete/PII/DLP
+drills, and rehearsed incident operations with immutable evidence archives.
 
 ### observability-ops
 
@@ -242,9 +310,18 @@ Required evidence:
 Primary repo surfaces:
 
 - `scripts/observability-collector-evidence-gate.sh`
+- `scripts/observability-ops-production-gate.sh`
 - `scripts/finance-evidence-gate.sh`
 - `scripts/stage2-production-evidence-gate.sh`
 - `docs/deployment-guide.md`
+
+Customer-grade completion must archive operations evidence at
+`observability-ops-production/summary.json`. The evidence must prove correlation
+across metrics, traces, logs, audit trails, and cost data; alert delivery for
+failed jobs, stale leases, delivery failures, connector/provider degradation,
+budget breach, and queue backlog; deployment/migration/pack/ontology/connector
+version visibility; incident timeline audit; manual repair audit and replay;
+SLO coverage; rehearsed runbooks; and immutable incident evidence archives.
 
 ### product-surfaces
 
@@ -263,12 +340,16 @@ Required evidence:
   incident evidence.
 - UI truth gates prove these surfaces read live APIs and do not present fake
   completion state.
+- Customer-grade completion archives `product-surfaces/summary.json` proving
+  live API readback, authorization boundaries, no fake completion state, and
+  immutable evidence archives for Admin, Operator, Builder, and Ops consoles.
 
 Primary repo surfaces:
 
 - `scripts/verify-static-ui-assets.sh`
 - `scripts/verify-ui-api-truth-gate.mjs`
 - `scripts/verify-static-ui-actionbook.sh`
+- `scripts/product-surfaces-production-gate.sh`
 - `GET /api/enterprise-product/readiness`
 - `scripts/managed-workflow-runtime-evidence-gate.sh`
 

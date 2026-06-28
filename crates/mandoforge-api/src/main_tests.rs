@@ -2098,7 +2098,7 @@ Stage 2 is not complete.
     assert_eq!(gaps[1], "Second controller-backed blocker.");
 
     let readiness = build_stage2_completion_readiness();
-    assert_eq!(readiness.evidence_requirements.len(), 14);
+    assert_eq!(readiness.evidence_requirements.len(), 19);
     assert_eq!(readiness.evidence_requirements[0].id, "tenant-routing");
     assert!(
         readiness.evidence_requirements[0]
@@ -2213,12 +2213,124 @@ Stage 2 is not complete.
             .contains(&"finance-export-delivery-observer.json".to_string())
     );
 
+    let product_surfaces = readiness
+        .evidence_requirements
+        .iter()
+        .find(|requirement| requirement.id == "product-surfaces")
+        .expect("missing product surfaces evidence requirement");
+    assert!(
+        product_surfaces
+            .evidence_scripts
+            .contains(&"./scripts/product-surfaces-production-gate.sh".to_string())
+    );
+    assert!(product_surfaces.evidence_job_manifests.contains(
+        &"deploy/stage2-evidence/product-surfaces-production-job.example.yaml".to_string()
+    ));
+    assert!(
+        product_surfaces
+            .required_artifacts
+            .contains(&"product-surfaces/summary.json".to_string())
+    );
+    assert!(
+        product_surfaces
+            .validation_endpoints
+            .contains(&"./scripts/product-surfaces-production-gate.sh".to_string())
+    );
+
+    let enterprise_security_controls = readiness
+        .evidence_requirements
+        .iter()
+        .find(|requirement| requirement.id == "enterprise-security-production-controls")
+        .expect("missing enterprise security production controls evidence requirement");
+    assert!(
+        enterprise_security_controls
+            .evidence_scripts
+            .contains(&"./scripts/enterprise-security-production-controls-gate.sh".to_string())
+    );
+    assert!(
+        enterprise_security_controls
+            .required_artifacts
+            .contains(&"enterprise-security-production-controls/summary.json".to_string())
+    );
+
+    let observability_ops = readiness
+        .evidence_requirements
+        .iter()
+        .find(|requirement| requirement.id == "observability-ops-production")
+        .expect("missing observability ops production evidence requirement");
+    assert!(
+        observability_ops
+            .evidence_scripts
+            .contains(&"./scripts/observability-ops-production-gate.sh".to_string())
+    );
+    assert!(
+        observability_ops
+            .required_artifacts
+            .contains(&"observability-ops-production/summary.json".to_string())
+    );
+
+    let live_connector_semantics = readiness
+        .evidence_requirements
+        .iter()
+        .find(|requirement| requirement.id == "live-connector-production-semantics")
+        .expect("missing live connector production semantics evidence requirement");
+    assert!(
+        live_connector_semantics
+            .evidence_scripts
+            .contains(&"./scripts/live-connector-production-semantics-gate.sh".to_string())
+    );
+    assert!(
+        live_connector_semantics
+            .required_artifacts
+            .contains(&"live-connector-production-semantics/tmall-top/summary.json".to_string())
+    );
+    assert!(live_connector_semantics.required_artifacts.contains(
+        &"live-connector-production-semantics/amazon-selling-partner-api/summary.json".to_string()
+    ));
+
+    let runtime_recovery = readiness
+        .evidence_requirements
+        .iter()
+        .find(|requirement| requirement.id == "runtime-production-recovery")
+        .expect("missing runtime production recovery evidence requirement");
+    assert!(
+        runtime_recovery
+            .evidence_scripts
+            .contains(&"./scripts/runtime-production-readiness-gate.sh".to_string())
+    );
+    assert!(
+        runtime_recovery
+            .required_artifacts
+            .contains(&"runtime-production-recovery-evidence.json".to_string())
+    );
+
+    let worker_remote_computer = readiness
+        .evidence_requirements
+        .iter()
+        .find(|requirement| requirement.id == "worker-remote-computer")
+        .expect("missing worker/Remote Computer evidence requirement");
+    assert!(
+        worker_remote_computer
+            .evidence_scripts
+            .contains(&"./scripts/remote-computer-production-state-gate.sh".to_string())
+    );
+    assert!(
+        worker_remote_computer
+            .required_artifacts
+            .contains(&"remote-computer-session-pod-lifecycle-evidence.json".to_string())
+    );
+
     for optional_enterprise_id in [
         "tenant-routing",
         "policy-rollout",
         "vault-kms",
         "worker-remote-computer",
         "finance-close",
+        "product-surfaces",
+        "enterprise-security-production-controls",
+        "observability-ops-production",
+        "live-connector-production-semantics",
+        "runtime-production-recovery",
     ] {
         let requirement = readiness
             .evidence_requirements
@@ -2274,6 +2386,34 @@ Stage 2 is not complete.
         );
     }
 
+    let provider_rollout = readiness
+        .evidence_requirements
+        .iter()
+        .find(|requirement| requirement.id == "provider-rollout")
+        .expect("missing provider rollout evidence requirement");
+    assert!(
+        provider_rollout
+            .required_artifacts
+            .contains(&"provider-production-rollout-evidence.json".to_string())
+    );
+    assert!(
+        provider_rollout
+            .required_artifacts
+            .contains(&"provider-production-rollback-evidence.json".to_string())
+    );
+    let root = repo_root();
+    let completion_audit = read_repo_file(&root, "scripts/stage2-completion-audit-gate.sh");
+    assert!(
+        completion_audit.contains("provider rollout status")
+            && completion_audit.contains("provider rollback status"),
+        "completion audit must semantically validate provider rollout and rollback evidence"
+    );
+    assert!(
+        read_repo_file(&root, "scripts/verify-stage2-evidence-archive.sh")
+            .contains("provider-production-rollback-evidence.json)"),
+        "archive verifier must semantically validate provider rollback evidence"
+    );
+
     let managed_session = readiness
         .evidence_requirements
         .iter()
@@ -2293,10 +2433,10 @@ fn enterprise_product_readiness_reports_customer_grade_blockers() {
     assert!(readiness.contract_present);
     assert!(readiness.completion_blocked);
     assert_eq!(readiness.required_evidence_class, "customer_grade");
-    assert_eq!(readiness.lane_count, 8);
+    assert_eq!(readiness.lane_count, 9);
     assert_eq!(readiness.ready_lane_count, 0);
     assert_eq!(readiness.pilot_ready_lane_count, 2);
-    assert_eq!(readiness.blocked_lane_count, 6);
+    assert_eq!(readiness.blocked_lane_count, 7);
     assert!(
         readiness
             .next_actions
@@ -2316,6 +2456,42 @@ fn enterprise_product_readiness_reports_customer_grade_blockers() {
             .readiness_endpoints
             .contains(&"/api/stage2/readiness".to_string())
     );
+    assert!(
+        runtime
+            .evidence_scripts
+            .contains(&"./scripts/runtime-production-readiness-gate.sh".to_string())
+    );
+
+    let deployment_safety = readiness
+        .lanes
+        .iter()
+        .find(|lane| lane.id == "production-deployment-safety")
+        .expect("production deployment safety lane");
+    assert_eq!(deployment_safety.status, "blocked");
+    assert_eq!(deployment_safety.current_evidence_class, "repo_controlled");
+    assert!(
+        deployment_safety
+            .evidence_scripts
+            .contains(&"./scripts/production-launch-preflight.sh".to_string())
+    );
+    assert!(
+        deployment_safety
+            .required_evidence
+            .iter()
+            .any(|evidence| evidence.contains("secret-delivery-contract.yaml"))
+    );
+    assert!(
+        deployment_safety
+            .next_actions
+            .iter()
+            .any(|action| action.contains("customer-grade secret-manager"))
+    );
+    assert!(
+        deployment_safety
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("external secret delivery evidence"))
+    );
 
     let remote_computer = readiness
         .lanes
@@ -2327,7 +2503,12 @@ fn enterprise_product_readiness_reports_customer_grade_blockers() {
         remote_computer
             .blockers
             .iter()
-            .any(|blocker| blocker.contains("single-node local-hostpath"))
+            .any(|blocker| blocker.contains("production state gate"))
+    );
+    assert!(
+        remote_computer
+            .evidence_scripts
+            .contains(&"./scripts/remote-computer-production-state-gate.sh".to_string())
     );
 
     let live_connectors = readiness
@@ -2341,6 +2522,11 @@ fn enterprise_product_readiness_reports_customer_grade_blockers() {
             .evidence_scripts
             .contains(&"./scripts/verify-ecommerce-tmall-context-os.sh".to_string())
     );
+    assert!(
+        live_connectors
+            .evidence_scripts
+            .contains(&"./scripts/live-connector-production-semantics-gate.sh".to_string())
+    );
 
     let ontology = readiness
         .lanes
@@ -2353,6 +2539,23 @@ fn enterprise_product_readiness_reports_customer_grade_blockers() {
             .current_boundary
             .contains("ontology-ready is not a full ontology engine")
     );
+    assert!(
+        ontology
+            .evidence_scripts
+            .contains(&"./scripts/ontology-release-workflow-trigger-gate.sh".to_string())
+    );
+    assert!(
+        ontology
+            .required_evidence
+            .iter()
+            .any(|evidence| { evidence.contains("trigger matching workflow runs") })
+    );
+    assert!(
+        ontology
+            .blockers
+            .iter()
+            .any(|blocker| { blocker.contains("workflow trigger gate") })
+    );
 
     let product_surfaces = readiness
         .lanes
@@ -2364,6 +2567,41 @@ fn enterprise_product_readiness_reports_customer_grade_blockers() {
         product_surfaces
             .readiness_endpoints
             .contains(&"/api/enterprise-product/readiness".to_string())
+    );
+    assert!(
+        product_surfaces
+            .evidence_scripts
+            .contains(&"./scripts/product-surfaces-production-gate.sh".to_string())
+    );
+    assert!(
+        product_surfaces
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("product surfaces production gate"))
+    );
+
+    let enterprise_security = readiness
+        .lanes
+        .iter()
+        .find(|lane| lane.id == "enterprise-security-admin")
+        .expect("enterprise security lane");
+    assert_eq!(enterprise_security.status, "blocked");
+    assert!(
+        enterprise_security
+            .evidence_scripts
+            .contains(&"./scripts/enterprise-security-production-controls-gate.sh".to_string())
+    );
+
+    let observability_ops = readiness
+        .lanes
+        .iter()
+        .find(|lane| lane.id == "observability-ops")
+        .expect("observability ops lane");
+    assert_eq!(observability_ops.status, "blocked");
+    assert!(
+        observability_ops
+            .evidence_scripts
+            .contains(&"./scripts/observability-ops-production-gate.sh".to_string())
     );
 }
 
@@ -3304,7 +3542,7 @@ async fn reads_agent_versions_for_agent() {
                 "name": "Versioned Agent",
                 "kind": "orchestrator",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "system_prompt": "Keep a version record.",
                 "tools": ["file.read", "sql.query"]
                 })
@@ -3355,7 +3593,7 @@ async fn sessions_bind_agent_version_and_enforce_tool_allowlist() {
                 "name": "Read Only Agent",
                 "kind": "orchestrator",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "system_prompt": "Read only.",
                 "tools": ["file.read"]
                 })
@@ -3450,7 +3688,7 @@ async fn agent_handoff_events_require_allowlist_approval_and_payload_schema() {
                 "name": "Governance Analyzer",
                 "kind": "analyzer",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "system_prompt": "Assess AI governance evidence."
             }),
             &[("x-mandoforge-roles", "admin")],
@@ -3466,7 +3704,7 @@ async fn agent_handoff_events_require_allowlist_approval_and_payload_schema() {
                 "name": "Governance Orchestrator",
                 "kind": "orchestrator",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "system_prompt": "Route governance work.",
                 "runtime_config": {
                     "handoffs": {
@@ -3620,7 +3858,7 @@ async fn agent_handoff_accept_complete_and_reject_fail_paths_are_audited() {
                 "name": "Writer Worker",
                 "kind": "writer",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "system_prompt": "Write governed output."
             }),
             &[("x-mandoforge-roles", "admin")],
@@ -3636,7 +3874,7 @@ async fn agent_handoff_accept_complete_and_reject_fail_paths_are_audited() {
                 "name": "Analyzer Worker",
                 "kind": "analyzer",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "system_prompt": "Analyze then hand off.",
                 "runtime_config": {
                     "handoffs": {
@@ -3806,7 +4044,7 @@ async fn agent_handoff_escalation_records_review_status_event_and_audit() {
                 "kind": "specialist",
                 "agent_role": "specialist",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini"
+                "model": "gpt-5.5-mini"
             }),
             &[("x-mandoforge-roles", "admin")],
         ),
@@ -3822,7 +4060,7 @@ async fn agent_handoff_escalation_records_review_status_event_and_audit() {
                 "kind": "manager",
                 "agent_role": "manager",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "runtime_config": {
                     "handoffs": {
                         "allowed_targets": [{
@@ -3922,7 +4160,7 @@ async fn agent_handoff_blocks_unallowlisted_target_or_intent() {
             json!({
                 "name": "Unlisted Target",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini"
+                "model": "gpt-5.5-mini"
             }),
             &[("x-mandoforge-roles", "admin")],
         ),
@@ -3936,7 +4174,7 @@ async fn agent_handoff_blocks_unallowlisted_target_or_intent() {
             json!({
                 "name": "No Handoff Source",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini"
+                "model": "gpt-5.5-mini"
             }),
             &[("x-mandoforge-roles", "admin")],
         ),
@@ -3986,7 +4224,7 @@ async fn manager_agent_plans_record_planning_and_review_events() {
                 "kind": "specialist",
                 "agent_role": "specialist",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "tools": ["agent_cli.exec", "file.read"],
                 "semantic_scopes": {
                     "project_scope": "mandoforge",
@@ -4011,7 +4249,7 @@ async fn manager_agent_plans_record_planning_and_review_events() {
                 "kind": "manager",
                 "agent_role": "manager",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "tools": ["approval.request"],
                 "semantic_scopes": {
                     "project_scope": "mandoforge",
@@ -4196,7 +4434,7 @@ async fn manager_agent_plan_binds_work_item_without_starting_runtime_execution()
                 "kind": "specialist",
                 "agent_role": "specialist",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "tools": ["agent_cli.exec"]
             }),
             &admin_headers,
@@ -4213,7 +4451,7 @@ async fn manager_agent_plan_binds_work_item_without_starting_runtime_execution()
                 "kind": "manager",
                 "agent_role": "manager",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "tools": ["approval.request"]
             }),
             &admin_headers,
@@ -4390,7 +4628,7 @@ async fn manager_agent_plan_requires_manager_session_and_specialist_target() {
                 "kind": "specialist",
                 "agent_role": "specialist",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini"
+                "model": "gpt-5.5-mini"
             }),
             &[("x-mandoforge-roles", "admin")],
         ),
@@ -4406,7 +4644,7 @@ async fn manager_agent_plan_requires_manager_session_and_specialist_target() {
                 "kind": "manager",
                 "agent_role": "manager",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini"
+                "model": "gpt-5.5-mini"
             }),
             &[("x-mandoforge-roles", "admin")],
         ),
@@ -4504,7 +4742,7 @@ async fn agent_handoff_records_manager_assignment_context() {
                 "agent_role": "specialist",
                 "runtime_profile_id": runtime_profile.id,
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "tools": ["agent_cli.exec", "file.read"],
                 "remote_computer_profile": {"required": true, "profile": "whiskey-k3s"},
                 "semantic_scopes": {
@@ -4530,7 +4768,7 @@ async fn agent_handoff_records_manager_assignment_context() {
                 "kind": "manager",
                 "agent_role": "manager",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "runtime_config": {
                     "handoffs": {
                         "allowed_targets": [{
@@ -4695,7 +4933,7 @@ async fn manager_handoff_assignment_creates_specialist_execution_entry() {
                 "agent_role": "specialist",
                 "runtime_profile_id": runtime_profile.id,
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "tools": ["agent_cli.exec", "file.read"],
                 "remote_computer_profile": {"required": true, "profile": "whiskey-k3s"},
                 "semantic_scopes": {
@@ -4721,7 +4959,7 @@ async fn manager_handoff_assignment_creates_specialist_execution_entry() {
                 "kind": "manager",
                 "agent_role": "manager",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "runtime_config": {
                     "handoffs": {
                         "allowed_targets": [{
@@ -5056,7 +5294,7 @@ async fn backend_coder_demo_proves_managed_agent_os_flow() {
                 "agent_role": "specialist",
                 "runtime_profile_id": runtime_profile.id,
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "system_prompt": "Implement backend tasks through the governed Agent OS runtime.",
                 "tools": ["agent_cli.exec", "artifact.create", "file.read"],
                 "tool_policy": {
@@ -5090,7 +5328,7 @@ async fn backend_coder_demo_proves_managed_agent_os_flow() {
                 "kind": "manager",
                 "agent_role": "manager",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "tools": ["approval.request"],
                 "runtime_config": {
                     "handoffs": {
@@ -6735,7 +6973,7 @@ async fn semantic_workbench_resolves_conflicts_expands_ontology_and_queues_dream
                 "kind": "manager",
                 "agent_role": "manager",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "semantic_scopes": {
                     "domain_scope": "legal",
                     "workflow_scope": "contract-review",
@@ -6962,7 +7200,7 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
                 "kind": "manager",
                 "agent_role": "manager",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "tools": ["approval.request"],
                 "skill_ids": ["manager-planning"],
                 "workflow_pack_ids": ["legal-pack"],
@@ -6986,7 +7224,7 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
                 "kind": "specialist",
                 "agent_role": "specialist",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "tools": ["file.read", "artifact.create"],
                 "skill_ids": ["legal-research"],
                 "workflow_pack_ids": ["legal-pack"],
@@ -7403,7 +7641,7 @@ async fn semantic_synthesis_run_creates_reflection_artifact_and_review_candidate
                 "kind": "manager",
                 "agent_role": "manager",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "tools": ["artifact.create"],
                 "semantic_scopes": {
                     "domain_scope": "platform",
@@ -12633,7 +12871,7 @@ async fn workflow_handoff_assignment_materializes_step_and_child_grant() {
                 "kind": "specialist",
                 "agent_role": "specialist",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "tools": ["file.read", "agent_cli.exec"],
                 "semantic_scopes": {
                     "domain_scope": "legal",
@@ -12654,7 +12892,7 @@ async fn workflow_handoff_assignment_materializes_step_and_child_grant() {
                 "kind": "manager",
                 "agent_role": "manager",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "runtime_config": {
                     "handoffs": {
                         "allowed_targets": [{
@@ -13474,7 +13712,7 @@ async fn workflow_context_packet_applies_task_grant_memory_scope() {
                 "kind": "orchestrator",
                 "agent_role": "manager",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "tools": [
                     "file.read",
                     "semantic_object.fetch",
@@ -13640,7 +13878,7 @@ async fn workflow_context_packet_applies_memory_scope_trust_threshold() {
                 "kind": "orchestrator",
                 "agent_role": "manager",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "tools": ["file.read"],
                 "semantic_scopes": semantic_scopes,
                 "release_state": "active"
@@ -15571,7 +15809,7 @@ async fn archived_provider_is_audited_and_fails_closed_for_new_scoped_agents() {
                 json!({
                     "provider_type": "mock",
                     "name": "archive-lifecycle-mock",
-                    "default_model": "gpt-5.4-mini",
+                    "default_model": "gpt-5.5-mini",
                     "config": {}
                 })
                 .to_string(),
@@ -15590,7 +15828,7 @@ async fn archived_provider_is_audited_and_fails_closed_for_new_scoped_agents() {
             .body(Body::from(
                 json!({
                     "provider_name": "archive-lifecycle-mock",
-                    "model_allowlist": ["gpt-5.4-mini"]
+                    "model_allowlist": ["gpt-5.5-mini"]
                 })
                 .to_string(),
             ))
@@ -15651,7 +15889,7 @@ async fn archived_provider_is_audited_and_fails_closed_for_new_scoped_agents() {
                     "kind": "orchestrator",
                     "team_id": team.id,
                     "provider": "archive-lifecycle-mock",
-                    "model": "gpt-5.4-mini",
+                    "model": "gpt-5.5-mini",
                     "tools": ["file.read", "file.write"]
                 })
                 .to_string(),
@@ -15702,7 +15940,7 @@ async fn provider_status_approval_requires_separate_approver_and_audits_decision
                     "name": "approval-governed-provider",
                     "provider_type": "openai_compatible",
                     "base_url": "https://example.invalid/v1",
-                    "default_model": "gpt-5.4-mini",
+                    "default_model": "gpt-5.5-mini",
                     "config": {"api_key_env": "OPENAI_API_KEY"}
                 })
                 .to_string(),
@@ -15858,7 +16096,7 @@ async fn provider_summary_aggregates_governance_signals() {
                 json!({
                     "provider_type": "mock",
                     "name": "summary-budgeted-mock",
-                    "default_model": "gpt-5.4-mini",
+                    "default_model": "gpt-5.5-mini",
                     "config": {"budget": {"daily_request_limit": 5}}
                 })
                 .to_string(),
@@ -15879,7 +16117,7 @@ async fn provider_summary_aggregates_governance_signals() {
                     "provider_type": "mock",
                     "name": "summary-budgeted-mock",
                     "base_url": "http://mock-provider.local/v1",
-                    "default_model": "gpt-5.4-mini",
+                    "default_model": "gpt-5.5-mini",
                     "config": {"budget": {"daily_request_limit": 8}}
                 })
                 .to_string(),
@@ -15901,7 +16139,7 @@ async fn provider_summary_aggregates_governance_signals() {
                 json!({
                     "provider_type": "openai_compatible",
                     "name": "summary-misconfigured-openai",
-                    "default_model": "gpt-5.4-mini",
+                    "default_model": "gpt-5.5-mini",
                     "config": {}
                 })
                 .to_string(),
@@ -16194,7 +16432,7 @@ async fn provider_production_rollout_requires_fresh_passing_gate() {
                 json!({
                     "provider_type": "mock",
                     "name": "production-rollout-mock",
-                    "default_model": "gpt-5.4-mini",
+                    "default_model": "gpt-5.5-mini",
                     "config": {"budget": {"daily_request_limit": 10}}
                 })
                 .to_string(),
@@ -16284,7 +16522,7 @@ async fn provider_production_rollout_requires_fresh_passing_gate() {
                 json!({
                     "provider_type": "mock",
                     "name": "post-gate-provider",
-                    "default_model": "gpt-5.4-mini",
+                    "default_model": "gpt-5.5-mini",
                     "config": {"budget": {"daily_request_limit": 10}}
                 })
                 .to_string(),
@@ -17746,6 +17984,15 @@ async fn test_app_with_codex_app_server(codex_client: Arc<dyn CodexAppServerClie
 }
 
 fn test_state_with_worker(execution_worker: Arc<dyn ExecutionWorker>) -> AppState {
+    // Tests that need insecure dev auth explicitly opt in via the environment variable
+    // rather than relying on cfg!(test) in the auth layer (which is a security risk if
+    // test binaries are exposed). Tests that need auth OFF reset this via EnvVarGuard
+    // before calling this function, so we only set it when it is not already configured.
+    if std::env::var("MANDOFORGE_INSECURE_DEV_AUTH").is_err() {
+        unsafe {
+            std::env::set_var("MANDOFORGE_INSECURE_DEV_AUTH", "1");
+        }
+    }
     AppState {
         store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
         execution_queue: ExecutionQueue::default(),
@@ -18533,7 +18780,7 @@ async fn mock_provider_models(headers: HeaderMap) -> Json<Value> {
             .and_then(|value| value.to_str().ok())
             .is_some_and(|value| value.starts_with("Bearer "))
     );
-    Json(json!({"data": [{"id": "gpt-5.4-mini"}]}))
+    Json(json!({"data": [{"id": "gpt-5.5-mini"}]}))
 }
 
 async fn mock_mcp_deployment_controller(
@@ -18921,7 +19168,7 @@ async fn provider_health_resolves_vault_api_key_ref_for_external_probe() {
         provider_type: "openai-compatible".to_string(),
         name: "vault-probed-openai-compatible".to_string(),
         base_url: Some(format!("http://{provider_addr}")),
-        default_model: Some("gpt-5.4-mini".to_string()),
+        default_model: Some("gpt-5.5-mini".to_string()),
         config: json!({"api_key_ref": "vault:providers/openai#api_key"}),
         status: "active".to_string(),
         created_at: Utc::now(),
@@ -19012,7 +19259,7 @@ async fn vault_readiness_reports_secret_consumers_and_kms_gate() {
                     "provider_type": "openai_compatible",
                     "name": "ready-openai",
                     "base_url": "https://provider.example.invalid",
-                    "default_model": "gpt-5.4-mini",
+                    "default_model": "gpt-5.5-mini",
                     "config": {"api_key_ref": "vault:providers/openai#api_key"}
                 })
                 .to_string(),
@@ -20958,7 +21205,7 @@ async fn managed_agent_runtime_profile_can_drive_agent_cli_worker() {
                 "kind": "specialist",
                 "agent_role": "specialist",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "runtime_profile_id": profile.id,
                 "tools": ["agent_cli.exec"]
             }),
@@ -21116,7 +21363,7 @@ async fn managed_cli_runtime_profile_can_drive_agent_cli_worker() {
                 "kind": "specialist",
                 "agent_role": "specialist",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "runtime_profile_id": profile.id,
                 "tools": ["agent_cli.exec"]
             }),
@@ -21349,7 +21596,7 @@ async fn managed_codex_cli_runtime_profile_ingests_jsonl_into_session_events() {
                 "kind": "specialist",
                 "agent_role": "specialist",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "runtime_profile_id": profile.id,
                 "tools": ["agent_cli.exec"]
             }),
@@ -21603,7 +21850,7 @@ async fn managed_agent_runtime_profile_lifecycle_is_audited_and_fail_closed() {
                 "kind": "specialist",
                 "agent_role": "specialist",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "runtime_profile_id": profile.id,
                 "tools": ["agent_cli.exec"]
             }),
@@ -22038,7 +22285,7 @@ async fn environment_runtime_profile_is_canonical_for_agent_cli_exec() {
                 "kind": "specialist",
                 "agent_role": "specialist",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "runtime_profile_id": agent_profile.id,
                 "tools": ["agent_cli.exec"]
             }),
@@ -22539,7 +22786,7 @@ async fn managed_agent_registry_persists_runtime_profile_and_semantic_scope() {
                 "agent_role": "specialist",
                 "runtime_profile_id": runtime_profile.id,
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "system_prompt": "Implement backend tasks through governed runtime profiles.",
                 "tools": ["agent_cli.exec", "file.read", "file.write"],
                 "tool_policy": {"risk": "approval_required"},
@@ -22624,7 +22871,7 @@ async fn context_packet_includes_managed_agent_scope_runtime_and_policy() {
                 "agent_role": "specialist",
                 "runtime_profile_id": runtime_profile.id,
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "system_prompt": "Implement backend work with governed context.",
                 "tools": [
                     "agent_cli.exec",
@@ -22777,7 +23024,7 @@ async fn rendered_context_pins_active_ontology_release_by_domain_scope() {
                 "kind": "specialist",
                 "agent_role": "specialist",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "system_prompt": "Use the pinned ontology release.",
                 "tools": [
                     "semantic_object.fetch",
@@ -23022,7 +23269,7 @@ async fn context_packets_are_versioned_persisted_and_include_semantic_objects() 
                 "kind": "specialist",
                 "agent_role": "specialist",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "system_prompt": "Use durable Context OS packets.",
                 "tools": [
                     "file.read",
@@ -23481,7 +23728,7 @@ async fn work_item_semantic_projection_feeds_context_packets() {
                 "kind": "specialist",
                 "agent_role": "specialist",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "tools": ["file.read"],
                 "tool_policy": {"read_only": true},
                 "workflow_pack_ids": ["coding-pack"],
@@ -23655,7 +23902,7 @@ async fn work_item_semantic_projection_does_not_leak_across_partial_scope_match(
                 "kind": "specialist",
                 "agent_role": "specialist",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "tools": ["file.read"],
                 "tool_policy": {"read_only": true},
                 "workflow_pack_ids": ["coding-pack"],
@@ -23769,7 +24016,7 @@ async fn memory_writeback_candidates_require_review_before_durable_memory() {
                 "kind": "specialist",
                 "agent_role": "specialist",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "tools": ["file.write", "artifact.create", "approval.request"],
                 "semantic_scopes": {
                     "project_scope": "mandoforge",
@@ -23798,7 +24045,7 @@ async fn memory_writeback_candidates_require_review_before_durable_memory() {
                 "kind": "manager",
                 "agent_role": "manager",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "tools": ["artifact.create", "file.write"],
                 "tool_policy": {
                     "allowed_tools": ["artifact.create", "file.write"],
@@ -24349,7 +24596,7 @@ async fn cost_alert_delivery_posts_budget_alerts_to_webhook() {
                 json!({
                     "provider_type": "mock",
                     "name": "alert-mock",
-                    "default_model": "gpt-5.4-mini",
+                    "default_model": "gpt-5.5-mini",
                     "config": {
                         "budget": {"daily_request_limit": 1},
                         "pricing": {"per_request_cents": 1.0}
@@ -24373,7 +24620,7 @@ async fn cost_alert_delivery_posts_budget_alerts_to_webhook() {
                     "name": "alert agent",
                     "kind": "orchestrator",
                     "provider": "alert-mock",
-                    "model": "gpt-5.4-mini",
+                    "model": "gpt-5.5-mini",
                     "tools": ["file.read", "sql.get_schema", "sql.query", "shell.exec"]
                 })
                 .to_string(),
@@ -24813,7 +25060,7 @@ async fn mcp_call_executes_through_tool_router_and_gateway_policy() {
             team.id,
             CreateProviderAccess {
                 provider_name: "openai-compatible".to_string(),
-                model_allowlist: vec!["gpt-5.4-mini".to_string()],
+                model_allowlist: vec!["gpt-5.5-mini".to_string()],
             },
         )
         .await
@@ -24835,7 +25082,7 @@ async fn mcp_call_executes_through_tool_router_and_gateway_policy() {
             name: "MCP Scoped Agent".to_string(),
             kind: "orchestrator".to_string(),
             provider: "openai-compatible".to_string(),
-            model: "gpt-5.4-mini".to_string(),
+            model: "gpt-5.5-mini".to_string(),
             team_id: Some(team.id),
             project_id: None,
             runtime_profile_id: None,
@@ -25627,7 +25874,7 @@ async fn mcp_commit_write_uses_approval_commit_token_exact_binding() {
             team.id,
             CreateProviderAccess {
                 provider_name: "openai-compatible".to_string(),
-                model_allowlist: vec!["gpt-5.4-mini".to_string()],
+                model_allowlist: vec!["gpt-5.5-mini".to_string()],
             },
         )
         .await
@@ -25649,7 +25896,7 @@ async fn mcp_commit_write_uses_approval_commit_token_exact_binding() {
             name: "Social Commit Agent".to_string(),
             kind: "orchestrator".to_string(),
             provider: "openai-compatible".to_string(),
-            model: "gpt-5.4-mini".to_string(),
+            model: "gpt-5.5-mini".to_string(),
             team_id: Some(team.id),
             project_id: None,
             runtime_profile_id: None,
@@ -26144,7 +26391,7 @@ async fn native_connector_commit_write_enforces_side_effect_scope_and_exact_bind
             team.id,
             CreateProviderAccess {
                 provider_name: "openai-compatible".to_string(),
-                model_allowlist: vec!["gpt-5.4-mini".to_string()],
+                model_allowlist: vec!["gpt-5.5-mini".to_string()],
             },
         )
         .await
@@ -26154,7 +26401,7 @@ async fn native_connector_commit_write_enforces_side_effect_scope_and_exact_bind
             name: "Native Connector Agent".to_string(),
             kind: "orchestrator".to_string(),
             provider: "openai-compatible".to_string(),
-            model: "gpt-5.4-mini".to_string(),
+            model: "gpt-5.5-mini".to_string(),
             team_id: Some(team.id),
             project_id: None,
             runtime_profile_id: None,
@@ -26495,7 +26742,7 @@ async fn ecommerce_native_connector_live_adapter_executes_after_approval_commit(
             team.id,
             CreateProviderAccess {
                 provider_name: "openai-compatible".to_string(),
-                model_allowlist: vec!["gpt-5.4-mini".to_string()],
+                model_allowlist: vec!["gpt-5.5-mini".to_string()],
             },
         )
         .await
@@ -26505,7 +26752,7 @@ async fn ecommerce_native_connector_live_adapter_executes_after_approval_commit(
             name: "Ecommerce Live Adapter Agent".to_string(),
             kind: "orchestrator".to_string(),
             provider: "openai-compatible".to_string(),
-            model: "gpt-5.4-mini".to_string(),
+            model: "gpt-5.5-mini".to_string(),
             team_id: Some(team.id),
             project_id: None,
             runtime_profile_id: None,
@@ -29163,7 +29410,7 @@ async fn high_risk_tools_fail_closed_on_stale_or_untrusted_semantic_context() {
                 "kind": "specialist",
                 "agent_role": "specialist",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "system_prompt": "Execute only with trusted semantic context.",
                 "tools": ["file.read", "shell.exec"],
                 "semantic_scopes": {
@@ -31016,7 +31263,7 @@ async fn task_board_agent_inbox_claim_binds_context_packet_and_grant() {
                 "kind": "specialist",
                 "agent_role": "specialist",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "tools": ["agent_cli.exec"],
                 "semantic_scopes": semantic_scopes,
                 "release_state": "active"
@@ -31260,7 +31507,7 @@ async fn workflow_step_run_endpoint_claims_and_executes_session_loop() {
                 "kind": "specialist",
                 "agent_role": "specialist",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "tools": [
                     "file.read",
                     "sql.get_schema",
@@ -31781,7 +32028,7 @@ async fn agent_teammates_and_squads_route_work_item_assignments() {
                 "kind": "specialist",
                 "agent_role": "specialist",
                 "provider": "openai-compatible",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.5-mini",
                 "tools": ["agent_cli.exec"]
             }),
             &admin_headers,
@@ -32151,7 +32398,7 @@ async fn admin_can_manage_stage2_governance_scope() {
                     "kind": "orchestrator",
                     "team_id": team.id,
                     "provider": "openai-compatible",
-                    "model": "gpt-5.4-mini",
+                    "model": "gpt-5.5-mini",
                     "tools": ["file.read", "file.write"]
                 })
                 .to_string(),
@@ -32178,7 +32425,7 @@ async fn admin_can_manage_stage2_governance_scope() {
             .body(Body::from(
                 json!({
                     "provider_name": "openai-compatible",
-                    "model_allowlist": ["gpt-5.4-mini"]
+                    "model_allowlist": ["gpt-5.5-mini"]
                 })
                 .to_string(),
             ))
@@ -32834,7 +33081,7 @@ async fn admin_can_manage_stage2_governance_scope() {
                 json!({
                     "provider_type": "mock",
                     "name": "governed-mock",
-                    "default_model": "gpt-5.4-mini",
+                    "default_model": "gpt-5.5-mini",
                     "config": {
                         "budget": {"daily_request_limit": 1},
                         "pricing": {
@@ -32862,7 +33109,7 @@ async fn admin_can_manage_stage2_governance_scope() {
             .body(Body::from(
                 json!({
                     "provider_name": "governed-mock",
-                    "model_allowlist": ["gpt-5.4-mini"]
+                    "model_allowlist": ["gpt-5.5-mini"]
                 })
                 .to_string(),
             ))
@@ -32883,7 +33130,7 @@ async fn admin_can_manage_stage2_governance_scope() {
                 json!({
                     "provider_type": "mock",
                     "name": "access-lifecycle-mock",
-                    "default_model": "gpt-5.4-mini",
+                    "default_model": "gpt-5.5-mini",
                     "config": {}
                 })
                 .to_string(),
@@ -32903,7 +33150,7 @@ async fn admin_can_manage_stage2_governance_scope() {
             .body(Body::from(
                 json!({
                     "provider_name": "access-lifecycle-mock",
-                    "model_allowlist": ["gpt-5.4-mini"]
+                    "model_allowlist": ["gpt-5.5-mini"]
                 })
                 .to_string(),
             ))
@@ -32922,7 +33169,7 @@ async fn admin_can_manage_stage2_governance_scope() {
             .body(Body::from(
                 json!({
                     "provider_name": "access-lifecycle-mock",
-                    "model_allowlist": ["gpt-5.4"]
+                    "model_allowlist": ["gpt-5.5"]
                 })
                 .to_string(),
             ))
@@ -32931,7 +33178,7 @@ async fn admin_can_manage_stage2_governance_scope() {
     .await;
     assert_eq!(
         updated_access_lifecycle.model_allowlist,
-        vec!["gpt-5.4".to_string()]
+        vec!["gpt-5.5".to_string()]
     );
     let (blocked_old_model_status, blocked_old_model_error) = request_value(
         app.clone(),
@@ -32947,7 +33194,7 @@ async fn admin_can_manage_stage2_governance_scope() {
                     "kind": "orchestrator",
                     "team_id": team.id,
                     "provider": "access-lifecycle-mock",
-                    "model": "gpt-5.4-mini",
+                    "model": "gpt-5.5-mini",
                     "tools": ["file.read", "file.write"]
                 })
                 .to_string(),
@@ -32976,7 +33223,7 @@ async fn admin_can_manage_stage2_governance_scope() {
                     "kind": "orchestrator",
                     "team_id": team.id,
                     "provider": "access-lifecycle-mock",
-                    "model": "gpt-5.4",
+                    "model": "gpt-5.5",
                     "tools": ["file.read"]
                 })
                 .to_string(),
@@ -32984,7 +33231,7 @@ async fn admin_can_manage_stage2_governance_scope() {
             .expect("valid request"),
     )
     .await;
-    assert_eq!(allowed_updated_model_agent.model, "gpt-5.4");
+    assert_eq!(allowed_updated_model_agent.model, "gpt-5.5");
     let archived_access_lifecycle: ProviderAccess = request_json(
         app.clone(),
         Request::builder()
@@ -33014,7 +33261,7 @@ async fn admin_can_manage_stage2_governance_scope() {
                     "kind": "orchestrator",
                     "team_id": team.id,
                     "provider": "access-lifecycle-mock",
-                    "model": "gpt-5.4",
+                    "model": "gpt-5.5",
                     "tools": ["file.read"]
                 })
                 .to_string(),
@@ -33042,7 +33289,7 @@ async fn admin_can_manage_stage2_governance_scope() {
                 json!({
                     "provider_type": "mock",
                     "name": "cost-limited-mock",
-                    "default_model": "gpt-5.4-mini",
+                    "default_model": "gpt-5.5-mini",
                     "config": {
                         "budget": {"daily_cost_limit_cents": 1.0},
                         "pricing": {"per_request_cents": 2.5}
@@ -33065,7 +33312,7 @@ async fn admin_can_manage_stage2_governance_scope() {
             .body(Body::from(
                 json!({
                     "provider_name": "cost-limited-mock",
-                    "model_allowlist": ["gpt-5.4-mini"]
+                    "model_allowlist": ["gpt-5.5-mini"]
                 })
                 .to_string(),
             ))
@@ -33102,7 +33349,7 @@ async fn admin_can_manage_stage2_governance_scope() {
                 json!({
                     "provider_type": "mock",
                     "name": "status-managed-mock",
-                    "default_model": "gpt-5.4-mini",
+                    "default_model": "gpt-5.5-mini",
                     "config": {}
                 })
                 .to_string(),
@@ -33136,7 +33383,7 @@ async fn admin_can_manage_stage2_governance_scope() {
             .body(Body::from(
                 json!({
                     "provider_name": "status-managed-mock",
-                    "model_allowlist": ["gpt-5.4-mini"]
+                    "model_allowlist": ["gpt-5.5-mini"]
                 })
                 .to_string(),
             ))
@@ -33159,7 +33406,7 @@ async fn admin_can_manage_stage2_governance_scope() {
                     "kind": "orchestrator",
                     "team_id": team.id,
                     "provider": "status-managed-mock",
-                    "model": "gpt-5.4-mini",
+                    "model": "gpt-5.5-mini",
                     "tools": ["file.read", "sql.get_schema", "sql.query", "shell.exec"]
                 })
                 .to_string(),
@@ -33258,7 +33505,7 @@ async fn admin_can_manage_stage2_governance_scope() {
                 json!({
                     "provider_type": "openai-compatible",
                     "name": "misconfigured-openai-compatible",
-                    "default_model": "gpt-5.4-mini",
+                    "default_model": "gpt-5.5-mini",
                     "config": {}
                 })
                 .to_string(),
@@ -33316,7 +33563,7 @@ async fn admin_can_manage_stage2_governance_scope() {
                     "provider_type": "openai-compatible",
                     "name": "probed-openai-compatible",
                     "base_url": format!("http://{addr}"),
-                    "default_model": "gpt-5.4-mini",
+                    "default_model": "gpt-5.5-mini",
                     "config": {"api_key_env": "PATH"}
                 })
                 .to_string(),
@@ -33351,7 +33598,7 @@ async fn admin_can_manage_stage2_governance_scope() {
                     "provider_type": "openai-compatible",
                     "name": "rotated-key-ref-openai-compatible",
                     "base_url": format!("http://{addr}"),
-                    "default_model": "gpt-5.4-mini",
+                    "default_model": "gpt-5.5-mini",
                     "config": {
                         "api_key_ref": "vault:providers/openai#api_key",
                         "api_key_env": "PATH"
@@ -33405,7 +33652,7 @@ async fn admin_can_manage_stage2_governance_scope() {
             && log.details["provider_name"] == "access-lifecycle-mock"
             && log.details["model_allowlist"]
                 .as_array()
-                .is_some_and(|models| models.iter().any(|model| model == "gpt-5.4"))
+                .is_some_and(|models| models.iter().any(|model| model == "gpt-5.5"))
     }));
     assert!(audit_logs.iter().any(|log| {
         log.action == "provider_access.archived"
@@ -33468,7 +33715,7 @@ async fn admin_can_manage_stage2_governance_scope() {
                     "kind": "orchestrator",
                     "team_id": team.id,
                     "provider": "cost-limited-mock",
-                    "model": "gpt-5.4-mini",
+                    "model": "gpt-5.5-mini",
                     "tools": ["file.read"]
                 })
                 .to_string(),
@@ -33531,7 +33778,7 @@ async fn admin_can_manage_stage2_governance_scope() {
                     "team_id": team.id,
                     "project_id": project.id,
                     "provider": "governed-mock",
-                    "model": "gpt-5.4-mini",
+                    "model": "gpt-5.5-mini",
                     "tools": ["file.read", "sql.get_schema", "sql.query", "shell.exec"]
                 })
                 .to_string(),
@@ -33863,7 +34110,7 @@ async fn admin_can_manage_stage2_governance_scope() {
                     "team_id": team.id,
                     "project_id": project.id,
                     "provider": "openai-compatible",
-                    "model": "gpt-5.4-mini",
+                    "model": "gpt-5.5-mini",
                     "tools": ["file.read", "file.write"]
                 })
                 .to_string(),
@@ -33889,7 +34136,7 @@ async fn admin_can_manage_stage2_governance_scope() {
                     "team_id": team.id,
                     "project_id": sibling_project.id,
                     "provider": "openai-compatible",
-                    "model": "gpt-5.4-mini",
+                    "model": "gpt-5.5-mini",
                     "tools": ["file.read", "file.write"]
                 })
                 .to_string(),

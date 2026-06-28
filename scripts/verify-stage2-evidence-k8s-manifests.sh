@@ -12,14 +12,21 @@ manifests=(
   deploy/stage2-evidence/stage2-evidence-gate-job.yaml
   deploy/stage2-evidence/stage2-production-evidence-pvc.example.yaml
   deploy/stage2-evidence/stage2-production-evidence-gate-job.example.yaml
+  deploy/stage2-evidence/runtime-production-evidence-job.example.yaml
   deploy/stage2-evidence/stage2-completion-audit-job.example.yaml
   deploy/stage2-evidence/observability-collector-evidence-job.example.yaml
+  deploy/stage2-evidence/observability-ops-production-job.example.yaml
   deploy/stage2-evidence/remote-computer-evidence-job.example.yaml
   deploy/stage2-evidence/worker-remote-computer-evidence-job.example.yaml
+  deploy/stage2-evidence/remote-computer-production-state-job.example.yaml
+  deploy/stage2-evidence/live-connector-production-semantics-job.example.yaml
+  deploy/stage2-evidence/ontology-release-workflow-trigger-job.example.yaml
   deploy/stage2-evidence/provider-governance-evidence-job.example.yaml
   deploy/stage2-evidence/tenant-isolation-evidence-job.example.yaml
   deploy/stage2-evidence/vault-evidence-job.example.yaml
   deploy/stage2-evidence/approval-notification-evidence-job.example.yaml
+  deploy/stage2-evidence/enterprise-security-production-controls-job.example.yaml
+  deploy/stage2-evidence/product-surfaces-production-job.example.yaml
   deploy/stage2-evidence/worker-evidence-job.example.yaml
   deploy/stage2-evidence/scheduler-evidence-job.example.yaml
   deploy/stage2-evidence/policy-rollout-evidence-job.example.yaml
@@ -31,12 +38,17 @@ manifests=(
 )
 archive_script="scripts/archive-stage2-production-evidence.sh"
 observability_script="scripts/observability-collector-evidence-gate.sh"
+observability_ops_script="scripts/observability-ops-production-gate.sh"
 remote_computer_script="scripts/remote-computer-evidence-gate.sh"
 worker_remote_computer_script="scripts/worker-remote-computer-evidence-gate.sh"
+remote_computer_production_state_script="scripts/remote-computer-production-state-gate.sh"
+remote_computer_runner_source="crates/mandoforge-api/src/remote_computer_runner.rs"
 provider_script="scripts/provider-governance-evidence-gate.sh"
 tenant_script="scripts/tenant-isolation-evidence-gate.sh"
 vault_script="scripts/vault-evidence-gate.sh"
 approval_notification_script="scripts/approval-notification-evidence-gate.sh"
+enterprise_security_controls_script="scripts/enterprise-security-production-controls-gate.sh"
+product_surfaces_script="scripts/product-surfaces-production-gate.sh"
 worker_script="scripts/worker-evidence-gate.sh"
 scheduler_script="scripts/scheduler-evidence-gate.sh"
 policy_rollout_script="scripts/policy-rollout-evidence-gate.sh"
@@ -47,8 +59,17 @@ mcp_gateway_script="scripts/mcp-gateway-evidence-gate.sh"
 eval_release_script="scripts/eval-release-evidence-gate.sh"
 finance_script="scripts/finance-evidence-gate.sh"
 completion_audit_script="scripts/stage2-completion-audit-gate.sh"
+runtime_production_script="scripts/runtime-production-readiness-gate.sh"
+live_connector_semantics_script="scripts/live-connector-production-semantics-gate.sh"
+ontology_release_workflow_trigger_script="scripts/ontology-release-workflow-trigger-gate.sh"
 whiskey_deploy_script="scripts/whiskey-adoption-deploy.sh"
 whiskey_evidence_script="scripts/whiskey-adoption-evidence.sh"
+stage2_readiness_source="crates/mandoforge-api/src/stage2_readiness.rs"
+vault_types_source="crates/mandoforge-api/src/types/vault.rs"
+vault_runtime_source="crates/mandoforge-api/src/vault_kms_runtime.rs"
+policy_types_source="crates/mandoforge-api/src/types/policy.rs"
+policy_runtime_source="crates/mandoforge-api/src/policy_rollout_runtime.rs"
+usage_types_source="crates/mandoforge-api/src/types/usage.rs"
 worker_isolated_pool_manifests=(
   deploy/k8s/worker-isolated-pool.yaml
   deploy/k8s/worker-isolated-pool-networkpolicy.yaml
@@ -79,6 +100,11 @@ if [[ ! -x "$observability_script" ]]; then
   exit 1
 fi
 
+if [[ ! -x "$observability_ops_script" ]]; then
+  echo "missing executable observability ops production script: $observability_ops_script" >&2
+  exit 1
+fi
+
 if [[ ! -x "$remote_computer_script" ]]; then
   echo "missing executable Remote Computer evidence script: $remote_computer_script" >&2
   exit 1
@@ -86,6 +112,11 @@ fi
 
 if [[ ! -x "$worker_remote_computer_script" ]]; then
   echo "missing executable worker/Remote Computer evidence script: $worker_remote_computer_script" >&2
+  exit 1
+fi
+
+if [[ ! -x "$remote_computer_production_state_script" ]]; then
+  echo "missing executable Remote Computer production state script: $remote_computer_production_state_script" >&2
   exit 1
 fi
 
@@ -106,6 +137,16 @@ fi
 
 if [[ ! -x "$approval_notification_script" ]]; then
   echo "missing approval notification evidence script: $approval_notification_script" >&2
+  exit 1
+fi
+
+if [[ ! -x "$enterprise_security_controls_script" ]]; then
+  echo "missing enterprise security production controls script: $enterprise_security_controls_script" >&2
+  exit 1
+fi
+
+if [[ ! -x "$product_surfaces_script" ]]; then
+  echo "missing product surfaces production script: $product_surfaces_script" >&2
   exit 1
 fi
 
@@ -156,6 +197,21 @@ fi
 
 if [[ ! -x "$completion_audit_script" ]]; then
   echo "missing Stage 2 completion audit script: $completion_audit_script" >&2
+  exit 1
+fi
+
+if [[ ! -x "$runtime_production_script" ]]; then
+  echo "missing runtime production readiness script: $runtime_production_script" >&2
+  exit 1
+fi
+
+if [[ ! -x "$live_connector_semantics_script" ]]; then
+  echo "missing live connector production semantics script: $live_connector_semantics_script" >&2
+  exit 1
+fi
+
+if [[ ! -x "$ontology_release_workflow_trigger_script" ]]; then
+  echo "missing ontology release workflow trigger script: $ontology_release_workflow_trigger_script" >&2
   exit 1
 fi
 
@@ -222,6 +278,38 @@ if [[ ! -s "$deploy_render_file" ]]; then
   exit 1
 fi
 
+if grep -Eq '(^|[[:space:]-])secret\.example\.yaml([[:space:]]|$)' deploy/k8s/kustomization.yaml; then
+  echo "deploy/k8s default kustomization must not apply the example Secret" >&2
+  exit 1
+fi
+
+if ! grep -q "secret-delivery-contract.yaml" deploy/k8s/kustomization.yaml; then
+  echo "deploy/k8s default kustomization must include the secret delivery contract" >&2
+  exit 1
+fi
+
+if ! grep -q 'MANDOFORGE_SECRET_DELIVERY_REQUIRED: "true"' deploy/k8s/secret-delivery-contract.yaml \
+  || ! grep -q 'MANDOFORGE_SECRET_NAME: "mandoforge-secrets"' deploy/k8s/secret-delivery-contract.yaml \
+  || ! grep -q 'MANDOFORGE_SECRET_MUST_NOT_BE_EXAMPLE: "true"' deploy/k8s/secret-delivery-contract.yaml; then
+  echo "secret delivery contract must require external mandoforge-secrets delivery" >&2
+  exit 1
+fi
+
+if grep -Eq 'kind:[[:space:]]*Secret|POSTGRES_PASSWORD:[[:space:]]*"mandoforge"|postgres://mandoforge:mandoforge@' "$deploy_render_file"; then
+  echo "deploy/k8s render must not include example Secrets or default database credentials" >&2
+  exit 1
+fi
+
+if ! grep -q "name: mandoforge-secret-delivery-contract" "$deploy_render_file"; then
+  echo "deploy/k8s render must include the secret delivery contract" >&2
+  exit 1
+fi
+
+if ! grep -q "claimName: mandoforge-workspaces" "$deploy_render_file"; then
+  echo "deploy/k8s render must mount the API workspace PVC" >&2
+  exit 1
+fi
+
 if ! grep -q "name: mandoforge-worker-isolated" "$deploy_render_file"; then
   echo "deploy/k8s render is missing isolated worker-pool Deployment/NetworkPolicy" >&2
   exit 1
@@ -237,6 +325,11 @@ if ! grep -q "MANDOFORGE_TENANT_ID" "$deploy_render_file"; then
   exit 1
 fi
 
+if ! grep -q "MANDOFORGE_PROVIDER_RUNTIME_ENV: production" "$deploy_render_file"; then
+  echo "deploy/k8s render must force provider runtime production mode" >&2
+  exit 1
+fi
+
 if ! grep -q "kind: Job" "$stage2_render_file"; then
   echo "Stage 2 evidence kustomize render is missing a Job" >&2
   exit 1
@@ -244,6 +337,11 @@ fi
 
 if ! grep -q "name: mandoforge-stage2-production-evidence-gate" "$stage2_production_render_file"; then
   echo "Stage 2 production evidence kustomize render is missing the strict production Job" >&2
+  exit 1
+fi
+
+if ! grep -q "name: mandoforge-runtime-production-evidence" "$stage2_production_render_file"; then
+  echo "Stage 2 production evidence kustomize render is missing the runtime production evidence Job" >&2
   exit 1
 fi
 
@@ -257,6 +355,11 @@ if ! grep -q "name: mandoforge-observability-collector-evidence" "$stage2_produc
   exit 1
 fi
 
+if ! grep -q "name: mandoforge-observability-ops-production" "$stage2_production_render_file"; then
+  echo "Stage 2 production evidence kustomize render is missing the observability ops production Job" >&2
+  exit 1
+fi
+
 if ! grep -q "name: mandoforge-remote-computer-evidence" "$stage2_production_render_file"; then
   echo "Stage 2 production evidence kustomize render is missing the Remote Computer evidence Job" >&2
   exit 1
@@ -264,6 +367,33 @@ fi
 
 if ! grep -q "name: mandoforge-worker-remote-computer-evidence" "$stage2_production_render_file"; then
   echo "Stage 2 production evidence kustomize render is missing the worker/Remote Computer evidence Job" >&2
+  exit 1
+fi
+
+if ! grep -q "name: mandoforge-remote-computer-production-state" "$stage2_production_render_file"; then
+  echo "Stage 2 production evidence kustomize render is missing the Remote Computer production state Job" >&2
+  exit 1
+fi
+
+for tracking_key in \
+  "mandoforge.io/session-id" \
+  "mandoforge.io/remote-computer-id" \
+  "mandoforge.io/tenant-id" \
+  "mandoforge.io/lease-id" \
+  "mandoforge.io/lifecycle"; do
+  if ! grep -q "$tracking_key" "$remote_computer_runner_source"; then
+    echo "Remote Computer runner is missing Kubernetes Pod tracking metadata: $tracking_key" >&2
+    exit 1
+  fi
+done
+
+if ! grep -q "name: mandoforge-live-connector-production-semantics" "$stage2_production_render_file"; then
+  echo "Stage 2 production evidence kustomize render is missing the live connector production semantics Job" >&2
+  exit 1
+fi
+
+if ! grep -q "name: mandoforge-ontology-release-workflow-trigger" "$stage2_production_render_file"; then
+  echo "Stage 2 production evidence kustomize render is missing the ontology release workflow trigger Job" >&2
   exit 1
 fi
 
@@ -284,6 +414,16 @@ fi
 
 if ! grep -q "name: mandoforge-approval-notification-evidence" "$stage2_production_render_file"; then
   echo "Stage 2 production evidence kustomize render is missing the approval notification evidence Job" >&2
+  exit 1
+fi
+
+if ! grep -q "name: mandoforge-enterprise-security-production-controls" "$stage2_production_render_file"; then
+  echo "Stage 2 production evidence kustomize render is missing the enterprise security production controls Job" >&2
+  exit 1
+fi
+
+if ! grep -q "name: mandoforge-product-surfaces-production" "$stage2_production_render_file"; then
+  echo "Stage 2 production evidence kustomize render is missing the product surfaces production Job" >&2
   exit 1
 fi
 
@@ -354,6 +494,210 @@ fi
 
 if ! grep -q "claimName: mandoforge-stage2-production-evidence" deploy/stage2-evidence/stage2-production-evidence-gate-job.example.yaml; then
   echo "Stage 2 production evidence Job example does not persist evidence to the production evidence PVC" >&2
+  exit 1
+fi
+
+if ! grep -q "runtime-production-readiness-gate.sh" deploy/stage2-evidence/runtime-production-evidence-job.example.yaml; then
+  echo "runtime production evidence Job does not run the runtime production readiness gate" >&2
+  exit 1
+fi
+
+if ! grep -q "runtime-production-recovery-evidence.json" deploy/stage2-evidence/runtime-production-evidence-job.example.yaml; then
+  echo "runtime production evidence Job does not bind the recovery evidence artifact" >&2
+  exit 1
+fi
+
+if ! grep -q "claimName: mandoforge-stage2-production-evidence" deploy/stage2-evidence/runtime-production-evidence-job.example.yaml; then
+  echo "runtime production evidence Job does not persist evidence to the production evidence PVC" >&2
+  exit 1
+fi
+
+if ! grep -q "runtime-production-readiness-gate.sh" scripts/production-launch-preflight.sh; then
+  echo "production launch preflight must run the runtime production readiness gate" >&2
+  exit 1
+fi
+
+if ! grep -q "runtime-production-recovery-evidence.json" "$runtime_production_script"; then
+  echo "runtime production readiness gate must require backup/restore, dead-letter, and idempotency evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "live-connector-production-semantics-gate.sh" deploy/stage2-evidence/live-connector-production-semantics-job.example.yaml; then
+  echo "live connector production semantics Job does not run the dedicated gate" >&2
+  exit 1
+fi
+
+if ! grep -q "claimName: mandoforge-stage2-production-evidence" deploy/stage2-evidence/live-connector-production-semantics-job.example.yaml; then
+  echo "live connector production semantics Job does not persist evidence to the production evidence PVC" >&2
+  exit 1
+fi
+
+if ! grep -q "SOURCE_EVIDENCE_DIR" deploy/stage2-evidence/live-connector-production-semantics-job.example.yaml; then
+  echo "live connector production semantics Job does not bind the source evidence directory" >&2
+  exit 1
+fi
+
+if ! grep -q "live-connector-production-semantics-gate.sh" scripts/production-launch-preflight.sh; then
+  echo "production launch preflight must run the live connector production semantics gate" >&2
+  exit 1
+fi
+
+if ! grep -q "live-connector-production-semantics-gate.sh" crates/mandoforge-api/src/enterprise_product_readiness.rs; then
+  echo "enterprise readiness must require the live connector production semantics gate" >&2
+  exit 1
+fi
+
+if ! grep -q "live-connector-production-semantics-gate.sh" docs/enterprise-product-completion-contract.md; then
+  echo "enterprise completion contract must list the live connector production semantics gate" >&2
+  exit 1
+fi
+
+for connector_manifest in \
+  packs/ecommerce-tmall/connectors/tmall-top.yaml \
+  packs/ecommerce-taobao/connectors/taobao-open-platform.yaml \
+  packs/ecommerce-xiaohongshu/connectors/xiaohongshu-shop.yaml \
+  packs/ecommerce-xianyu/connectors/xianyu-goofish.yaml \
+  packs/ecommerce-tiktok-shop/connectors/tiktok-shop-open-api.yaml \
+  packs/ecommerce-amazon/connectors/amazon-selling-partner-api.yaml; do
+  if ! grep -q "required_evidence_class: customer_grade" "$connector_manifest" \
+    || ! grep -q "fail_closed_without_evidence: true" "$connector_manifest" \
+    || ! grep -q "token_lifecycle:" "$connector_manifest" \
+    || ! grep -q "rate_limit_retry:" "$connector_manifest" \
+    || ! grep -q "idempotency_reconciliation:" "$connector_manifest" \
+    || ! grep -q "webhook_ingestion:" "$connector_manifest" \
+    || ! grep -q "compensation:" "$connector_manifest" \
+    || ! grep -q "secret_redaction:" "$connector_manifest"; then
+    echo "ecommerce connector manifest lacks required production semantics: $connector_manifest" >&2
+    exit 1
+  fi
+done
+
+if ! grep -q "token_lifecycle.refresh_tested" "$live_connector_semantics_script" \
+  || ! grep -q "external_reconciliation_tested" "$live_connector_semantics_script" \
+  || ! grep -q "provenance_captured" "$live_connector_semantics_script" \
+  || ! grep -q "no_raw_secret_leakage" "$live_connector_semantics_script" \
+  || ! grep -q "deployment_archive.immutable" "$live_connector_semantics_script"; then
+  echo "live connector production semantics gate must require token, reconciliation, webhook, secret-redaction, and immutable archive evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "ontology-release-workflow-trigger-gate.sh" deploy/stage2-evidence/ontology-release-workflow-trigger-job.example.yaml; then
+  echo "ontology release workflow trigger Job does not run the dedicated gate" >&2
+  exit 1
+fi
+
+if ! grep -q "claimName: mandoforge-stage2-production-evidence" deploy/stage2-evidence/ontology-release-workflow-trigger-job.example.yaml; then
+  echo "ontology release workflow trigger Job does not persist evidence to the production evidence PVC" >&2
+  exit 1
+fi
+
+if ! grep -q "MANDOFORGE_ONTOLOGY_WORKFLOW_TRIGGER_DOMAIN_SCOPE" deploy/stage2-evidence/ontology-release-workflow-trigger-job.example.yaml; then
+  echo "ontology release workflow trigger Job does not bind the domain scope" >&2
+  exit 1
+fi
+
+if ! grep -q "ontology-release-workflow-trigger-gate.sh" scripts/production-launch-preflight.sh; then
+  echo "production launch preflight must run the ontology release workflow trigger gate" >&2
+  exit 1
+fi
+
+if ! grep -q "ontology-release-workflow-trigger-gate.sh" crates/mandoforge-api/src/enterprise_product_readiness.rs; then
+  echo "enterprise readiness must require the ontology release workflow trigger gate" >&2
+  exit 1
+fi
+
+if ! grep -q "ontology-release-workflow-trigger-gate.sh" docs/enterprise-product-completion-contract.md; then
+  echo "enterprise completion contract must list the ontology release workflow trigger gate" >&2
+  exit 1
+fi
+
+if ! grep -q "ontology_release.workflow_run_triggered" "$ontology_release_workflow_trigger_script" \
+  || ! grep -q "/api/workflow-definitions" "$ontology_release_workflow_trigger_script" \
+  || ! grep -q "/api/workflow-runs" "$ontology_release_workflow_trigger_script" \
+  || ! grep -q "/api/audit-logs" "$ontology_release_workflow_trigger_script" \
+  || ! grep -q "/api/scheduler/run-due" "$ontology_release_workflow_trigger_script"; then
+  echo "ontology release workflow trigger gate must require workflow definition, workflow run, audit, and scheduler drain evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "enterprise-security-production-controls-gate.sh" deploy/stage2-evidence/enterprise-security-production-controls-job.example.yaml; then
+  echo "enterprise security production controls Job does not run the dedicated gate" >&2
+  exit 1
+fi
+
+if ! grep -q "claimName: mandoforge-stage2-production-evidence" deploy/stage2-evidence/enterprise-security-production-controls-job.example.yaml; then
+  echo "enterprise security production controls Job does not persist evidence to the production evidence PVC" >&2
+  exit 1
+fi
+
+if ! grep -q "ENTERPRISE_SECURITY_CONTROLS_EVIDENCE_FILE" deploy/stage2-evidence/enterprise-security-production-controls-job.example.yaml; then
+  echo "enterprise security production controls Job does not bind the controls evidence artifact" >&2
+  exit 1
+fi
+
+if ! grep -q "enterprise-security-production-controls-gate.sh" scripts/production-launch-preflight.sh; then
+  echo "production launch preflight must run the enterprise security production controls gate" >&2
+  exit 1
+fi
+
+if ! grep -q "enterprise-security-production-controls-gate.sh" crates/mandoforge-api/src/enterprise_product_readiness.rs; then
+  echo "enterprise readiness must require the enterprise security production controls gate" >&2
+  exit 1
+fi
+
+if ! grep -q "enterprise-security-production-controls-gate.sh" docs/enterprise-product-completion-contract.md; then
+  echo "enterprise completion contract must list the enterprise security production controls gate" >&2
+  exit 1
+fi
+
+if ! grep -q "identity-provisioning" "$enterprise_security_controls_script" \
+  || ! grep -q "audit-export-siem" "$enterprise_security_controls_script" \
+  || ! grep -q "data-governance" "$enterprise_security_controls_script" \
+  || ! grep -q "security-incident-operations" "$enterprise_security_controls_script" \
+  || ! grep -q "break_glass_tested" "$enterprise_security_controls_script" \
+  || ! grep -q "evidence_archive_immutable" "$enterprise_security_controls_script"; then
+  echo "enterprise security production controls gate must require identity, SIEM, data governance, incident, break-glass, and immutable archive evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "product-surfaces-production-gate.sh" deploy/stage2-evidence/product-surfaces-production-job.example.yaml; then
+  echo "product surfaces production Job does not run the dedicated gate" >&2
+  exit 1
+fi
+
+if ! grep -q "claimName: mandoforge-stage2-production-evidence" deploy/stage2-evidence/product-surfaces-production-job.example.yaml; then
+  echo "product surfaces production Job does not persist evidence to the production evidence PVC" >&2
+  exit 1
+fi
+
+if ! grep -q "PRODUCT_SURFACES_EVIDENCE_FILE" deploy/stage2-evidence/product-surfaces-production-job.example.yaml; then
+  echo "product surfaces production Job does not bind the product surfaces evidence artifact" >&2
+  exit 1
+fi
+
+if ! grep -q "product-surfaces-production-gate.sh" scripts/production-launch-preflight.sh; then
+  echo "production launch preflight must run the product surfaces production gate" >&2
+  exit 1
+fi
+
+if ! grep -q "product-surfaces-production-gate.sh" crates/mandoforge-api/src/enterprise_product_readiness.rs; then
+  echo "enterprise readiness must require the product surfaces production gate" >&2
+  exit 1
+fi
+
+if ! grep -q "product-surfaces-production-gate.sh" docs/enterprise-product-completion-contract.md; then
+  echo "enterprise completion contract must list the product surfaces production gate" >&2
+  exit 1
+fi
+
+if ! grep -q "admin-console" "$product_surfaces_script" \
+  || ! grep -q "operator-console" "$product_surfaces_script" \
+  || ! grep -q "builder-console" "$product_surfaces_script" \
+  || ! grep -q "ops-console" "$product_surfaces_script" \
+  || ! grep -q "no_fake_completion_state" "$product_surfaces_script" \
+  || ! grep -q "authorization_boundaries_checked" "$product_surfaces_script" \
+  || ! grep -q "fake_completion_scan_passed" "$product_surfaces_script"; then
+  echo "product surfaces production gate must require admin, operator, builder, ops, authorization, and fake-completion evidence" >&2
   exit 1
 fi
 
@@ -429,6 +773,47 @@ fi
 
 if ! grep -q "observability-collector-remediation-evidence.json" scripts/stage2-production-evidence-gate.sh; then
   echo "Strict production evidence gate must write explicit observability collector remediation evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "observability-ops-production-gate.sh" deploy/stage2-evidence/observability-ops-production-job.example.yaml; then
+  echo "Observability ops production Job does not run the dedicated gate" >&2
+  exit 1
+fi
+
+if ! grep -q "claimName: mandoforge-stage2-production-evidence" deploy/stage2-evidence/observability-ops-production-job.example.yaml; then
+  echo "Observability ops production Job does not persist evidence to the production evidence PVC" >&2
+  exit 1
+fi
+
+if ! grep -q "OBSERVABILITY_OPS_EVIDENCE_FILE" deploy/stage2-evidence/observability-ops-production-job.example.yaml; then
+  echo "Observability ops production Job does not bind the ops evidence artifact" >&2
+  exit 1
+fi
+
+if ! grep -q "observability-ops-production-gate.sh" scripts/production-launch-preflight.sh; then
+  echo "production launch preflight must run the observability ops production gate" >&2
+  exit 1
+fi
+
+if ! grep -q "observability-ops-production-gate.sh" crates/mandoforge-api/src/enterprise_product_readiness.rs; then
+  echo "enterprise readiness must require the observability ops production gate" >&2
+  exit 1
+fi
+
+if ! grep -q "observability-ops-production-gate.sh" docs/enterprise-product-completion-contract.md; then
+  echo "enterprise completion contract must list the observability ops production gate" >&2
+  exit 1
+fi
+
+if ! grep -q "failed_jobs" "$observability_ops_script" \
+  || ! grep -q "stale_leases" "$observability_ops_script" \
+  || ! grep -q "connector_degradation" "$observability_ops_script" \
+  || ! grep -q "incident_timeline" "$observability_ops_script" \
+  || ! grep -q "manual_repair" "$observability_ops_script" \
+  || ! grep -q "remote_computer" "$observability_ops_script" \
+  || ! grep -q "owner_acknowledged" "$observability_ops_script"; then
+  echo "observability ops production gate must require alert, incident, manual repair, SLO, and runbook evidence" >&2
   exit 1
 fi
 
@@ -527,18 +912,23 @@ if ! grep -q "worker-remote-computer-evidence-gate.sh" deploy/stage2-evidence/wo
   exit 1
 fi
 
-if ! grep -q "worker-remote-computer-evidence-gate.sh" crates/mandoforge-api/src/main.rs; then
+if ! grep -q "worker-remote-computer-evidence-gate.sh" "$stage2_readiness_source"; then
   echo "Stage 2 readiness must require the combined worker/Remote Computer evidence script" >&2
   exit 1
 fi
 
-if ! grep -q "worker-remote-computer-evidence-job.example.yaml" crates/mandoforge-api/src/main.rs; then
+if ! grep -q "worker-remote-computer-evidence-job.example.yaml" "$stage2_readiness_source"; then
   echo "Stage 2 readiness must require the combined worker/Remote Computer evidence Job manifest" >&2
   exit 1
 fi
 
-if ! grep -q "worker-remote-computer/summary.json" crates/mandoforge-api/src/main.rs; then
+if ! grep -q "worker-remote-computer/summary.json" "$stage2_readiness_source"; then
   echo "Stage 2 readiness must require combined worker/Remote Computer summary evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "remote-computer-session-pod-lifecycle-evidence.json" "$stage2_readiness_source"; then
+  echo "Stage 2 readiness must require Remote Computer session Pod lifecycle evidence" >&2
   exit 1
 fi
 
@@ -547,8 +937,23 @@ if ! grep -q "worker-remote-computer/summary.json" scripts/stage2-completion-aud
   exit 1
 fi
 
+if ! grep -q "remote-computer-session-pod-lifecycle-evidence.json" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit must require Remote Computer session Pod lifecycle evidence" >&2
+  exit 1
+fi
+
 if ! grep -q "worker-remote-computer/summary.json" scripts/verify-stage2-evidence-archive.sh; then
   echo "Stage 2 archive verifier must require combined worker/Remote Computer summary evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "remote-computer-session-pod-lifecycle-evidence.json" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 archive verifier must require Remote Computer session Pod lifecycle evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "REMOTE_COMPUTER_SESSION_POD_LIFECYCLE_EVIDENCE_FILE" scripts/stage2-completion-audit-gate.sh || ! grep -q "REMOTE_COMPUTER_SESSION_POD_LIFECYCLE_EVIDENCE_FILE" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 completion audit and archive verifier must reuse the Remote Computer production state gate" >&2
   exit 1
 fi
 
@@ -564,6 +969,26 @@ fi
 
 if ! grep -q "claimName: mandoforge-stage2-production-evidence" deploy/stage2-evidence/worker-remote-computer-evidence-job.example.yaml; then
   echo "Worker/Remote Computer evidence Job does not persist evidence to the production evidence PVC" >&2
+  exit 1
+fi
+
+if ! grep -q "remote-computer-production-state-gate.sh" deploy/stage2-evidence/remote-computer-production-state-job.example.yaml; then
+  echo "Remote Computer production state Job does not run the production state gate" >&2
+  exit 1
+fi
+
+if ! grep -q "claimName: mandoforge-stage2-production-evidence" deploy/stage2-evidence/remote-computer-production-state-job.example.yaml; then
+  echo "Remote Computer production state Job does not persist evidence to the production evidence PVC" >&2
+  exit 1
+fi
+
+if ! grep -q "remote-computer-production-state-gate.sh" scripts/production-launch-preflight.sh; then
+  echo "production launch preflight must run the Remote Computer production state gate" >&2
+  exit 1
+fi
+
+if ! grep -q "same production cluster, state claim, and distributed backend" "$remote_computer_production_state_script"; then
+  echo "Remote Computer production state gate must bind standalone and combined evidence to one production state target" >&2
   exit 1
 fi
 
@@ -684,6 +1109,23 @@ fi
 
 if ! grep -q "provider-production-rollback-evidence.json" scripts/stage2-production-evidence-gate.sh; then
   echo "Strict production evidence gate must write explicit provider rollback evidence metadata" >&2
+  exit 1
+fi
+
+if ! grep -q "provider rollout status" scripts/stage2-completion-audit-gate.sh || ! grep -q "provider-production-rollout-evidence.json)" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 completion audit and archive verifier must semantically validate provider rollout evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "provider rollback status" scripts/stage2-completion-audit-gate.sh || ! grep -q "provider-production-rollback-evidence.json)" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 completion audit and archive verifier must semantically validate provider rollback evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "active provider uses mock runtime" "$provider_script" \
+  || ! grep -q "/api/providers/runtime" "$provider_script" \
+  || ! grep -q "provider_runtime_production_mode" "$provider_script"; then
+  echo "Provider governance evidence script must fail closed for mock provider runtime in production mode" >&2
   exit 1
 fi
 
@@ -917,7 +1359,7 @@ if ! grep -q "rotation_rotated_count" "$vault_script" || ! grep -q "rotation_cat
   exit 1
 fi
 
-if ! grep -q "rotation_details: Vec<VaultKmsRotationDetail>" crates/mandoforge-api/src/main.rs || ! grep -q "catalog_updated: true" crates/mandoforge-api/src/main.rs || ! grep -q "audit_id: Uuid" crates/mandoforge-api/src/main.rs || ! grep -q "rotated_at: DateTime<Utc>" crates/mandoforge-api/src/main.rs; then
+if ! grep -q "rotation_details: Vec<VaultKmsRotationDetail>" "$vault_types_source" || ! grep -q "catalog_updated: true" "$vault_runtime_source" || ! grep -q "audit_id: Uuid" "$vault_types_source" || ! grep -q "rotated_at: DateTime<Utc>" "$vault_types_source"; then
   echo "Vault KMS rotation API must return audited key-level rotation details for production evidence" >&2
   exit 1
 fi
@@ -1322,6 +1764,81 @@ if ! grep -q "ui-production-polish)" scripts/stage2-completion-audit-gate.sh; th
   exit 1
 fi
 
+if ! grep -q "product-surfaces)" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit gate must map the product-surfaces requirement id to its evidence artifacts" >&2
+  exit 1
+fi
+
+if ! grep -q "enterprise-security-production-controls)" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit gate must map the enterprise-security-production-controls requirement id to its evidence artifacts" >&2
+  exit 1
+fi
+
+if ! grep -q "observability-ops-production)" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit gate must map the observability-ops-production requirement id to its evidence artifacts" >&2
+  exit 1
+fi
+
+if ! grep -q "live-connector-production-semantics)" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit gate must map the live-connector-production-semantics requirement id to its evidence artifacts" >&2
+  exit 1
+fi
+
+if ! grep -q "runtime-production-recovery)" scripts/stage2-completion-audit-gate.sh; then
+  echo "Stage 2 completion audit gate must map the runtime-production-recovery requirement id to its evidence artifacts" >&2
+  exit 1
+fi
+
+if ! grep -q "product-surfaces/summary.json" "$stage2_readiness_source" || ! grep -q "product-surfaces/summary.json" scripts/stage2-completion-audit-gate.sh || ! grep -q "product-surfaces/summary.json" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 readiness, completion audit, and archive verifier must require product-surfaces summary evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "enterprise-security-production-controls/summary.json" "$stage2_readiness_source" || ! grep -q "enterprise-security-production-controls/summary.json" scripts/stage2-completion-audit-gate.sh || ! grep -q "enterprise-security-production-controls/summary.json" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 readiness, completion audit, and archive verifier must require enterprise security controls summary evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "observability-ops-production/summary.json" "$stage2_readiness_source" || ! grep -q "observability-ops-production/summary.json" scripts/stage2-completion-audit-gate.sh || ! grep -q "observability-ops-production/summary.json" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 readiness, completion audit, and archive verifier must require observability ops summary evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "live-connector-production-semantics/tmall-top/summary.json" "$stage2_readiness_source" || ! grep -q "live-connector-production-semantics/tmall-top/summary.json" scripts/stage2-completion-audit-gate.sh || ! grep -q "live-connector-production-semantics/tmall-top/summary.json" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 readiness, completion audit, and archive verifier must require live connector summary evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "runtime-production-recovery-evidence.json" "$stage2_readiness_source" || ! grep -q "runtime-production-recovery-evidence.json" scripts/stage2-completion-audit-gate.sh || ! grep -q "runtime-production-recovery-evidence.json" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 readiness, completion audit, and archive verifier must require runtime production recovery evidence" >&2
+  exit 1
+fi
+
+if ! grep -q "ENTERPRISE_SECURITY_CONTROLS_EVIDENCE_FILE" scripts/stage2-completion-audit-gate.sh || ! grep -q "ENTERPRISE_SECURITY_CONTROLS_EVIDENCE_FILE" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 completion audit and archive verifier must reuse the enterprise security production controls gate" >&2
+  exit 1
+fi
+
+if ! grep -q "OBSERVABILITY_OPS_EVIDENCE_FILE" scripts/stage2-completion-audit-gate.sh || ! grep -q "OBSERVABILITY_OPS_EVIDENCE_FILE" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 completion audit and archive verifier must reuse the observability ops production gate" >&2
+  exit 1
+fi
+
+if ! grep -q "SOURCE_EVIDENCE_DIR=.*live-connector-production-semantics" scripts/stage2-completion-audit-gate.sh || ! grep -q "SOURCE_EVIDENCE_DIR=.*live-connector-production-semantics" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 completion audit and archive verifier must reuse the live connector production semantics gate" >&2
+  exit 1
+fi
+
+if ! grep -q "RUNTIME_PRODUCTION_RECOVERY_EVIDENCE_FILE" scripts/stage2-completion-audit-gate.sh || ! grep -q "RUNTIME_PRODUCTION_RECOVERY_EVIDENCE_FILE" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Stage 2 completion audit and archive verifier must reuse the runtime production readiness gate" >&2
+  exit 1
+fi
+
+if ! grep -q "live_endpoint_coverage_tested" scripts/stage2-completion-audit-gate.sh || ! grep -q "live_endpoint_coverage_tested" scripts/verify-stage2-evidence-archive.sh; then
+  echo "Product surfaces evidence gates must require live endpoint coverage readback" >&2
+  exit 1
+fi
+
 if grep -q "ui-production-crud)" scripts/stage2-completion-audit-gate.sh; then
   echo "Stage 2 completion audit gate still contains the old UI production CRUD requirement id" >&2
   exit 1
@@ -1472,7 +1989,7 @@ if ! grep -q "policy-rollout-due-run-evidence.json" scripts/stage2-completion-au
   exit 1
 fi
 
-if ! grep -q "scanned_revisions: Vec<PolicyScheduledRolloutScanDetail>" crates/mandoforge-api/src/main.rs || ! grep -q "audit_id: audit_log.id" crates/mandoforge-api/src/main.rs || ! grep -q "latest_policy_rollout_controller_binding" crates/mandoforge-api/src/main.rs; then
+if ! grep -q "scanned_revisions: Vec<PolicyScheduledRolloutScanDetail>" "$policy_types_source" || ! grep -q "audit_id: audit_log.id" "$policy_runtime_source" || ! grep -q "latest_policy_rollout_controller_binding" "$policy_runtime_source"; then
   echo "Policy due-run API must return audited per-revision scan details bound to production controller evidence" >&2
   exit 1
 fi
@@ -2452,6 +2969,13 @@ if ! grep -q "workflow_step_id_by_key" scripts/managed-workflow-runtime-evidence
   exit 1
 fi
 
+if ! grep -q "managed-workflow-lease-drill-a" scripts/managed-workflow-runtime-evidence-gate.sh \
+  || ! grep -q "managed-workflow-lease-drill-b" scripts/managed-workflow-runtime-evidence-gate.sh \
+  || ! grep -q "lease_expiry_reclaim" scripts/managed-workflow-runtime-evidence-gate.sh; then
+  echo "Managed-workflow runtime evidence gate must prove expired workflow step leases can be reclaimed" >&2
+  exit 1
+fi
+
 if ! grep -q "MANDOFORGE_STAGE2_MANAGED_SESSION_RUNTIME_TARGET_ID" scripts/stage2-production-evidence-gate.sh; then
   echo "Stage 2 production evidence gate must write the managed-session target id into the run manifest" >&2
   exit 1
@@ -2642,7 +3166,7 @@ if ! grep -q "finance_export_delivery_receipt_count" "$finance_script" || ! grep
   exit 1
 fi
 
-if ! grep -q "delivery_id: Uuid" crates/mandoforge-api/src/main.rs || ! grep -q "file_name: String" crates/mandoforge-api/src/main.rs || ! grep -q "export_bytes: usize" crates/mandoforge-api/src/main.rs || ! grep -q "record_count: usize" crates/mandoforge-api/src/main.rs; then
+if ! grep -q "delivery_id: Uuid" "$usage_types_source" || ! grep -q "file_name: String" "$usage_types_source" || ! grep -q "export_bytes: usize" "$usage_types_source" || ! grep -q "record_count: usize" "$usage_types_source"; then
   echo "Finance export delivery API must expose file and receipt binding fields for ERP/accounting evidence" >&2
   exit 1
 fi

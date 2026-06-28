@@ -13,23 +13,25 @@ use crate::{
     DecideProviderStatusApproval, Permission, ProviderAccess, ProviderDeploymentValidationRun,
     ProviderGovernanceSummary, ProviderHealth, ProviderPolicyGateReport,
     ProviderPolicyGateRunResponse, ProviderPolicyGateRunSummary, ProviderProductionRollbackRun,
-    ProviderProductionRolloutRun, ProviderRecord, ProviderStatusApprovalResponse,
-    RequestProviderStatusApproval, RotateProviderApiKeyRef, RunProviderProductionRollback,
-    RunProviderProductionRollout, UpdateProviderAccess, UpdateProviderStatus, authorize_request,
-    build_provider_governance_summary, build_provider_policy_gate_report,
-    build_provider_policy_gate_run_summary, decide_provider_status_approval,
-    enforce_resource_scope, execute_provider_deployment_controller, execute_provider_policy_gate,
+    ProviderProductionRolloutRun, ProviderRecord, ProviderRuntimeStatus,
+    ProviderStatusApprovalResponse, RequestProviderStatusApproval, RotateProviderApiKeyRef,
+    RunProviderProductionRollback, RunProviderProductionRollout, UpdateProviderAccess,
+    UpdateProviderStatus, authorize_request, build_provider_governance_summary,
+    build_provider_policy_gate_report, build_provider_policy_gate_run_summary,
+    decide_provider_status_approval, enforce_resource_scope,
+    execute_provider_deployment_controller, execute_provider_policy_gate,
     execute_provider_production_rollback_with_lookup,
     execute_provider_production_rollout_with_lookup, new_audit_log, normalize_provider_api_key_ref,
     normalize_provider_status, optional_trimmed, principal_from_request, provider_by_id,
     provider_deployment_controller_configured, provider_deployment_controller_required,
-    provider_health,
+    provider_health, provider_runtime_production_mode,
 };
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route("/api/providers", get(list_providers).post(create_provider))
         .route("/api/providers/{id}", patch(update_provider))
+        .route("/api/providers/runtime", get(get_provider_runtime_status))
         .route("/api/providers/summary", get(get_provider_summary))
         .route(
             "/api/providers/deployment/validate",
@@ -79,6 +81,24 @@ pub(crate) fn router() -> Router<AppState> {
             "/api/provider-access/{id}/archive",
             post(archive_provider_access),
         )
+}
+
+async fn get_provider_runtime_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ProviderRuntimeStatus>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "providers", None).await?;
+    let production_mode = provider_runtime_production_mode();
+    Ok(Json(ProviderRuntimeStatus {
+        mode: if production_mode {
+            "production"
+        } else {
+            "development"
+        }
+        .to_string(),
+        production_mode,
+        contract: "production mode forbids mock providers and env/mock fallback".to_string(),
+    }))
 }
 
 async fn list_providers(

@@ -318,7 +318,7 @@ agent_id="\$(jq -r '
 if [[ -z "\$agent_id" ]]; then
   curl -fsS -X POST "\${auth_headers[@]}" \
     -H "content-type: application/json" \
-    -d '{"name":"Whiskey Eval Release Pilot","kind":"assistant","provider":"openai-compatible","model":"gpt-5.4-mini","system_prompt":"Whiskey eval release adoption pilot with the required Stage 2 regression tool surface.","tools":["file.read","file.write","sql.query","artifact.create"]}' \
+    -d '{"name":"Whiskey Eval Release Pilot","kind":"assistant","provider":"openai-compatible","model":"gpt-5.5-mini","system_prompt":"Whiskey eval release adoption pilot with the required Stage 2 regression tool surface.","tools":["file.read","file.write","sql.query","artifact.create"]}' \
     "\$base_url/api/agents" >"\$agent_file"
   agent_id="\$(jq -r '.id' "\$agent_file")"
 fi
@@ -593,7 +593,7 @@ else
     '{
       provider_type: "mock",
       name: "whiskey-mock-provider",
-      default_model: "gpt-5.4-mini",
+      default_model: "gpt-5.5-mini",
       config: {
         source: "whiskey-provider-rollout-evidence",
         reason: \$reason,

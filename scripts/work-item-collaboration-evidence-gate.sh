@@ -161,7 +161,7 @@ api_post /api/agents "$(
     kind: "manager",
     agent_role: "manager",
     provider: "openai-compatible",
-    model: "gpt-5.4-mini",
+    model: "gpt-5.5-mini",
     tools: ["approval.request"],
     semantic_scopes: {
       project_scope: "mandoforge",
@@ -181,7 +181,7 @@ api_post /api/agents "$(
     kind: "specialist",
     agent_role: "specialist",
     provider: "openai-compatible",
-    model: "gpt-5.4-mini",
+    model: "gpt-5.5-mini",
     tools: ["agent_cli.exec"],
     semantic_scopes: {
       project_scope: "mandoforge",

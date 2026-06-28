@@ -2526,7 +2526,7 @@ pub(crate) fn insecure_dev_auth_enabled() -> bool {
                 "1" | "true" | "yes"
             )
         })
-        .unwrap_or(cfg!(test))
+        .unwrap_or(false)
 }
 
 pub(crate) fn trusted_tenant_header_enabled() -> bool {

@@ -4216,41 +4216,62 @@ pub(crate) async fn promote_ontology_release_with_actor(
             }),
         ))
         .await?;
-    let release = if let Err(error) =
-        trigger_workflow_run_from_ontology_release(state, &release, actor_subject).await
-    {
-        let error_message = error.message.clone();
-        let release = update_ontology_release_workflow_trigger_status(
-            state,
-            &release,
-            ONTOLOGY_RELEASE_STATUS_ACTIVE_TRIGGER_FAILED,
-            "failed",
-            actor_subject,
-            Some(error_message.clone()),
-        )
-        .await?;
-        state
-            .append_audit_log(new_audit_log(
-                None,
-                "system",
-                None,
-                "ontology_release.workflow_trigger_failed",
-                "ontology_release",
-                Some(release.id),
-                json!({
-                    "subject": actor_subject,
-                    "release_id": release.id,
-                    "version": release.version,
-                    "domain_scope": release.domain_scope,
-                    "status": release.status,
-                    "error": error_message,
-                }),
-            ))
-            .await?;
-        release
-    } else {
-        release
-    };
+    let release =
+        match trigger_workflow_run_from_ontology_release(state, &release, actor_subject).await {
+            Ok(Some(_)) => {
+                update_ontology_release_workflow_trigger_status(
+                    state,
+                    &release,
+                    ONTOLOGY_RELEASE_STATUS_ACTIVE,
+                    "triggered",
+                    actor_subject,
+                    None,
+                )
+                .await?
+            }
+            Ok(None) => {
+                update_ontology_release_workflow_trigger_status(
+                    state,
+                    &release,
+                    ONTOLOGY_RELEASE_STATUS_ACTIVE,
+                    "skipped",
+                    actor_subject,
+                    None,
+                )
+                .await?
+            }
+            Err(error) => {
+                let error_message = error.message.clone();
+                let release = update_ontology_release_workflow_trigger_status(
+                    state,
+                    &release,
+                    ONTOLOGY_RELEASE_STATUS_ACTIVE_TRIGGER_FAILED,
+                    "failed",
+                    actor_subject,
+                    Some(error_message.clone()),
+                )
+                .await?;
+                state
+                    .append_audit_log(new_audit_log(
+                        None,
+                        "system",
+                        None,
+                        "ontology_release.workflow_trigger_failed",
+                        "ontology_release",
+                        Some(release.id),
+                        json!({
+                            "subject": actor_subject,
+                            "release_id": release.id,
+                            "version": release.version,
+                            "domain_scope": release.domain_scope,
+                            "status": release.status,
+                            "error": error_message,
+                        }),
+                    ))
+                    .await?;
+                release
+            }
+        };
     Ok(release)
 }
 

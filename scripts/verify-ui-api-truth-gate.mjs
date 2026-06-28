@@ -2,7 +2,9 @@
 import fs from "node:fs";
 import process from "node:process";
 
-const BACKEND_FILE = "crates/mandoforge-api/src/main.rs";
+const BACKEND_ROOT = "crates/mandoforge-api/src";
+const BACKEND_ENTRYPOINT = `${BACKEND_ROOT}/main.rs`;
+const BACKEND_HANDLERS = `${BACKEND_ROOT}/handlers`;
 const FRONTEND_ROOT = "web-ui/src";
 
 const ACTION_EXPANSIONS = new Map([
@@ -47,6 +49,7 @@ const LIVE_CHECKS = [
   ["GET", "/api/observability"],
   ["GET", "/api/capability-discovery"],
   ["GET", "/api/usage"],
+  ["GET", "/api/usage/finance-operations/summary"],
   ["GET", "/api/memory-governance/summary"],
   ["GET", "/api/memory-governance/writebacks?limit=50&status=pending"],
   ["GET", "/api/memory-writeback-candidates"],
@@ -107,8 +110,35 @@ function listFrontendFiles(dir = FRONTEND_ROOT) {
   return files.sort();
 }
 
+function listRustFiles(dir) {
+  const files = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const path = `${dir}/${entry.name}`;
+    if (entry.isDirectory()) {
+      files.push(...listRustFiles(path));
+    } else if (entry.isFile() && path.endsWith(".rs")) {
+      files.push(path);
+    }
+  }
+  return files.sort();
+}
+
+function backendRouteFiles() {
+  const files = [BACKEND_ENTRYPOINT];
+  if (fs.existsSync(BACKEND_HANDLERS)) {
+    files.push(...listRustFiles(BACKEND_HANDLERS));
+  }
+  return [...new Set(files)].sort();
+}
+
 function backendRoutes() {
-  return [...read(BACKEND_FILE).matchAll(/\.route\(\s*"([^"]+)"/gs)].map((match) => match[1]);
+  const routes = [];
+  for (const file of backendRouteFiles()) {
+    for (const match of read(file).matchAll(/\.route\(\s*"([^"]+)"/gs)) {
+      routes.push(match[1]);
+    }
+  }
+  return [...new Set(routes)].sort();
 }
 
 function frontendApiRefs() {

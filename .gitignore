@@ -1,4 +1,5 @@
 /target/
+/web-ui/target/
 /.mandoforge/
 /.env
 /.env.*

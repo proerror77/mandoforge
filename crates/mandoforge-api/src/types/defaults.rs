@@ -128,7 +128,7 @@ pub(crate) fn default_mcp_transport() -> String {
 }
 
 pub(crate) fn default_model() -> String {
-    "gpt-5.4-mini".to_string()
+    "gpt-5.5-mini".to_string()
 }
 
 pub(crate) fn default_session_title() -> String {

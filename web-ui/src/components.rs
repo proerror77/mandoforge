@@ -292,6 +292,9 @@ pub(crate) fn EnterpriseReadinessPanel(props: &EnterpriseReadinessPanelProps) ->
             <div class="enterprise-lanes">
                 { for readiness.lanes.iter().map(|lane| {
                     let blocker = lane.blockers.first().or_else(|| lane.next_actions.first());
+                    let endpoint = lane.readiness_endpoints.first().cloned().unwrap_or_else(|| "no endpoint".to_string());
+                    let script = lane.evidence_scripts.first().cloned().unwrap_or_else(|| "no evidence script".to_string());
+                    let evidence_count = lane.required_evidence.len();
                     html! {
                         <article class={classes!("enterprise-lane", status_tone(&lane.status))} key={lane.id.clone()}>
                             <StatusLogo status={lane.status.clone()} />
@@ -299,6 +302,8 @@ pub(crate) fn EnterpriseReadinessPanel(props: &EnterpriseReadinessPanelProps) ->
                                 <strong>{ label_or(&lane.title, &lane.id) }</strong>
                                 <span>{ format!("{} -> {}", label_or(&lane.current_evidence_class, "evidence"), label_or(&lane.required_evidence_class, "customer_grade")) }</span>
                                 <small>{ blocker.cloned().unwrap_or_else(|| label_or(&lane.production_target, "target").to_string()) }</small>
+                                <small>{ format!("{} | {} | {} required evidence", label_or(&lane.current_boundary, "boundary"), endpoint, evidence_count) }</small>
+                                <small>{ script }</small>
                             </div>
                             <em>{ label_or(&lane.status, "status") }</em>
                         </article>

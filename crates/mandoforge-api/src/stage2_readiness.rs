@@ -42,7 +42,7 @@ pub(crate) fn build_stage2_completion_readiness() -> Stage2CompletionReadiness {
     }
 }
 
-fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2EvidenceRequirement> {
+fn build_stage2_evidence_requirements(_open_gaps: &[String]) -> Vec<Stage2EvidenceRequirement> {
     struct Stage2EvidenceRequirementSpec<'a> {
         id: &'a str,
         title: &'a str,
@@ -125,6 +125,7 @@ fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2Evidenc
                 "deploy/stage2-evidence/provider-governance-evidence-job.example.yaml",
             ],
             readiness_endpoints: vec![
+                "/api/providers/runtime",
                 "/api/providers/summary",
                 "/api/providers/policy-gate",
                 "/api/providers/policy-gate/runs",
@@ -191,11 +192,13 @@ fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2Evidenc
                 "./scripts/worker-evidence-gate.sh",
                 "./scripts/remote-computer-evidence-gate.sh",
                 "./scripts/worker-remote-computer-evidence-gate.sh",
+                "./scripts/remote-computer-production-state-gate.sh",
             ],
             evidence_job_manifests: vec![
                 "deploy/stage2-evidence/worker-evidence-job.example.yaml",
                 "deploy/stage2-evidence/remote-computer-evidence-job.example.yaml",
                 "deploy/stage2-evidence/worker-remote-computer-evidence-job.example.yaml",
+                "deploy/stage2-evidence/remote-computer-production-state-job.example.yaml",
             ],
             readiness_endpoints: vec![
                 "/api/execution-jobs/worker-readiness",
@@ -220,11 +223,13 @@ fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2Evidenc
                 "remote-computer-state-sync-evidence.json",
                 "remote-computer-sidecar-recovery-evidence.json",
                 "worker-remote-computer/summary.json",
+                "remote-computer-session-pod-lifecycle-evidence.json",
             ],
             required_evidence: vec![
                 "durable queue-backed worker mode is enabled",
                 "production-like load validation proves autoscaling and worker-pool isolation",
                 "Remote Computer distributed state sync and sidecar replacement are validated against a real cluster",
+                "session Pod lifecycle evidence covers live create, Running, approved exec, heartbeat, lease release, Pod deletion, and orphan sweep",
             ],
         },
         Stage2EvidenceRequirementSpec {
@@ -539,12 +544,126 @@ fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2Evidenc
                 "browserless static asset smoke covers key labels, routes, and form-based controls",
             ],
         },
+        Stage2EvidenceRequirementSpec {
+            id: "product-surfaces",
+            title: "Enterprise product surface evidence",
+            category: "enterprise_optional",
+            required_for_stage2_production: false,
+            production_target: "Customer-grade Admin, Operator, Builder, and Ops consoles backed by live production APIs",
+            evidence_scripts: vec!["./scripts/product-surfaces-production-gate.sh"],
+            evidence_job_manifests: vec![
+                "deploy/stage2-evidence/product-surfaces-production-job.example.yaml",
+            ],
+            readiness_endpoints: vec!["/api/enterprise-product/readiness"],
+            validation_endpoints: vec!["./scripts/product-surfaces-production-gate.sh"],
+            required_flags: vec![],
+            required_artifacts: vec!["product-surfaces/summary.json"],
+            required_evidence: vec![
+                "Admin, Operator, Builder, and Ops console surfaces report customer-grade readiness",
+                "each surface proves live API readback, authorization boundary checks, and no fake completion state",
+                "product surface evidence binds to a production target, audit id, support owner, and immutable archive metadata",
+            ],
+        },
+        Stage2EvidenceRequirementSpec {
+            id: "enterprise-security-production-controls",
+            title: "Enterprise security production controls evidence",
+            category: "enterprise_optional",
+            required_for_stage2_production: false,
+            production_target: "Customer-grade security controls proving identity, tenant isolation, KMS, SIEM, data governance, break-glass, and incident operations",
+            evidence_scripts: vec!["./scripts/enterprise-security-production-controls-gate.sh"],
+            evidence_job_manifests: vec![
+                "deploy/stage2-evidence/enterprise-security-production-controls-job.example.yaml",
+            ],
+            readiness_endpoints: vec!["/api/enterprise-security/admin-readiness"],
+            validation_endpoints: vec!["./scripts/enterprise-security-production-controls-gate.sh"],
+            required_flags: vec![],
+            required_artifacts: vec!["enterprise-security-production-controls/summary.json"],
+            required_evidence: vec![
+                "SSO/OIDC or SAML plus SCIM evidence is production configured",
+                "tenant RLS/ABAC, production KMS rotation and recovery, break-glass, SIEM, data governance, and incident operations are tested",
+                "security controls evidence binds to a production target, audit id, support owner, and immutable archive metadata",
+            ],
+        },
+        Stage2EvidenceRequirementSpec {
+            id: "observability-ops-production",
+            title: "Observability operations production evidence",
+            category: "enterprise_optional",
+            required_for_stage2_production: false,
+            production_target: "Customer-grade operations evidence proving correlation, alerts, versions, incident timeline, manual repair, SLOs, and runbooks",
+            evidence_scripts: vec!["./scripts/observability-ops-production-gate.sh"],
+            evidence_job_manifests: vec![
+                "deploy/stage2-evidence/observability-ops-production-job.example.yaml",
+            ],
+            readiness_endpoints: vec![
+                "/api/observability",
+                "/api/usage/finance-operations/summary",
+            ],
+            validation_endpoints: vec!["./scripts/observability-ops-production-gate.sh"],
+            required_flags: vec![],
+            required_artifacts: vec!["observability-ops-production/summary.json"],
+            required_evidence: vec![
+                "metrics, traces, logs, audit trails, and cost data are correlated across production identifiers",
+                "alert delivery, version visibility, incident timeline, manual repair, SLO, and runbook rehearsal evidence is present",
+                "observability operations evidence binds to a production target, audit id, support owner, and immutable archive metadata",
+            ],
+        },
+        Stage2EvidenceRequirementSpec {
+            id: "live-connector-production-semantics",
+            title: "Live connector production semantics evidence",
+            category: "enterprise_optional",
+            required_for_stage2_production: false,
+            production_target: "Customer-grade ecommerce connector promotion evidence with sandbox/live separation, token lifecycle, rate limits, idempotency, reconciliation, webhook provenance, compensation policy, and secret redaction",
+            evidence_scripts: vec!["./scripts/live-connector-production-semantics-gate.sh"],
+            evidence_job_manifests: vec![
+                "deploy/stage2-evidence/live-connector-production-semantics-job.example.yaml",
+            ],
+            readiness_endpoints: vec!["/api/native-connectors/production-readiness"],
+            validation_endpoints: vec!["./scripts/live-connector-production-semantics-gate.sh"],
+            required_flags: vec![],
+            required_artifacts: vec![
+                "live-connector-production-semantics/tmall-top/summary.json",
+                "live-connector-production-semantics/taobao-open-platform/summary.json",
+                "live-connector-production-semantics/xiaohongshu-shop/summary.json",
+                "live-connector-production-semantics/xianyu-goofish/summary.json",
+                "live-connector-production-semantics/tiktok-shop-open-api/summary.json",
+                "live-connector-production-semantics/amazon-selling-partner-api/summary.json",
+            ],
+            required_evidence: vec![
+                "each promoted ecommerce connector has customer-grade production semantics evidence",
+                "sandbox/live separation, token lifecycle, rate limits, idempotency, reconciliation, webhook provenance, compensation policy, approval commit boundary, and secret redaction are tested",
+                "connector evidence binds to production targets, versions, audit ids, support owners, immutable deployment archives, and logs",
+            ],
+        },
+        Stage2EvidenceRequirementSpec {
+            id: "runtime-production-recovery",
+            title: "Runtime production recovery evidence",
+            category: "enterprise_optional",
+            required_for_stage2_production: false,
+            production_target: "Customer-grade managed runtime recovery evidence proving backup/restore, restart/resume, worker summary, dead-letter replay, and idempotency",
+            evidence_scripts: vec!["./scripts/runtime-production-readiness-gate.sh"],
+            evidence_job_manifests: vec![
+                "deploy/stage2-evidence/runtime-production-evidence-job.example.yaml",
+            ],
+            readiness_endpoints: vec!["/api/stage2/readiness", "/api/providers/runtime"],
+            validation_endpoints: vec!["./scripts/runtime-production-readiness-gate.sh"],
+            required_flags: vec![],
+            required_artifacts: vec!["runtime-production-recovery-evidence.json"],
+            required_evidence: vec![
+                "backup and restore preserve production runtime resources",
+                "managed-session restart/resume and worker evidence are archived with the same production evidence root",
+                "dead-letter/manual replay and external side-effect idempotency drills are validated",
+            ],
+        },
     ];
 
+    // All open gaps are reported at the top-level `open_gaps` field.
+    // The per-spec `gap` field is intentionally left empty here because audit
+    // gaps are free-text entries without a spec id — positional binding would
+    // silently map gap[N] to spec[N] regardless of content, producing
+    // semantically incorrect UI output.
     specs
         .iter()
-        .enumerate()
-        .map(|(index, spec)| {
+        .map(|spec| {
             let required_for_core = spec.category == "core_runtime";
             let enterprise_optional = spec.category == "enterprise_optional";
 
@@ -555,7 +674,7 @@ fn build_stage2_evidence_requirements(open_gaps: &[String]) -> Vec<Stage2Evidenc
                 required_for_core,
                 required_for_stage2_production: spec.required_for_stage2_production,
                 enterprise_optional,
-                gap: open_gaps.get(index).cloned().unwrap_or_default(),
+                gap: String::new(),
                 production_target: spec.production_target.to_string(),
                 evidence_scripts: spec
                     .evidence_scripts

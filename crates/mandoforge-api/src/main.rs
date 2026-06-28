@@ -432,9 +432,9 @@ pub(crate) use types::provider::{
     ProviderPolicyGateEnforcement, ProviderPolicyGateReport, ProviderPolicyGateRun,
     ProviderPolicyGateRunAttentionItem, ProviderPolicyGateRunResponse,
     ProviderPolicyGateRunSummary, ProviderProductionRollbackRun, ProviderProductionRolloutRun,
-    ProviderRecord, ProviderStatusApprovalResponse, RequestProviderStatusApproval,
-    RotateProviderApiKeyRef, RunProviderProductionRollback, RunProviderProductionRollout,
-    UpdateProviderAccess, UpdateProviderStatus,
+    ProviderRecord, ProviderRuntimeStatus, ProviderStatusApprovalResponse,
+    RequestProviderStatusApproval, RotateProviderApiKeyRef, RunProviderProductionRollback,
+    RunProviderProductionRollout, UpdateProviderAccess, UpdateProviderStatus,
 };
 pub(crate) use types::remote_computer::{
     CreateRemoteComputer, CreateRemoteComputerAttachment, CreateRemoteComputerJobAssignment,

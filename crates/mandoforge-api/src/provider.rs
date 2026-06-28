@@ -270,7 +270,7 @@ impl OpenAiCompatibleProviderClient {
         let api_key =
             provider_api_key_from_env_value(api_key.trim(), &lookup, secret_provider).await?;
         let model = lookup("MANDOFORGE_PROVIDER_MODEL")
-            .unwrap_or_else(|| "gpt-5.4-mini".to_string())
+            .unwrap_or_else(|| "gpt-5.5-mini".to_string())
             .trim()
             .to_string();
         Ok(Some(Self::from_parts(base_url, api_key, model)?))

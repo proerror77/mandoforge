@@ -67,6 +67,7 @@ write_summary() {
   local gate_json="$EVIDENCE_DIR/api-providers-policy-gate.json"
   local runs_json="$EVIDENCE_DIR/api-providers-policy-gate-runs.json"
   local provider_health_json="$EVIDENCE_DIR/api-providers-health.json"
+  local runtime_json="$EVIDENCE_DIR/api-providers-runtime.json"
   local rollout_evidence_file="$EVIDENCE_DIR/provider-production-rollout-evidence.json"
   local rollback_evidence_file="$EVIDENCE_DIR/provider-production-rollback-evidence.json"
   local summary_file="$EVIDENCE_DIR/summary.txt"
@@ -83,6 +84,10 @@ write_summary() {
   local provider_health_external_probe
   local provider_health_api_key_env_present
   local provider_health_api_key_ref_resolved
+  local provider_runtime_mode
+  local provider_runtime_production_mode
+  local provider_runtime_contract
+  local active_mock_provider_count
   local rollout_evidence_status
   local rollout_run_status
   local rollback_evidence_status
@@ -102,6 +107,10 @@ write_summary() {
   provider_health_external_probe="$(jq -r '.checks.external_probe // "unknown"' "$provider_health_json")"
   provider_health_api_key_env_present="$(jq -r '.checks.api_key_env_present // "unknown"' "$provider_health_json")"
   provider_health_api_key_ref_resolved="$(jq -r '.checks.api_key_ref_resolved // "unknown"' "$provider_health_json")"
+  provider_runtime_mode="$(jq -r '.mode // "unknown"' "$runtime_json")"
+  provider_runtime_production_mode="$(jq -r '.production_mode // false' "$runtime_json")"
+  provider_runtime_contract="$(jq -r '.contract // "unknown"' "$runtime_json")"
+  active_mock_provider_count="$(jq -r '[.[]? | select(.status == "active" and ((.provider_type // "" | ascii_downcase | gsub("-"; "_")) == "mock" or (.provider_type // "" | ascii_downcase | gsub("-"; "_")) == "mock_openai_compatible"))] | length' "$providers_json")"
   rollout_evidence_status="not_requested"
   rollout_run_status="not_run"
   if [[ -s "$rollout_evidence_file" ]]; then
@@ -118,6 +127,10 @@ write_summary() {
       .deployment_readiness.production_blocked
     ] | map(select(. == true)) | length' "$summary_json")"
   blocked_count="$((blocked_count + $(jq -r 'if .production_enforcement.production_blocked == true then 1 else 0 end' "$runs_json")))"
+  blocked_count="$((blocked_count + active_mock_provider_count))"
+  if [[ "$provider_runtime_production_mode" != "true" ]]; then
+    blocked_count="$((blocked_count + 1))"
+  fi
 
   {
     echo "provider_count=$provider_count"
@@ -130,6 +143,10 @@ write_summary() {
     echo "provider_health_external_probe=$provider_health_external_probe"
     echo "provider_health_api_key_env_present=$provider_health_api_key_env_present"
     echo "provider_health_api_key_ref_resolved=$provider_health_api_key_ref_resolved"
+    echo "provider_runtime_mode=$provider_runtime_mode"
+    echo "provider_runtime_production_mode=$provider_runtime_production_mode"
+    echo "provider_runtime_contract=$provider_runtime_contract"
+    echo "active_mock_provider_count=$active_mock_provider_count"
     echo "deployment_readiness_status=$deployment_status"
     echo "deployment_controller_evidence_fresh=$deployment_controller_fresh"
     echo "deployment_controller_age_hours=$deployment_controller_age_hours"
@@ -149,6 +166,16 @@ write_summary() {
     echo
     echo "policy_gate_attention_items:"
     jq -r '.attention_items[]? | "- \(.severity): \(.kind) - \(.message)"' "$runs_json"
+    if [[ "$active_mock_provider_count" != "0" ]]; then
+      echo
+      echo "provider_runtime_blocking_reasons:"
+      jq -r '.[]? | select(.status == "active" and ((.provider_type // "" | ascii_downcase) == "mock" or (.provider_type // "" | ascii_downcase) == "mock_openai_compatible")) | "- active provider uses mock runtime: \(.name)"' "$providers_json"
+    fi
+    if [[ "$provider_runtime_production_mode" != "true" ]]; then
+      echo
+      echo "provider_runtime_blocking_reasons:"
+      echo "- provider runtime target is not in production mode"
+    fi
   } >"$summary_file"
 
   cat "$summary_file"
@@ -201,6 +228,7 @@ mkdir -p "$EVIDENCE_DIR"
 
 curl -fsS "$BASE_URL/healthz" >/dev/null
 providers_file="$(fetch_json GET /api/providers)"
+fetch_json GET /api/providers/runtime >/dev/null
 fetch_json GET /api/providers/summary >/dev/null
 fetch_json GET /api/providers/policy-gate >/dev/null
 fetch_json GET /api/providers/policy-gate/runs >/dev/null

@@ -121,6 +121,7 @@ required_evidence_artifacts_for_requirement() {
       echo "$SOURCE_EVIDENCE_DIR/remote-computer-state-sync-evidence.json"
       echo "$SOURCE_EVIDENCE_DIR/remote-computer-sidecar-recovery-evidence.json"
       echo "$SOURCE_EVIDENCE_DIR/worker-remote-computer/summary.json"
+      echo "$SOURCE_EVIDENCE_DIR/remote-computer-session-pod-lifecycle-evidence.json"
       ;;
     approval-notifications)
       echo "$SOURCE_EVIDENCE_DIR/api-approvals-notifications-deployment-validate.json"
@@ -165,6 +166,26 @@ required_evidence_artifacts_for_requirement() {
     ui-production-polish)
       echo "$SOURCE_EVIDENCE_DIR/local-script-scripts-verify-static-ui-actionbook.sh.json"
       echo "$SOURCE_EVIDENCE_DIR/local-script-scripts-verify-static-ui-assets.sh.json"
+      ;;
+    product-surfaces)
+      echo "$SOURCE_EVIDENCE_DIR/product-surfaces/summary.json"
+      ;;
+    enterprise-security-production-controls)
+      echo "$SOURCE_EVIDENCE_DIR/enterprise-security-production-controls/summary.json"
+      ;;
+    observability-ops-production)
+      echo "$SOURCE_EVIDENCE_DIR/observability-ops-production/summary.json"
+      ;;
+    live-connector-production-semantics)
+      echo "$SOURCE_EVIDENCE_DIR/live-connector-production-semantics/tmall-top/summary.json"
+      echo "$SOURCE_EVIDENCE_DIR/live-connector-production-semantics/taobao-open-platform/summary.json"
+      echo "$SOURCE_EVIDENCE_DIR/live-connector-production-semantics/xiaohongshu-shop/summary.json"
+      echo "$SOURCE_EVIDENCE_DIR/live-connector-production-semantics/xianyu-goofish/summary.json"
+      echo "$SOURCE_EVIDENCE_DIR/live-connector-production-semantics/tiktok-shop-open-api/summary.json"
+      echo "$SOURCE_EVIDENCE_DIR/live-connector-production-semantics/amazon-selling-partner-api/summary.json"
+      ;;
+    runtime-production-recovery)
+      echo "$SOURCE_EVIDENCE_DIR/runtime-production-recovery-evidence.json"
       ;;
   esac
 }
@@ -965,6 +986,203 @@ artifact_contract_issue() {
     fi
   fi
 
+  if [[ "$req_id" == "product-surfaces" && "$artifact" == */product-surfaces/summary.json ]]; then
+    local summary_status
+    local evidence_class
+    local target_id
+    local target_kind
+    local target_environment
+    local target_base_url
+    local target_git_sha
+    local target_image_tag
+    local audit_id
+    local checked_at
+    local support_owner
+    local archive_uri
+    local immutable
+    local archive_digest
+    local retention_policy
+
+    summary_status="$(jq -r '.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    evidence_class="$(jq -r '.evidence_class // .required_evidence_class // ""' "$artifact" 2>/dev/null || echo "")"
+    target_id="$(jq -r '.target.id // .target.deployment_id // .target.cluster_id // ""' "$artifact" 2>/dev/null || echo "")"
+    target_kind="$(jq -r '.target.kind // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    target_environment="$(jq -r '.target.environment // ""' "$artifact" 2>/dev/null || echo "")"
+    target_base_url="$(jq -r '.target.base_url // ""' "$artifact" 2>/dev/null || echo "")"
+    target_git_sha="$(jq -r '.target.git_sha // ""' "$artifact" 2>/dev/null || echo "")"
+    target_image_tag="$(jq -r '.target.image_tag // ""' "$artifact" 2>/dev/null || echo "")"
+    audit_id="$(jq -r '.audit_id // .audit_log_id // .trace_id // .run_id // ""' "$artifact" 2>/dev/null || echo "")"
+    checked_at="$(jq -r '.checked_at // .validated_at // .completed_at // .timestamp // ""' "$artifact" 2>/dev/null || echo "")"
+    support_owner="$(jq -r '.support_owner // .product_owner // .oncall_owner // ""' "$artifact" 2>/dev/null || echo "")"
+    archive_uri="$(jq -r '.evidence_archive.uri // .archive.uri // ""' "$artifact" 2>/dev/null || echo "")"
+    immutable="$(jq -r '.evidence_archive.immutable // .archive.immutable // false' "$artifact" 2>/dev/null || echo "false")"
+    archive_digest="$(jq -r '.evidence_archive.digest // .archive.digest // ""' "$artifact" 2>/dev/null || echo "")"
+    retention_policy="$(jq -r '.evidence_archive.retention_policy // .archive.retention_policy // ""' "$artifact" 2>/dev/null || echo "")"
+
+    case "$summary_status" in
+      ready|validated|completed|passed) ;;
+      *)
+        printf 'product surfaces summary status=%s' "$summary_status"
+        return 0
+        ;;
+    esac
+    if [[ "$evidence_class" != "customer_grade" ]]; then
+      printf 'product surfaces evidence_class=%s is not customer_grade' "${evidence_class:-<empty>}"
+      return 0
+    fi
+    if ! is_production_identity "$target_id" || ! is_production_identity "$target_base_url"; then
+      printf 'product surfaces target id or base_url is pilot/mock/local'
+      return 0
+    fi
+    if [[ "$target_environment" != "production" || -z "$target_git_sha" || -z "$target_image_tag" ]]; then
+      printf 'product surfaces target lacks production environment, git SHA, or image tag'
+      return 0
+    fi
+    case "$target_kind" in
+      production_product_surface|production_ui|customer_grade_deployment|kubernetes_cluster|managed_agent_cluster) ;;
+      *)
+        printf 'product surfaces target_kind=%s is not production-grade' "$target_kind"
+        return 0
+        ;;
+    esac
+    if [[ -z "$audit_id" || -z "$checked_at" || -z "$support_owner" ]]; then
+      printf 'product surfaces summary lacks audit id, timestamp, or support owner'
+      return 0
+    fi
+    if [[ "$immutable" != "true" || -z "$archive_uri" || -z "$archive_digest" || -z "$retention_policy" ]]; then
+      printf 'product surfaces summary lacks immutable archive metadata'
+      return 0
+    fi
+    jq -e '
+      def ready: . == "ready" or . == "validated" or . == "completed" or . == "passed";
+      def surface($id): first(.surfaces[]? | select(.id == $id));
+      def routes_checked($id):
+        ((surface($id).routes // []) | length) > 0
+        and all(surface($id).routes[]?;
+          (.method // "") != ""
+          and (.path // "" | startswith("/api/"))
+          and ((.status // 0) >= 200 and (.status // 0) < 300)
+          and (.schema_checked == true)
+        );
+      all(["admin-console", "operator-console", "builder-console", "ops-console"][];
+        (surface(.).status // "unknown" | ready)
+        and (surface(.).live_api_readback == true)
+        and (surface(.).authorization_boundaries_checked == true)
+        and (surface(.).no_fake_completion_state == true)
+        and routes_checked(.)
+      )
+      and (.live_api_truth.status // "unknown" | ready)
+      and (.live_api_truth.route_coverage_tested == true)
+      and (.live_api_truth.live_endpoint_coverage_tested == true)
+      and (.live_api_truth.backend_authorization_checked == true)
+      and (.live_api_truth.unauthenticated_rejected == true)
+      and (.live_api_truth.forbidden_role_rejected == true)
+      and (.live_api_truth.fake_completion_scan_passed == true)
+      and (.live_api_truth.stale_or_mock_data_scan_passed == true)
+    ' "$artifact" >/dev/null || {
+      printf 'product surfaces summary lacks live API truth or per-surface route evidence'
+      return 0
+    }
+  fi
+
+  if [[ "$req_id" == "provider-rollout" && "$artifact_name" == "provider-production-rollout-evidence.json" ]]; then
+    local evidence_status
+    local rollout_status
+    local environment
+    local provider_count
+    local provider_id_count
+    local enforcement_blocked
+    local controller_configured
+    local controller_status
+    local rollout_id
+    local ran_at
+
+    evidence_status="$(jq -r '.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    rollout_status="$(jq -r '.response.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    environment="$(jq -r '.response.environment // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    provider_count="$(jq -r '.response.provider_count // 0' "$artifact" 2>/dev/null || echo "0")"
+    provider_id_count="$(jq -r '[.response.provider_ids[]?] | length' "$artifact" 2>/dev/null || echo "0")"
+    enforcement_blocked="$(jq -r '.response.enforcement.production_blocked // true' "$artifact" 2>/dev/null || echo "true")"
+    controller_configured="$(jq -r '.response.controller_configured // false' "$artifact" 2>/dev/null || echo "false")"
+    controller_status="$(jq -r '.response.controller_execution.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    rollout_id="$(jq -r '.response.id // ""' "$artifact" 2>/dev/null || echo "")"
+    ran_at="$(jq -r '.response.ran_at // ""' "$artifact" 2>/dev/null || echo "")"
+
+    if [[ "$evidence_status" != "captured" ]]; then
+      printf 'provider rollout evidence_status=%s' "$evidence_status"
+      return 0
+    fi
+    if [[ "$rollout_status" != "applied" || "$controller_status" != "applied" ]]; then
+      printf 'provider rollout status=%s controller_status=%s' "$rollout_status" "$controller_status"
+      return 0
+    fi
+    if [[ "$environment" != "production" && "$environment" != "prod" ]]; then
+      printf 'provider rollout environment=%s is not production' "$environment"
+      return 0
+    fi
+    if [[ "$controller_configured" != "true" || "$enforcement_blocked" != "false" ]]; then
+      printf 'provider rollout controller or enforcement evidence incomplete'
+      return 0
+    fi
+    if [[ ! "$provider_count" =~ ^[0-9]+$ || "$provider_count" == "0" || "$provider_id_count" != "$provider_count" ]]; then
+      printf 'provider rollout provider_count=%s provider_id_count=%s' "$provider_count" "$provider_id_count"
+      return 0
+    fi
+    if [[ -z "$rollout_id" || -z "$ran_at" ]]; then
+      printf 'provider rollout lacks audit id or timestamp'
+      return 0
+    fi
+  fi
+
+  if [[ "$req_id" == "provider-rollout" && "$artifact_name" == "provider-production-rollback-evidence.json" ]]; then
+    local evidence_status
+    local rollback_status
+    local environment
+    local provider_count
+    local provider_id_count
+    local controller_configured
+    local controller_status
+    local rollback_id
+    local source_rollout_id
+    local ran_at
+
+    evidence_status="$(jq -r '.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    rollback_status="$(jq -r '.response.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    environment="$(jq -r '.response.environment // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    provider_count="$(jq -r '.response.provider_count // 0' "$artifact" 2>/dev/null || echo "0")"
+    provider_id_count="$(jq -r '[.response.provider_ids[]?] | length' "$artifact" 2>/dev/null || echo "0")"
+    controller_configured="$(jq -r '.response.controller_configured // false' "$artifact" 2>/dev/null || echo "false")"
+    controller_status="$(jq -r '.response.controller_execution.status // "unknown"' "$artifact" 2>/dev/null || echo "unknown")"
+    rollback_id="$(jq -r '.response.id // ""' "$artifact" 2>/dev/null || echo "")"
+    source_rollout_id="$(jq -r '.response.source_rollout_id // ""' "$artifact" 2>/dev/null || echo "")"
+    ran_at="$(jq -r '.response.ran_at // ""' "$artifact" 2>/dev/null || echo "")"
+
+    if [[ "$evidence_status" != "captured" ]]; then
+      printf 'provider rollback evidence_status=%s' "$evidence_status"
+      return 0
+    fi
+    if [[ "$rollback_status" != "rolled_back" || "$controller_status" != "rolled_back" ]]; then
+      printf 'provider rollback status=%s controller_status=%s' "$rollback_status" "$controller_status"
+      return 0
+    fi
+    if [[ "$environment" != "production" && "$environment" != "prod" ]]; then
+      printf 'provider rollback environment=%s is not production' "$environment"
+      return 0
+    fi
+    if [[ "$controller_configured" != "true" ]]; then
+      printf 'provider rollback controller evidence incomplete'
+      return 0
+    fi
+    if [[ ! "$provider_count" =~ ^[0-9]+$ || "$provider_count" == "0" || "$provider_id_count" != "$provider_count" ]]; then
+      printf 'provider rollback provider_count=%s provider_id_count=%s' "$provider_count" "$provider_id_count"
+      return 0
+    fi
+    if [[ -z "$rollback_id" || -z "$source_rollout_id" || -z "$ran_at" ]]; then
+      printf 'provider rollback lacks audit id, source rollout id, or timestamp'
+      return 0
+    fi
+  fi
+
   if [[ "$req_id" == "finance-close" && "$artifact_name" == "finance-export-delivery-observer.json" ]]; then
     local observer_status
     local delivery_mode
@@ -1004,6 +1222,22 @@ artifact_contract_issue() {
     fi
     if ! is_finance_system_identity "$system_id"; then
       printf 'system_id=%s is not a true ERP/accounting system identity' "$system_id"
+      return 0
+    fi
+  fi
+
+  if [[ "$req_id" == "enterprise-security-production-controls" && "$artifact" == */enterprise-security-production-controls/summary.json ]]; then
+    local gate_output
+    if ! gate_output="$(env EVIDENCE_DIR="$tmp_dir/enterprise-security-production-controls-gate" ENTERPRISE_SECURITY_CONTROLS_EVIDENCE_FILE="$artifact" scripts/enterprise-security-production-controls-gate.sh 2>&1)"; then
+      printf 'enterprise security production controls gate rejected artifact: %s' "$(printf '%s' "$gate_output" | tr '\n' ' ' | cut -c1-500)"
+      return 0
+    fi
+  fi
+
+  if [[ "$req_id" == "observability-ops-production" && "$artifact" == */observability-ops-production/summary.json ]]; then
+    local gate_output
+    if ! gate_output="$(env EVIDENCE_DIR="$tmp_dir/observability-ops-production-gate" OBSERVABILITY_OPS_EVIDENCE_FILE="$artifact" scripts/observability-ops-production-gate.sh 2>&1)"; then
+      printf 'observability ops production gate rejected artifact: %s' "$(printf '%s' "$gate_output" | tr '\n' ' ' | cut -c1-500)"
       return 0
     fi
   fi
@@ -1823,7 +2057,29 @@ requirement_cross_artifact_issue() {
   local req_id="$1"
   local run_manifest="$SOURCE_EVIDENCE_DIR/production-evidence-run.json"
 
+  if [[ "$req_id" == "live-connector-production-semantics" ]]; then
+    local gate_output
+    if ! gate_output="$(env EVIDENCE_DIR="$tmp_dir/live-connector-production-semantics-gate" SOURCE_EVIDENCE_DIR="$SOURCE_EVIDENCE_DIR/live-connector-production-semantics" scripts/live-connector-production-semantics-gate.sh 2>&1)"; then
+      printf 'live connector production semantics gate rejected artifacts: %s' "$(printf '%s' "$gate_output" | tr '\n' ' ' | cut -c1-500)"
+      return 0
+    fi
+  fi
+
+  if [[ "$req_id" == "runtime-production-recovery" ]]; then
+    local gate_output
+    if ! gate_output="$(env EVIDENCE_DIR="$tmp_dir/runtime-production-readiness-gate" SOURCE_EVIDENCE_DIR="$SOURCE_EVIDENCE_DIR" RUNTIME_PRODUCTION_RECOVERY_EVIDENCE_FILE="$SOURCE_EVIDENCE_DIR/runtime-production-recovery-evidence.json" scripts/runtime-production-readiness-gate.sh 2>&1)"; then
+      printf 'runtime production readiness gate rejected artifacts: %s' "$(printf '%s' "$gate_output" | tr '\n' ' ' | cut -c1-500)"
+      return 0
+    fi
+  fi
+
   if [[ "$req_id" == "worker-remote-computer" ]]; then
+    local production_state_gate_output
+    if ! production_state_gate_output="$(env EVIDENCE_DIR="$tmp_dir/remote-computer-production-state-gate" SOURCE_EVIDENCE_DIR="$SOURCE_EVIDENCE_DIR" REMOTE_COMPUTER_EVIDENCE_DIR="$SOURCE_EVIDENCE_DIR/remote-computer" WORKER_REMOTE_COMPUTER_EVIDENCE_DIR="$SOURCE_EVIDENCE_DIR/worker-remote-computer" REMOTE_COMPUTER_SESSION_POD_LIFECYCLE_EVIDENCE_FILE="$SOURCE_EVIDENCE_DIR/remote-computer-session-pod-lifecycle-evidence.json" scripts/remote-computer-production-state-gate.sh 2>&1)"; then
+      printf 'Remote Computer production state gate rejected artifacts: %s' "$(printf '%s' "$production_state_gate_output" | tr '\n' ' ' | cut -c1-500)"
+      return 0
+    fi
+
     local worker_artifact="$SOURCE_EVIDENCE_DIR/worker-load-validation-evidence.json"
     local state_artifact="$SOURCE_EVIDENCE_DIR/remote-computer-state-sync-evidence.json"
     local sidecar_artifact="$SOURCE_EVIDENCE_DIR/remote-computer-sidecar-recovery-evidence.json"

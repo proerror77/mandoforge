@@ -240,6 +240,14 @@ pub struct EnterpriseProductLane {
     #[serde(default)]
     pub production_target: String,
     #[serde(default)]
+    pub current_boundary: String,
+    #[serde(default)]
+    pub readiness_endpoints: Vec<String>,
+    #[serde(default)]
+    pub evidence_scripts: Vec<String>,
+    #[serde(default)]
+    pub required_evidence: Vec<String>,
+    #[serde(default)]
     pub blockers: Vec<String>,
     #[serde(default)]
     pub next_actions: Vec<String>,
