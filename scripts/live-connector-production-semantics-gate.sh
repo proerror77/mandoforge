@@ -13,6 +13,14 @@ connectors=(
   "xianyu-goofish|packs/ecommerce-xianyu/connectors/xianyu-goofish.yaml"
   "tiktok-shop-open-api|packs/ecommerce-tiktok-shop/connectors/tiktok-shop-open-api.yaml"
   "amazon-selling-partner-api|packs/ecommerce-amazon/connectors/amazon-selling-partner-api.yaml"
+  "github-connector|packs/swe-review/connectors/github-connector.yaml"
+)
+
+enterprise_connectors=(
+  "lark-mcp"
+  "feishu-mcp"
+  "lark-native"
+  "feishu-native"
 )
 
 require_cmd() {
@@ -42,7 +50,7 @@ is_production_identity() {
   local value
   value="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
   [[ -n "$value" ]] || return 1
-  [[ ! "$value" =~ (^|[./:_-])(mock|example|sample|demo|local|localhost|sandbox-only)([./:_-]|$) ]] || return 1
+  [[ ! "$value" =~ (^|[./:_-])(whiskey|pilot|mock|example|sample|demo|local|localhost|sandbox-only)([./:_-]|$) ]] || return 1
   [[ ! "$value" =~ (^|[./:_-])(127\.0\.0\.1|\[::1\])([./:_-]|$) ]] || return 1
 }
 
@@ -81,6 +89,20 @@ static_contract_check() {
     require_pattern 'secret_redaction:' "$manifest" "$connector_id must declare secret redaction"
     require_pattern 'prompt_injection_boundary:' "$manifest" "$connector_id must declare prompt injection boundary"
     require_pattern 'treat_results_as_data:[[:space:]]*true' "$manifest" "$connector_id must treat connector results as data"
+  done
+
+  grep -q "GitHub SWE connector" docs/enterprise-product-completion-contract.md \
+    || fail "enterprise completion contract must require GitHub SWE connector promotion"
+  grep -q "Lark/Feishu MCP and native enterprise connectors" docs/enterprise-product-completion-contract.md \
+    || fail "enterprise completion contract must require Lark/Feishu MCP and native connector promotion"
+  for connector_id in "${enterprise_connectors[@]}"; do
+    local artifact_path="live-connector-production-semantics/$connector_id/summary.json"
+    grep -q "$artifact_path" crates/mandoforge-api/src/stage2_readiness.rs \
+      || fail "Stage 2 readiness must require $connector_id production semantics evidence"
+    grep -q "$artifact_path" scripts/stage2-completion-audit-gate.sh \
+      || fail "Stage 2 completion audit must require $connector_id production semantics evidence"
+    grep -q "$artifact_path" scripts/verify-stage2-evidence-archive.sh \
+      || fail "Stage 2 archive verifier must require $connector_id production semantics evidence"
   done
 }
 
@@ -166,14 +188,18 @@ write_summary() {
   local issue="$3"
   jq -n \
     --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --arg source "live-connector-production-semantics-gate" \
     --arg status "$status" \
+    --arg required_evidence_class "customer_grade" \
     --arg source_evidence_dir "$SOURCE_EVIDENCE_DIR" \
     --arg issue "$issue" \
-    --argjson connector_count "${#connectors[@]}" \
+    --argjson connector_count "$((${#connectors[@]} + ${#enterprise_connectors[@]}))" \
     --argjson blocked_count "$blocked_count" \
     '{
       generated_at: $generated_at,
+      source: $source,
       status: $status,
+      required_evidence_class: $required_evidence_class,
       source_evidence_dir: $source_evidence_dir,
       connector_count: $connector_count,
       blocked_count: $blocked_count,
@@ -181,7 +207,7 @@ write_summary() {
     }' >"$EVIDENCE_DIR/summary.json"
   {
     echo "live_connector_production_semantics_status=$status"
-    echo "connector_count=${#connectors[@]}"
+    echo "connector_count=$((${#connectors[@]} + ${#enterprise_connectors[@]}))"
     echo "blocked_count=$blocked_count"
     if [[ -n "$issue" ]]; then
       echo "issue=$issue"
@@ -205,6 +231,14 @@ blocked_count=0
 issue=""
 for connector in "${connectors[@]}"; do
   connector_id="${connector%%|*}"
+  artifact="$SOURCE_EVIDENCE_DIR/$connector_id/summary.json"
+  if issue_text="$(connector_issue "$connector_id" "$artifact")"; then
+    echo "$connector_id: $issue_text" >&2
+    issue="${issue:+$issue; }$connector_id: $issue_text"
+    blocked_count=$((blocked_count + 1))
+  fi
+done
+for connector_id in "${enterprise_connectors[@]}"; do
   artifact="$SOURCE_EVIDENCE_DIR/$connector_id/summary.json"
   if issue_text="$(connector_issue "$connector_id" "$artifact")"; then
     echo "$connector_id: $issue_text" >&2

@@ -150,7 +150,9 @@ write_summary() {
 
   jq -n \
     --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --arg source "runtime-production-readiness-gate" \
     --arg status "$status" \
+    --arg required_evidence_class "customer_grade" \
     --arg source_evidence_dir "$SOURCE_EVIDENCE_DIR" \
     --arg runtime_recovery_evidence_file "$RUNTIME_RECOVERY_EVIDENCE_FILE" \
     --arg runtime_recovery_status "$runtime_recovery_status" \
@@ -159,7 +161,9 @@ write_summary() {
     --argjson blocked_count "$blocked_count" \
     '{
       generated_at: $generated_at,
+      source: $source,
       status: $status,
+      required_evidence_class: $required_evidence_class,
       source_evidence_dir: $source_evidence_dir,
       runtime_recovery_evidence_file: $runtime_recovery_evidence_file,
       runtime_recovery_status: $runtime_recovery_status,

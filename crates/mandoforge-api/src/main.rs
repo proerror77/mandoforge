@@ -360,8 +360,9 @@ pub(crate) use types::context_packet::{
 };
 pub(crate) use types::defaults::*;
 pub(crate) use types::deployment::{
-    DeploymentVersion, EnterpriseProductCompletionLane, EnterpriseProductCompletionReadiness,
-    EnterpriseSecurityAdminCheck, EnterpriseSecurityAdminReadiness, ProductionAutoDeployRequest,
+    DeploymentVersion, EnterpriseEvidenceArchiveMetadata, EnterpriseProductCompletionLane,
+    EnterpriseProductCompletionReadiness, EnterpriseSecurityAdminCheck,
+    EnterpriseSecurityAdminReadiness, ProductionAutoDeployRequest,
     ProductionDeploymentVerifyRequest, Stage2CompletionReadiness, Stage2EvidenceRequirement,
 };
 pub(crate) use types::eval::{

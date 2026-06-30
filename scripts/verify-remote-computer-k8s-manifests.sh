@@ -23,15 +23,22 @@ for manifest in "${dry_run_manifests[@]}"; do
 done
 
 k8s_render="$(mktemp -t mandoforge-k8s-render.XXXXXX.out)"
+default_render="$(mktemp -t mandoforge-default-render.XXXXXX.out)"
 pilot_render="$(mktemp -t mandoforge-remote-computer-pilot-render.XXXXXX.out)"
-cleanup() { rm -f "$k8s_render" "$pilot_render"; }
+cleanup() { rm -f "$k8s_render" "$default_render" "$pilot_render"; }
 trap cleanup EXIT
 
 kubectl kustomize deploy/k8s >"$k8s_render"
-kubectl kustomize deploy >"$pilot_render"
+kubectl kustomize deploy >"$default_render"
+kubectl kustomize deploy/remote-computer-pilot --load-restrictor LoadRestrictionsNone >"$pilot_render"
 
 if ! grep -q "claimName: mandoforge-remote-computer-state" "$k8s_render"; then
   echo "base Remote Computer render is missing the mounted state PVC claim" >&2
+  exit 1
+fi
+
+if grep -Eq 'kind:[[:space:]]*Secret|replace-me|s3\.example\.com' "$default_render"; then
+  echo "default deploy render must not include placeholder Remote Computer state Secrets" >&2
   exit 1
 fi
 
@@ -81,5 +88,17 @@ for tracking_key in \
     exit 1
   fi
 done
+
+if ! grep -q "parse_kubernetes_exec_command" "$runner_source" \
+  || ! grep -q "metadata.command array must contain only non-empty string arguments" "$runner_source" \
+  || ! grep -q "command_query" "$runner_source"; then
+  echo "Remote Computer runner must preserve Kubernetes exec argv semantics and validate array commands" >&2
+  exit 1
+fi
+
+if grep -q 'parts.join(" ")' "$runner_source"; then
+  echo "Remote Computer runner must not collapse metadata.command arrays into shell strings" >&2
+  exit 1
+fi
 
 echo "remote computer k8s manifests ok"

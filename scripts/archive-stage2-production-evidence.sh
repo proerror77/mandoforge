@@ -7,6 +7,7 @@ pod_name="${MANDOFORGE_STAGE2_EVIDENCE_ARCHIVE_POD:-mandoforge-stage2-evidence-a
 archive_path="${1:-.mandoforge/stage2-production-evidence-$(date -u +%Y%m%dT%H%M%SZ).tar.gz}"
 image="${MANDOFORGE_STAGE2_EVIDENCE_ARCHIVE_IMAGE:-busybox:1.36}"
 VERIFY_ARCHIVE="${VERIFY_STAGE2_EVIDENCE_ARCHIVE:-1}"
+ALLOW_UNVERIFIED_ARCHIVE="${ALLOW_UNVERIFIED_STAGE2_EVIDENCE_ARCHIVE:-0}"
 
 if ! command -v kubectl >/dev/null 2>&1; then
   echo "kubectl is required to archive Stage 2 production evidence" >&2
@@ -17,6 +18,7 @@ sha256_file="${archive_path}.sha256"
 manifest_file="${archive_path}.manifest.txt"
 created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 current_context="$(kubectl config current-context 2>/dev/null || true)"
+verifier="scripts/verify-stage2-evidence-archive.sh"
 
 archive_size() {
   if stat -c%s "$archive_path" >/dev/null 2>&1; then
@@ -35,6 +37,30 @@ archive_sha256() {
     echo "sha256sum or shasum is required to checksum the Stage 2 evidence archive" >&2
     exit 1
   fi
+}
+
+write_manifest() {
+  local verification_status="${1:?verification status is required}"
+  local customer_grade_evidence="${2:?customer-grade evidence flag is required}"
+
+  {
+    echo "created_at=$created_at"
+    echo "kube_context=${current_context:-<unknown>}"
+    echo "namespace=$namespace"
+    echo "pvc=$pvc_name"
+    echo "archive_pod=$pod_name"
+    echo "archive_image=$image"
+    echo "archive_path=$archive_path"
+    echo "archive_bytes=$archive_bytes"
+    echo "archive_sha256=$archive_sha"
+    echo "sha256_file=$sha256_file"
+    echo "verification_required=true"
+    echo "verification_status=$verification_status"
+    echo "verifier=$verifier"
+    echo "verify_stage2_evidence_archive=$VERIFY_ARCHIVE"
+    echo "break_glass_unverified=$ALLOW_UNVERIFIED_ARCHIVE"
+    echo "customer_grade_evidence=$customer_grade_evidence"
+  } >"$manifest_file"
 }
 
 mkdir -p "$(dirname "$archive_path")"
@@ -107,31 +133,34 @@ archive_sha="$(archive_sha256)"
 archive_bytes="$(archive_size)"
 
 printf '%s  %s\n' "$archive_sha" "$archive_path" >"$sha256_file"
-
-{
-  echo "created_at=$created_at"
-  echo "kube_context=${current_context:-<unknown>}"
-  echo "namespace=$namespace"
-  echo "pvc=$pvc_name"
-  echo "archive_pod=$pod_name"
-  echo "archive_image=$image"
-  echo "archive_path=$archive_path"
-  echo "archive_bytes=$archive_bytes"
-  echo "archive_sha256=$archive_sha"
-  echo "sha256_file=$sha256_file"
-} >"$manifest_file"
+write_manifest "pending" "false"
 
 echo "Stage 2 production evidence archived to $archive_path" >&2
 echo "Stage 2 production evidence checksum written to $sha256_file" >&2
 echo "Stage 2 production evidence manifest written to $manifest_file" >&2
 
+if [[ "$VERIFY_ARCHIVE" != "1" && "$ALLOW_UNVERIFIED_ARCHIVE" != "1" ]]; then
+  write_manifest "blocked_verification_disabled" "false"
+  echo "Stage 2 production evidence archive verification is mandatory; set ALLOW_UNVERIFIED_STAGE2_EVIDENCE_ARCHIVE=1 only for break-glass diagnostics." >&2
+  exit 1
+fi
+
+if [[ ! -x "$verifier" ]]; then
+  write_manifest "blocked_missing_verifier" "false"
+  echo "Stage 2 evidence archive verifier is missing or not executable: $verifier" >&2
+  exit 1
+fi
+
 if [[ "$VERIFY_ARCHIVE" == "1" ]]; then
-  verifier="scripts/verify-stage2-evidence-archive.sh"
-  if [[ ! -x "$verifier" ]]; then
-    echo "Stage 2 evidence archive verifier is missing or not executable: $verifier" >&2
+  if ALLOW_PENDING_STAGE2_ARCHIVE_MANIFEST=1 "$verifier" "$archive_path" >&2; then
+    write_manifest "passed" "true"
+    echo "Stage 2 production evidence manifest verified: $manifest_file" >&2
+  else
+    write_manifest "failed" "false"
+    echo "Stage 2 production evidence archive verification failed; manifest records verification_status=failed: $manifest_file" >&2
     exit 1
   fi
-  "$verifier" "$archive_path" >&2
 else
-  echo "Stage 2 production evidence archive verification skipped; set VERIFY_STAGE2_EVIDENCE_ARCHIVE=1 to enable it" >&2
+  write_manifest "skipped_break_glass" "false"
+  echo "Stage 2 production evidence archive verification skipped by break-glass override; this archive is not customer-grade evidence." >&2
 fi

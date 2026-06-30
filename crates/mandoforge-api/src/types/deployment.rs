@@ -81,9 +81,20 @@ pub(crate) struct EnterpriseProductCompletionReadiness {
     pub(crate) pilot_ready_lane_count: usize,
     pub(crate) blocked_lane_count: usize,
     pub(crate) completion_blocked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) evidence_archive: Option<EnterpriseEvidenceArchiveMetadata>,
     pub(crate) lanes: Vec<EnterpriseProductCompletionLane>,
     pub(crate) next_actions: Vec<String>,
     pub(crate) message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct EnterpriseEvidenceArchiveMetadata {
+    pub(crate) support_owner: String,
+    pub(crate) uri: String,
+    pub(crate) digest: String,
+    pub(crate) retention_policy: String,
+    pub(crate) immutable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

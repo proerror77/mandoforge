@@ -41,6 +41,9 @@ spec:
           volumeMounts:
             - name: workspaces
               mountPath: /var/lib/mandoforge/workspaces
+            - name: stage2-production-evidence
+              mountPath: /evidence
+              readOnly: true
           readinessProbe:
             httpGet:
               path: /healthz
@@ -64,3 +67,6 @@ spec:
         - name: workspaces
           persistentVolumeClaim:
             claimName: mandoforge-workspaces
+        - name: stage2-production-evidence
+          persistentVolumeClaim:
+            claimName: mandoforge-stage2-production-evidence

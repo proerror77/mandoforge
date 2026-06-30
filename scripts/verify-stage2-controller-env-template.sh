@@ -17,6 +17,10 @@ required_template_vars=(
   RUN_STAGE2_COMPLETION_AUDIT
   ALLOW_BLOCKED
   MANDOFORGE_STAGE2_TEAM_ID
+  MANDOFORGE_STAGE2_SUPPORT_OWNER
+  MANDOFORGE_STAGE2_EVIDENCE_ARCHIVE_URI
+  MANDOFORGE_STAGE2_EVIDENCE_ARCHIVE_DIGEST
+  MANDOFORGE_STAGE2_EVIDENCE_RETENTION_POLICY
   MANDOFORGE_STAGE2_TENANT_DEPLOYMENT_ID
   MANDOFORGE_STAGE2_TENANT_RLS_TABLES
   MANDOFORGE_TENANT_ROUTING_CONTROLLER_REQUIRED
@@ -248,6 +252,15 @@ fi
 
 if ! grep -q "looks_production_identity" "$production_preflight_script"; then
   echo "Stage 2 production evidence preflight must validate target identity values" >&2
+  exit 1
+fi
+
+if ! grep -q "check_evidence_archive_metadata" "$production_preflight_script" \
+  || ! grep -q "MANDOFORGE_STAGE2_SUPPORT_OWNER" "$production_preflight_script" \
+  || ! grep -q "MANDOFORGE_STAGE2_EVIDENCE_ARCHIVE_URI" "$production_preflight_script" \
+  || ! grep -q "MANDOFORGE_STAGE2_EVIDENCE_ARCHIVE_DIGEST" "$production_preflight_script" \
+  || ! grep -q "MANDOFORGE_STAGE2_EVIDENCE_RETENTION_POLICY" "$production_preflight_script"; then
+  echo "Stage 2 production evidence preflight must require support owner and immutable evidence archive metadata" >&2
   exit 1
 fi
 

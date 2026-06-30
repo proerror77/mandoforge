@@ -5,6 +5,7 @@ resources:
   - stage2-production-evidence-pvc.yaml
   - stage2-production-evidence-gate-job.yaml
   - runtime-production-evidence-job.yaml
+  - production-deployment-safety-job.yaml
   - stage2-completion-audit-job.yaml
   - observability-collector-evidence-job.yaml
   - observability-ops-production-job.yaml
@@ -12,6 +13,7 @@ resources:
   - worker-remote-computer-evidence-job.yaml
   - remote-computer-production-state-job.yaml
   - live-connector-production-semantics-job.yaml
+  - ontology-engine-production-job.yaml
   - ontology-release-workflow-trigger-job.yaml
   - provider-governance-evidence-job.yaml
   - tenant-isolation-evidence-job.yaml
@@ -19,6 +21,7 @@ resources:
   - approval-notification-evidence-job.yaml
   - enterprise-security-production-controls-job.yaml
   - product-surfaces-production-job.yaml
+  - workflowpack-enterprise-lifecycle-job.yaml
   - worker-evidence-job.yaml
   - scheduler-evidence-job.yaml
   - policy-rollout-evidence-job.yaml

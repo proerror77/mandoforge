@@ -15,7 +15,7 @@ It contains:
 - JuiceFS CSI Remote Computer state example, kept outside the default kustomization.
 - Remote Computer warm-pool example, kept outside the default kustomization.
 - Remote Computer KEDA ScaledObject example, kept outside the default kustomization.
-- Remote Computer pilot bundle at `../kustomization.yaml` that opts into JuiceFS, warm-pool, and Remote Computer KEDA examples together.
+- Remote Computer pilot bundle at `../remote-computer-pilot/kustomization.yaml` that opts into JuiceFS, warm-pool, and Remote Computer KEDA examples together.
 - Scheduler CronJob for due policy, approval, release, and MCP automation, using a dedicated ServiceAccount with token automount disabled and Secret-sourced scheduler subject, role, and shared token headers.
 - Postgres StatefulSet and Service.
 - ConfigMap for runtime configuration.
@@ -34,7 +34,7 @@ kubectl -n agent-os port-forward svc/mandoforge-api 8787:8787
 Render the opt-in Remote Computer pilot bundle before applying it to a real cluster:
 
 ```bash
-kubectl kustomize deploy
+kubectl kustomize deploy/remote-computer-pilot --load-restrictor LoadRestrictionsNone
 ```
 
 Production notes:
@@ -49,10 +49,10 @@ Production notes:
 - Treat `remote-computer-state-contract.yaml` as the mounted state layout contract for `/agent-state/memory`, `/agent-state/notes`, `/agent-state/skills`, artifacts, locks, and manifests. Its conflict policy is one active writer per session; shared Memory/Notes/Skills must stay read-mostly until a lock-aware sync manager is configured.
 - `remote-computer-artifact-discovery-sidecar.yaml` provides a fail-closed sidecar script for scanning the assigned workspace artifact directory and pushing discovered files through `/api/remote-computers/artifacts/sync`. Keep `MANDOFORGE_ARTIFACT_DISCOVERY_ENABLED=false` until leased Pods receive real `MANDOFORGE_SESSION_ID`, `MANDOFORGE_REMOTE_COMPUTER_ID`, and assignment-aware artifact paths.
 - `POST /api/remote-computers/sidecars/recovery/run` produces an audited replacement plan for missing or stale sidecar heartbeats. It only attempts Pod delete/create when the Kubernetes runner live mutation gates and `MANDOFORGE_REMOTE_COMPUTER_SIDECAR_REPLACEMENT_ENABLED=true` are all set.
-- Treat `remote-computer-state-juicefs-profile.yaml` plus `remote-computer-state-juicefs-pvc-patch.yaml` as the opt-in JuiceFS CSI profile for the same `mandoforge-remote-computer-state` PVC mounted by Remote Computer Pods. Replace its secret values, metadata backend, object store, and namespace before applying it through the `../kustomization.yaml` pilot bundle.
+- Treat `remote-computer-state-juicefs-profile.yaml` plus `remote-computer-state-juicefs-pvc-patch.yaml` as the opt-in JuiceFS CSI profile for the same `mandoforge-remote-computer-state` PVC mounted by Remote Computer Pods. Replace its secret values, metadata backend, object store, and namespace before applying it through the `../remote-computer-pilot/kustomization.yaml` pilot bundle.
 - Keep `remote-computer-state-juicefs-example.yaml` as a reference-only manifest for provider shape; it creates a separate sample PVC and is not the Pod-mounted production claim.
 - Treat `remote-computer-warm-pool.yaml` as an opt-in example. The worker can claim persisted warm-pool Remote Computer records, but a production controller still needs to register prewarmed Pods, reset dirty workspaces, and refill the pool.
 - Treat `remote-computer-keda.yaml` as an opt-in example. It assumes Prometheus metrics that are not production-hardened yet.
-- Treat `../kustomization.yaml` as the reviewable bundle for enabling those examples together; do not apply it until storage credentials, Prometheus metrics, namespace policy, and state conflict rules have been reviewed.
+- Treat `../remote-computer-pilot/kustomization.yaml` as the reviewable bundle for enabling those examples together; do not apply it until storage credentials, Prometheus metrics, namespace policy, and state conflict rules have been reviewed.
 - Replace the scheduler example shared token before production exposure. If `MANDOFORGE_SCHEDULER_TOKEN` is set in the API runtime, `/api/scheduler/run-due` requires the CronJob to send the matching `x-mandoforge-scheduler-token` header in addition to Admin authorization.
 - The bundled OTel Collector exports to the collector `debug` exporter so local clusters have a real OTLP target without external credentials. Its NetworkPolicy allows ingress from the API Pod to OTLP HTTP and health ports only. Replace or extend its exporter pipeline before claiming production collector rollout; keep `MANDOFORGE_OTEL_COLLECTOR_HEALTH_ENDPOINT` pointed at the collector health extension rather than the OTLP HTTP receiver.

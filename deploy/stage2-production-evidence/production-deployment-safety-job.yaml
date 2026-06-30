@@ -1,0 +1,58 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mandoforge-production-deployment-safety
+  labels:
+    app.kubernetes.io/name: mandoforge
+    app.kubernetes.io/component: production-deployment-safety
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mandoforge
+        app.kubernetes.io/component: production-deployment-safety
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: production-deployment-safety
+          image: mandoforge-api:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /app/scripts/production-deployment-safety-gate.sh
+          envFrom:
+            - secretRef:
+                name: mandoforge-stage2-controller-env
+          env:
+            - name: EVIDENCE_DIR
+              value: /evidence/production-deployment-safety-gate
+            - name: SOURCE_EVIDENCE_DIR
+              value: /evidence
+            - name: PRODUCTION_DEPLOYMENT_SAFETY_EVIDENCE_FILE
+              value: /evidence/production-deployment-safety/summary.json
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          volumeMounts:
+            - name: evidence
+              mountPath: /evidence
+      volumes:
+        - name: evidence
+          persistentVolumeClaim:
+            claimName: mandoforge-stage2-production-evidence

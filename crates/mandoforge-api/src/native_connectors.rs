@@ -147,7 +147,7 @@ pub(crate) fn build_native_connector_production_readiness() -> NativeConnectorPr
     }
     .to_string();
     let next_actions = vec![
-        "configure sandbox and live environment separation for every native ecommerce connector"
+        "configure sandbox and live environment separation for every native and enterprise connector"
             .to_string(),
         "add token refresh, rate-limit, retry, reconciliation, and webhook ingestion evidence"
             .to_string(),
@@ -156,11 +156,11 @@ pub(crate) fn build_native_connector_production_readiness() -> NativeConnectorPr
     ];
     let message = if status == "ready" {
         format!(
-            "All {connector_count} native ecommerce connectors have customer-grade production evidence"
+            "All {connector_count} native and enterprise connectors have customer-grade production evidence"
         )
     } else {
         format!(
-            "Native connector production readiness is blocked: {ready_connector_count}/{connector_count} connectors are customer-grade ready and {blocked_connector_count} remain blocked"
+            "Native and enterprise connector production readiness is blocked: {ready_connector_count}/{connector_count} connectors are customer-grade ready and {blocked_connector_count} remain blocked"
         )
     };
 
@@ -343,6 +343,78 @@ fn native_connector_production_specs() -> Vec<NativeConnectorProductionSpec> {
             webhook_ingestion_env: "MANDOFORGE_GITHUB_WEBHOOK_INGESTION_URL",
             compensation_policy_env: "MANDOFORGE_GITHUB_COMPENSATION_POLICY",
             deployment_evidence_archive_env: "MANDOFORGE_GITHUB_DEPLOYMENT_EVIDENCE_ARCHIVE",
+        },
+        NativeConnectorProductionSpec {
+            connector_id: "lark-mcp",
+            provider: "lark-mcp",
+            manifest_path: "live-connector-production-semantics/lark-mcp/summary.json",
+            required_secret_refs: vec![
+                "LARK_MCP_APP_ID",
+                "LARK_MCP_APP_SECRET",
+                "LARK_MCP_ACCESS_TOKEN",
+            ],
+            sandbox_base_url_env: "MANDOFORGE_LARK_MCP_SANDBOX_BASE_URL",
+            live_base_url_env: "MANDOFORGE_LARK_MCP_LIVE_BASE_URL",
+            token_refresh_controller_env: "MANDOFORGE_LARK_MCP_TOKEN_REFRESH_CONTROLLER_URL",
+            rate_limit_policy_env: "MANDOFORGE_LARK_MCP_RATE_LIMIT_POLICY",
+            reconciliation_controller_env: "MANDOFORGE_LARK_MCP_RECONCILIATION_CONTROLLER_URL",
+            webhook_ingestion_env: "MANDOFORGE_LARK_MCP_WEBHOOK_INGESTION_URL",
+            compensation_policy_env: "MANDOFORGE_LARK_MCP_COMPENSATION_POLICY",
+            deployment_evidence_archive_env: "MANDOFORGE_LARK_MCP_DEPLOYMENT_EVIDENCE_ARCHIVE",
+        },
+        NativeConnectorProductionSpec {
+            connector_id: "feishu-mcp",
+            provider: "feishu-mcp",
+            manifest_path: "live-connector-production-semantics/feishu-mcp/summary.json",
+            required_secret_refs: vec![
+                "FEISHU_MCP_APP_ID",
+                "FEISHU_MCP_APP_SECRET",
+                "FEISHU_MCP_ACCESS_TOKEN",
+            ],
+            sandbox_base_url_env: "MANDOFORGE_FEISHU_MCP_SANDBOX_BASE_URL",
+            live_base_url_env: "MANDOFORGE_FEISHU_MCP_LIVE_BASE_URL",
+            token_refresh_controller_env: "MANDOFORGE_FEISHU_MCP_TOKEN_REFRESH_CONTROLLER_URL",
+            rate_limit_policy_env: "MANDOFORGE_FEISHU_MCP_RATE_LIMIT_POLICY",
+            reconciliation_controller_env: "MANDOFORGE_FEISHU_MCP_RECONCILIATION_CONTROLLER_URL",
+            webhook_ingestion_env: "MANDOFORGE_FEISHU_MCP_WEBHOOK_INGESTION_URL",
+            compensation_policy_env: "MANDOFORGE_FEISHU_MCP_COMPENSATION_POLICY",
+            deployment_evidence_archive_env: "MANDOFORGE_FEISHU_MCP_DEPLOYMENT_EVIDENCE_ARCHIVE",
+        },
+        NativeConnectorProductionSpec {
+            connector_id: "lark-native",
+            provider: "lark-open-platform-native",
+            manifest_path: "live-connector-production-semantics/lark-native/summary.json",
+            required_secret_refs: vec![
+                "LARK_NATIVE_APP_ID",
+                "LARK_NATIVE_APP_SECRET",
+                "LARK_NATIVE_TENANT_ACCESS_TOKEN",
+            ],
+            sandbox_base_url_env: "MANDOFORGE_LARK_NATIVE_SANDBOX_BASE_URL",
+            live_base_url_env: "MANDOFORGE_LARK_NATIVE_LIVE_BASE_URL",
+            token_refresh_controller_env: "MANDOFORGE_LARK_NATIVE_TOKEN_REFRESH_CONTROLLER_URL",
+            rate_limit_policy_env: "MANDOFORGE_LARK_NATIVE_RATE_LIMIT_POLICY",
+            reconciliation_controller_env: "MANDOFORGE_LARK_NATIVE_RECONCILIATION_CONTROLLER_URL",
+            webhook_ingestion_env: "MANDOFORGE_LARK_NATIVE_WEBHOOK_INGESTION_URL",
+            compensation_policy_env: "MANDOFORGE_LARK_NATIVE_COMPENSATION_POLICY",
+            deployment_evidence_archive_env: "MANDOFORGE_LARK_NATIVE_DEPLOYMENT_EVIDENCE_ARCHIVE",
+        },
+        NativeConnectorProductionSpec {
+            connector_id: "feishu-native",
+            provider: "feishu-open-platform-native",
+            manifest_path: "live-connector-production-semantics/feishu-native/summary.json",
+            required_secret_refs: vec![
+                "FEISHU_NATIVE_APP_ID",
+                "FEISHU_NATIVE_APP_SECRET",
+                "FEISHU_NATIVE_TENANT_ACCESS_TOKEN",
+            ],
+            sandbox_base_url_env: "MANDOFORGE_FEISHU_NATIVE_SANDBOX_BASE_URL",
+            live_base_url_env: "MANDOFORGE_FEISHU_NATIVE_LIVE_BASE_URL",
+            token_refresh_controller_env: "MANDOFORGE_FEISHU_NATIVE_TOKEN_REFRESH_CONTROLLER_URL",
+            rate_limit_policy_env: "MANDOFORGE_FEISHU_NATIVE_RATE_LIMIT_POLICY",
+            reconciliation_controller_env: "MANDOFORGE_FEISHU_NATIVE_RECONCILIATION_CONTROLLER_URL",
+            webhook_ingestion_env: "MANDOFORGE_FEISHU_NATIVE_WEBHOOK_INGESTION_URL",
+            compensation_policy_env: "MANDOFORGE_FEISHU_NATIVE_COMPENSATION_POLICY",
+            deployment_evidence_archive_env: "MANDOFORGE_FEISHU_NATIVE_DEPLOYMENT_EVIDENCE_ARCHIVE",
         },
     ]
 }
@@ -1523,9 +1595,9 @@ mod tests {
 
         assert_eq!(readiness.status, "blocked");
         assert!(!readiness.live_enabled);
-        assert_eq!(readiness.connector_count, 7);
+        assert_eq!(readiness.connector_count, 11);
         assert_eq!(readiness.ready_connector_count, 0);
-        assert_eq!(readiness.blocked_connector_count, 7);
+        assert_eq!(readiness.blocked_connector_count, 11);
         assert!(
             readiness
                 .connectors
@@ -1538,6 +1610,15 @@ mod tests {
                 .iter()
                 .any(|connector| connector.connector_id == "xianyu-goofish")
         );
+        for enterprise_connector_id in ["lark-mcp", "feishu-mcp", "lark-native", "feishu-native"] {
+            assert!(
+                readiness
+                    .connectors
+                    .iter()
+                    .any(|connector| connector.connector_id == enterprise_connector_id),
+                "missing enterprise connector readiness for {enterprise_connector_id}"
+            );
+        }
         for connector in &readiness.connectors {
             assert_eq!(connector.status, "blocked");
             assert_eq!(connector.required_evidence_class, "customer_grade");

@@ -627,6 +627,44 @@ finance_reconciliation_check_detail_count() {
   ] | unique | length' "$1"
 }
 
+relative_artifact_path_safe() {
+  local summary_path="$1"
+  local segment
+  local -a segments
+  [[ -n "$summary_path" ]] || return 1
+  [[ "$summary_path" != /* ]] || return 1
+  IFS='/' read -r -a segments <<<"$summary_path"
+  for segment in "${segments[@]}"; do
+    [[ -n "$segment" && "$segment" != "." && "$segment" != ".." ]] || return 1
+  done
+}
+
+enterprise_checklist_summary_paths_exist() {
+  local root="$1"
+  local checklist="$2"
+  local summary_path
+  local expected_source
+  while IFS=$'\t' read -r summary_path expected_source; do
+    if ! relative_artifact_path_safe "$summary_path"; then
+      enterprise_checklist_summary_path_issue="unsafe summary_path=$summary_path"
+      return 1
+    fi
+    if [[ ! -s "$root/$summary_path" ]]; then
+      enterprise_checklist_summary_path_issue="missing summary_path=$summary_path"
+      return 1
+    fi
+    jq -e --arg expected_source "$expected_source" '
+      (.source // "") == $expected_source
+      and (.required_evidence_class // "") == "customer_grade"
+      and ((.status // "") | IN("ready", "validated", "completed", "passed"))
+      and ((.blocked_count // 0) == 0)
+    ' "$root/$summary_path" >/dev/null || {
+      enterprise_checklist_summary_path_issue="summary_path=$summary_path does not match expected_source=$expected_source, customer_grade, ready status, or blocked_count=0"
+      return 1
+    }
+  done < <(jq -r '.lane_results[]? | select((.status // "") == "ready") | [.summary_path // "", .expected_source // ""] | @tsv' "$checklist")
+}
+
 artifact_issue() {
   local root="$1"
   local relative_path="$2"
@@ -638,6 +676,20 @@ artifact_issue() {
   fi
 
   case "$relative_path" in
+    stage2-production-evidence-preflight.json)
+      jq -e '
+        . as $root
+        | ($root.source // "") == "stage2-production-evidence-preflight"
+        and ($root.status // "") == "passed"
+        and (($root.fail_count // 1) == 0)
+        and (($root.pass_count // 0) > 0)
+        and (($root.checks // []) | length == ($root.pass_count // -1))
+        and all($root.checks[]?; (.status // "") == "passed" and ((.scope // "") | length > 0) and ((.detail // "") | length > 0))
+      ' "$path" >/dev/null || {
+        printf '%s does not prove strict Stage 2 production evidence preflight success' "$relative_path"
+        return 0
+      }
+      ;;
     worker-load-validation-evidence.json)
       local evidence_status
       local controller_status
@@ -1687,11 +1739,12 @@ artifact_issue() {
         return 0
       fi
       jq -e '
-        def ready: . == "ready" or . == "validated" or . == "completed" or . == "passed";
-        def surface($id): first(.surfaces[]? | select(.id == $id));
+        . as $root
+        | def ready: . == "ready" or . == "validated" or . == "completed" or . == "passed";
+        def surface($id): first($root.surfaces[]? | select(.id == $id));
         def routes_checked($id):
           ((surface($id).routes // []) | length) > 0
-          and all(surface($id).routes[]?;
+          and all((surface($id).routes // [])[];
             (.method // "") != ""
             and (.path // "" | startswith("/api/"))
             and ((.status // 0) >= 200 and (.status // 0) < 300)
@@ -1717,6 +1770,87 @@ artifact_issue() {
         return 0
       }
       ;;
+    production-deployment-safety/summary.json)
+      local gate_output
+      if ! gate_output="$(env EVIDENCE_DIR="$root/.production-deployment-safety-gate" PRODUCTION_DEPLOYMENT_SAFETY_EVIDENCE_FILE="$path" scripts/production-deployment-safety-gate.sh 2>&1)"; then
+        printf '%s rejected by production deployment safety gate: %s' "$relative_path" "$(printf '%s' "$gate_output" | tr '\n' ' ' | cut -c1-500)"
+        return 0
+      fi
+      ;;
+    api-enterprise-product-readiness.json|enterprise-product-readiness-gate/api-enterprise-product-readiness.json)
+      jq -e '
+        (.status // "") == "enterprise_product_complete"
+        and (.completion_blocked == false)
+        and (.required_evidence_class // "") == "customer_grade"
+        and (.evidence_archive.immutable == true)
+        and ((.evidence_archive.support_owner // "") | length > 0)
+        and ((.evidence_archive.uri // "") | test("^(s3|gs|az|https)://"))
+        and ((.evidence_archive.uri // "") | test("(^|[./:_-])(whiskey|pilot|mock|example|sample|demo|local|localhost|sandbox-only)([./:_-]|$)") | not)
+        and ((.evidence_archive.digest // "") | test("^(sha256:)?[A-Fa-f0-9]{64}$"))
+        and ((.evidence_archive.retention_policy // "") | length > 0)
+        and ((.lane_count // 0) == 9)
+        and ((.ready_lane_count // 0) == (.lane_count // -1))
+        and ((.blocked_lane_count // 1) == 0)
+        and ((.lanes // []) | length == 9)
+        and all(.lanes[]?; (.status // "") == "ready" and (.current_evidence_class // "") == "customer_grade")
+      ' "$path" >/dev/null || {
+        printf '%s does not prove enterprise product completion readiness' "$relative_path"
+        return 0
+      }
+      ;;
+    enterprise-product-completion-contract-gate/checklist.json)
+      jq -e '
+        (.source // "") == "enterprise-product-completion-contract-gate"
+        and (.enterprise_product_status // "") == "enterprise_product_complete"
+        and (.completion_blocked == false)
+        and (.required_evidence_class // "") == "customer_grade"
+        and (.archive_metadata_ready == true)
+        and ((.support_owner // "") | length > 0)
+        and ((.evidence_archive.immutable // false) == true)
+        and ((.evidence_archive.uri // "") | test("^(s3|gs|az|https)://"))
+        and ((.evidence_archive.uri // "") | test("(^|[./:_-])(whiskey|pilot|mock|example|sample|demo|local|localhost|sandbox-only)([./:_-]|$)") | not)
+        and ((.evidence_archive.digest // "") | test("^(sha256:)?[A-Fa-f0-9]{64}$"))
+        and ((.evidence_archive.retention_policy // "") | length > 0)
+        and ((.required_lanes // []) | length == 9)
+        and ((.ready_lanes // []) | length == 9)
+        and ((.lane_results // []) | length == 10)
+        and ((.blocked_lanes // []) | length == 0)
+        and (def lane_ready($lane; $source):
+          any(.lane_results[]?;
+            (.lane // "") == $lane
+            and (.expected_source // "") == $source
+            and (.status // "") == "ready"
+            and ((.summary_path // "") | length > 0)
+            and ((.issue // null) == null)
+          );
+          lane_ready("production-deployment-safety"; "production-deployment-safety-gate")
+          and lane_ready("runtime-production"; "runtime-production-readiness-gate")
+          and lane_ready("remote-computer-multinode"; "remote-computer-production-state-gate")
+          and lane_ready("live-connector-production"; "live-connector-production-semantics-gate")
+          and lane_ready("ontology-engine"; "ontology-engine-production-gate")
+          and lane_ready("ontology-release-workflow-trigger"; "ontology-release-workflow-trigger-gate")
+          and lane_ready("workflowpack-enterprise-lifecycle"; "workflowpack-enterprise-lifecycle-gate")
+          and lane_ready("enterprise-security-admin"; "enterprise-security-production-controls-gate")
+          and lane_ready("observability-ops"; "observability-ops-production-gate")
+          and lane_ready("product-surfaces"; "product-surfaces-production-gate")
+        )
+      ' "$path" >/dev/null || {
+        printf '%s does not prove customer-grade enterprise completion checklist and lane results' "$relative_path"
+        return 0
+      }
+      enterprise_checklist_summary_path_issue=""
+      if ! enterprise_checklist_summary_paths_exist "$root" "$path"; then
+        printf '%s contains invalid lane summary path evidence: %s' "$relative_path" "$enterprise_checklist_summary_path_issue"
+        return 0
+      fi
+      ;;
+    workflowpack-enterprise-lifecycle/summary.json)
+      local gate_output
+      if ! gate_output="$(env EVIDENCE_DIR="$root/.workflowpack-enterprise-lifecycle-gate" WORKFLOWPACK_ENTERPRISE_LIFECYCLE_EVIDENCE_FILE="$path" scripts/workflowpack-enterprise-lifecycle-gate.sh 2>&1)"; then
+        printf '%s rejected by WorkflowPack enterprise lifecycle gate: %s' "$relative_path" "$(printf '%s' "$gate_output" | tr '\n' ' ' | cut -c1-500)"
+        return 0
+      fi
+      ;;
     enterprise-security-production-controls/summary.json)
       local gate_output
       if ! gate_output="$(env EVIDENCE_DIR="$root/.enterprise-security-production-controls-gate" ENTERPRISE_SECURITY_CONTROLS_EVIDENCE_FILE="$path" scripts/enterprise-security-production-controls-gate.sh 2>&1)"; then
@@ -1731,19 +1865,47 @@ artifact_issue() {
         return 0
       fi
       ;;
-    live-connector-production-semantics/*/summary.json)
-      local gate_output
-      if ! gate_output="$(env EVIDENCE_DIR="$root/.live-connector-production-semantics-gate" SOURCE_EVIDENCE_DIR="$root/live-connector-production-semantics" scripts/live-connector-production-semantics-gate.sh 2>&1)"; then
-        printf '%s rejected by live connector production semantics gate: %s' "$relative_path" "$(printf '%s' "$gate_output" | tr '\n' ' ' | cut -c1-500)"
-        return 0
-      fi
-      ;;
     runtime-production-recovery-evidence.json)
       local gate_output
       if ! gate_output="$(env EVIDENCE_DIR="$root/.runtime-production-readiness-gate" SOURCE_EVIDENCE_DIR="$root" RUNTIME_PRODUCTION_RECOVERY_EVIDENCE_FILE="$path" scripts/runtime-production-readiness-gate.sh 2>&1)"; then
         printf '%s rejected by runtime production readiness gate: %s' "$relative_path" "$(printf '%s' "$gate_output" | tr '\n' ' ' | cut -c1-500)"
         return 0
       fi
+      ;;
+    ontology-engine-production/summary.json)
+      local gate_output
+      if ! gate_output="$(env EVIDENCE_DIR="$root/.ontology-engine-production-gate" ONTOLOGY_ENGINE_PRODUCTION_EVIDENCE_FILE="$path" scripts/ontology-engine-production-gate.sh 2>&1)"; then
+        printf '%s rejected by ontology engine production gate: %s' "$relative_path" "$(printf '%s' "$gate_output" | tr '\n' ' ' | cut -c1-500)"
+        return 0
+      fi
+      ;;
+    ontology-release-workflow-trigger/summary.json)
+      jq -e '
+        .status == "ready"
+        and (.evidence_class // .required_evidence_class // "") == "customer_grade"
+        and ((.target.environment // "") == "production")
+        and ((.target.id // .target.deployment_id // .target.cluster_id // "") | length > 0)
+        and ((.audit_id // .audit_log_id // .trace_id // .run_id // "") | length > 0)
+        and ((.checked_at // .validated_at // .completed_at // .timestamp // "") | length > 0)
+        and ((.support_owner // .workflow_owner // .oncall_owner // "") | length > 0)
+        and ((.evidence_archive.immutable // .archive.immutable // false) == true)
+        and ((.evidence_archive.uri // .archive.uri // "") | length > 0)
+        and ((.evidence_archive.digest // .archive.digest // "") | length > 0)
+        and ((.evidence_archive.retention_policy // .archive.retention_policy // "") | length > 0)
+        and ((.domain_scope // "") | length > 0)
+        and ((.workflow_definition_id // "") | length > 0)
+        and ((.workflow_run_id // "") | length > 0)
+        and ((.ontology_release_id // "") | length > 0)
+        and (.checks.release_promoted == true)
+        and (.checks.workflow_trigger_reported == true)
+        and (.checks.workflow_run_queued == true)
+        and (.checks.audit_log_recorded == true)
+        and (.checks.scheduler_drain_exposed == true)
+        and (.checks.readiness_reflected == true)
+      ' "$path" >/dev/null || {
+        printf '%s is incomplete' "$relative_path"
+        return 0
+      }
       ;;
   esac
 }
@@ -1788,6 +1950,51 @@ manifest_value_mismatch_issue() {
     return 0
   fi
   value_mismatch_issue "$label" "$expected" "$actual"
+}
+
+enterprise_archive_metadata_mismatch_issue() {
+  local root="$1"
+  local relative_path="$2"
+  local checklist="$root/enterprise-product-completion-contract-gate/checklist.json"
+  local artifact="$root/$relative_path"
+  local expected_support_owner
+  local expected_uri
+  local expected_digest
+  local expected_retention_policy
+  local expected_immutable
+  local actual_support_owner
+  local actual_uri
+  local actual_digest
+  local actual_retention_policy
+  local actual_immutable
+  local issue
+
+  if [[ ! -s "$checklist" || ! -s "$artifact" ]]; then
+    return 0
+  fi
+
+  expected_support_owner="$(jq -r '.support_owner // ""' "$checklist")"
+  expected_uri="$(jq -r '.evidence_archive.uri // ""' "$checklist")"
+  expected_digest="$(jq -r '.evidence_archive.digest // ""' "$checklist")"
+  expected_retention_policy="$(jq -r '.evidence_archive.retention_policy // ""' "$checklist")"
+  expected_immutable="$(jq -r '.evidence_archive.immutable // false' "$checklist")"
+  actual_support_owner="$(jq -r '.evidence_archive.support_owner // ""' "$artifact")"
+  actual_uri="$(jq -r '.evidence_archive.uri // ""' "$artifact")"
+  actual_digest="$(jq -r '.evidence_archive.digest // ""' "$artifact")"
+  actual_retention_policy="$(jq -r '.evidence_archive.retention_policy // ""' "$artifact")"
+  actual_immutable="$(jq -r '.evidence_archive.immutable // false' "$artifact")"
+
+  for issue in \
+    "$(value_mismatch_issue "$relative_path evidence_archive.support_owner" "$expected_support_owner" "$actual_support_owner")" \
+    "$(value_mismatch_issue "$relative_path evidence_archive.uri" "$expected_uri" "$actual_uri")" \
+    "$(value_mismatch_issue "$relative_path evidence_archive.digest" "$expected_digest" "$actual_digest")" \
+    "$(value_mismatch_issue "$relative_path evidence_archive.retention_policy" "$expected_retention_policy" "$actual_retention_policy")" \
+    "$(value_mismatch_issue "$relative_path evidence_archive.immutable" "$expected_immutable" "$actual_immutable")"; do
+    if [[ -n "$issue" ]]; then
+      printf '%s does not match enterprise completion checklist archive metadata' "$issue"
+      return 0
+    fi
+  done
 }
 
 finance_identity_issue() {
@@ -2025,6 +2232,7 @@ verify_semantic_artifacts() {
   local state_cluster_id
   local sidecar_cluster_id
   local required_artifacts=(
+    stage2-production-evidence-preflight.json
     production-evidence-run.json
     worker-load-validation-evidence.json
     remote-computer-state-sync-evidence.json
@@ -2042,7 +2250,9 @@ verify_semantic_artifacts() {
     finance-export-delivery-evidence.json
     finance-export-delivery-observer.json
     managed-session-restart-resume-evidence.json
+    production-deployment-safety/summary.json
     product-surfaces/summary.json
+    workflowpack-enterprise-lifecycle/summary.json
     enterprise-security-production-controls/summary.json
     observability-ops-production/summary.json
     live-connector-production-semantics/tmall-top/summary.json
@@ -2051,7 +2261,17 @@ verify_semantic_artifacts() {
     live-connector-production-semantics/xianyu-goofish/summary.json
     live-connector-production-semantics/tiktok-shop-open-api/summary.json
     live-connector-production-semantics/amazon-selling-partner-api/summary.json
+    live-connector-production-semantics/github-connector/summary.json
+    live-connector-production-semantics/lark-mcp/summary.json
+    live-connector-production-semantics/feishu-mcp/summary.json
+    live-connector-production-semantics/lark-native/summary.json
+    live-connector-production-semantics/feishu-native/summary.json
     runtime-production-recovery-evidence.json
+    ontology-engine-production/summary.json
+    ontology-release-workflow-trigger/summary.json
+    api-enterprise-product-readiness.json
+    enterprise-product-readiness-gate/api-enterprise-product-readiness.json
+    enterprise-product-completion-contract-gate/checklist.json
   )
 
   for artifact in "${required_artifacts[@]}"; do
@@ -2061,6 +2281,22 @@ verify_semantic_artifacts() {
       echo "Stage 2 evidence archive semantic issue: $issue" >&2
     fi
   done
+
+  for artifact in \
+    api-enterprise-product-readiness.json \
+    enterprise-product-readiness-gate/api-enterprise-product-readiness.json; do
+    issue="$(enterprise_archive_metadata_mismatch_issue "$root" "$artifact")"
+    if [[ -n "$issue" ]]; then
+      issue_count=$((issue_count + 1))
+      echo "Stage 2 evidence archive semantic issue: $issue" >&2
+    fi
+  done
+
+  local live_connector_gate_output
+  if ! live_connector_gate_output="$(env EVIDENCE_DIR="$root/.live-connector-production-semantics-gate" SOURCE_EVIDENCE_DIR="$root/live-connector-production-semantics" scripts/live-connector-production-semantics-gate.sh 2>&1)"; then
+    issue_count=$((issue_count + 1))
+    echo "Stage 2 evidence archive semantic issue: live connector production semantics rejected by gate: $(printf '%s' "$live_connector_gate_output" | tr '\n' ' ' | cut -c1-500)" >&2
+  fi
 
   worker_cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$root/worker-load-validation-evidence.json" 2>/dev/null || echo "")"
   state_cluster_id="$(jq -r '.response.controller_execution.cluster_id // ""' "$root/remote-computer-state-sync-evidence.json" 2>/dev/null || echo "")"
@@ -2091,6 +2327,13 @@ verify_archive() {
   local expected_sha
   local actual_sha
   local manifest_sha
+  local manifest_verification_required
+  local manifest_verification_status
+  local manifest_verifier
+  local manifest_verify_flag
+  local manifest_break_glass
+  local manifest_customer_grade
+  local allow_legacy_manifest
   local completion_blocked
   local missing_total
   local semantic_issue_count
@@ -2131,6 +2374,45 @@ verify_archive() {
   if ! grep -q "^archive_path=$archive$" "$manifest_file"; then
     echo "Stage 2 evidence archive manifest does not point at $archive" >&2
     exit 1
+  fi
+
+  allow_legacy_manifest=0
+  if [[ "${ALLOW_LEGACY_STAGE2_ARCHIVE_MANIFEST:-0}" == "1" && "${MANDOFORGE_STAGE2_ARCHIVE_SELF_TEST:-0}" == "1" ]]; then
+    allow_legacy_manifest=1
+  fi
+
+  if [[ "$allow_legacy_manifest" != "1" ]]; then
+    manifest_verification_required="$(grep -E '^verification_required=' "$manifest_file" | sed 's/^verification_required=//' || true)"
+    manifest_verification_status="$(grep -E '^verification_status=' "$manifest_file" | sed 's/^verification_status=//' || true)"
+    manifest_verifier="$(grep -E '^verifier=' "$manifest_file" | sed 's/^verifier=//' || true)"
+    manifest_verify_flag="$(grep -E '^verify_stage2_evidence_archive=' "$manifest_file" | sed 's/^verify_stage2_evidence_archive=//' || true)"
+    manifest_break_glass="$(grep -E '^break_glass_unverified=' "$manifest_file" | sed 's/^break_glass_unverified=//' || true)"
+    manifest_customer_grade="$(grep -E '^customer_grade_evidence=' "$manifest_file" | sed 's/^customer_grade_evidence=//' || true)"
+
+    if [[ "$manifest_verification_required" != "true" || "$manifest_verifier" != "scripts/verify-stage2-evidence-archive.sh" || "$manifest_verify_flag" != "1" ]]; then
+      echo "Stage 2 evidence archive manifest does not prove mandatory verifier execution" >&2
+      exit 1
+    fi
+
+    if [[ "${ALLOW_PENDING_STAGE2_ARCHIVE_MANIFEST:-0}" == "1" ]]; then
+      if [[ "$manifest_verification_status" != "pending" && "$manifest_verification_status" != "passed" ]]; then
+        echo "Stage 2 evidence archive manifest has invalid pre-verification status: $manifest_verification_status" >&2
+        exit 1
+      fi
+    elif [[ "$manifest_verification_status" != "passed" ]]; then
+      echo "Stage 2 evidence archive manifest does not record verification_status=passed" >&2
+      exit 1
+    fi
+
+    if [[ "$manifest_break_glass" != "0" ]]; then
+      echo "Stage 2 evidence archive manifest was produced with break-glass verification disabled" >&2
+      exit 1
+    fi
+
+    if [[ "${ALLOW_PENDING_STAGE2_ARCHIVE_MANIFEST:-0}" != "1" && "$manifest_customer_grade" != "true" ]]; then
+      echo "Stage 2 evidence archive manifest does not mark the archive as customer-grade evidence" >&2
+      exit 1
+    fi
   fi
 
   tar tzf "$archive" >/dev/null
@@ -2208,6 +2490,22 @@ self_test() {
   "missing_evidence_script_count": 0,
   "missing_evidence_job_manifest_count": 0,
   "missing_required_flag_count": 0
+}
+JSON
+  cat >"$tmpdir/evidence/stage2-production-evidence-preflight.json" <<'JSON'
+{
+  "source": "stage2-production-evidence-preflight",
+  "status": "passed",
+  "generated_at": "1970-01-01T00:00:00Z",
+  "env_file": "/evidence/stage2-production-controller.env",
+  "pass_count": 4,
+  "fail_count": 0,
+  "checks": [
+    {"status": "passed", "scope": "global", "detail": "global: RUN_STAGE2_PRODUCTION_VALIDATIONS is enabled"},
+    {"status": "passed", "scope": "evidence-archive", "detail": "evidence-archive: MANDOFORGE_STAGE2_EVIDENCE_ARCHIVE_URI points at immutable production evidence storage"},
+    {"status": "passed", "scope": "worker-remote-computer", "detail": "worker-remote-computer: MANDOFORGE_STAGE2_REMOTE_STATE_BACKEND names a supported distributed state backend"},
+    {"status": "passed", "scope": "managed-session-runtime", "detail": "managed-session-runtime: RUN_STAGE2_MANAGED_SESSION_RESTART_RESUME is enabled"}
+  ]
 }
 JSON
   cat >"$tmpdir/evidence/worker-load-validation-evidence.json" <<'JSON'
@@ -2322,8 +2620,10 @@ JSON
   },
   "remote_computer": {
     "state_sync_cluster_id": "prod-cluster-1",
+    "state_sync_node_count": 3,
     "sidecar_cluster_id": "prod-cluster-1",
     "distributed_state_backend": "juicefs",
+    "state_backend": "juicefs",
     "state_claim": "mandoforge-remote-computer-state",
     "checked_path_count": 6,
     "checked_paths": [
@@ -2342,6 +2642,21 @@ JSON
   }
 }
 JSON
+  mkdir -p "$tmpdir/evidence/worker" "$tmpdir/evidence/remote-computer"
+  cat >"$tmpdir/evidence/worker/summary.txt" <<'EOF'
+production_blocked_count=0
+EOF
+  cat >"$tmpdir/evidence/remote-computer/summary.txt" <<'EOF'
+production_blocked_count=0
+state_sync_cluster_id=prod-cluster-1
+state_sync_node_count=3
+state_sync_backend=juicefs
+state_sync_state_claim=mandoforge-remote-computer-state
+state_sync_checked_path_detail_count=6
+sidecar_replacement_scope=cluster
+sidecar_replacement_pods_healthy=true
+sidecar_checked_pod_detail_count=1
+EOF
   cat >"$tmpdir/evidence/tenant-routing-validation-evidence.json" <<'JSON'
 {
   "status": "captured",
@@ -2444,8 +2759,48 @@ JSON
     echo "Stage 2 archive verifier self-test expected unconfigured finance delivery target to fail" >&2
     exit 1
   fi
+
   set +e
-  ALLOW_BLOCKED=1 "$0" "$archive" >/tmp/mandoforge-stage2-archive-finance-target-allow-blocked.out 2>/tmp/mandoforge-stage2-archive-finance-target-allow-blocked.err
+  env -u ALLOW_LEGACY_STAGE2_ARCHIVE_MANIFEST "$0" "$archive" >/tmp/mandoforge-stage2-archive-manifest-metadata-negative.out 2>/tmp/mandoforge-stage2-archive-manifest-metadata-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected missing archive manifest verification metadata to fail" >&2
+    exit 1
+  fi
+  if ! grep -q "mandatory verifier execution" /tmp/mandoforge-stage2-archive-manifest-metadata-negative.err; then
+    echo "Stage 2 archive verifier self-test expected missing manifest verification metadata to fail before semantic evidence checks" >&2
+    cat /tmp/mandoforge-stage2-archive-manifest-metadata-negative.err >&2
+    exit 1
+  fi
+
+  set +e
+  env -u MANDOFORGE_STAGE2_ARCHIVE_SELF_TEST ALLOW_LEGACY_STAGE2_ARCHIVE_MANIFEST=1 "$0" "$archive" >/tmp/mandoforge-stage2-archive-manifest-legacy-env-negative.out 2>/tmp/mandoforge-stage2-archive-manifest-legacy-env-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected legacy manifest override without self-test marker to fail" >&2
+    exit 1
+  fi
+  if ! grep -q "mandatory verifier execution" /tmp/mandoforge-stage2-archive-manifest-legacy-env-negative.err; then
+    echo "Stage 2 archive verifier self-test expected legacy manifest override without self-test marker to fail before semantic evidence checks" >&2
+    cat /tmp/mandoforge-stage2-archive-manifest-legacy-env-negative.err >&2
+    exit 1
+  fi
+
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+    echo "verification_required=true"
+    echo "verification_status=passed"
+    echo "verifier=scripts/verify-stage2-evidence-archive.sh"
+    echo "verify_stage2_evidence_archive=1"
+    echo "break_glass_unverified=0"
+    echo "customer_grade_evidence=true"
+  } >"${archive}.manifest.txt"
+  set +e
+  env -u ALLOW_LEGACY_STAGE2_ARCHIVE_MANIFEST ALLOW_BLOCKED=1 "$0" "$archive" >/tmp/mandoforge-stage2-archive-finance-target-allow-blocked.out 2>/tmp/mandoforge-stage2-archive-finance-target-allow-blocked.err
   blocked_status="$?"
   set -e
   if [[ "$blocked_status" != "0" ]]; then
@@ -2992,6 +3347,616 @@ JSON
   }
 }
 JSON
+  cat >"$tmpdir/evidence/remote-computer-session-pod-lifecycle-evidence.json" <<'JSON'
+{
+  "cluster_id": "prod-cluster-1",
+  "session_id": "session-prod-1",
+  "remote_computer_id": "remote-computer-prod-1",
+  "lease_id": "lease-prod-1",
+  "pod_name": "mandoforge-agent-session-prod-1",
+  "pod_phase": "Running",
+  "pod_labels": {
+    "mandoforge.io/session-id": "session-prod-1",
+    "mandoforge.io/remote-computer-id": "remote-computer-prod-1",
+    "mandoforge.io/tenant-id": "tenant-prod-1",
+    "mandoforge.io/lease-id": "lease-prod-1",
+    "mandoforge.io/lifecycle": "assigned"
+  },
+  "live_create": {"ok": true},
+  "approved_exec": {"ok": true},
+  "heartbeat": {"observed": true},
+  "lease_release": {"ok": true},
+  "pod_delete": {"ok": true},
+  "orphan_sweep": {"ok": true, "orphan_count": 0}
+}
+JSON
+  cat >"$tmpdir/evidence/runtime-production-recovery-evidence.json" <<'JSON'
+{
+  "status": "validated",
+  "target": {
+    "id": "runtime-prod-1",
+    "kind": "production_runtime_cluster"
+  },
+  "backup_restore": {
+    "status": "validated",
+    "preserved_resources": [
+      "sessions",
+      "events",
+      "approvals",
+      "tool_calls",
+      "artifacts",
+      "audit_logs",
+      "workflow_runs",
+      "semantic_objects",
+      "context_packets"
+    ],
+    "audit_id": "backup-restore-audit-1",
+    "completed_at": "1970-01-01T00:00:00Z"
+  },
+  "dead_letter_replay": {
+    "status": "validated",
+    "dead_letter_queue_configured": true,
+    "manual_replay_tested": true,
+    "audit_id": "dead-letter-audit-1",
+    "completed_at": "1970-01-01T00:00:00Z"
+  },
+  "idempotency": {
+    "status": "validated",
+    "external_side_effect_idempotency_covered": true,
+    "idempotency_key_count": 3
+  }
+}
+JSON
+  mkdir -p "$tmpdir/evidence/production-deployment-safety"
+  cat >"$tmpdir/evidence/production-deployment-safety/summary.json" <<'JSON'
+{
+  "status": "ready",
+  "evidence_class": "customer_grade",
+  "required_evidence_class": "customer_grade",
+  "source": "production-deployment-safety-gate",
+  "blocked_count": 0,
+  "target": {
+    "id": "deployment-prod-1",
+    "kind": "production_deployment",
+    "environment": "production"
+  },
+  "audit_id": "deployment-safety-audit-1",
+  "checked_at": "1970-01-01T00:00:00Z",
+  "support_owner": "platform-oncall",
+  "evidence_archive": {
+    "uri": "s3://mandoforge-prod-evidence/deployment-safety",
+    "immutable": true,
+    "digest": "sha256:deployment-safety",
+    "retention_policy": "seven-years"
+  },
+  "checks": {
+    "no_example_secret_applied": true,
+    "external_secret_delivery_proven": true,
+    "no_default_credentials": true,
+    "durable_workspace_storage": true,
+    "no_insecure_auth": true,
+    "provider_runtime_production": true,
+    "remote_computer_kubernetes": true,
+    "launch_preflight_passed": true,
+    "enterprise_completion_contract_inventory_passed": true,
+    "customer_data_boundary_documented": true
+  }
+}
+JSON
+  mkdir -p "$tmpdir/evidence/product-surfaces"
+  cat >"$tmpdir/evidence/product-surfaces/summary.json" <<'JSON'
+{
+  "status": "ready",
+  "evidence_class": "customer_grade",
+  "required_evidence_class": "customer_grade",
+  "source": "ontology-release-workflow-trigger-gate",
+  "blocked_count": 0,
+  "target": {
+    "id": "product-surfaces-prod-1",
+    "kind": "production_product_surface",
+    "environment": "production",
+    "base_url": "https://mandoforge-prod.mandonothing.com",
+    "git_sha": "0123456789abcdef0123456789abcdef01234567",
+    "image_tag": "prod-2026-06-29"
+  },
+  "audit_id": "product-surfaces-audit-1",
+  "checked_at": "1970-01-01T00:00:00Z",
+  "support_owner": "product-oncall",
+  "freshness": {
+    "expires_at": "2999-01-01T00:00:00Z"
+  },
+  "evidence_archive": {
+    "uri": "s3://mandoforge-prod-evidence/product-surfaces",
+    "immutable": true,
+    "digest": "sha256:product-surfaces",
+    "retention_policy": "seven-years"
+  },
+  "surfaces": [
+    {
+      "id": "admin-console",
+      "status": "ready",
+      "live_api_readback": true,
+      "authorization_boundaries_checked": true,
+      "no_fake_completion_state": true,
+      "features": ["tenants", "teams", "agents", "runtime_profiles", "providers", "policies", "approvals", "connectors", "budgets", "release_state"],
+      "routes": [{"method": "GET", "path": "/api/enterprise-product/readiness", "status": 200, "schema_checked": true}]
+    },
+    {
+      "id": "operator-console",
+      "status": "ready",
+      "live_api_readback": true,
+      "authorization_boundaries_checked": true,
+      "no_fake_completion_state": true,
+      "features": ["blocked_work", "approvals", "runs", "replay", "artifacts", "execution_jobs", "session_loop_jobs", "manual_repair"],
+      "routes": [{"method": "GET", "path": "/api/workflow-runs", "status": 200, "schema_checked": true}]
+    },
+    {
+      "id": "builder-console",
+      "status": "ready",
+      "live_api_readback": true,
+      "authorization_boundaries_checked": true,
+      "no_fake_completion_state": true,
+      "features": ["workflow_packs", "ontology_builder", "connector_mapping", "eval_gates", "release_gates"],
+      "routes": [{"method": "GET", "path": "/api/ontology/engine-readiness", "status": 200, "schema_checked": true}]
+    },
+    {
+      "id": "ops-console",
+      "status": "ready",
+      "live_api_readback": true,
+      "authorization_boundaries_checked": true,
+      "no_fake_completion_state": true,
+      "features": ["health", "workers", "queues", "costs", "alerts", "deployments", "incident_evidence"],
+      "routes": [{"method": "GET", "path": "/api/observability", "status": 200, "schema_checked": true}]
+    }
+  ],
+  "live_api_truth": {
+    "status": "ready",
+    "route_coverage_tested": true,
+    "live_endpoint_coverage_tested": true,
+    "backend_authorization_checked": true,
+    "unauthenticated_rejected": true,
+    "forbidden_role_rejected": true,
+    "fake_completion_scan_passed": true,
+    "stale_or_mock_data_scan_passed": true
+  }
+}
+JSON
+  mkdir -p "$tmpdir/evidence/workflowpack-enterprise-lifecycle"
+  cat >"$tmpdir/evidence/workflowpack-enterprise-lifecycle/summary.json" <<'JSON'
+{
+  "status": "ready",
+  "evidence_class": "customer_grade",
+  "target": {
+    "id": "workflowpack-prod-1",
+    "kind": "workflowpack_lifecycle",
+    "environment": "production"
+  },
+  "pack": {
+    "id": "commerce-pack",
+    "version": "2026.06.29"
+  },
+  "audit_id": "workflowpack-lifecycle-audit-1",
+  "checked_at": "1970-01-01T00:00:00Z",
+  "support_owner": "builder-oncall",
+  "evidence_archive": {
+    "uri": "s3://mandoforge-prod-evidence/workflowpack-lifecycle",
+    "immutable": true,
+    "digest": "sha256:workflowpack-lifecycle",
+    "retention_policy": "seven-years"
+  },
+  "checks": {
+    "install_audited": true,
+    "stage_audited": true,
+    "release_promoted": true,
+    "rollback_verified": true,
+    "archive_verified": true,
+    "onboarding_profiles_complete": true,
+    "connector_quality_passed": true,
+    "eval_regression_passed": true,
+    "canary_promoted": true,
+    "compatibility_matrix_passed": true,
+    "tenant_overrides_policy_enforced": true,
+    "managed_workflow_recovery_passed": true
+  },
+  "compatibility_matrix": {
+    "versions": ["2026.06.28", "2026.06.29"]
+  },
+  "tenant_overrides": {
+    "validated_tenants": ["tenant-prod-1"]
+  },
+  "managed_workflow_runtime": {
+    "recovery_checks": ["scheduler_retry", "fan_in_completion", "durable_transitions", "expired_lease_reclaim"]
+  }
+}
+JSON
+  mkdir -p "$tmpdir/evidence/enterprise-security-production-controls"
+  cat >"$tmpdir/evidence/enterprise-security-production-controls/summary.json" <<'JSON'
+{
+  "status": "ready",
+  "target": {
+    "id": "security-prod-1",
+    "kind": "production_security_controls"
+  },
+  "audit_id": "security-controls-audit-1",
+  "checked_at": "1970-01-01T00:00:00Z",
+  "support_owner": "security-oncall",
+  "controls": [
+    {"id": "identity-provisioning", "status": "ready", "sso_protocol": "oidc", "scim_enabled": true, "directory_id": "directory-prod-1"},
+    {"id": "tenant-rls-abac", "status": "ready", "rls_forced": true, "abac_tested": true},
+    {"id": "vault-kms-rotation-recovery", "status": "ready", "production_kms_backend": true, "rotation_tested": true, "recovery_tested": true},
+    {"id": "approval-break-glass", "status": "ready", "break_glass_tested": true, "audit_captured": true},
+    {"id": "audit-export-siem", "status": "ready", "delivery_tested": true, "correlation_fields": ["tenant_id", "session_id", "tool_call_id"]},
+    {"id": "data-governance", "status": "ready", "retention_tested": true, "legal_hold_tested": true, "export_tested": true, "deletion_tested": true, "pii_redaction_tested": true, "dlp_tested": true},
+    {"id": "security-incident-operations", "status": "ready", "runbook_rehearsed": true, "evidence_archive_immutable": true}
+  ]
+}
+JSON
+  mkdir -p "$tmpdir/evidence/observability-ops-production"
+  cat >"$tmpdir/evidence/observability-ops-production/summary.json" <<'JSON'
+{
+  "status": "ready",
+  "target": {
+    "id": "observability-prod-1",
+    "kind": "production_observability"
+  },
+  "audit_id": "observability-ops-audit-1",
+  "checked_at": "1970-01-01T00:00:00Z",
+  "support_owner": "ops-oncall",
+  "evidence_archive": {
+    "uri": "s3://mandoforge-prod-evidence/observability",
+    "immutable": true
+  },
+  "correlation": {"status": "ready", "fields": ["tenant_id", "session_id", "workflow_run_id", "tool_call_id", "worker_id", "connector_id", "provider_id"]},
+  "alerts": {"status": "ready", "delivery_tested": true, "coverage": ["failed_jobs", "stale_leases", "delivery_failures", "connector_degradation", "provider_degradation", "budget_breach", "queue_backlog"]},
+  "versions": {"status": "ready", "visible": ["deployment", "migration", "workflow_pack", "ontology", "connector"]},
+  "incident_timeline": {"status": "ready", "audit_captured": true},
+  "manual_repair": {"status": "ready", "actions_audited": true, "replay_tested": true},
+  "slos": {"status": "ready", "coverage": ["runtime", "connector", "worker", "approval", "remote_computer"]},
+  "runbooks": {"status": "ready", "rehearsed": true, "owner_acknowledged": true}
+}
+JSON
+  mkdir -p "$tmpdir/evidence/ontology-release-workflow-trigger"
+  mkdir -p "$tmpdir/evidence/ontology-engine-production"
+  cat >"$tmpdir/evidence/ontology-engine-production/summary.json" <<'JSON'
+{
+  "status": "ready",
+  "evidence_class": "customer_grade",
+  "target": {
+    "id": "ontology-engine-prod-1",
+    "kind": "production_ontology_engine",
+    "environment": "production"
+  },
+  "registry_version": "ontology-registry-2026.06.29",
+  "registry": {
+    "status": "ready",
+    "version": "ontology-registry-2026.06.29",
+    "core_version": "core-2026.06.29",
+    "domain_versions": ["commerce-2026.06.29"]
+  },
+  "audit_id": "ontology-engine-audit-1",
+  "checked_at": "1970-01-01T00:00:00Z",
+  "support_owner": "ontology-oncall",
+  "evidence_archive": {
+    "uri": "s3://mandoforge-prod-evidence/ontology-engine",
+    "immutable": true,
+    "digest": "sha256:ontology-engine",
+    "retention_policy": "seven-years"
+  },
+  "migrations": {
+    "status": "ready",
+    "promote_tested": true,
+    "rollback_tested": true,
+    "forward_migration_tested": true,
+    "migration_policy_present": true
+  },
+  "relation_constraints": {
+    "status": "ready",
+    "enforced_before_policy": true,
+    "coverage": ["object_type", "link_type", "cardinality", "domain_scope"]
+  },
+  "conflict_trust": {
+    "status": "ready",
+    "conflict_policy_tested": true,
+    "contradiction_blocks_high_risk": true,
+    "stale_fact_blocks_high_risk": true,
+    "trust_downgrade_blocks_high_risk": true
+  },
+  "builder_approvals": {
+    "status": "ready",
+    "reviewable_proposals": true,
+    "approved_changes_audited": true
+  },
+  "context_packets": {
+    "status": "ready",
+    "source_refs_rendered": true,
+    "ontology_version_rendered": true,
+    "relation_expansion_rendered": true,
+    "trust_freshness_gates_enforced": true
+  },
+  "runtime_enforcement": {
+    "status": "ready",
+    "policy_precheck_uses_constraints": true
+  }
+}
+JSON
+  cat >"$tmpdir/evidence/ontology-release-workflow-trigger/summary.json" <<'JSON'
+{
+  "status": "ready",
+  "evidence_class": "customer_grade",
+  "required_evidence_class": "customer_grade",
+  "source": "ontology-release-workflow-trigger-gate",
+  "blocked_count": 0,
+  "target": {
+    "id": "ontology-trigger-prod-1",
+    "kind": "production_ontology_workflow_trigger",
+    "environment": "production"
+  },
+  "audit_id": "ontology-trigger-audit-1",
+  "checked_at": "1970-01-01T00:00:00Z",
+  "support_owner": "ontology-oncall",
+  "evidence_archive": {
+    "uri": "s3://mandoforge-prod-evidence/ontology-trigger",
+    "immutable": true,
+    "digest": "sha256:ontology-trigger",
+    "retention_policy": "seven-years"
+  },
+  "domain_scope": "commerce",
+  "workflow_definition_id": "workflow-definition-prod-1",
+  "workflow_run_id": "workflow-run-prod-1",
+  "ontology_release_id": "ontology-release-prod-1",
+  "checks": {
+    "release_promoted": true,
+    "workflow_trigger_reported": true,
+    "workflow_run_queued": true,
+    "audit_log_recorded": true,
+    "scheduler_drain_exposed": true,
+    "readiness_reflected": true
+  }
+}
+JSON
+  mkdir -p "$tmpdir/evidence/enterprise-product-completion-contract-gate" "$tmpdir/evidence/enterprise-product-readiness-gate"
+  mkdir -p \
+    "$tmpdir/evidence/enterprise-product-completion-contract-gate/lane-gates/production-deployment-safety" \
+    "$tmpdir/evidence/enterprise-product-completion-contract-gate/lane-gates/runtime-production" \
+    "$tmpdir/evidence/enterprise-product-completion-contract-gate/lane-gates/remote-computer-multinode" \
+    "$tmpdir/evidence/enterprise-product-completion-contract-gate/lane-gates/live-connector-production" \
+    "$tmpdir/evidence/enterprise-product-completion-contract-gate/lane-gates/ontology-engine" \
+    "$tmpdir/evidence/enterprise-product-completion-contract-gate/lane-gates/workflowpack-enterprise-lifecycle" \
+    "$tmpdir/evidence/enterprise-product-completion-contract-gate/lane-gates/enterprise-security-admin" \
+    "$tmpdir/evidence/enterprise-product-completion-contract-gate/lane-gates/observability-ops" \
+    "$tmpdir/evidence/enterprise-product-completion-contract-gate/lane-gates/product-surfaces"
+  cat >"$tmpdir/evidence/enterprise-product-completion-contract-gate/lane-gates/production-deployment-safety/summary.json" <<'JSON'
+{"source":"production-deployment-safety-gate","required_evidence_class":"customer_grade","status":"ready","blocked_count":0,"production_deployment_safety_evidence_file":"production-deployment-safety/summary.json"}
+JSON
+  cat >"$tmpdir/evidence/enterprise-product-completion-contract-gate/lane-gates/runtime-production/summary.json" <<'JSON'
+{"source":"runtime-production-readiness-gate","required_evidence_class":"customer_grade","status":"ready","blocked_count":0,"runtime_recovery_status":"ready","runtime_recovery_evidence_file":"runtime-production-recovery-evidence.json"}
+JSON
+  cat >"$tmpdir/evidence/enterprise-product-completion-contract-gate/lane-gates/remote-computer-multinode/summary.json" <<'JSON'
+{"source":"remote-computer-production-state-gate","required_evidence_class":"customer_grade","status":"ready","blocked_count":0,"remote_evidence_dir":"remote-computer","combined_evidence_dir":"worker-remote-computer","lifecycle_evidence_file":"remote-computer-session-pod-lifecycle-evidence.json"}
+JSON
+  cat >"$tmpdir/evidence/enterprise-product-completion-contract-gate/lane-gates/live-connector-production/summary.json" <<'JSON'
+{"source":"live-connector-production-semantics-gate","required_evidence_class":"customer_grade","status":"ready","blocked_count":0,"connector_count":11,"source_evidence_dir":"live-connector-production-semantics"}
+JSON
+  cat >"$tmpdir/evidence/enterprise-product-completion-contract-gate/lane-gates/ontology-engine/summary.json" <<'JSON'
+{"source":"ontology-engine-production-gate","required_evidence_class":"customer_grade","status":"ready","blocked_count":0,"ontology_engine_evidence_file":"ontology-engine-production/summary.json"}
+JSON
+  cat >"$tmpdir/evidence/enterprise-product-completion-contract-gate/lane-gates/workflowpack-enterprise-lifecycle/summary.json" <<'JSON'
+{"source":"workflowpack-enterprise-lifecycle-gate","required_evidence_class":"customer_grade","status":"ready","blocked_count":0,"workflowpack_enterprise_lifecycle_evidence_file":"workflowpack-enterprise-lifecycle/summary.json"}
+JSON
+  cat >"$tmpdir/evidence/enterprise-product-completion-contract-gate/lane-gates/enterprise-security-admin/summary.json" <<'JSON'
+{"source":"enterprise-security-production-controls-gate","required_evidence_class":"customer_grade","status":"ready","blocked_count":0,"controls_evidence_file":"enterprise-security-production-controls/summary.json"}
+JSON
+  cat >"$tmpdir/evidence/enterprise-product-completion-contract-gate/lane-gates/observability-ops/summary.json" <<'JSON'
+{"source":"observability-ops-production-gate","required_evidence_class":"customer_grade","status":"ready","blocked_count":0,"ops_evidence_file":"observability-ops-production/summary.json"}
+JSON
+  cat >"$tmpdir/evidence/enterprise-product-completion-contract-gate/lane-gates/product-surfaces/summary.json" <<'JSON'
+{"source":"product-surfaces-production-gate","required_evidence_class":"customer_grade","status":"ready","blocked_count":0,"product_surfaces_evidence_file":"product-surfaces/summary.json"}
+JSON
+  cat >"$tmpdir/evidence/api-enterprise-product-readiness.json" <<'JSON'
+{
+  "status": "enterprise_product_complete",
+  "completion_blocked": false,
+  "required_evidence_class": "customer_grade",
+  "evidence_archive": {
+    "support_owner": "platform-oncall",
+    "uri": "s3://mandoforge-prod-evidence/enterprise-completion/stage2-evidence.tar.gz",
+    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "retention_policy": "p1y",
+    "immutable": true
+  },
+  "lane_count": 9,
+  "ready_lane_count": 9,
+  "blocked_lane_count": 0,
+  "lanes": [
+    {"id": "production-deployment-safety", "status": "ready", "current_evidence_class": "customer_grade"},
+    {"id": "runtime-production", "status": "ready", "current_evidence_class": "customer_grade"},
+    {"id": "remote-computer-multinode", "status": "ready", "current_evidence_class": "customer_grade"},
+    {"id": "live-connector-production", "status": "ready", "current_evidence_class": "customer_grade"},
+    {"id": "ontology-engine", "status": "ready", "current_evidence_class": "customer_grade"},
+    {"id": "workflowpack-enterprise-lifecycle", "status": "ready", "current_evidence_class": "customer_grade"},
+    {"id": "enterprise-security-admin", "status": "ready", "current_evidence_class": "customer_grade"},
+    {"id": "observability-ops", "status": "ready", "current_evidence_class": "customer_grade"},
+    {"id": "product-surfaces", "status": "ready", "current_evidence_class": "customer_grade"}
+  ]
+}
+JSON
+  cp "$tmpdir/evidence/api-enterprise-product-readiness.json" "$tmpdir/evidence/enterprise-product-readiness-gate/api-enterprise-product-readiness.json"
+  cat >"$tmpdir/evidence/enterprise-product-completion-contract-gate/checklist.json" <<'JSON'
+{
+  "source": "enterprise-product-completion-contract-gate",
+  "enterprise_product_status": "enterprise_product_complete",
+  "completion_blocked": false,
+  "required_evidence_class": "customer_grade",
+  "required_lanes": [
+    "production-deployment-safety",
+    "runtime-production",
+    "remote-computer-multinode",
+    "live-connector-production",
+    "ontology-engine",
+    "workflowpack-enterprise-lifecycle",
+    "enterprise-security-admin",
+    "observability-ops",
+    "product-surfaces"
+  ],
+  "ready_lanes": [
+    "production-deployment-safety",
+    "runtime-production",
+    "remote-computer-multinode",
+    "live-connector-production",
+    "ontology-engine",
+    "workflowpack-enterprise-lifecycle",
+    "enterprise-security-admin",
+    "observability-ops",
+    "product-surfaces"
+  ],
+  "blocked_lanes": [],
+  "lane_results": [
+    {"lane": "production-deployment-safety", "expected_source": "production-deployment-safety-gate", "status": "ready", "summary_path": "enterprise-product-completion-contract-gate/lane-gates/production-deployment-safety/summary.json", "issue": null},
+    {"lane": "runtime-production", "expected_source": "runtime-production-readiness-gate", "status": "ready", "summary_path": "enterprise-product-completion-contract-gate/lane-gates/runtime-production/summary.json", "issue": null},
+    {"lane": "remote-computer-multinode", "expected_source": "remote-computer-production-state-gate", "status": "ready", "summary_path": "enterprise-product-completion-contract-gate/lane-gates/remote-computer-multinode/summary.json", "issue": null},
+    {"lane": "live-connector-production", "expected_source": "live-connector-production-semantics-gate", "status": "ready", "summary_path": "enterprise-product-completion-contract-gate/lane-gates/live-connector-production/summary.json", "issue": null},
+    {"lane": "ontology-engine", "expected_source": "ontology-engine-production-gate", "status": "ready", "summary_path": "enterprise-product-completion-contract-gate/lane-gates/ontology-engine/summary.json", "issue": null},
+    {"lane": "ontology-release-workflow-trigger", "expected_source": "ontology-release-workflow-trigger-gate", "status": "ready", "summary_path": "ontology-release-workflow-trigger/summary.json", "issue": null},
+    {"lane": "workflowpack-enterprise-lifecycle", "expected_source": "workflowpack-enterprise-lifecycle-gate", "status": "ready", "summary_path": "enterprise-product-completion-contract-gate/lane-gates/workflowpack-enterprise-lifecycle/summary.json", "issue": null},
+    {"lane": "enterprise-security-admin", "expected_source": "enterprise-security-production-controls-gate", "status": "ready", "summary_path": "enterprise-product-completion-contract-gate/lane-gates/enterprise-security-admin/summary.json", "issue": null},
+    {"lane": "observability-ops", "expected_source": "observability-ops-production-gate", "status": "ready", "summary_path": "enterprise-product-completion-contract-gate/lane-gates/observability-ops/summary.json", "issue": null},
+    {"lane": "product-surfaces", "expected_source": "product-surfaces-production-gate", "status": "ready", "summary_path": "enterprise-product-completion-contract-gate/lane-gates/product-surfaces/summary.json", "issue": null}
+  ]
+}
+JSON
+  for connector_id in \
+    tmall-top \
+    taobao-open-platform \
+    xiaohongshu-shop \
+    xianyu-goofish \
+    tiktok-shop-open-api \
+    amazon-selling-partner-api \
+    github-connector \
+    lark-mcp \
+    feishu-mcp \
+    lark-native \
+    feishu-native; do
+    mkdir -p "$tmpdir/evidence/live-connector-production-semantics/$connector_id"
+    cat >"$tmpdir/evidence/live-connector-production-semantics/$connector_id/summary.json" <<JSON
+{
+  "status": "ready",
+  "connector": {
+    "id": "$connector_id",
+    "version": "2026.06.29"
+  },
+  "target": {
+    "id": "$connector_id-prod-1",
+    "kind": "production_connector"
+  },
+  "audit_id": "$connector_id-audit-1",
+  "checked_at": "1970-01-01T00:00:00Z",
+  "deployment_archive": {
+    "uri": "s3://mandoforge-prod-evidence/connectors/$connector_id",
+    "logs_uri": "s3://mandoforge-prod-evidence/connectors/$connector_id/logs",
+    "support_owner": "connector-oncall",
+    "immutable": true
+  },
+  "sandbox_live_separation": {"status": "ready"},
+  "token_lifecycle": {"status": "ready", "refresh_tested": true, "expiry_tested": true, "rotation_tested": true},
+  "rate_limit_retry": {"status": "ready", "error_taxonomy": ["rate_limited", "auth_expired"]},
+  "idempotency_reconciliation": {"status": "ready", "idempotency_key_count": 1, "external_reconciliation_tested": true},
+  "webhook_ingestion": {"status": "ready", "provenance_captured": true},
+  "compensation": {"status": "ready", "mode": "compensation_or_explicit_non_compensable"},
+  "approval_commit_boundary": {"status": "ready"},
+  "secret_redaction": {"status": "ready", "no_raw_secret_leakage": true}
+}
+JSON
+  done
+  archive="$tmpdir/stage2-evidence-enterprise-archive-metadata-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-enterprise-archive-metadata-negative.out 2>/tmp/mandoforge-stage2-archive-enterprise-archive-metadata-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected enterprise completion checklist without archive metadata to fail" >&2
+    exit 1
+  fi
+  if ! grep -q "customer-grade enterprise completion checklist" /tmp/mandoforge-stage2-archive-enterprise-archive-metadata-negative.err; then
+    echo "Stage 2 archive verifier self-test expected missing enterprise archive metadata to fail at completion checklist validation" >&2
+    cat /tmp/mandoforge-stage2-archive-enterprise-archive-metadata-negative.err >&2
+    exit 1
+  fi
+
+  jq '. + {
+    "support_owner": "platform-oncall",
+    "archive_metadata_ready": true,
+    "evidence_archive": {
+      "uri": "s3://mandoforge-prod-evidence/enterprise-completion/stage2-evidence.tar.gz",
+      "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "retention_policy": "p1y",
+      "immutable": true
+    }
+  }' "$tmpdir/evidence/enterprise-product-completion-contract-gate/checklist.json" >"$tmpdir/evidence/enterprise-product-completion-contract-gate/checklist.json.tmp"
+  mv "$tmpdir/evidence/enterprise-product-completion-contract-gate/checklist.json.tmp" "$tmpdir/evidence/enterprise-product-completion-contract-gate/checklist.json"
+  cp "$tmpdir/evidence/api-enterprise-product-readiness.json" "$tmpdir/evidence/api-enterprise-product-readiness.json.good"
+  jq '.evidence_archive.uri = "s3://mandoforge-prod-evidence/enterprise-completion/different-stage2-evidence.tar.gz"' \
+    "$tmpdir/evidence/api-enterprise-product-readiness.json" >"$tmpdir/evidence/api-enterprise-product-readiness.json.tmp"
+  mv "$tmpdir/evidence/api-enterprise-product-readiness.json.tmp" "$tmpdir/evidence/api-enterprise-product-readiness.json"
+  cp "$tmpdir/evidence/api-enterprise-product-readiness.json" "$tmpdir/evidence/enterprise-product-readiness-gate/api-enterprise-product-readiness.json"
+  archive="$tmpdir/stage2-evidence-enterprise-archive-readback-mismatch-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-enterprise-archive-readback-mismatch-negative.out 2>/tmp/mandoforge-stage2-archive-enterprise-archive-readback-mismatch-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected mismatched API archive readback metadata to fail" >&2
+    exit 1
+  fi
+  if ! grep -q "does not match enterprise completion checklist archive metadata" /tmp/mandoforge-stage2-archive-enterprise-archive-readback-mismatch-negative.err; then
+    echo "Stage 2 archive verifier self-test expected API archive readback mismatch to fail at archive metadata binding validation" >&2
+    cat /tmp/mandoforge-stage2-archive-enterprise-archive-readback-mismatch-negative.err >&2
+    exit 1
+  fi
+  mv "$tmpdir/evidence/api-enterprise-product-readiness.json.good" "$tmpdir/evidence/api-enterprise-product-readiness.json"
+  cp "$tmpdir/evidence/api-enterprise-product-readiness.json" "$tmpdir/evidence/enterprise-product-readiness-gate/api-enterprise-product-readiness.json"
+  cp "$tmpdir/evidence/stage2-production-evidence-preflight.json" "$tmpdir/evidence/stage2-production-evidence-preflight.json.good"
+  jq '.status = "failed" | .fail_count = 1 | .checks += [{"status":"failed","scope":"global","detail":"global: RUN_STAGE2_PRODUCTION_VALIDATIONS must be true/1"}]' \
+    "$tmpdir/evidence/stage2-production-evidence-preflight.json" >"$tmpdir/evidence/stage2-production-evidence-preflight.json.tmp"
+  mv "$tmpdir/evidence/stage2-production-evidence-preflight.json.tmp" "$tmpdir/evidence/stage2-production-evidence-preflight.json"
+  archive="$tmpdir/stage2-evidence-preflight-failed-negative.tar.gz"
+  tar czf "$archive" -C "$tmpdir/evidence" .
+  sha="$(sha256_value "$archive")"
+  printf '%s  %s\n' "$sha" "$archive" >"${archive}.sha256"
+  {
+    echo "created_at=1970-01-01T00:00:00Z"
+    echo "archive_path=$archive"
+    echo "archive_sha256=$sha"
+  } >"${archive}.manifest.txt"
+  set +e
+  "$0" "$archive" >/tmp/mandoforge-stage2-archive-preflight-failed-negative.out 2>/tmp/mandoforge-stage2-archive-preflight-failed-negative.err
+  negative_status="$?"
+  set -e
+  if [[ "$negative_status" == "0" ]]; then
+    echo "Stage 2 archive verifier self-test expected failed production evidence preflight summary to fail" >&2
+    exit 1
+  fi
+  if ! grep -q "strict Stage 2 production evidence preflight success" /tmp/mandoforge-stage2-archive-preflight-failed-negative.err; then
+    echo "Stage 2 archive verifier self-test expected failed preflight summary to fail at preflight validation" >&2
+    cat /tmp/mandoforge-stage2-archive-preflight-failed-negative.err >&2
+    exit 1
+  fi
+  mv "$tmpdir/evidence/stage2-production-evidence-preflight.json.good" "$tmpdir/evidence/stage2-production-evidence-preflight.json"
   archive="$tmpdir/stage2-evidence.tar.gz"
   tar czf "$archive" -C "$tmpdir/evidence" .
   sha="$(sha256_value "$archive")"
@@ -7204,6 +8169,8 @@ JSON
 }
 
 if [[ "$archive_path" == "--self-test" ]]; then
+  export ALLOW_LEGACY_STAGE2_ARCHIVE_MANIFEST=1
+  export MANDOFORGE_STAGE2_ARCHIVE_SELF_TEST=1
   self_test
   echo "stage2 evidence archive verifier self-test ok"
   exit 0

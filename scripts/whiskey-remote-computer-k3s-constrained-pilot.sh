@@ -103,11 +103,11 @@ if [[ "$SKIP_MANIFEST_RENDER" != "1" ]]; then
     base_render_file="$(mktemp)"
     pilot_render_file="$(mktemp)"
     kubectl kustomize deploy/k8s >"$base_render_file"
-    kubectl kustomize deploy >"$pilot_render_file"
+    kubectl kustomize deploy/remote-computer-pilot --load-restrictor LoadRestrictionsNone >"$pilot_render_file"
     base_render_lines="$(wc -l <"$base_render_file" | awk '{print $1}')"
     pilot_render_lines="$(wc -l <"$pilot_render_file" | awk '{print $1}')"
     manifest_render_status="rendered"
-    manifest_render_details="deploy/k8s lines=$base_render_lines; deploy lines=$pilot_render_lines"
+    manifest_render_details="deploy/k8s lines=$base_render_lines; deploy/remote-computer-pilot lines=$pilot_render_lines"
     rm -f "$base_render_file" "$pilot_render_file"
   else
     manifest_render_status="missing_kubectl"

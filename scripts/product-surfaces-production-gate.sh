@@ -38,7 +38,7 @@ is_production_identity() {
   local value
   value="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
   [[ -n "$value" ]] || return 1
-  [[ ! "$value" =~ (^|[./:_-])(mock|example|sample|demo|local|localhost|sandbox-only)([./:_-]|$) ]] || return 1
+  [[ ! "$value" =~ (^|[./:_-])(whiskey|pilot|mock|example|sample|demo|local|localhost|sandbox-only)([./:_-]|$) ]] || return 1
   [[ ! "$value" =~ (^|[./:_-])(127\.0\.0\.1|\[::1\])([./:_-]|$) ]] || return 1
 }
 
@@ -198,13 +198,17 @@ write_summary() {
   local issue="$3"
   jq -n \
     --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --arg source "product-surfaces-production-gate" \
     --arg status "$status" \
+    --arg required_evidence_class "customer_grade" \
     --arg product_surfaces_evidence_file "$PRODUCT_SURFACES_EVIDENCE_FILE" \
     --arg issue "$issue" \
     --argjson blocked_count "$blocked_count" \
     '{
       generated_at: $generated_at,
+      source: $source,
       status: $status,
+      required_evidence_class: $required_evidence_class,
       product_surfaces_evidence_file: $product_surfaces_evidence_file,
       blocked_count: $blocked_count,
       issue: (if $issue == "" then null else $issue end)

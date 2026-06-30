@@ -2,6 +2,7 @@
 set -euo pipefail
 
 env_file="${1:-deploy/stage2-evidence/stage2-production-controllers.env.example}"
+summary_file="${STAGE2_PRODUCTION_PREFLIGHT_SUMMARY_FILE:-}"
 
 if [[ ! -f "$env_file" ]]; then
   echo "missing Stage 2 production evidence env file: $env_file" >&2
@@ -10,6 +11,17 @@ fi
 
 pass_count=0
 fail_count=0
+checks_jsonl=""
+
+if [[ -n "$summary_file" ]]; then
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "jq is required to write Stage 2 production evidence preflight summary JSON" >&2
+    exit 1
+  fi
+  mkdir -p "$(dirname "$summary_file")"
+  checks_jsonl="$(mktemp)"
+  trap 'rm -f "$checks_jsonl"' EXIT
+fi
 
 trim() {
   printf '%s' "$1" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
@@ -36,11 +48,31 @@ env_value() {
 record_pass() {
   pass_count=$((pass_count + 1))
   printf 'ok %s\n' "$1"
+  record_check "passed" "$1"
 }
 
 record_fail() {
   fail_count=$((fail_count + 1))
   printf 'fail %s\n' "$1"
+  record_check "failed" "$1"
+}
+
+record_check() {
+  local status="$1"
+  local message="$2"
+  local scope="${message%%:*}"
+  local detail="$message"
+
+  [[ -n "$checks_jsonl" ]] || return 0
+  jq -n \
+    --arg status "$status" \
+    --arg scope "$scope" \
+    --arg detail "$detail" \
+    '{
+      status: $status,
+      scope: $scope,
+      detail: $detail
+    }' >>"$checks_jsonl"
 }
 
 is_true() {
@@ -219,6 +251,43 @@ require_production_url() {
   fi
 }
 
+looks_production_archive_uri() {
+  local value="$1"
+  [[ "$value" =~ ^(s3|gs|az|https):// ]] || return 1
+  [[ ! "$value" =~ example\.com ]] || return 1
+  [[ ! "$value" =~ (^|[./:_-])(whiskey|pilot|mock|example|sample|demo|local|localhost|sandbox-only)([./:_-]|$) ]] || return 1
+  [[ ! "$value" =~ (^|[./:_-])(127\.0\.0\.1|\[::1\])([./:_-]|$) ]] || return 1
+}
+
+looks_evidence_digest() {
+  local value="$1"
+  [[ "$value" =~ ^(sha256:)?[A-Fa-f0-9]{64}$ ]] || return 1
+}
+
+require_production_archive_uri() {
+  local key="$1"
+  local label="$2"
+  local value
+  value="$(trim "$(env_value "$key")")"
+  if looks_production_archive_uri "$value"; then
+    record_pass "$label: $key points at immutable production evidence storage"
+  else
+    record_fail "$label: $key must point at real immutable evidence storage, not pilot/mock/local/example storage"
+  fi
+}
+
+require_evidence_digest() {
+  local key="$1"
+  local label="$2"
+  local value
+  value="$(trim "$(env_value "$key")")"
+  if looks_evidence_digest "$value"; then
+    record_pass "$label: $key is a sha256 evidence archive digest"
+  else
+    record_fail "$label: $key must be a sha256 evidence archive digest"
+  fi
+}
+
 require_no_whiskey_url() {
   local key="$1"
   local label="$2"
@@ -262,6 +331,14 @@ check_global() {
   require_true VERIFY_STAGE2_VALIDATION_COVERAGE global
   require_true RUN_STAGE2_COMPLETION_AUDIT global
   require_false ALLOW_BLOCKED global
+}
+
+check_evidence_archive_metadata() {
+  local label="evidence-archive"
+  require_production_identity MANDOFORGE_STAGE2_SUPPORT_OWNER "$label"
+  require_production_archive_uri MANDOFORGE_STAGE2_EVIDENCE_ARCHIVE_URI "$label"
+  require_evidence_digest MANDOFORGE_STAGE2_EVIDENCE_ARCHIVE_DIGEST "$label"
+  require_value MANDOFORGE_STAGE2_EVIDENCE_RETENTION_POLICY "$label"
 }
 
 check_tenant() {
@@ -354,6 +431,7 @@ check_managed_session_runtime() {
 
 echo "stage2_production_evidence_preflight_env=$env_file"
 check_global
+check_evidence_archive_metadata
 check_worker_remote_computer
 check_tenant
 check_policy
@@ -364,6 +442,25 @@ check_managed_session_runtime
 echo
 echo "preflight_pass_count=$pass_count"
 echo "preflight_fail_count=$fail_count"
+
+if [[ -n "$summary_file" ]]; then
+  jq -n \
+    --arg source "stage2-production-evidence-preflight" \
+    --arg env_file "$env_file" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --argjson pass_count "$pass_count" \
+    --argjson fail_count "$fail_count" \
+    --slurpfile checks "$checks_jsonl" \
+    '{
+      source: $source,
+      status: (if $fail_count == 0 then "passed" else "failed" end),
+      generated_at: $generated_at,
+      env_file: $env_file,
+      pass_count: $pass_count,
+      fail_count: $fail_count,
+      checks: $checks
+    }' >"$summary_file"
+fi
 
 if [[ "$fail_count" != "0" ]]; then
   echo "Stage 2 production evidence preflight failed; fix the env file before running strict production evidence." >&2

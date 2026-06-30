@@ -9,6 +9,13 @@ EVIDENCE_DIR="${EVIDENCE_DIR:-.mandoforge/ontology-release-workflow-trigger}"
 STATIC_ONLY="${STATIC_ONLY:-0}"
 DOMAIN_SCOPE="${MANDOFORGE_ONTOLOGY_WORKFLOW_TRIGGER_DOMAIN_SCOPE:-commerce}"
 RELEASE_CLASS="${MANDOFORGE_ONTOLOGY_WORKFLOW_TRIGGER_RELEASE_CLASS:-customer_grade}"
+TARGET_ID="${MANDOFORGE_ONTOLOGY_WORKFLOW_TRIGGER_TARGET_ID:-${MANDOFORGE_STAGE2_PRODUCTION_CLUSTER_ID:-}}"
+TARGET_KIND="${MANDOFORGE_ONTOLOGY_WORKFLOW_TRIGGER_TARGET_KIND:-production_ontology_workflow_trigger}"
+TARGET_ENVIRONMENT="${MANDOFORGE_ONTOLOGY_WORKFLOW_TRIGGER_TARGET_ENVIRONMENT:-production}"
+SUPPORT_OWNER="${MANDOFORGE_ONTOLOGY_WORKFLOW_TRIGGER_SUPPORT_OWNER:-${MANDOFORGE_STAGE2_SUPPORT_OWNER:-}}"
+EVIDENCE_ARCHIVE_URI="${MANDOFORGE_ONTOLOGY_WORKFLOW_TRIGGER_ARCHIVE_URI:-${MANDOFORGE_STAGE2_EVIDENCE_ARCHIVE_URI:-}}"
+EVIDENCE_ARCHIVE_DIGEST="${MANDOFORGE_ONTOLOGY_WORKFLOW_TRIGGER_ARCHIVE_DIGEST:-${MANDOFORGE_STAGE2_EVIDENCE_ARCHIVE_DIGEST:-}}"
+EVIDENCE_ARCHIVE_RETENTION_POLICY="${MANDOFORGE_ONTOLOGY_WORKFLOW_TRIGGER_ARCHIVE_RETENTION_POLICY:-${MANDOFORGE_STAGE2_EVIDENCE_RETENTION_POLICY:-}}"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -24,6 +31,14 @@ fail() {
 
 require_executable() {
   [[ -x "$1" ]] || fail "missing executable script: $1"
+}
+
+is_production_identity() {
+  local value
+  value="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  [[ -n "$value" ]] || return 1
+  [[ ! "$value" =~ (^|[./:_-])(whiskey|pilot|mock|example|sample|demo|local|localhost|sandbox-only)([./:_-]|$) ]] || return 1
+  [[ ! "$value" =~ (^|[./:_-])(127\.0\.0\.1|\[::1\])([./:_-]|$) ]] || return 1
 }
 
 static_contract_check() {
@@ -45,6 +60,19 @@ static_contract_check() {
     || fail "Stage 2 manifest verifier must check the ontology release workflow trigger gate"
 }
 
+validate_customer_grade_metadata() {
+  [[ "$RELEASE_CLASS" == "customer_grade" ]] \
+    || fail "ontology release workflow trigger evidence_class must be customer_grade"
+  is_production_identity "$TARGET_ID" \
+    || fail "ontology release workflow trigger target id must be production-grade"
+  [[ "$TARGET_ENVIRONMENT" == "production" ]] \
+    || fail "ontology release workflow trigger target environment must be production"
+  [[ -n "$SUPPORT_OWNER" ]] \
+    || fail "ontology release workflow trigger support owner is required"
+  [[ -n "$EVIDENCE_ARCHIVE_URI" && -n "$EVIDENCE_ARCHIVE_DIGEST" && -n "$EVIDENCE_ARCHIVE_RETENTION_POLICY" ]] \
+    || fail "ontology release workflow trigger immutable archive URI, digest, and retention policy are required"
+}
+
 require_cmd curl
 require_cmd jq
 mkdir -p "$EVIDENCE_DIR"
@@ -63,6 +91,8 @@ if [[ "$STATIC_ONLY" == "1" ]]; then
   echo "ontology release workflow trigger static gate ok"
   exit 0
 fi
+
+validate_customer_grade_metadata
 
 headers=()
 if [[ -n "$AUTH_TOKEN" ]]; then
@@ -250,14 +280,43 @@ jq -e '
 
 jq -n \
   --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+  --arg source "ontology-release-workflow-trigger-gate" \
   --arg status "ready" \
+  --arg required_evidence_class "customer_grade" \
+  --arg release_class "$RELEASE_CLASS" \
+  --arg target_id "$TARGET_ID" \
+  --arg target_kind "$TARGET_KIND" \
+  --arg target_environment "$TARGET_ENVIRONMENT" \
+  --arg support_owner "$SUPPORT_OWNER" \
+  --arg archive_uri "$EVIDENCE_ARCHIVE_URI" \
+  --arg archive_digest "$EVIDENCE_ARCHIVE_DIGEST" \
+  --arg archive_retention_policy "$EVIDENCE_ARCHIVE_RETENTION_POLICY" \
   --arg domain_scope "$DOMAIN_SCOPE" \
   --arg workflow_definition_id "$definition_id" \
   --arg workflow_run_id "$workflow_run_id" \
   --arg ontology_release_id "$release_id" \
+  --arg audit_id "ontology-release-workflow-trigger:$release_id:$workflow_run_id" \
   '{
     generated_at: $generated_at,
+    source: $source,
     status: $status,
+    required_evidence_class: $required_evidence_class,
+    release_class: $release_class,
+    blocked_count: 0,
+    target: {
+      id: $target_id,
+      kind: $target_kind,
+      environment: $target_environment
+    },
+    audit_id: $audit_id,
+    checked_at: $generated_at,
+    support_owner: $support_owner,
+    evidence_archive: {
+      uri: $archive_uri,
+      immutable: true,
+      digest: $archive_digest,
+      retention_policy: $archive_retention_policy
+    },
     domain_scope: $domain_scope,
     workflow_definition_id: $workflow_definition_id,
     workflow_run_id: $workflow_run_id,

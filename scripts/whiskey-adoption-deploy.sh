@@ -30,6 +30,7 @@ REMOTE_APPROVAL_NOTIFICATION_CONTROLLER="$REMOTE_ROOT/approval-notification-cont
 REMOTE_VAULT_KMS_CONTROLLER="$REMOTE_ROOT/vault-kms-controller.mjs"
 REMOTE_FINANCE_CONTROLLER="$REMOTE_ROOT/finance-controller.mjs"
 REMOTE_ENV="$REMOTE_ROOT/whiskey.env"
+REMOTE_ENV_LOADER="$REMOTE_ROOT/load-whiskey-env.sh"
 IMAGE_TAG="${MANDOFORGE_IMAGE_TAG:-latest}"
 GIT_SHA="${MANDOFORGE_GIT_SHA:-$(git rev-parse HEAD 2>/dev/null || printf unknown)}"
 GIT_SHA="${GIT_SHA:-unknown}"
@@ -92,6 +93,49 @@ require_cmd() {
 require_cmd ssh
 require_cmd rsync
 
+install_remote_env_loader() {
+  ssh "$REMOTE_HOST" "cat > '$REMOTE_ENV_LOADER' <<'ENV_LOADER'
+#!/usr/bin/env bash
+set -euo pipefail
+
+trim() {
+  printf '%s' \"\$1\" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
+}
+
+load_env_file() {
+  local env_file=\"\$1\"
+  local line
+  local name
+  local value
+  local line_number=0
+
+  while IFS= read -r line || [[ -n \"\$line\" ]]; do
+    line_number=\$((line_number + 1))
+    line=\"\$(trim \"\$line\")\"
+    [[ -z \"\$line\" || \"\$line\" == \#* ]] && continue
+    if [[ \"\$line\" == export[[:space:]]* ]]; then
+      line=\"\$(trim \"\${line#export}\")\"
+    fi
+    if [[ \"\$line\" != *=* ]]; then
+      echo \"\$env_file:\$line_number must be KEY=value\" >&2
+      return 1
+    fi
+    name=\"\$(trim \"\${line%%=*}\")\"
+    value=\"\${line#*=}\"
+    if [[ ! \"\$name\" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      echo \"\$env_file:\$line_number has invalid env var name: \${name:-<empty>}\" >&2
+      return 1
+    fi
+    if [[ \"\$value\" =~ ^\\\".*\\\"$ || \"\$value\" =~ ^\\'.*\\'$ ]]; then
+      value=\"\${value:1:\${#value}-2}\"
+    fi
+    export \"\$name=\$value\"
+  done <\"\$env_file\"
+}
+ENV_LOADER
+chmod 0700 '$REMOTE_ENV_LOADER'"
+}
+
 if [[ ! -f "$LOCAL_COMPOSE" ]]; then
   echo "missing Whiskey compose file: $LOCAL_COMPOSE" >&2
   exit 1
@@ -146,6 +190,7 @@ if [[ ! -d "$LOCAL_WEB_DIR" ]]; then
 fi
 
 ssh "$REMOTE_HOST" "mkdir -p '$REMOTE_ROOT/evidence' '$REMOTE_ROOT/archives' && chown -R 1000:1000 '$REMOTE_ROOT/evidence' && chmod 0750 '$REMOTE_ROOT/evidence'"
+install_remote_env_loader
 rsync -az "$LOCAL_COMPOSE" "$REMOTE_HOST:$REMOTE_COMPOSE"
 rsync -az "$LOCAL_CODEX_CONTROLLER" "$REMOTE_HOST:$REMOTE_CODEX_CONTROLLER"
 rsync -az "$LOCAL_TENANT_CONTROLLER" "$REMOTE_HOST:$REMOTE_TENANT_CONTROLLER"
@@ -295,9 +340,8 @@ ensure_env MANDOFORGE_FINANCE_RECONCILIATION_CONTROLLER_URL http://host.docker.i
 ensure_env MANDOFORGE_FINANCE_RECONCILIATION_CONTROLLER_TOKEN $FINANCE_RECONCILIATION_CONTROLLER_TOKEN"
 
 ssh "$REMOTE_HOST" "set -euo pipefail
-set -a
-source '$REMOTE_ENV'
-set +a
+source '$REMOTE_ENV_LOADER'
+load_env_file '$REMOTE_ENV'
 docker_gateway_ip=\$(ip -4 addr show docker0 2>/dev/null | awk '/inet /{print \$2}' | cut -d/ -f1 | head -1)
 if [[ -z \"\$docker_gateway_ip\" ]]; then
   echo 'docker0 gateway IP is required for container-to-host Codex App Server wiring' >&2
@@ -441,7 +485,7 @@ echo \$! > '$REMOTE_ROOT/finance-controller.pid'
 sleep 2
 ss -ltn | awk '{print \$4}' | grep -q \"\$docker_gateway_ip:$FINANCE_CONTROLLER_PORT$\" || { cat '$REMOTE_ROOT/finance-controller.log' >&2; exit 1; }"
 
-remote_cmd="cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +a"
+remote_cmd="cd '$REMOTE_ROOT' && source '$REMOTE_ENV_LOADER' && load_env_file '$REMOTE_ENV'"
 if [[ "$PULL_IMAGE" == "1" ]]; then
   remote_cmd="$remote_cmd && docker compose -p '$COMPOSE_PROJECT' -f '$REMOTE_COMPOSE' pull"
 fi
@@ -453,10 +497,10 @@ ssh "$REMOTE_HOST" "IMAGE_TAG=$(printf '%q' "$IMAGE_TAG") GIT_SHA=$(printf '%q' 
 set -euo pipefail
 
 REMOTE_ENV="$REMOTE_ROOT/whiskey.env"
+REMOTE_ENV_LOADER="$REMOTE_ROOT/load-whiskey-env.sh"
 cd "$REMOTE_ROOT"
-set -a
-source "$REMOTE_ENV"
-set +a
+source "$REMOTE_ENV_LOADER"
+load_env_file "$REMOTE_ENV"
 
 version_json=""
 for _attempt in {1..30}; do

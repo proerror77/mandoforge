@@ -8,6 +8,20 @@ AUTH_TOKEN="${MANDOFORGE_NATIVE_CONNECTOR_GATE_TOKEN:-${MANDOFORGE_DEV_ADMIN_TOK
 EVIDENCE_DIR="${EVIDENCE_DIR:-.mandoforge/native-connector-production-readiness}"
 ALLOW_BLOCKED="${ALLOW_BLOCKED:-0}"
 
+required_connectors=(
+  "tmall-top"
+  "taobao-open-platform"
+  "xiaohongshu-shop"
+  "xianyu-goofish"
+  "tiktok-shop-open-api"
+  "amazon-selling-partner-api"
+  "github-connector"
+  "lark-mcp"
+  "feishu-mcp"
+  "lark-native"
+  "feishu-native"
+)
+
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
     echo "native connector production readiness gate requires $1" >&2
@@ -45,6 +59,14 @@ connector_count="$(jq -r '.connector_count // 0' "$readiness_file")"
 ready_connector_count="$(jq -r '.ready_connector_count // 0' "$readiness_file")"
 blocked_connector_count="$(jq -r '.blocked_connector_count // 0' "$readiness_file")"
 live_enabled="$(jq -r '.live_enabled // false' "$readiness_file")"
+missing_connectors=()
+for connector_id in "${required_connectors[@]}"; do
+  if ! jq -e --arg connector_id "$connector_id" \
+    'any(.connectors[]?; .connector_id == $connector_id)' \
+    "$readiness_file" >/dev/null; then
+    missing_connectors+=("$connector_id")
+  fi
+done
 
 summary_file="$EVIDENCE_DIR/summary.txt"
 {
@@ -52,9 +74,14 @@ summary_file="$EVIDENCE_DIR/summary.txt"
   echo "required_evidence_class=$required_evidence_class"
   echo "live_enabled=$live_enabled"
   echo "connector_count=$connector_count"
+  echo "required_connector_count=${#required_connectors[@]}"
+  echo "missing_connector_count=${#missing_connectors[@]}"
   echo "ready_connector_count=$ready_connector_count"
   echo "blocked_connector_count=$blocked_connector_count"
   echo "readiness_file=$readiness_file"
+  if [[ "${#missing_connectors[@]}" -gt 0 ]]; then
+    printf 'missing_connectors=%s\n' "$(IFS=,; echo "${missing_connectors[*]}")"
+  fi
 } >"$summary_file"
 
 cat "$summary_file"
@@ -64,8 +91,13 @@ if [[ "$required_evidence_class" != "customer_grade" ]]; then
   exit 1
 fi
 
-if [[ "$connector_count" -lt 5 ]]; then
-  echo "native connector production readiness must include the ecommerce connector family" >&2
+if [[ "$connector_count" -lt "${#required_connectors[@]}" ]]; then
+  echo "native connector production readiness must include all required ecommerce, SWE, Lark, and Feishu connectors" >&2
+  exit 1
+fi
+
+if [[ "${#missing_connectors[@]}" -gt 0 ]]; then
+  printf 'native connector production readiness is missing required connector ids: %s\n' "$(IFS=,; echo "${missing_connectors[*]}")" >&2
   exit 1
 fi
 

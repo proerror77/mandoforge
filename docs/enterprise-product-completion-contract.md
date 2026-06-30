@@ -64,8 +64,17 @@ Primary repo surfaces:
 - `deploy/k8s/secret-delivery-contract.yaml`
 - `deploy/k8s/secret.example.yaml`
 - `scripts/production-launch-preflight.sh`
+- `scripts/production-deployment-safety-gate.sh`
+- `scripts/enterprise-product-completion-contract-gate.sh`
 - `scripts/verify-stage2-evidence-k8s-manifests.sh`
 - `GET /api/enterprise-product/readiness`
+
+Customer-grade completion must archive deployment safety evidence at
+`production-deployment-safety/summary.json`. The evidence must prove external
+secret delivery, no example Secrets or default credentials, durable workspace
+storage, production runtime config, Kubernetes Remote Computer execution, launch
+preflight completion, enterprise completion contract inventory, and the
+customer-data validation boundary.
 
 ### runtime-production
 
@@ -181,15 +190,16 @@ Required platform promotion:
 - Xiaohongshu Shop
 - TikTok Shop Open API
 - Amazon Selling Partner API
+- GitHub SWE connector
 - Lark/Feishu MCP and native enterprise connectors
 
 Customer-grade completion must also archive per-connector production semantics
 evidence under `live-connector-production-semantics/<connector-id>/summary.json`
-for the promoted ecommerce connector family. The evidence must prove live/sandbox
-separation, token refresh/expiry/rotation, rate-limit/error taxonomy, idempotent
-writes with external reconciliation, webhook or polling provenance, compensation
-or explicit non-compensable policy, secret redaction, and immutable deployment
-archive metadata.
+for the promoted ecommerce, SWE, Lark, and Feishu connector family. The evidence
+must prove live/sandbox separation, token refresh/expiry/rotation,
+rate-limit/error taxonomy, idempotent writes with external reconciliation,
+webhook or polling provenance, compensation or explicit non-compensable policy,
+secret redaction, and immutable deployment archive metadata.
 
 ### ontology-engine
 
@@ -221,6 +231,7 @@ Primary repo surfaces:
 - `crates/mandoforge-api/src/store_context_packets.rs`
 - `GET /api/ontology/engine-readiness`
 - `scripts/ontology-engine-readiness-gate.sh`
+- `scripts/ontology-engine-production-gate.sh`
 - `scripts/ontology-release-workflow-trigger-gate.sh`
 - `scripts/verify-ecommerce-tmall-context-os.sh`
 
@@ -230,6 +241,13 @@ The repo is ontology-ready and has Context OS primitives. Enterprise completion
 requires a promoted ontology registry, domain ontology lifecycle, migration
 policy, operator-facing release workflow, and archived customer-grade evidence
 that ontology promotion drives the next WorkflowRun.
+
+Customer-grade completion must archive Ontology Engine production evidence at
+`ontology-engine-production/summary.json`. The evidence must prove versioned
+core and domain registries, promotion/rollback/migration policy, relation
+constraints enforced before policy decisions, conflict and trust downgrade
+runtime blocking, reviewable Builder approvals, and context packets with source
+refs, ontology version, relation expansion, and trust/freshness gates.
 
 ### workflowpack-enterprise-lifecycle
 
@@ -256,6 +274,13 @@ Primary repo surfaces:
 - `scripts/verify-workflow-pack-manifest.sh`
 - `scripts/workflow-pack-evidence-gate.sh`
 - `scripts/managed-workflow-runtime-evidence-gate.sh`
+- `scripts/workflowpack-enterprise-lifecycle-gate.sh`
+
+Customer-grade completion must archive WorkflowPack lifecycle evidence at
+`workflowpack-enterprise-lifecycle/summary.json`. The evidence must prove
+install, stage, release, rollback, archive, onboarding completeness, connector
+quality, eval regression, canary, version compatibility, tenant override policy,
+and managed workflow recovery.
 
 ### enterprise-security-admin
 

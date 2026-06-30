@@ -129,7 +129,7 @@ fi
 base_render_file="$(mktemp)"
 pilot_render_file="$(mktemp)"
 kubectl kustomize deploy/k8s >"$base_render_file"
-kubectl kustomize deploy >"$pilot_render_file"
+kubectl kustomize deploy/remote-computer-pilot --load-restrictor LoadRestrictionsNone >"$pilot_render_file"
 base_render_lines="$(wc -l <"$base_render_file" | awk '{print $1}')"
 pilot_render_lines="$(wc -l <"$pilot_render_file" | awk '{print $1}')"
 rm -f "$base_render_file" "$pilot_render_file"

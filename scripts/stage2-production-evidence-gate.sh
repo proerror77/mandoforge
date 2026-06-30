@@ -402,6 +402,7 @@ collect_readiness() {
   fetch_json GET /api/memory-governance/summary >/dev/null
   fetch_json GET /api/policy/rollout/orchestration/readiness >/dev/null
   fetch_json GET /api/agents/releases/automation-runs >/dev/null
+  fetch_json GET /api/enterprise-product/readiness >/dev/null
 
   if [[ -n "$TEAM_ID" ]]; then
     fetch_json GET "/api/teams/$TEAM_ID/mcp-servers/rollouts/summary" >/dev/null
@@ -1318,9 +1319,70 @@ run_completion_audit() {
   fi
 }
 
+run_enterprise_completion_contract_inventory() {
+  local contract_script="scripts/enterprise-product-completion-contract-gate.sh"
+  if [[ ! -x "$contract_script" && -x "/app/$contract_script" ]]; then
+    contract_script="/app/$contract_script"
+  fi
+  if [[ ! -x "$contract_script" ]]; then
+    echo "Stage 2 production evidence gate could not find executable enterprise completion contract script" >&2
+    exit 1
+  fi
+
+  ALLOW_BLOCKED=1 \
+    BASE_URL="$BASE_URL" \
+    SOURCE_EVIDENCE_DIR="$EVIDENCE_DIR" \
+    ENTERPRISE_PRODUCT_EVIDENCE_DIR="$EVIDENCE_DIR" \
+    AUDIT_DIR="$EVIDENCE_DIR/enterprise-product-completion-contract-gate" \
+    "$contract_script" >/dev/null
+
+  if [[ ! -s "$EVIDENCE_DIR/enterprise-product-completion-contract-gate/checklist.json" ]]; then
+    echo "Stage 2 production evidence gate did not write enterprise-product-completion-contract-gate/checklist.json" >&2
+    exit 1
+  fi
+}
+
+run_enterprise_product_readiness_readback() {
+  local readiness_script="scripts/enterprise-product-readiness-gate.sh"
+  if [[ ! -x "$readiness_script" && -x "/app/$readiness_script" ]]; then
+    readiness_script="/app/$readiness_script"
+  fi
+  if [[ ! -x "$readiness_script" ]]; then
+    echo "Stage 2 production evidence gate could not find executable enterprise product readiness script" >&2
+    exit 1
+  fi
+
+  BASE_URL="$BASE_URL" \
+    MANDOFORGE_ENTERPRISE_GATE_SUBJECT="$SUBJECT" \
+    MANDOFORGE_ENTERPRISE_GATE_ROLES="$ROLES" \
+    MANDOFORGE_ENTERPRISE_GATE_TOKEN="$AUTH_TOKEN" \
+    EVIDENCE_DIR="$EVIDENCE_DIR/enterprise-product-readiness-gate" \
+    SOURCE_EVIDENCE_DIR="$EVIDENCE_DIR" \
+    ENTERPRISE_PRODUCT_EVIDENCE_DIR="$EVIDENCE_DIR" \
+    ENTERPRISE_PRODUCT_COMPLETION_CHECKLIST="$EVIDENCE_DIR/enterprise-product-completion-contract-gate/checklist.json" \
+    ALLOW_BLOCKED="$ALLOW_BLOCKED" \
+    "$readiness_script" >/dev/null
+
+  if [[ ! -s "$EVIDENCE_DIR/enterprise-product-readiness-gate/api-enterprise-product-readiness.json" ]]; then
+    echo "Stage 2 production evidence gate did not write enterprise-product-readiness-gate/api-enterprise-product-readiness.json" >&2
+    exit 1
+  fi
+}
+
 require_cmd curl
 require_cmd jq
 mkdir -p "$EVIDENCE_DIR"
+
+if [[ "$RUN_VALIDATIONS" == "1" && "$ALLOW_BLOCKED" != "1" ]]; then
+  preflight_env_snapshot="$(mktemp)"
+  env >"$preflight_env_snapshot"
+  if ! STAGE2_PRODUCTION_PREFLIGHT_SUMMARY_FILE="$EVIDENCE_DIR/stage2-production-evidence-preflight.json" \
+    scripts/stage2-production-evidence-preflight.sh "$preflight_env_snapshot"; then
+    rm -f "$preflight_env_snapshot"
+    exit 1
+  fi
+  rm -f "$preflight_env_snapshot"
+fi
 
 curl -fsS "$BASE_URL/healthz" >/dev/null
 discover_team_id
@@ -1356,4 +1418,8 @@ if [[ "$RUN_VALIDATIONS" == "1" || "$local_validations_were_requested" == "1" ]]
 fi
 
 run_completion_audit
+run_enterprise_completion_contract_inventory
+collect_readiness
+verify_readiness_inventory_coverage
+run_enterprise_product_readiness_readback
 write_summary

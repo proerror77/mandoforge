@@ -66,10 +66,14 @@ static_contract_check() {
   grep -q "remote-computer-production-state-job" deploy/stage2-production-evidence/kustomization.yaml \
     || fail "Stage 2 production evidence bundle must include the Remote Computer production state Job"
 
-  grep -q "k8s/remote-computer-state-juicefs-profile.yaml" deploy/kustomization.yaml \
-    || fail "production Remote Computer bundle must include the JuiceFS state profile"
-  grep -q "remote-computer-state-juicefs-pvc-patch.yaml" deploy/kustomization.yaml \
-    || fail "production Remote Computer bundle must patch the Pod-mounted state PVC to the distributed PV"
+  ! grep -q "remote-computer-state-juicefs-profile.yaml" deploy/kustomization.yaml \
+    || fail "default deploy bundle must not include the placeholder JuiceFS state profile Secret"
+  ! grep -q "remote-computer-state-juicefs-pvc-patch.yaml" deploy/kustomization.yaml \
+    || fail "default deploy bundle must not patch the Pod-mounted state PVC to a placeholder distributed PV"
+  grep -q "../k8s/remote-computer-state-juicefs-profile.yaml" deploy/remote-computer-pilot/kustomization.yaml \
+    || fail "Remote Computer pilot bundle must include the opt-in JuiceFS state profile"
+  grep -q "remote-computer-state-juicefs-pvc-patch.yaml" deploy/remote-computer-pilot/kustomization.yaml \
+    || fail "Remote Computer pilot bundle must patch the Pod-mounted state PVC to the distributed PV"
   grep -q "ReadWriteMany" deploy/k8s/remote-computer-state-pvc.yaml \
     || fail "Remote Computer state PVC must request ReadWriteMany"
   grep -q "runtime-api-or-lock-aware-sync" deploy/k8s/remote-computer-state-contract.yaml \
@@ -104,7 +108,9 @@ write_summary() {
 
   jq -n \
     --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --arg source "remote-computer-production-state-gate" \
     --arg status "$status" \
+    --arg required_evidence_class "customer_grade" \
     --arg issue "$issue" \
     --arg remote_evidence_dir "$REMOTE_EVIDENCE_DIR" \
     --arg combined_evidence_dir "$COMBINED_EVIDENCE_DIR" \
@@ -112,7 +118,9 @@ write_summary() {
     --argjson blocked_count "$blocked_count" \
     '{
       generated_at: $generated_at,
+      source: $source,
       status: $status,
+      required_evidence_class: $required_evidence_class,
       blocked_count: $blocked_count,
       issue: (if $issue == "" then null else $issue end),
       remote_evidence_dir: $remote_evidence_dir,

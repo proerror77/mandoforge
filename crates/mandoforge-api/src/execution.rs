@@ -3113,12 +3113,12 @@ fn remote_agent_cli_exec_command(
 case \"$allowed\" in *\",$agent_cli_profile,\"*) ;; *) echo \"agent CLI profile is not allowlisted: $agent_cli_profile\" >&2; exit 64 ;; esac\n\
 command_var=\"MANDOFORGE_AGENT_CLI_$(printf '%s' \"$agent_cli_profile\" | tr '[:lower:]-' '[:upper:]_')_COMMAND\"\n\
 args_var=\"MANDOFORGE_AGENT_CLI_$(printf '%s' \"$agent_cli_profile\" | tr '[:lower:]-' '[:upper:]_')_ARGS\"\n\
-agent_command=\"$(eval \"printf '%s' \\\"\\${$command_var:-}\\\"\")\"\n\
-agent_args=\"$(eval \"printf '%s' \\\"\\${$args_var:-}\\\"\")\"\n\
+agent_command=\"$(printenv \"$command_var\" 2>/dev/null || true)\"\n\
+agent_args=\"$(printenv \"$args_var\" 2>/dev/null || true)\"\n\
 if [ -z \"$agent_command\" ]; then echo \"agent CLI profile $agent_cli_profile is missing $command_var\" >&2; exit 64; fi\n",
     );
     command.push_str("set --\n");
-    command.push_str("if [ -n \"$agent_args\" ]; then\n  # Profile args intentionally use simple whitespace splitting; wrap complex CLIs in a shim.\n  set -- $agent_args\nfi\n");
+    command.push_str("if [ -n \"$agent_args\" ]; then\n  # Profile args intentionally use simple whitespace splitting; wrap complex CLIs in a shim.\n  set -f\n  set -- $agent_args\n  set +f\nfi\n");
     for arg in &request.args {
         command.push_str(&format!("set -- \"$@\" {}\n", shell_single_quote(arg)));
     }
@@ -5283,6 +5283,37 @@ mod tests {
         assert!(command.contains("mkdir -p '/workspace/sessions/session-1'"));
         assert!(command.contains("cd '/workspace/sessions/session-1'"));
         assert!(command.ends_with("pwd && touch marker.txt"));
+    }
+
+    #[test]
+    fn remote_agent_cli_environment_profile_avoids_eval_and_globbing() {
+        let request = AgentCliRequest {
+            profile: "legacy-coder".to_string(),
+            task: "summarize repo".to_string(),
+            args: vec!["--json".to_string()],
+            timeout_seconds: None,
+        };
+        let config = AgentCliProfileConfig {
+            command: String::new(),
+            args: Vec::new(),
+            env: Vec::new(),
+            timeout_seconds: None,
+            remote_computer_required: true,
+            runtime_type: "agent_cli".to_string(),
+            source: AgentCliProfileConfigSource::Environment,
+        };
+
+        let command = remote_agent_cli_exec_command(&request, &config, "/workspace/sessions/s1")
+            .expect("agent cli command");
+
+        assert!(command.contains("printenv \"$command_var\""));
+        assert!(command.contains("printenv \"$args_var\""));
+        assert!(!command.contains("eval \"printf"));
+        assert!(command.contains("set -f\n  set -- $agent_args\n  set +f"));
+        assert!(command.contains("MANDOFORGE_AGENT_CLI_$(printf '%s' \"$agent_cli_profile\""));
+        assert!(command.contains("'legacy-coder'"));
+        assert!(command.contains("'--json'"));
+        assert!(command.contains("'summarize repo'"));
     }
 
     #[test]

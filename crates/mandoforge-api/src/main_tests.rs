@@ -2098,7 +2098,7 @@ Stage 2 is not complete.
     assert_eq!(gaps[1], "Second controller-backed blocker.");
 
     let readiness = build_stage2_completion_readiness();
-    assert_eq!(readiness.evidence_requirements.len(), 19);
+    assert_eq!(readiness.evidence_requirements.len(), 23);
     assert_eq!(readiness.evidence_requirements[0].id, "tenant-routing");
     assert!(
         readiness.evidence_requirements[0]
@@ -2122,6 +2122,22 @@ Stage 2 is not complete.
             .evidence_requirements
             .iter()
             .any(|requirement| requirement.id == "ui-production-polish")
+    );
+
+    let deployment_safety = readiness
+        .evidence_requirements
+        .iter()
+        .find(|requirement| requirement.id == "production-deployment-safety")
+        .expect("missing production deployment safety evidence requirement");
+    assert!(
+        deployment_safety
+            .required_artifacts
+            .contains(&"stage2-production-evidence-preflight.json".to_string())
+    );
+    assert!(
+        deployment_safety
+            .required_artifacts
+            .contains(&"production-deployment-safety/summary.json".to_string())
     );
 
     let mcp = readiness
@@ -2237,6 +2253,38 @@ Stage 2 is not complete.
             .contains(&"./scripts/product-surfaces-production-gate.sh".to_string())
     );
 
+    let deployment_safety = readiness
+        .evidence_requirements
+        .iter()
+        .find(|requirement| requirement.id == "production-deployment-safety")
+        .expect("missing production deployment safety evidence requirement");
+    assert!(
+        deployment_safety
+            .evidence_scripts
+            .contains(&"./scripts/production-deployment-safety-gate.sh".to_string())
+    );
+    assert!(
+        deployment_safety
+            .required_artifacts
+            .contains(&"production-deployment-safety/summary.json".to_string())
+    );
+
+    let workflowpack_lifecycle = readiness
+        .evidence_requirements
+        .iter()
+        .find(|requirement| requirement.id == "workflowpack-enterprise-lifecycle")
+        .expect("missing WorkflowPack enterprise lifecycle evidence requirement");
+    assert!(
+        workflowpack_lifecycle
+            .evidence_scripts
+            .contains(&"./scripts/workflowpack-enterprise-lifecycle-gate.sh".to_string())
+    );
+    assert!(
+        workflowpack_lifecycle
+            .required_artifacts
+            .contains(&"workflowpack-enterprise-lifecycle/summary.json".to_string())
+    );
+
     let enterprise_security_controls = readiness
         .evidence_requirements
         .iter()
@@ -2287,6 +2335,30 @@ Stage 2 is not complete.
     assert!(live_connector_semantics.required_artifacts.contains(
         &"live-connector-production-semantics/amazon-selling-partner-api/summary.json".to_string()
     ));
+    assert!(live_connector_semantics.required_artifacts.contains(
+        &"live-connector-production-semantics/github-connector/summary.json".to_string()
+    ));
+    for enterprise_connector_artifact in [
+        "live-connector-production-semantics/lark-mcp/summary.json",
+        "live-connector-production-semantics/feishu-mcp/summary.json",
+        "live-connector-production-semantics/lark-native/summary.json",
+        "live-connector-production-semantics/feishu-native/summary.json",
+    ] {
+        assert!(
+            live_connector_semantics
+                .required_artifacts
+                .contains(&enterprise_connector_artifact.to_string()),
+            "Stage 2 readiness must require {enterprise_connector_artifact}"
+        );
+    }
+    let manifest_verifier = read_repo_file(
+        &repo_root(),
+        "scripts/verify-stage2-evidence-k8s-manifests.sh",
+    );
+    assert!(
+        manifest_verifier.contains("packs/swe-review/connectors/github-connector.yaml"),
+        "Stage 2 manifest verifier must contract-check the GitHub SWE connector manifest"
+    );
 
     let runtime_recovery = readiness
         .evidence_requirements
@@ -2320,17 +2392,53 @@ Stage 2 is not complete.
             .contains(&"remote-computer-session-pod-lifecycle-evidence.json".to_string())
     );
 
+    let ontology_trigger = readiness
+        .evidence_requirements
+        .iter()
+        .find(|requirement| requirement.id == "ontology-release-workflow-trigger")
+        .expect("missing ontology release workflow trigger evidence requirement");
+    assert!(
+        ontology_trigger
+            .evidence_scripts
+            .contains(&"./scripts/ontology-release-workflow-trigger-gate.sh".to_string())
+    );
+    assert!(
+        ontology_trigger
+            .required_artifacts
+            .contains(&"ontology-release-workflow-trigger/summary.json".to_string())
+    );
+
+    let ontology_engine_production = readiness
+        .evidence_requirements
+        .iter()
+        .find(|requirement| requirement.id == "ontology-engine-production")
+        .expect("missing ontology engine production evidence requirement");
+    assert!(
+        ontology_engine_production
+            .evidence_scripts
+            .contains(&"./scripts/ontology-engine-production-gate.sh".to_string())
+    );
+    assert!(
+        ontology_engine_production
+            .required_artifacts
+            .contains(&"ontology-engine-production/summary.json".to_string())
+    );
+
     for optional_enterprise_id in [
         "tenant-routing",
+        "production-deployment-safety",
         "policy-rollout",
         "vault-kms",
         "worker-remote-computer",
         "finance-close",
         "product-surfaces",
+        "workflowpack-enterprise-lifecycle",
         "enterprise-security-production-controls",
         "observability-ops-production",
         "live-connector-production-semantics",
         "runtime-production-recovery",
+        "ontology-engine-production",
+        "ontology-release-workflow-trigger",
     ] {
         let requirement = readiness
             .evidence_requirements
@@ -2474,11 +2582,457 @@ fn enterprise_product_readiness_reports_customer_grade_blockers() {
             .evidence_scripts
             .contains(&"./scripts/production-launch-preflight.sh".to_string())
     );
+    let root = repo_root();
+    let production_launch_preflight =
+        read_repo_file(&root, "scripts/production-launch-preflight.sh");
+    let manifest_verifier =
+        read_repo_file(&root, "scripts/verify-stage2-evidence-k8s-manifests.sh");
+    let archive_script = read_repo_file(&root, "scripts/archive-stage2-production-evidence.sh");
+    let enterprise_readiness_gate =
+        read_repo_file(&root, "scripts/enterprise-product-readiness-gate.sh");
+    let k8s_config = read_repo_file(&root, "deploy/k8s/configmap.yaml");
+    let k8s_kustomization = read_repo_file(&root, "deploy/k8s/kustomization.yaml");
+    let k8s_api = read_repo_file(&root, "deploy/k8s/api.yaml");
+    let k8s_stage2_evidence_pvc =
+        read_repo_file(&root, "deploy/k8s/stage2-production-evidence-pvc.yaml");
+    let stage2_evidence_pvc = read_repo_file(
+        &root,
+        "deploy/stage2-production-evidence/stage2-production-evidence-pvc.yaml",
+    );
+    let stage2_evidence_pvc_example = read_repo_file(
+        &root,
+        "deploy/stage2-evidence/stage2-production-evidence-pvc.example.yaml",
+    );
+    let controller_env_template = read_repo_file(
+        &root,
+        "deploy/stage2-evidence/stage2-production-controllers.env.example",
+    );
+    let controller_env_verifier =
+        read_repo_file(&root, "scripts/verify-stage2-controller-env-template.sh");
+    let production_evidence_preflight =
+        read_repo_file(&root, "scripts/stage2-production-evidence-preflight.sh");
+    let ontology_trigger_gate =
+        read_repo_file(&root, "scripts/ontology-release-workflow-trigger-gate.sh");
+    let enterprise_contract_gate = read_repo_file(
+        &root,
+        "scripts/enterprise-product-completion-contract-gate.sh",
+    );
+    assert!(
+        production_launch_preflight.contains("enterprise-product-completion-contract-gate.sh"),
+        "production launch preflight must run the enterprise completion contract gate"
+    );
+    assert!(
+        production_launch_preflight
+            .contains("scripts/enterprise-product-completion-contract-gate.sh)")
+            && production_launch_preflight.contains(
+                r#"AUDIT_DIR="$stage2_capture_dir/enterprise-product-completion-contract-gate""#,
+            )
+            && production_launch_preflight.contains("ALLOW_BLOCKED=1")
+            && production_launch_preflight.contains("ALLOW_BLOCKED=0"),
+        "production launch preflight must run the enterprise contract gate as inventory in the shared Stage 2 evidence root while keeping readiness gates fail-closed"
+    );
+    assert!(
+        production_launch_preflight
+            .contains("stage2_capture_dir=\"${ENTERPRISE_PRODUCT_EVIDENCE_DIR:-")
+            && production_launch_preflight.contains("MANDOFORGE_ENTERPRISE_PRODUCT_EVIDENCE_DIR")
+            && production_launch_preflight.contains("STAGE2_EVIDENCE_DIR")
+            && production_launch_preflight.contains(r#"default_stage2_capture_dir=".mandoforge/stage2-production-evidence""#)
+            && production_launch_preflight.contains(r#"[[ "$EVIDENCE_DIR" == "/evidence" ]]"#)
+            && production_launch_preflight.contains(r#"default_stage2_capture_dir="$EVIDENCE_DIR""#)
+            && production_launch_preflight.contains(r#"mkdir -p "$stage2_capture_dir""#)
+            && production_launch_preflight.contains(r#"SOURCE_EVIDENCE_DIR="$stage2_capture_dir""#)
+            && production_launch_preflight.contains(
+                r#"AUDIT_DIR="$stage2_capture_dir/enterprise-product-completion-contract-gate""#
+            )
+            && production_launch_preflight
+                .contains(r#"MANDOFORGE_ENTERPRISE_PRODUCT_EVIDENCE_DIR="$stage2_capture_dir""#)
+            && production_launch_preflight.contains(
+                r#"ENTERPRISE_PRODUCT_COMPLETION_CHECKLIST="$stage2_capture_dir/enterprise-product-completion-contract-gate/checklist.json""#
+            )
+            && production_launch_preflight.contains(
+                r#"SOURCE_EVIDENCE_DIR="$stage2_capture_dir/live-connector-production-semantics""#
+            )
+            && production_launch_preflight.contains(
+                r#"SOURCE_EVIDENCE_DIR="$stage2_capture_dir/enterprise-security-production-controls""#
+            )
+            && production_launch_preflight.contains(
+                r#"SOURCE_EVIDENCE_DIR="$stage2_capture_dir/observability-ops-production""#
+            ),
+        "production launch preflight must bind semantic gates to the same Stage 2 evidence capture directory"
+    );
+    assert!(
+        k8s_config.contains(r#"MANDOFORGE_ENTERPRISE_PRODUCT_EVIDENCE_DIR: "/evidence""#)
+            && k8s_kustomization.contains("stage2-production-evidence-pvc.yaml")
+            && k8s_api.contains("name: stage2-production-evidence")
+            && k8s_api.contains("mountPath: /evidence")
+            && k8s_api.contains("readOnly: true")
+            && k8s_api.contains("claimName: mandoforge-stage2-production-evidence"),
+        "API deployment must mount the Stage 2 production evidence PVC read-only for enterprise readiness readback"
+    );
+    assert!(
+        k8s_stage2_evidence_pvc.contains("ReadWriteMany")
+            && stage2_evidence_pvc.contains("ReadWriteMany")
+            && stage2_evidence_pvc_example.contains("ReadWriteMany"),
+        "Stage 2 production evidence PVC must support shared API readback and evidence job writes"
+    );
+    assert!(
+        production_launch_preflight.contains("STAGE2_CONTROLLER_ENV_FILE")
+            && production_launch_preflight.contains("stage2-production-evidence-preflight.sh")
+            && production_launch_preflight
+                .contains(r#"load_stage2_controller_env_file "$STAGE2_CONTROLLER_ENV_FILE""#)
+            && production_launch_preflight.contains(
+                r#"stage2_preflight_summary="$stage2_capture_dir/stage2-production-evidence-preflight.json""#
+            )
+            && production_launch_preflight.contains("STAGE2_PRODUCTION_PREFLIGHT_SUMMARY_FILE")
+            && production_launch_preflight.contains(r#"[[ "$line" == *=* ]]"#)
+            && production_launch_preflight.contains("^[A-Za-z_][A-Za-z0-9_]*$")
+            && production_launch_preflight
+                .contains(r#"stage2_env_snapshot="$(mktemp -t mandoforge-stage2-production-env.XXXXXX)""#)
+            && production_launch_preflight.contains(r#"env >"$stage2_env_snapshot""#)
+            && production_launch_preflight
+                .contains(r#"stage2-production-evidence-preflight.sh "$stage2_env_snapshot""#),
+        "production launch preflight must validate Stage 2 controller env before collecting evidence"
+    );
+    assert!(
+        !production_launch_preflight.contains(r#"source "$STAGE2_CONTROLLER_ENV_FILE""#),
+        "production launch preflight must parse Stage 2 controller env files without sourcing shell code"
+    );
+    assert!(
+        manifest_verifier.contains("scripts/render-remote-computer-juicefs-profile.sh")
+            && manifest_verifier.contains("scripts/render-remote-computer-runtime-env.sh")
+            && manifest_verifier
+                .contains("scripts/render-remote-computer-local-hostpath-profile.sh")
+            && manifest_verifier.contains(r#"source "$env_file""#)
+            && manifest_verifier.contains(r#"load_env_file "$env_file""#),
+        "Stage 2 manifest verifier must ensure Remote Computer env renderers parse env files without sourcing shell code"
+    );
+    assert!(
+        manifest_verifier.contains("scripts/whiskey-adoption-deploy.sh")
+            && manifest_verifier.contains("scripts/whiskey-adoption-evidence.sh")
+            && manifest_verifier.contains("Whiskey adoption scripts must parse whiskey.env"),
+        "Stage 2 manifest verifier must ensure Whiskey adoption scripts parse whiskey.env without sourcing shell code"
+    );
+    assert!(
+        manifest_verifier.contains(
+            "customer-grade production gates must reject Whiskey/pilot/mock target identities"
+        ) && manifest_verifier.contains("scripts/production-deployment-safety-gate.sh")
+            && manifest_verifier.contains("scripts/workflowpack-enterprise-lifecycle-gate.sh")
+            && manifest_verifier.contains("scripts/ontology-engine-production-gate.sh")
+            && manifest_verifier.contains("scripts/live-connector-production-semantics-gate.sh"),
+        "Stage 2 manifest verifier must ensure customer-grade production gates reject Whiskey/pilot/mock identities"
+    );
+    assert!(
+        controller_env_template.contains("MANDOFORGE_STAGE2_SUPPORT_OWNER=")
+            && controller_env_template.contains("MANDOFORGE_STAGE2_EVIDENCE_ARCHIVE_URI=")
+            && controller_env_template.contains("MANDOFORGE_STAGE2_EVIDENCE_ARCHIVE_DIGEST=")
+            && controller_env_template.contains("MANDOFORGE_STAGE2_EVIDENCE_RETENTION_POLICY="),
+        "Stage 2 controller env template must expose support owner and immutable evidence archive metadata"
+    );
+    assert!(
+        controller_env_verifier.contains("MANDOFORGE_STAGE2_SUPPORT_OWNER")
+            && controller_env_verifier.contains("MANDOFORGE_STAGE2_EVIDENCE_ARCHIVE_URI")
+            && controller_env_verifier.contains("check_evidence_archive_metadata"),
+        "Stage 2 controller env verifier must require production evidence archive metadata"
+    );
+    assert!(
+        production_evidence_preflight.contains("check_evidence_archive_metadata")
+            && production_evidence_preflight.contains("looks_production_archive_uri")
+            && production_evidence_preflight.contains("looks_evidence_digest")
+            && production_evidence_preflight.contains("STAGE2_PRODUCTION_PREFLIGHT_SUMMARY_FILE")
+            && production_evidence_preflight.contains("stage2-production-evidence-preflight")
+            && production_evidence_preflight.contains("checks_jsonl"),
+        "Stage 2 production evidence preflight must fail closed without production archive metadata and emit machine-readable summary evidence"
+    );
+    assert!(
+        ontology_trigger_gate.contains("validate_customer_grade_metadata")
+            && ontology_trigger_gate.contains("MANDOFORGE_STAGE2_EVIDENCE_ARCHIVE_URI")
+            && ontology_trigger_gate.contains("support_owner")
+            && ontology_trigger_gate.contains("evidence_archive"),
+        "ontology release workflow trigger gate must emit customer-grade target and archive metadata"
+    );
+    assert!(
+        manifest_verifier.contains(
+            "ontology release workflow trigger gate must require customer-grade production target and immutable archive metadata"
+        ) && manifest_verifier.contains(
+            "Stage 2 completion audit and archive verifier must validate ontology trigger support owner and immutable archive metadata"
+        ),
+        "Stage 2 manifest verifier must enforce ontology trigger metadata semantics"
+    );
+    assert!(
+        archive_script.contains("ALLOW_UNVERIFIED_STAGE2_EVIDENCE_ARCHIVE")
+            && archive_script.contains("archive verification is mandatory")
+            && archive_script.contains("not customer-grade evidence"),
+        "Stage 2 archive creation must fail closed unless verification runs or a break-glass override is explicit"
+    );
+    assert!(
+        archive_script.contains("verification_required=true")
+            && archive_script.contains("verification_status=$verification_status")
+            && archive_script.contains(r#"write_manifest "passed" "true""#)
+            && archive_script.contains(r#"write_manifest "failed" "false""#)
+            && archive_script.contains(r#"write_manifest "skipped_break_glass" "false""#)
+            && archive_script.contains("verifier=$verifier")
+            && archive_script.contains("ALLOW_PENDING_STAGE2_ARCHIVE_MANIFEST=1")
+            && archive_script.contains("break_glass_unverified")
+            && archive_script.contains("customer_grade_evidence=$customer_grade_evidence"),
+        "Stage 2 archive manifest must record verifier outcome, break-glass state, and whether the archive is customer-grade evidence"
+    );
+    let archive_verifier = read_repo_file(&root, "scripts/verify-stage2-evidence-archive.sh");
+    assert!(
+        archive_verifier.contains("ALLOW_LEGACY_STAGE2_ARCHIVE_MANIFEST")
+            && archive_verifier.contains("MANDOFORGE_STAGE2_ARCHIVE_SELF_TEST")
+            && archive_verifier.contains("ALLOW_PENDING_STAGE2_ARCHIVE_MANIFEST")
+            && archive_verifier.contains("mandatory verifier execution")
+            && archive_verifier.contains("verification_status=passed")
+            && archive_verifier.contains("customer-grade evidence")
+            && archive_verifier.contains("break-glass verification disabled")
+            && archive_verifier.contains("manifest-metadata-negative")
+            && archive_verifier.contains("manifest-legacy-env-negative")
+            && archive_verifier
+                .contains("env -u ALLOW_LEGACY_STAGE2_ARCHIVE_MANIFEST ALLOW_BLOCKED=1"),
+        "Stage 2 archive verifier must reject final archives that lack verified manifest metadata"
+    );
+    let stage2_gate_pos = production_launch_preflight
+        .find("scripts/stage2-production-evidence-gate.sh")
+        .expect("production launch preflight must run the Stage 2 production evidence gate");
+    let runtime_gate_pos = production_launch_preflight
+        .find("scripts/runtime-production-readiness-gate.sh")
+        .expect("production launch preflight must run the runtime production readiness gate");
+    let deployment_safety_gate_pos = production_launch_preflight
+        .find("scripts/production-deployment-safety-gate.sh")
+        .expect("production launch preflight must run the deployment safety gate");
+    let remote_state_gate_pos = production_launch_preflight
+        .find("scripts/remote-computer-production-state-gate.sh")
+        .expect("production launch preflight must run the remote computer production state gate");
+    let live_connector_gate_pos = production_launch_preflight
+        .find("scripts/live-connector-production-semantics-gate.sh")
+        .expect(
+            "production launch preflight must run the live connector production semantics gate",
+        );
+    let ontology_engine_gate_pos = production_launch_preflight
+        .find("scripts/ontology-engine-production-gate.sh")
+        .expect("production launch preflight must run the ontology engine production gate");
+    let ontology_trigger_gate_pos = production_launch_preflight
+        .find("scripts/ontology-release-workflow-trigger-gate.sh")
+        .expect("production launch preflight must run the ontology release workflow trigger gate");
+    let security_controls_gate_pos = production_launch_preflight
+        .find("scripts/enterprise-security-production-controls-gate.sh")
+        .expect("production launch preflight must run the enterprise security controls gate");
+    let observability_ops_gate_pos = production_launch_preflight
+        .find("scripts/observability-ops-production-gate.sh")
+        .expect("production launch preflight must run the observability ops production gate");
+    let product_surfaces_gate_pos = production_launch_preflight
+        .find("scripts/product-surfaces-production-gate.sh")
+        .expect("production launch preflight must run the product surfaces production gate");
+    let workflowpack_lifecycle_gate_pos = production_launch_preflight
+        .find("scripts/workflowpack-enterprise-lifecycle-gate.sh")
+        .expect("production launch preflight must run the WorkflowPack lifecycle gate");
+    let enterprise_contract_gate_pos = production_launch_preflight
+        .find("scripts/enterprise-product-completion-contract-gate.sh")
+        .expect("production launch preflight must run the enterprise completion contract gate");
+    let enterprise_readiness_gate_pos = production_launch_preflight
+        .find("scripts/enterprise-product-readiness-gate.sh")
+        .expect("production launch preflight must run the enterprise readiness gate");
+    assert!(
+        stage2_gate_pos < runtime_gate_pos
+            && stage2_gate_pos < deployment_safety_gate_pos
+            && stage2_gate_pos < remote_state_gate_pos
+            && enterprise_readiness_gate_pos > runtime_gate_pos
+            && enterprise_readiness_gate_pos > deployment_safety_gate_pos
+            && enterprise_readiness_gate_pos > remote_state_gate_pos
+            && enterprise_contract_gate_pos > runtime_gate_pos
+            && enterprise_contract_gate_pos > deployment_safety_gate_pos
+            && enterprise_contract_gate_pos > remote_state_gate_pos
+            && enterprise_contract_gate_pos > live_connector_gate_pos
+            && enterprise_contract_gate_pos > ontology_engine_gate_pos
+            && enterprise_contract_gate_pos > ontology_trigger_gate_pos
+            && enterprise_contract_gate_pos > security_controls_gate_pos
+            && enterprise_contract_gate_pos > observability_ops_gate_pos
+            && enterprise_contract_gate_pos > product_surfaces_gate_pos
+            && enterprise_contract_gate_pos > workflowpack_lifecycle_gate_pos
+            && enterprise_contract_gate_pos < enterprise_readiness_gate_pos,
+        "production launch preflight must collect Stage 2 evidence, run semantic lane gates, then run enterprise completion before enterprise readiness"
+    );
+    assert!(
+        enterprise_contract_gate.contains("AUDIT_DIR=\"${AUDIT_DIR:-${EVIDENCE_DIR:-"),
+        "enterprise completion contract gate must write into EVIDENCE_DIR when preflight invokes it"
+    );
+    assert!(
+        enterprise_contract_gate.contains("ENTERPRISE_PRODUCT_EVIDENCE_DIR")
+            && enterprise_contract_gate.contains("lane_ready()")
+            && enterprise_contract_gate.contains("gate_passed()")
+            && enterprise_contract_gate.contains("lane_results_jsonl")
+            && enterprise_contract_gate.contains("write_lane_result")
+            && enterprise_contract_gate.contains("readiness_checklist_dir")
+            && enterprise_contract_gate.contains("\"lane_results\"")
+            && enterprise_contract_gate.contains("ontology_trigger_summary_ready()")
+            && enterprise_contract_gate.contains("archive_metadata_ready()")
+            && enterprise_contract_gate.contains("MANDOFORGE_STAGE2_EVIDENCE_ARCHIVE_URI")
+            && enterprise_contract_gate.contains("\"evidence_archive\"")
+            && enterprise_contract_gate.contains("scripts/production-deployment-safety-gate.sh")
+            && enterprise_contract_gate
+                .contains("scripts/live-connector-production-semantics-gate.sh")
+            && enterprise_contract_gate.contains("ontology-release-workflow-trigger/summary.json")
+            && enterprise_contract_gate.contains("enterprise_product_complete"),
+        "enterprise completion contract gate must compute completion by rerunning customer-grade lane gates"
+    );
+    assert!(
+        enterprise_readiness_gate.contains("completion_checklist_ready()")
+            && enterprise_readiness_gate.contains("required_lane_sources")
+            && enterprise_readiness_gate.contains("required_result_lanes")
+            && enterprise_readiness_gate.contains("required_result_sources")
+            && enterprise_readiness_gate.contains("length == $required_lane_count")
+            && enterprise_readiness_gate.contains("length == $required_result_count")
+            && enterprise_readiness_gate.contains("ontology-release-workflow-trigger-gate")
+            && enterprise_readiness_gate.contains("summary_path_safe()")
+            && enterprise_readiness_gate.contains("checklist_summary_path_ready()")
+            && enterprise_readiness_gate.contains("archive_metadata_ready == true")
+            && enterprise_readiness_gate.contains("evidence_archive.digest")
+            && enterprise_readiness_gate.contains("ENTERPRISE_PRODUCT_COMPLETION_CHECKLIST")
+            && enterprise_readiness_gate
+                .contains("enterprise-product-completion-contract-gate/checklist.json"),
+        "enterprise product readiness gate must validate the local completion checklist, exact lane results, and lane summary paths when API readiness reports complete"
+    );
+    assert!(
+        read_repo_file(
+            &root,
+            "crates/mandoforge-api/src/enterprise_product_readiness.rs"
+        )
+        .contains("enterprise_product_completion_checklist")
+            && read_repo_file(
+                &root,
+                "crates/mandoforge-api/src/enterprise_product_readiness.rs"
+            )
+            .contains("enterprise_completion_archive_metadata")
+            && read_repo_file(
+                &root,
+                "crates/mandoforge-api/src/enterprise_product_readiness.rs"
+            )
+            .contains("EnterpriseEvidenceArchiveMetadata")
+            && read_repo_file(
+                &root,
+                "crates/mandoforge-api/src/enterprise_product_readiness.rs"
+            )
+            .contains("looks_production_archive_uri")
+            && read_repo_file(
+                &root,
+                "crates/mandoforge-api/src/enterprise_product_readiness.rs"
+            )
+            .contains("looks_evidence_digest")
+            && read_repo_file(
+                &root,
+                "crates/mandoforge-api/src/enterprise_product_readiness.rs"
+            )
+            .contains("checklist_lane_result_ready")
+            && read_repo_file(
+                &root,
+                "crates/mandoforge-api/src/enterprise_product_readiness.rs"
+            )
+            .contains("checklist_evidence_summary_ready")
+            && read_repo_file(
+                &root,
+                "crates/mandoforge-api/src/enterprise_product_readiness.rs"
+            )
+            .contains("json_array_len")
+            && read_repo_file(
+                &root,
+                "crates/mandoforge-api/src/enterprise_product_readiness.rs"
+            )
+            .contains("enterprise-product-completion-contract-gate/checklist.json"),
+        "enterprise readiness API must require the completion contract checklist and lane results before trusting customer-grade summaries"
+    );
+    assert!(
+        enterprise_contract_gate.contains("scripts/verify-stage2-evidence-k8s-manifests.sh"),
+        "enterprise completion contract gate must require the K8s evidence manifest verifier"
+    );
+    assert!(
+        read_repo_file(&root, "scripts/stage2-production-evidence-gate.sh")
+            .contains("/api/enterprise-product/readiness")
+            && read_repo_file(&root, "scripts/stage2-production-evidence-gate.sh")
+                .contains("run_enterprise_completion_contract_inventory")
+            && read_repo_file(&root, "scripts/stage2-production-evidence-gate.sh")
+                .contains("run_enterprise_product_readiness_readback")
+            && read_repo_file(&root, "scripts/stage2-production-evidence-gate.sh").contains(
+                "enterprise-product-readiness-gate/api-enterprise-product-readiness.json"
+            )
+            && read_repo_file(&root, "scripts/stage2-production-evidence-gate.sh")
+                .contains("enterprise-product-completion-contract-gate/checklist.json")
+            && read_repo_file(&root, "scripts/stage2-production-evidence-gate.sh")
+                .contains("ENTERPRISE_PRODUCT_EVIDENCE_DIR=\"$EVIDENCE_DIR\""),
+        "Stage 2 production evidence gate must collect and validate enterprise readiness after writing enterprise completion contract evidence"
+    );
+    let archive_verifier = read_repo_file(&root, "scripts/verify-stage2-evidence-archive.sh");
+    assert!(
+        archive_verifier.contains("api-enterprise-product-readiness.json")
+            && archive_verifier.contains(
+                "enterprise-product-readiness-gate/api-enterprise-product-readiness.json"
+            )
+            && archive_verifier
+                .contains("enterprise-product-completion-contract-gate/checklist.json")
+            && archive_verifier.contains("lane_count // 0) == 9")
+            && archive_verifier.contains("lane_results // []) | length == 10")
+            && archive_verifier.contains("relative_artifact_path_safe()")
+            && archive_verifier.contains("enterprise_checklist_summary_paths_exist()")
+            && archive_verifier.contains("enterprise-archive-metadata-negative")
+            && archive_verifier.contains("enterprise_archive_metadata_mismatch_issue")
+            && archive_verifier.contains("enterprise-archive-readback-mismatch-negative")
+            && archive_verifier
+                .contains("does not match enterprise completion checklist archive metadata")
+            && archive_verifier.contains("stage2-production-evidence-preflight.json")
+            && archive_verifier.contains("strict Stage 2 production evidence preflight success")
+            && archive_verifier.contains("stage2-evidence-preflight-failed-negative")
+            && archive_verifier.contains("archive_metadata_ready == true")
+            && archive_verifier.contains("evidence_archive.support_owner")
+            && archive_verifier.contains("evidence_archive.digest")
+            && archive_verifier.contains("does not prove enterprise product completion readiness")
+            && archive_verifier.contains(
+                "does not prove customer-grade enterprise completion checklist and lane results"
+            ),
+        "Stage 2 archive verifier must semantically validate enterprise product readiness, completion contract artifacts, and lane summary paths"
+    );
+    for required_primary_script in [
+        "scripts/approval-notification-evidence-gate.sh",
+        "scripts/finance-evidence-gate.sh",
+        "scripts/managed-workflow-runtime-evidence-gate.sh",
+        "scripts/provider-governance-evidence-gate.sh",
+        "scripts/remote-computer-evidence-gate.sh",
+        "scripts/runtime-production-readiness-gate.sh",
+        "scripts/stage2-production-evidence-gate.sh",
+        "scripts/stage2-production-evidence-preflight.sh",
+        "scripts/verify-static-ui-actionbook.sh",
+        "scripts/verify-static-ui-assets.sh",
+        "scripts/whiskey-remote-computer-k3s-verify.sh",
+        "scripts/worker-evidence-gate.sh",
+    ] {
+        assert!(
+            enterprise_contract_gate.contains(required_primary_script),
+            "enterprise completion contract gate must require primary contract script {required_primary_script}"
+        );
+    }
     assert!(
         deployment_safety
             .required_evidence
             .iter()
             .any(|evidence| evidence.contains("secret-delivery-contract.yaml"))
+    );
+    assert!(
+        deployment_safety.required_evidence.iter().any(|evidence| {
+            evidence.contains("configmap.yaml") && evidence.contains("provider runtime production")
+        }),
+        "deployment safety readiness must expose provider runtime production config as required evidence"
+    );
+    assert!(
+        deployment_safety.required_evidence.iter().any(|evidence| {
+            evidence.contains("trusted caller headers")
+                && evidence.contains("host shell")
+                && evidence.contains("inline shell")
+        }),
+        "deployment safety readiness must expose spoofing and shell execution config as fail-closed evidence"
+    );
+    assert!(
+        deployment_safety.required_evidence.iter().any(|evidence| {
+            evidence.contains("K8s evidence manifest verifier") && evidence.contains("executable")
+        }),
+        "deployment safety readiness must require executable preflight/gate/verifier scripts"
     );
     assert!(
         deployment_safety
@@ -2526,6 +3080,18 @@ fn enterprise_product_readiness_reports_customer_grade_blockers() {
         live_connectors
             .evidence_scripts
             .contains(&"./scripts/live-connector-production-semantics-gate.sh".to_string())
+    );
+    assert!(
+        live_connectors
+            .required_evidence
+            .iter()
+            .any(|evidence| evidence.contains("GitHub/SWE connector"))
+    );
+    assert!(
+        live_connectors
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("GitHub/SWE"))
     );
 
     let ontology = readiness
@@ -2606,6 +3172,318 @@ fn enterprise_product_readiness_reports_customer_grade_blockers() {
 }
 
 #[test]
+fn enterprise_product_readiness_uses_customer_grade_evidence_summaries() {
+    let _env_lock = env_lock().lock().expect("env lock");
+    let evidence_root =
+        std::env::temp_dir().join(format!("mandoforge-enterprise-evidence-{}", Uuid::new_v4()));
+    for (summary_path, _source) in [
+        (
+            "enterprise-product-completion-contract-gate/lane-gates/production-deployment-safety/summary.json",
+            "production-deployment-safety-gate",
+        ),
+        (
+            "enterprise-product-completion-contract-gate/lane-gates/runtime-production/summary.json",
+            "runtime-production-readiness-gate",
+        ),
+        (
+            "enterprise-product-completion-contract-gate/lane-gates/remote-computer-multinode/summary.json",
+            "remote-computer-production-state-gate",
+        ),
+        (
+            "enterprise-product-completion-contract-gate/lane-gates/live-connector-production/summary.json",
+            "live-connector-production-semantics-gate",
+        ),
+        (
+            "enterprise-product-completion-contract-gate/lane-gates/ontology-engine/summary.json",
+            "ontology-engine-production-gate",
+        ),
+        (
+            "ontology-release-workflow-trigger/summary.json",
+            "ontology-release-workflow-trigger-gate",
+        ),
+        (
+            "enterprise-product-completion-contract-gate/lane-gates/workflowpack-enterprise-lifecycle/summary.json",
+            "workflowpack-enterprise-lifecycle-gate",
+        ),
+        (
+            "enterprise-product-completion-contract-gate/lane-gates/enterprise-security-admin/summary.json",
+            "enterprise-security-production-controls-gate",
+        ),
+        (
+            "enterprise-product-completion-contract-gate/lane-gates/observability-ops/summary.json",
+            "observability-ops-production-gate",
+        ),
+        (
+            "enterprise-product-completion-contract-gate/lane-gates/product-surfaces/summary.json",
+            "product-surfaces-production-gate",
+        ),
+    ] {
+        let path = evidence_root.join(summary_path);
+        fs::create_dir_all(path.parent().expect("summary parent")).expect("create evidence dir");
+        fs::write(path, r#"{"status":"ready","blocked_count":0}"#).expect("write thin summary");
+    }
+    let _guard = EnvVarGuard::set(
+        "MANDOFORGE_ENTERPRISE_PRODUCT_EVIDENCE_DIR",
+        evidence_root.to_str().expect("utf8 evidence root"),
+    );
+
+    let readiness = build_enterprise_product_completion_readiness();
+    assert_eq!(readiness.status, "blocked");
+    assert!(readiness.completion_blocked);
+    assert_eq!(readiness.ready_lane_count, 0);
+
+    for (summary_path, source) in [
+        (
+            "enterprise-product-completion-contract-gate/lane-gates/production-deployment-safety/summary.json",
+            "production-deployment-safety-gate",
+        ),
+        (
+            "enterprise-product-completion-contract-gate/lane-gates/runtime-production/summary.json",
+            "runtime-production-readiness-gate",
+        ),
+        (
+            "enterprise-product-completion-contract-gate/lane-gates/remote-computer-multinode/summary.json",
+            "remote-computer-production-state-gate",
+        ),
+        (
+            "enterprise-product-completion-contract-gate/lane-gates/live-connector-production/summary.json",
+            "live-connector-production-semantics-gate",
+        ),
+        (
+            "enterprise-product-completion-contract-gate/lane-gates/ontology-engine/summary.json",
+            "ontology-engine-production-gate",
+        ),
+        (
+            "ontology-release-workflow-trigger/summary.json",
+            "ontology-release-workflow-trigger-gate",
+        ),
+        (
+            "enterprise-product-completion-contract-gate/lane-gates/workflowpack-enterprise-lifecycle/summary.json",
+            "workflowpack-enterprise-lifecycle-gate",
+        ),
+        (
+            "enterprise-product-completion-contract-gate/lane-gates/enterprise-security-admin/summary.json",
+            "enterprise-security-production-controls-gate",
+        ),
+        (
+            "enterprise-product-completion-contract-gate/lane-gates/observability-ops/summary.json",
+            "observability-ops-production-gate",
+        ),
+        (
+            "enterprise-product-completion-contract-gate/lane-gates/product-surfaces/summary.json",
+            "product-surfaces-production-gate",
+        ),
+    ] {
+        let path = evidence_root.join(summary_path);
+        let body = match source {
+            "production-deployment-safety-gate" => format!(
+                r#"{{"source":"{source}","required_evidence_class":"customer_grade","status":"ready","blocked_count":0,"production_deployment_safety_evidence_file":"production-deployment-safety/summary.json"}}"#
+            ),
+            "runtime-production-readiness-gate" => format!(
+                r#"{{"source":"{source}","required_evidence_class":"customer_grade","status":"ready","blocked_count":0,"runtime_recovery_status":"ready","runtime_recovery_evidence_file":"runtime-production-recovery-evidence.json"}}"#
+            ),
+            "remote-computer-production-state-gate" => format!(
+                r#"{{"source":"{source}","required_evidence_class":"customer_grade","status":"ready","blocked_count":0,"remote_evidence_dir":"remote-computer","combined_evidence_dir":"worker-remote-computer","lifecycle_evidence_file":"remote-computer-session-pod-lifecycle-evidence.json"}}"#
+            ),
+            "live-connector-production-semantics-gate" => format!(
+                r#"{{"source":"{source}","required_evidence_class":"customer_grade","status":"ready","blocked_count":0,"connector_count":11,"source_evidence_dir":"live-connector-production-semantics"}}"#
+            ),
+            "ontology-engine-production-gate" => format!(
+                r#"{{"source":"{source}","required_evidence_class":"customer_grade","status":"ready","blocked_count":0,"ontology_engine_evidence_file":"ontology-engine-production/summary.json"}}"#
+            ),
+            "ontology-release-workflow-trigger-gate" => format!(
+                r#"{{"source":"{source}","required_evidence_class":"customer_grade","status":"ready","blocked_count":0,"target":{{"id":"prod-ontology-trigger","kind":"production_ontology_workflow_trigger","environment":"production"}},"support_owner":"ontology-oncall","evidence_archive":{{"uri":"s3://prod-evidence/ontology-trigger","immutable":true,"digest":"sha256:abc","retention_policy":"p1y"}},"domain_scope":"commerce","workflow_definition_id":"workflow-prod","workflow_run_id":"run-prod","ontology_release_id":"release-prod","checks":{{"workflow_run_queued":true}}}}"#
+            ),
+            "workflowpack-enterprise-lifecycle-gate" => format!(
+                r#"{{"source":"{source}","required_evidence_class":"customer_grade","status":"ready","blocked_count":0,"workflowpack_enterprise_lifecycle_evidence_file":"workflowpack-enterprise-lifecycle/summary.json"}}"#
+            ),
+            "enterprise-security-production-controls-gate" => format!(
+                r#"{{"source":"{source}","required_evidence_class":"customer_grade","status":"ready","blocked_count":0,"controls_evidence_file":"enterprise-security-production-controls/summary.json"}}"#
+            ),
+            "observability-ops-production-gate" => format!(
+                r#"{{"source":"{source}","required_evidence_class":"customer_grade","status":"ready","blocked_count":0,"ops_evidence_file":"observability-ops-production/summary.json"}}"#
+            ),
+            "product-surfaces-production-gate" => format!(
+                r#"{{"source":"{source}","required_evidence_class":"customer_grade","status":"ready","blocked_count":0,"product_surfaces_evidence_file":"product-surfaces/summary.json"}}"#
+            ),
+            other => panic!("unexpected enterprise summary source: {other}"),
+        };
+        fs::write(path, body).expect("write customer-grade summary");
+    }
+
+    let readiness = build_enterprise_product_completion_readiness();
+    assert_eq!(readiness.status, "blocked");
+    assert!(readiness.completion_blocked);
+    assert_eq!(readiness.ready_lane_count, 0);
+
+    let checklist_path =
+        evidence_root.join("enterprise-product-completion-contract-gate/checklist.json");
+    fs::create_dir_all(checklist_path.parent().expect("checklist parent"))
+        .expect("create checklist dir");
+    fs::write(
+        &checklist_path,
+        r#"{
+          "source": "enterprise-product-completion-contract-gate",
+          "enterprise_product_status": "enterprise_product_complete",
+          "completion_blocked": false,
+          "required_evidence_class": "customer_grade",
+          "required_lanes": [
+            "production-deployment-safety",
+            "runtime-production",
+            "remote-computer-multinode",
+            "live-connector-production",
+            "ontology-engine",
+            "workflowpack-enterprise-lifecycle",
+            "enterprise-security-admin",
+            "observability-ops",
+            "product-surfaces"
+          ],
+          "ready_lanes": [
+            "production-deployment-safety",
+            "runtime-production",
+            "remote-computer-multinode",
+            "live-connector-production",
+            "ontology-engine",
+            "workflowpack-enterprise-lifecycle",
+            "enterprise-security-admin",
+            "observability-ops",
+            "product-surfaces"
+          ],
+          "blocked_lanes": [],
+          "lane_results": [
+            {"lane":"production-deployment-safety","expected_source":"production-deployment-safety-gate","status":"ready","summary_path":"enterprise-product-completion-contract-gate/lane-gates/production-deployment-safety/summary.json","output_log":"enterprise-product-completion-contract-gate/lane-gates/production-deployment-safety/output.log","issue":null},
+            {"lane":"runtime-production","expected_source":"runtime-production-readiness-gate","status":"ready","summary_path":"enterprise-product-completion-contract-gate/lane-gates/runtime-production/summary.json","output_log":"enterprise-product-completion-contract-gate/lane-gates/runtime-production/output.log","issue":null},
+            {"lane":"remote-computer-multinode","expected_source":"remote-computer-production-state-gate","status":"ready","summary_path":"enterprise-product-completion-contract-gate/lane-gates/remote-computer-multinode/summary.json","output_log":"enterprise-product-completion-contract-gate/lane-gates/remote-computer-multinode/output.log","issue":null},
+            {"lane":"live-connector-production","expected_source":"live-connector-production-semantics-gate","status":"ready","summary_path":"enterprise-product-completion-contract-gate/lane-gates/live-connector-production/summary.json","output_log":"enterprise-product-completion-contract-gate/lane-gates/live-connector-production/output.log","issue":null},
+            {"lane":"ontology-engine","expected_source":"ontology-engine-production-gate","status":"ready","summary_path":"enterprise-product-completion-contract-gate/lane-gates/ontology-engine/summary.json","output_log":"enterprise-product-completion-contract-gate/lane-gates/ontology-engine/output.log","issue":null},
+            {"lane":"ontology-release-workflow-trigger","expected_source":"ontology-release-workflow-trigger-gate","status":"ready","summary_path":"ontology-release-workflow-trigger/summary.json","output_log":null,"issue":null},
+            {"lane":"workflowpack-enterprise-lifecycle","expected_source":"workflowpack-enterprise-lifecycle-gate","status":"ready","summary_path":"enterprise-product-completion-contract-gate/lane-gates/workflowpack-enterprise-lifecycle/summary.json","output_log":"enterprise-product-completion-contract-gate/lane-gates/workflowpack-enterprise-lifecycle/output.log","issue":null},
+            {"lane":"enterprise-security-admin","expected_source":"enterprise-security-production-controls-gate","status":"ready","summary_path":"enterprise-product-completion-contract-gate/lane-gates/enterprise-security-admin/summary.json","output_log":"enterprise-product-completion-contract-gate/lane-gates/enterprise-security-admin/output.log","issue":null},
+            {"lane":"observability-ops","expected_source":"observability-ops-production-gate","status":"ready","summary_path":"enterprise-product-completion-contract-gate/lane-gates/observability-ops/summary.json","output_log":"enterprise-product-completion-contract-gate/lane-gates/observability-ops/output.log","issue":null},
+            {"lane":"product-surfaces","expected_source":"product-surfaces-production-gate","status":"ready","summary_path":"enterprise-product-completion-contract-gate/lane-gates/product-surfaces/summary.json","output_log":"enterprise-product-completion-contract-gate/lane-gates/product-surfaces/output.log","issue":null}
+          ]
+        }"#,
+    )
+    .expect("write completion checklist");
+
+    let readiness = build_enterprise_product_completion_readiness();
+    assert_eq!(readiness.status, "blocked");
+    assert!(readiness.completion_blocked);
+    assert_eq!(readiness.ready_lane_count, 0);
+    assert!(readiness.evidence_archive.is_none());
+
+    fs::write(
+        &checklist_path,
+        r#"{
+          "source": "enterprise-product-completion-contract-gate",
+          "enterprise_product_status": "enterprise_product_complete",
+          "completion_blocked": false,
+          "required_evidence_class": "customer_grade",
+          "support_owner": "platform-oncall",
+          "archive_metadata_ready": true,
+          "evidence_archive": {
+            "uri": "s3://prod-evidence/enterprise-completion/2026-06-30/stage2.tar.gz",
+            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "retention_policy": "p1y",
+            "immutable": true
+          },
+          "required_lanes": [
+            "production-deployment-safety",
+            "runtime-production",
+            "remote-computer-multinode",
+            "live-connector-production",
+            "ontology-engine",
+            "workflowpack-enterprise-lifecycle",
+            "enterprise-security-admin",
+            "observability-ops",
+            "product-surfaces"
+          ],
+          "ready_lanes": [
+            "production-deployment-safety",
+            "runtime-production",
+            "remote-computer-multinode",
+            "live-connector-production",
+            "ontology-engine",
+            "workflowpack-enterprise-lifecycle",
+            "enterprise-security-admin",
+            "observability-ops",
+            "product-surfaces"
+          ],
+          "blocked_lanes": [],
+          "lane_results": [
+            {"lane":"production-deployment-safety","expected_source":"production-deployment-safety-gate","status":"ready","summary_path":"enterprise-product-completion-contract-gate/lane-gates/production-deployment-safety/summary.json","output_log":"enterprise-product-completion-contract-gate/lane-gates/production-deployment-safety/output.log","issue":null},
+            {"lane":"runtime-production","expected_source":"runtime-production-readiness-gate","status":"ready","summary_path":"enterprise-product-completion-contract-gate/lane-gates/runtime-production/summary.json","output_log":"enterprise-product-completion-contract-gate/lane-gates/runtime-production/output.log","issue":null},
+            {"lane":"remote-computer-multinode","expected_source":"remote-computer-production-state-gate","status":"ready","summary_path":"enterprise-product-completion-contract-gate/lane-gates/remote-computer-multinode/summary.json","output_log":"enterprise-product-completion-contract-gate/lane-gates/remote-computer-multinode/output.log","issue":null},
+            {"lane":"live-connector-production","expected_source":"live-connector-production-semantics-gate","status":"ready","summary_path":"enterprise-product-completion-contract-gate/lane-gates/live-connector-production/summary.json","output_log":"enterprise-product-completion-contract-gate/lane-gates/live-connector-production/output.log","issue":null},
+            {"lane":"ontology-engine","expected_source":"ontology-engine-production-gate","status":"ready","summary_path":"enterprise-product-completion-contract-gate/lane-gates/ontology-engine/summary.json","output_log":"enterprise-product-completion-contract-gate/lane-gates/ontology-engine/output.log","issue":null},
+            {"lane":"ontology-release-workflow-trigger","expected_source":"ontology-release-workflow-trigger-gate","status":"ready","summary_path":"ontology-release-workflow-trigger/summary.json","output_log":null,"issue":null},
+            {"lane":"workflowpack-enterprise-lifecycle","expected_source":"workflowpack-enterprise-lifecycle-gate","status":"ready","summary_path":"enterprise-product-completion-contract-gate/lane-gates/workflowpack-enterprise-lifecycle/summary.json","output_log":"enterprise-product-completion-contract-gate/lane-gates/workflowpack-enterprise-lifecycle/output.log","issue":null},
+            {"lane":"enterprise-security-admin","expected_source":"enterprise-security-production-controls-gate","status":"ready","summary_path":"enterprise-product-completion-contract-gate/lane-gates/enterprise-security-admin/summary.json","output_log":"enterprise-product-completion-contract-gate/lane-gates/enterprise-security-admin/output.log","issue":null},
+            {"lane":"observability-ops","expected_source":"observability-ops-production-gate","status":"ready","summary_path":"enterprise-product-completion-contract-gate/lane-gates/observability-ops/summary.json","output_log":"enterprise-product-completion-contract-gate/lane-gates/observability-ops/output.log","issue":null},
+            {"lane":"product-surfaces","expected_source":"product-surfaces-production-gate","status":"ready","summary_path":"enterprise-product-completion-contract-gate/lane-gates/product-surfaces/summary.json","output_log":"enterprise-product-completion-contract-gate/lane-gates/product-surfaces/output.log","issue":null}
+          ]
+        }"#,
+    )
+    .expect("write completion checklist with archive metadata");
+
+    let readiness = build_enterprise_product_completion_readiness();
+
+    assert_eq!(readiness.status, "blocked");
+    assert!(readiness.completion_blocked);
+    assert_eq!(readiness.ready_lane_count, 8);
+    fs::write(
+        evidence_root.join("stage2-production-evidence-preflight.json"),
+        r#"{
+          "source": "stage2-production-evidence-preflight",
+          "status": "passed",
+          "generated_at": "2026-06-30T00:00:00Z",
+          "env_file": "/evidence/stage2-production-controller.env",
+          "pass_count": 2,
+          "fail_count": 0,
+          "checks": [
+            {"status": "passed", "scope": "global", "detail": "global: RUN_STAGE2_PRODUCTION_VALIDATIONS is enabled"},
+            {"status": "passed", "scope": "evidence-archive", "detail": "evidence-archive: MANDOFORGE_STAGE2_EVIDENCE_ARCHIVE_URI points at immutable production evidence storage"}
+          ]
+        }"#,
+    )
+    .expect("write strict preflight summary");
+
+    let readiness = build_enterprise_product_completion_readiness();
+
+    assert_eq!(readiness.status, "enterprise_product_complete");
+    assert!(!readiness.completion_blocked);
+    assert_eq!(readiness.ready_lane_count, 9);
+    assert_eq!(readiness.pilot_ready_lane_count, 0);
+    assert_eq!(readiness.blocked_lane_count, 0);
+    let evidence_archive = readiness
+        .evidence_archive
+        .as_ref()
+        .expect("complete readiness exposes evidence archive metadata");
+    assert_eq!(evidence_archive.support_owner, "platform-oncall");
+    assert_eq!(
+        evidence_archive.uri,
+        "s3://prod-evidence/enterprise-completion/2026-06-30/stage2.tar.gz"
+    );
+    assert_eq!(
+        evidence_archive.digest,
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
+    assert_eq!(evidence_archive.retention_policy, "p1y");
+    assert!(evidence_archive.immutable);
+    assert!(
+        readiness.lanes.iter().all(|lane| {
+            lane.status == "ready" && lane.current_evidence_class == "customer_grade"
+        })
+    );
+    let ontology = readiness
+        .lanes
+        .iter()
+        .find(|lane| lane.id == "ontology-engine")
+        .expect("ontology lane");
+    assert!(ontology.blockers.is_empty());
+}
+
+#[test]
 fn stage2_readiness_evidence_metadata_matches_repo_contract() {
     let root = repo_root();
     let readiness = build_stage2_completion_readiness();
@@ -2626,6 +3504,12 @@ fn stage2_readiness_evidence_metadata_matches_repo_contract() {
     assert!(
         completion_audit.contains("optional_missing_required_evidence_artifact_count"),
         "completion audit gate must report optional enterprise evidence without making it a core blocker"
+    );
+    assert!(
+        completion_audit.contains("stage2-production-evidence-preflight.json")
+            && completion_audit
+                .contains("strict Stage 2 production evidence preflight summary is incomplete"),
+        "completion audit gate must require strict Stage 2 production evidence preflight success before archive verification"
     );
     let controller_env = read_repo_file(
         &root,

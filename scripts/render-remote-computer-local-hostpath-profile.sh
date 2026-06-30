@@ -8,9 +8,42 @@ if [[ ! -f "$env_file" ]]; then
   exit 1
 fi
 
-set -a
-source "$env_file"
-set +a
+trim() {
+  printf '%s' "$1" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
+}
+
+load_env_file() {
+  local source_file="$1"
+  local line
+  local name
+  local value
+  local line_number=0
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line_number=$((line_number + 1))
+    line="$(trim "$line")"
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    if [[ "$line" == export[[:space:]]* ]]; then
+      line="$(trim "${line#export}")"
+    fi
+    if [[ "$line" != *=* ]]; then
+      echo "$source_file:$line_number must be KEY=value" >&2
+      exit 1
+    fi
+    name="$(trim "${line%%=*}")"
+    value="${line#*=}"
+    if [[ ! "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      echo "$source_file:$line_number has invalid env var name: ${name:-<empty>}" >&2
+      exit 1
+    fi
+    if [[ "$value" =~ ^\".*\"$ || "$value" =~ ^\'.*\'$ ]]; then
+      value="${value:1:${#value}-2}"
+    fi
+    export "$name=$value"
+  done <"$source_file"
+}
+
+load_env_file "$env_file"
 
 pv_name="${MANDOFORGE_REMOTE_COMPUTER_LOCAL_HOSTPATH_PV_NAME:-mandoforge-remote-computer-state-juicefs-pv}"
 host_path="${MANDOFORGE_REMOTE_COMPUTER_LOCAL_HOSTPATH_PATH:-}"

@@ -99,6 +99,10 @@ required_evidence_artifacts_for_requirement() {
       echo "$SOURCE_EVIDENCE_DIR/api-tenant-isolation-routing-validate.json"
       echo "$SOURCE_EVIDENCE_DIR/tenant-routing-validation-evidence.json"
       ;;
+    production-deployment-safety)
+      echo "$SOURCE_EVIDENCE_DIR/stage2-production-evidence-preflight.json"
+      echo "$SOURCE_EVIDENCE_DIR/production-deployment-safety/summary.json"
+      ;;
     policy-rollout)
       echo "$SOURCE_EVIDENCE_DIR/production-evidence-run.json"
       echo "$SOURCE_EVIDENCE_DIR/policy-rollout-orchestration-validation-evidence.json"
@@ -170,6 +174,9 @@ required_evidence_artifacts_for_requirement() {
     product-surfaces)
       echo "$SOURCE_EVIDENCE_DIR/product-surfaces/summary.json"
       ;;
+    workflowpack-enterprise-lifecycle)
+      echo "$SOURCE_EVIDENCE_DIR/workflowpack-enterprise-lifecycle/summary.json"
+      ;;
     enterprise-security-production-controls)
       echo "$SOURCE_EVIDENCE_DIR/enterprise-security-production-controls/summary.json"
       ;;
@@ -183,9 +190,20 @@ required_evidence_artifacts_for_requirement() {
       echo "$SOURCE_EVIDENCE_DIR/live-connector-production-semantics/xianyu-goofish/summary.json"
       echo "$SOURCE_EVIDENCE_DIR/live-connector-production-semantics/tiktok-shop-open-api/summary.json"
       echo "$SOURCE_EVIDENCE_DIR/live-connector-production-semantics/amazon-selling-partner-api/summary.json"
+      echo "$SOURCE_EVIDENCE_DIR/live-connector-production-semantics/github-connector/summary.json"
+      echo "$SOURCE_EVIDENCE_DIR/live-connector-production-semantics/lark-mcp/summary.json"
+      echo "$SOURCE_EVIDENCE_DIR/live-connector-production-semantics/feishu-mcp/summary.json"
+      echo "$SOURCE_EVIDENCE_DIR/live-connector-production-semantics/lark-native/summary.json"
+      echo "$SOURCE_EVIDENCE_DIR/live-connector-production-semantics/feishu-native/summary.json"
       ;;
     runtime-production-recovery)
       echo "$SOURCE_EVIDENCE_DIR/runtime-production-recovery-evidence.json"
+      ;;
+    ontology-engine-production)
+      echo "$SOURCE_EVIDENCE_DIR/ontology-engine-production/summary.json"
+      ;;
+    ontology-release-workflow-trigger)
+      echo "$SOURCE_EVIDENCE_DIR/ontology-release-workflow-trigger/summary.json"
       ;;
   esac
 }
@@ -1054,11 +1072,12 @@ artifact_contract_issue() {
       return 0
     fi
     jq -e '
-      def ready: . == "ready" or . == "validated" or . == "completed" or . == "passed";
-      def surface($id): first(.surfaces[]? | select(.id == $id));
+      . as $root
+      | def ready: . == "ready" or . == "validated" or . == "completed" or . == "passed";
+      def surface($id): first($root.surfaces[]? | select(.id == $id));
       def routes_checked($id):
         ((surface($id).routes // []) | length) > 0
-        and all(surface($id).routes[]?;
+        and all((surface($id).routes // [])[];
           (.method // "") != ""
           and (.path // "" | startswith("/api/"))
           and ((.status // 0) >= 200 and (.status // 0) < 300)
@@ -1081,6 +1100,82 @@ artifact_contract_issue() {
       and (.live_api_truth.stale_or_mock_data_scan_passed == true)
     ' "$artifact" >/dev/null || {
       printf 'product surfaces summary lacks live API truth or per-surface route evidence'
+      return 0
+    }
+  fi
+
+  if [[ "$req_id" == "production-deployment-safety" && "$artifact" == */production-deployment-safety/summary.json ]]; then
+    jq -e '
+      .status == "ready"
+      and (.evidence_class // .required_evidence_class // "") == "customer_grade"
+      and ((.target.environment // "") == "production")
+      and ((.target.id // .target.deployment_id // .target.cluster_id // "") | length > 0)
+      and ((.audit_id // .audit_log_id // .trace_id // .run_id // "") | length > 0)
+      and ((.support_owner // .deployment_owner // .oncall_owner // "") | length > 0)
+      and ((.evidence_archive.immutable // .archive.immutable // false) == true)
+      and ((.evidence_archive.uri // .archive.uri // "") | length > 0)
+      and ((.evidence_archive.digest // .archive.digest // "") | length > 0)
+      and (.checks.no_example_secret_applied == true)
+      and (.checks.external_secret_delivery_proven == true)
+      and (.checks.no_default_credentials == true)
+      and (.checks.durable_workspace_storage == true)
+      and (.checks.no_insecure_auth == true)
+      and (.checks.provider_runtime_production == true)
+      and (.checks.remote_computer_kubernetes == true)
+      and (.checks.launch_preflight_passed == true)
+      and (.checks.enterprise_completion_contract_inventory_passed == true)
+      and (.checks.customer_data_boundary_documented == true)
+    ' "$artifact" >/dev/null || {
+      printf 'production deployment safety summary is incomplete'
+      return 0
+    }
+  fi
+
+  if [[ "$req_id" == "production-deployment-safety" && "$artifact" == */stage2-production-evidence-preflight.json ]]; then
+    jq -e '
+      . as $root
+      | ($root.source // "") == "stage2-production-evidence-preflight"
+      and ($root.status // "") == "passed"
+      and (($root.fail_count // 1) == 0)
+      and (($root.pass_count // 0) > 0)
+      and (($root.checks // []) | length == ($root.pass_count // -1))
+      and all($root.checks[]?; (.status // "") == "passed" and ((.scope // "") | length > 0) and ((.detail // "") | length > 0))
+    ' "$artifact" >/dev/null || {
+      printf 'strict Stage 2 production evidence preflight summary is incomplete'
+      return 0
+    }
+  fi
+
+  if [[ "$req_id" == "workflowpack-enterprise-lifecycle" && "$artifact" == */workflowpack-enterprise-lifecycle/summary.json ]]; then
+    jq -e '
+      .status == "ready"
+      and (.evidence_class // .required_evidence_class // "") == "customer_grade"
+      and ((.target.environment // "") == "production")
+      and ((.target.id // .target.deployment_id // .target.cluster_id // "") | length > 0)
+      and ((.pack.id // .workflow_pack.id // "") | length > 0)
+      and ((.pack.version // .workflow_pack.version // "") | length > 0)
+      and ((.audit_id // .audit_log_id // .trace_id // .run_id // "") | length > 0)
+      and ((.support_owner // .pack_owner // .oncall_owner // "") | length > 0)
+      and ((.evidence_archive.immutable // .archive.immutable // false) == true)
+      and ((.evidence_archive.uri // .archive.uri // "") | length > 0)
+      and ((.evidence_archive.digest // .archive.digest // "") | length > 0)
+      and (.checks.install_audited == true)
+      and (.checks.stage_audited == true)
+      and (.checks.release_promoted == true)
+      and (.checks.rollback_verified == true)
+      and (.checks.archive_verified == true)
+      and (.checks.onboarding_profiles_complete == true)
+      and (.checks.connector_quality_passed == true)
+      and (.checks.eval_regression_passed == true)
+      and (.checks.canary_promoted == true)
+      and (.checks.compatibility_matrix_passed == true)
+      and (.checks.tenant_overrides_policy_enforced == true)
+      and (.checks.managed_workflow_recovery_passed == true)
+      and ((.compatibility_matrix.versions // []) | length > 0)
+      and ((.tenant_overrides.validated_tenants // []) | length > 0)
+      and ((.managed_workflow_runtime.recovery_checks // []) | length > 0)
+    ' "$artifact" >/dev/null || {
+      printf 'WorkflowPack enterprise lifecycle summary is incomplete'
       return 0
     }
   fi
@@ -1132,6 +1227,65 @@ artifact_contract_issue() {
       printf 'provider rollout lacks audit id or timestamp'
       return 0
     fi
+  fi
+
+  if [[ "$req_id" == "ontology-release-workflow-trigger" && "$artifact" == */ontology-release-workflow-trigger/summary.json ]]; then
+    jq -e '
+      .status == "ready"
+      and (.evidence_class // .required_evidence_class // "") == "customer_grade"
+      and ((.target.environment // "") == "production")
+      and ((.target.id // .target.deployment_id // .target.cluster_id // "") | length > 0)
+      and ((.audit_id // .audit_log_id // .trace_id // .run_id // "") | length > 0)
+      and ((.checked_at // .validated_at // .completed_at // .timestamp // "") | length > 0)
+      and ((.support_owner // .workflow_owner // .oncall_owner // "") | length > 0)
+      and ((.evidence_archive.immutable // .archive.immutable // false) == true)
+      and ((.evidence_archive.uri // .archive.uri // "") | length > 0)
+      and ((.evidence_archive.digest // .archive.digest // "") | length > 0)
+      and ((.evidence_archive.retention_policy // .archive.retention_policy // "") | length > 0)
+      and ((.domain_scope // "") | length > 0)
+      and ((.workflow_definition_id // "") | length > 0)
+      and ((.workflow_run_id // "") | length > 0)
+      and ((.ontology_release_id // "") | length > 0)
+      and (.checks.release_promoted == true)
+      and (.checks.workflow_trigger_reported == true)
+      and (.checks.workflow_run_queued == true)
+      and (.checks.audit_log_recorded == true)
+      and (.checks.scheduler_drain_exposed == true)
+      and (.checks.readiness_reflected == true)
+    ' "$artifact" >/dev/null || {
+      printf 'ontology release workflow trigger summary is incomplete'
+      return 0
+    }
+  fi
+
+  if [[ "$req_id" == "ontology-engine-production" && "$artifact" == */ontology-engine-production/summary.json ]]; then
+    jq -e '
+      .status == "ready"
+      and (.evidence_class // .required_evidence_class // "") == "customer_grade"
+      and ((.target.environment // "") == "production")
+      and ((.target.id // .target.deployment_id // .target.cluster_id // "") | length > 0)
+      and ((.registry.version // .registry_version // "") | length > 0)
+      and ((.audit_id // .audit_log_id // .trace_id // .run_id // "") | length > 0)
+      and ((.support_owner // .ontology_owner // .oncall_owner // "") | length > 0)
+      and ((.evidence_archive.immutable // .archive.immutable // false) == true)
+      and ((.evidence_archive.uri // .archive.uri // "") | length > 0)
+      and ((.evidence_archive.digest // .archive.digest // "") | length > 0)
+      and (.migrations.migration_policy_present == true)
+      and (.migrations.rollback_tested == true)
+      and (.relation_constraints.enforced_before_policy == true)
+      and (.conflict_trust.contradiction_blocks_high_risk == true)
+      and (.conflict_trust.stale_fact_blocks_high_risk == true)
+      and (.conflict_trust.trust_downgrade_blocks_high_risk == true)
+      and (.builder_approvals.approved_changes_audited == true)
+      and (.context_packets.source_refs_rendered == true)
+      and (.context_packets.ontology_version_rendered == true)
+      and (.context_packets.relation_expansion_rendered == true)
+      and (.context_packets.trust_freshness_gates_enforced == true)
+      and (.runtime_enforcement.policy_precheck_uses_constraints == true)
+    ' "$artifact" >/dev/null || {
+      printf 'ontology engine production summary is incomplete'
+      return 0
+    }
   fi
 
   if [[ "$req_id" == "provider-rollout" && "$artifact_name" == "provider-production-rollback-evidence.json" ]]; then

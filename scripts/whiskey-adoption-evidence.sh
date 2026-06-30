@@ -6,6 +6,7 @@ REMOTE_ROOT="${WHISKEY_REMOTE_ROOT:-/opt/mandoforge-adoption}"
 COMPOSE_PROJECT="${WHISKEY_COMPOSE_PROJECT:-mandoforge-adoption}"
 REMOTE_COMPOSE="$REMOTE_ROOT/docker-compose.yml"
 REMOTE_ENV="$REMOTE_ROOT/whiskey.env"
+REMOTE_ENV_LOADER="$REMOTE_ROOT/load-whiskey-env.sh"
 LOCAL_SYNC_DIR="${WHISKEY_LOCAL_SYNC_DIR:-.mandoforge/remote-adoption/whiskey}"
 RUN_STRICT_VALIDATIONS="${RUN_STAGE2_PRODUCTION_VALIDATIONS:-0}"
 WORKFLOW_PACK_MCP_QUERY="${WHISKEY_WORKFLOW_PACK_MCP_QUERY:-approval}"
@@ -19,6 +20,49 @@ require_cmd() {
 
 require_cmd ssh
 require_cmd rsync
+
+install_remote_env_loader() {
+  ssh "$REMOTE_HOST" "cat > '$REMOTE_ENV_LOADER' <<'ENV_LOADER'
+#!/usr/bin/env bash
+set -euo pipefail
+
+trim() {
+  printf '%s' \"\$1\" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
+}
+
+load_env_file() {
+  local env_file=\"\$1\"
+  local line
+  local name
+  local value
+  local line_number=0
+
+  while IFS= read -r line || [[ -n \"\$line\" ]]; do
+    line_number=\$((line_number + 1))
+    line=\"\$(trim \"\$line\")\"
+    [[ -z \"\$line\" || \"\$line\" == \#* ]] && continue
+    if [[ \"\$line\" == export[[:space:]]* ]]; then
+      line=\"\$(trim \"\${line#export}\")\"
+    fi
+    if [[ \"\$line\" != *=* ]]; then
+      echo \"\$env_file:\$line_number must be KEY=value\" >&2
+      return 1
+    fi
+    name=\"\$(trim \"\${line%%=*}\")\"
+    value=\"\${line#*=}\"
+    if [[ ! \"\$name\" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      echo \"\$env_file:\$line_number has invalid env var name: \${name:-<empty>}\" >&2
+      return 1
+    fi
+    if [[ \"\$value\" =~ ^\\\".*\\\"$ || \"\$value\" =~ ^\\'.*\\'$ ]]; then
+      value=\"\${value:1:\${#value}-2}\"
+    fi
+    export \"\$name=\$value\"
+  done <\"\$env_file\"
+}
+ENV_LOADER
+chmod 0700 '$REMOTE_ENV_LOADER'"
+}
 
 prepare_remote_evidence_dir() {
   local remote_dir="$1"
@@ -259,9 +303,8 @@ seed_eval_release_evidence() {
   remote_script="$(cat <<REMOTE
 set -euo pipefail
 cd '$REMOTE_ROOT'
-set -a
-source '$REMOTE_ENV'
-set +a
+source '$REMOTE_ENV_LOADER'
+load_env_file '$REMOTE_ENV'
 
 curl() {
   local token="\${MANDOFORGE_STAGE2_GATE_TOKEN:-\${MANDOFORGE_DEV_ADMIN_TOKEN:-\${MANDOFORGE_WORKER_TOKEN:-}}}"
@@ -402,9 +445,8 @@ seed_observability_remediation_evidence() {
   remote_script="$(cat <<REMOTE
 set -euo pipefail
 cd '$REMOTE_ROOT'
-set -a
-source '$REMOTE_ENV'
-set +a
+source '$REMOTE_ENV_LOADER'
+load_env_file '$REMOTE_ENV'
 
 curl() {
   local token="\${MANDOFORGE_STAGE2_GATE_TOKEN:-\${MANDOFORGE_DEV_ADMIN_TOKEN:-\${MANDOFORGE_WORKER_TOKEN:-}}}"
@@ -501,9 +543,8 @@ seed_provider_rollout_evidence() {
   remote_script="$(cat <<REMOTE
 set -euo pipefail
 cd '$REMOTE_ROOT'
-set -a
-source '$REMOTE_ENV'
-set +a
+source '$REMOTE_ENV_LOADER'
+load_env_file '$REMOTE_ENV'
 
 curl() {
   local token="\${MANDOFORGE_STAGE2_GATE_TOKEN:-\${MANDOFORGE_DEV_ADMIN_TOKEN:-\${MANDOFORGE_WORKER_TOKEN:-}}}"
@@ -657,9 +698,8 @@ seed_policy_rollout_evidence() {
   remote_script="$(cat <<REMOTE
 set -euo pipefail
 cd '$REMOTE_ROOT'
-set -a
-source '$REMOTE_ENV'
-set +a
+source '$REMOTE_ENV_LOADER'
+load_env_file '$REMOTE_ENV'
 
 curl() {
   local token="\${MANDOFORGE_STAGE2_GATE_TOKEN:-\${MANDOFORGE_DEV_ADMIN_TOKEN:-\${MANDOFORGE_WORKER_TOKEN:-}}}"
@@ -757,9 +797,8 @@ seed_approval_notification_evidence() {
   remote_script="$(cat <<REMOTE
 set -euo pipefail
 cd '$REMOTE_ROOT'
-set -a
-source '$REMOTE_ENV'
-set +a
+source '$REMOTE_ENV_LOADER'
+load_env_file '$REMOTE_ENV'
 
 curl() {
   local token="\${MANDOFORGE_STAGE2_GATE_TOKEN:-\${MANDOFORGE_DEV_ADMIN_TOKEN:-\${MANDOFORGE_WORKER_TOKEN:-}}}"
@@ -920,9 +959,8 @@ seed_vault_kms_evidence() {
   remote_script="$(cat <<REMOTE
 set -euo pipefail
 cd '$REMOTE_ROOT'
-set -a
-source '$REMOTE_ENV'
-set +a
+source '$REMOTE_ENV_LOADER'
+load_env_file '$REMOTE_ENV'
 
 curl() {
   local token="\${MANDOFORGE_STAGE2_GATE_TOKEN:-\${MANDOFORGE_DEV_ADMIN_TOKEN:-\${MANDOFORGE_WORKER_TOKEN:-}}}"
@@ -1015,13 +1053,14 @@ collect_mcp_lark_docs_scope_evidence
 collect_mcp_lark_docs_login_prompt_artifact
 
 ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && test -f '$REMOTE_COMPOSE' && test -f '$REMOTE_ENV'"
+install_remote_env_loader
 ssh "$REMOTE_HOST" "mkdir -p '$REMOTE_ROOT/evidence' '$REMOTE_ROOT/archives' '$REMOTE_ROOT/scripts' '$REMOTE_ROOT/deploy/stage2-evidence' '$REMOTE_ROOT/deploy/stage2-production-evidence' && chown -R 1000:1000 '$REMOTE_ROOT/evidence' && chmod 0750 '$REMOTE_ROOT/evidence'"
 rsync -az scripts/ "$REMOTE_HOST:$REMOTE_ROOT/scripts/"
 rsync -az packs/ "$REMOTE_HOST:$REMOTE_ROOT/packs/"
 rsync -az deploy/stage2-evidence/ "$REMOTE_HOST:$REMOTE_ROOT/deploy/stage2-evidence/"
 rsync -az deploy/stage2-production-evidence/ "$REMOTE_HOST:$REMOTE_ROOT/deploy/stage2-production-evidence/"
 
-ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +a && \
+ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && source '$REMOTE_ENV_LOADER' && load_env_file '$REMOTE_ENV' && \
   docker compose -p '$COMPOSE_PROJECT' -f '$REMOTE_COMPOSE' exec -T api bash -lc '
     set -euo pipefail
     curl() {
@@ -1085,49 +1124,49 @@ sync_remote_computer_k3s_cluster_stage_artifacts "$REMOTE_ROOT/evidence/remote-c
 
 seed_eval_release_evidence "$REMOTE_ROOT/evidence/eval-release" "Whiskey focused eval/release adoption evidence"
 
-ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +a && \
+ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && source '$REMOTE_ENV_LOADER' && load_env_file '$REMOTE_ENV' && \
   BASE_URL=http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787} EVIDENCE_DIR='$REMOTE_ROOT/evidence/eval-release' ALLOW_BLOCKED=1 RUN_STAGE2_EVAL_RELEASE_AUTOMATION=1 RUN_STAGE2_EVAL_RELEASE_ROLLBACK=1 MANDOFORGE_EVAL_RELEASE_ROLLBACK_ENVIRONMENT=whiskey-eval-release scripts/eval-release-evidence-gate.sh"
 
 seed_observability_remediation_evidence "$REMOTE_ROOT/evidence/observability-collector" "Whiskey focused observability remediation evidence"
 
-ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +a && \
+ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && source '$REMOTE_ENV_LOADER' && load_env_file '$REMOTE_ENV' && \
   BASE_URL=http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787} EVIDENCE_DIR='$REMOTE_ROOT/evidence/observability-collector' ALLOW_BLOCKED=1 RUN_STAGE2_OBSERVABILITY_REMEDIATION=1 scripts/observability-collector-evidence-gate.sh"
 capture_whiskey_otel_collector_evidence "$REMOTE_ROOT/evidence/observability-collector"
 
 seed_policy_rollout_evidence "$REMOTE_ROOT/evidence/policy-rollout" "Whiskey focused policy rollout orchestration evidence"
 
-ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +a && \
+ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && source '$REMOTE_ENV_LOADER' && load_env_file '$REMOTE_ENV' && \
   BASE_URL=http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787} EVIDENCE_DIR='$REMOTE_ROOT/evidence/policy-rollout' ALLOW_BLOCKED=1 RUN_STAGE2_POLICY_DUE_RUN=1 scripts/policy-rollout-evidence-gate.sh"
 
 seed_provider_rollout_evidence "$REMOTE_ROOT/evidence/provider-governance" "Whiskey focused provider rollout adoption evidence"
 
-ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +a && \
+ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && source '$REMOTE_ENV_LOADER' && load_env_file '$REMOTE_ENV' && \
   BASE_URL=http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787} EVIDENCE_DIR='$REMOTE_ROOT/evidence/provider-governance' ALLOW_BLOCKED=1 RUN_STAGE2_PROVIDER_ROLLOUT=1 scripts/provider-governance-evidence-gate.sh"
 
 seed_approval_notification_evidence "$REMOTE_ROOT/evidence/approval-notifications" "Whiskey focused approval notification delivery evidence"
 
-ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +a && \
+ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && source '$REMOTE_ENV_LOADER' && load_env_file '$REMOTE_ENV' && \
   BASE_URL=http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787} EVIDENCE_DIR='$REMOTE_ROOT/evidence/approval-notifications' ALLOW_BLOCKED=1 RUN_STAGE2_APPROVAL_DELIVERY=1 scripts/approval-notification-evidence-gate.sh"
 
 seed_vault_kms_evidence "$REMOTE_ROOT/evidence/vault-kms" "Whiskey focused Vault/KMS lifecycle evidence"
 
-ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +a && \
+ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && source '$REMOTE_ENV_LOADER' && load_env_file '$REMOTE_ENV' && \
   BASE_URL=http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787} EVIDENCE_DIR='$REMOTE_ROOT/evidence/vault-kms' ALLOW_BLOCKED=1 RUN_STAGE2_SECRET_LIFECYCLE=1 scripts/vault-evidence-gate.sh"
 
-ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +a && \
+ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && source '$REMOTE_ENV_LOADER' && load_env_file '$REMOTE_ENV' && \
   BASE_URL=http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787} EVIDENCE_DIR='$REMOTE_ROOT/evidence/finance' ALLOW_BLOCKED=1 RUN_STAGE2_FINANCE_CONTROLLERS=1 RUN_STAGE2_FINANCE_EXPORT=1 scripts/finance-evidence-gate.sh"
 
-ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +a && \
+ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && source '$REMOTE_ENV_LOADER' && load_env_file '$REMOTE_ENV' && \
   rm -rf '$REMOTE_ROOT/evidence/workflow-packs' && \
   BASE_URL=http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787} EVIDENCE_DIR='$REMOTE_ROOT/evidence/workflow-packs' WORKFLOW_PACK_MANIFEST_PATH=packs/ai-governance/package.yaml WORKFLOW_PACK_REQUIRE_CONNECTOR_BINDING=1 WORKFLOW_PACK_REQUIRE_LIVE_CONNECTOR_AUTH=1 WORKFLOW_PACK_MCP_QUERY='$WORKFLOW_PACK_MCP_QUERY' scripts/workflow-pack-evidence-gate.sh"
 sync_mcp_lark_docs_scope_evidence "$REMOTE_ROOT/evidence/workflow-packs"
 sync_mcp_lark_docs_login_prompt_artifact "$REMOTE_ROOT/evidence/workflow-packs"
 
-ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +a && \
+ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && source '$REMOTE_ENV_LOADER' && load_env_file '$REMOTE_ENV' && \
   rm -rf '$REMOTE_ROOT/evidence/managed-workflow-runtime' && \
   BASE_URL=http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787} EVIDENCE_DIR='$REMOTE_ROOT/evidence/managed-workflow-runtime' MANDOFORGE_SCHEDULER_TOKEN=\"\${MANDOFORGE_SCHEDULER_TOKEN:-}\" scripts/managed-workflow-runtime-evidence-gate.sh"
 
-ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +a && \
+ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && source '$REMOTE_ENV_LOADER' && load_env_file '$REMOTE_ENV' && \
   rm -rf '$REMOTE_ROOT/evidence/stage2-production'"
 
 seed_eval_release_evidence "$REMOTE_ROOT/evidence/stage2-production" "Whiskey strict eval/release adoption evidence"
@@ -1138,7 +1177,7 @@ seed_approval_notification_evidence "$REMOTE_ROOT/evidence/stage2-production" "W
 seed_vault_kms_evidence "$REMOTE_ROOT/evidence/stage2-production" "Whiskey strict Vault/KMS lifecycle evidence"
 seed_provider_rollout_evidence "$REMOTE_ROOT/evidence/stage2-production" "Whiskey strict provider rollout refresh after Vault lifecycle evidence"
 
-ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +a && \
+ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && source '$REMOTE_ENV_LOADER' && load_env_file '$REMOTE_ENV' && \
   curl() { token=\"\${MANDOFORGE_STAGE2_GATE_TOKEN:-\${MANDOFORGE_DEV_ADMIN_TOKEN:-\${MANDOFORGE_WORKER_TOKEN:-}}}\"; if [[ -n \"\$token\" ]]; then command curl -H \"authorization: Bearer \$token\" \"\$@\"; else command curl \"\$@\"; fi; }; \
   org_id=\$(curl -fsS -H \"x-mandoforge-subject: whiskey-adoption-admin\" -H \"x-mandoforge-roles: admin\" http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787}/api/organizations | jq -r '.[0].id // empty') && \
   team_id=\$(curl -fsS -H \"x-mandoforge-subject: whiskey-adoption-admin\" -H \"x-mandoforge-roles: admin\" http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787}/api/organizations/\$org_id/teams | jq -r 'map(select(.slug == \"whiskey-pilot\")) | .[0].id // empty') && \
@@ -1153,7 +1192,7 @@ ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +
   fi && \
   [[ -n \"\$pending_rollout_id\" ]] && curl -fsS -X POST -H \"x-mandoforge-subject: whiskey-adoption-admin\" -H \"x-mandoforge-roles: admin\" http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787}/api/teams/\$team_id/mcp-servers/\$server_id/rollouts/\$pending_rollout_id/apply >/dev/null"
 
-ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && set -a && source '$REMOTE_ENV' && set +a && \
+ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && source '$REMOTE_ENV_LOADER' && load_env_file '$REMOTE_ENV' && \
   chrome_bin=\$(command -v google-chrome || command -v chromium || command -v chromium-browser) && \
   BASE_URL=http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787} EVIDENCE_DIR='$REMOTE_ROOT/evidence/stage2-production' ALLOW_BLOCKED=1 RUN_STAGE2_PRODUCTION_VALIDATIONS=$RUN_STRICT_VALIDATIONS RUN_STAGE2_MCP_DUE_RUN=1 RUN_STAGE2_MCP_ROLLBACK=1 RUN_STAGE2_EVAL_RELEASE_AUTOMATION=1 RUN_STAGE2_EVAL_RELEASE_ROLLBACK=1 RUN_STAGE2_OBSERVABILITY_REMEDIATION=1 RUN_STAGE2_POLICY_DUE_RUN=1 RUN_STAGE2_PROVIDER_ROLLOUT=1 RUN_STAGE2_APPROVAL_DELIVERY=1 RUN_STAGE2_CODEX_STALE_POLL=1 RUN_STAGE2_MANAGED_WORKFLOW_RUNTIME=1 RUN_STAGE2_SECRET_LIFECYCLE=1 RUN_STAGE2_FINANCE_CONTROLLERS=1 RUN_STAGE2_FINANCE_EXPORT=1 RUN_STAGE2_REMOTE_SIDECAR_RECOVERY=1 RUN_STAGE2_UI_ACTIONBOOK=1 RUN_STAGE2_UI_STATIC_ASSETS=1 CHROME_PATH=\"\$chrome_bin\" MANDOFORGE_EVAL_RELEASE_ROLLBACK_ENVIRONMENT=whiskey-eval-release MANDOFORGE_SCHEDULER_TOKEN=\"\${MANDOFORGE_SCHEDULER_TOKEN:-}\" scripts/stage2-production-evidence-gate.sh"
 sync_remote_computer_k3s_inventory "$REMOTE_ROOT/evidence/stage2-production/remote-computer-k3s"

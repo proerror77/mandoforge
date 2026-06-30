@@ -7,6 +7,7 @@ resources:
   - secret-delivery-contract.yaml
   - postgres.yaml
   - workspace-pvc.yaml
+  - stage2-production-evidence-pvc.yaml
   - otel-collector.yaml
   - otel-collector-networkpolicy.yaml
   - api.yaml

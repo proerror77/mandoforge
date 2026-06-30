@@ -442,47 +442,16 @@ impl RemoteComputerRunner for KubernetesRemoteComputerRunner {
         } else {
             None
         };
-        let exec_command = {
-            let command_value = request
-                .metadata
-                .as_ref()
-                .and_then(|metadata| metadata.get("command"));
-            match command_value {
-                Some(value) if value.is_string() => value
-                    .as_str()
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| "true".to_string()),
-                Some(value) if value.is_array() => {
-                    // Support JSON array form: ["sh", "-c", "echo hello"]
-                    // Join elements as space-separated shell tokens.
-                    let parts: Vec<&str> = value
-                        .as_array()
-                        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
-                        .unwrap_or_default();
-                    if parts.is_empty() {
-                        "true".to_string()
-                    } else {
-                        parts.join(" ")
-                    }
-                }
-                Some(_) => {
-                    // Unknown command value type — fall back to no-op rather
-                    // than silently executing an unintended command.
-                    tracing::warn!(
-                        "remote_computer exec: metadata.command is neither a string nor an array; defaulting to \"true\""
-                    );
-                    "true".to_string()
-                }
-                None => "true".to_string(),
-            }
-        };
+        let exec_command = parse_kubernetes_exec_command(request.metadata.as_ref());
         let exec_gates_open = readiness.configured
             && config.execution_enabled
             && config.live_mutation_enabled
             && client_access.is_some();
         let exec_result = if exec_gates_open && operation_is_exec {
-            Some(call_kubernetes_exec(config, &pod_name, &exec_command).await)
+            Some(match &exec_command {
+                Ok(command) => call_kubernetes_exec(config, &pod_name, command).await,
+                Err(error) => Err(error.clone()),
+            })
         } else {
             None
         };
@@ -557,6 +526,13 @@ impl RemoteComputerRunner for KubernetesRemoteComputerRunner {
             } else if client_access.is_none() {
                 "Kubernetes mutation requires a supported API server URL and readable bearer token; kubeconfig mutation is not implemented"
                     .to_string()
+            } else if operation_is_exec && exec_command.is_err() {
+                format!(
+                    "Kubernetes Pod exec is blocked: {}",
+                    exec_command
+                        .as_ref()
+                        .expect_err("checked exec command error")
+                )
             } else if operation_is_exec && !config.execution_enabled {
                 "Kubernetes Pod exec is blocked until MANDOFORGE_REMOTE_COMPUTER_EXECUTION_ENABLED is explicitly enabled".to_string()
             } else if operation_is_exec && !config.live_mutation_enabled {
@@ -709,7 +685,7 @@ impl KubernetesExecResult {
 async fn call_kubernetes_exec(
     config: &RemoteComputerRunnerConfig,
     pod_name: &str,
-    command: &str,
+    command: &[String],
 ) -> Result<KubernetesExecResult, String> {
     call_kubernetes_exec_with_timeout(
         config,
@@ -723,7 +699,7 @@ async fn call_kubernetes_exec(
 async fn call_kubernetes_exec_with_timeout(
     config: &RemoteComputerRunnerConfig,
     pod_name: &str,
-    command: &str,
+    command: &[String],
     timeout: Duration,
 ) -> Result<KubernetesExecResult, String> {
     let access = kubernetes_client_access(config)
@@ -896,7 +872,7 @@ fn kubernetes_exec_websocket_url(
     api_url: &str,
     namespace: &str,
     pod_name: &str,
-    command: &str,
+    command: &[String],
 ) -> String {
     let base = if let Some(rest) = api_url.strip_prefix("https://") {
         format!("wss://{rest}")
@@ -905,12 +881,51 @@ fn kubernetes_exec_websocket_url(
     } else {
         api_url.to_string()
     };
+    let command_query = command
+        .iter()
+        .map(|arg| format!("command={}", percent_encode(arg)))
+        .collect::<Vec<_>>()
+        .join("&");
     format!(
-        "{base}/api/v1/namespaces/{}/pods/{}/exec?container=remote-computer&stdout=true&stderr=true&stdin=false&tty=false&command=sh&command=-lc&command={}",
+        "{base}/api/v1/namespaces/{}/pods/{}/exec?container=remote-computer&stdout=true&stderr=true&stdin=false&tty=false&{}",
         percent_encode(namespace),
         percent_encode(pod_name),
-        percent_encode(command)
+        command_query
     )
+}
+
+fn parse_kubernetes_exec_command(metadata: Option<&Value>) -> Result<Vec<String>, String> {
+    let Some(command_value) = metadata.and_then(|metadata| metadata.get("command")) else {
+        return Ok(vec!["true".to_string()]);
+    };
+    if let Some(command) = command_value
+        .as_str()
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+    {
+        return Ok(vec![
+            "sh".to_string(),
+            "-lc".to_string(),
+            command.to_string(),
+        ]);
+    }
+    if let Some(parts) = command_value.as_array() {
+        let mut command = Vec::new();
+        for part in parts {
+            let Some(part) = part.as_str().map(str::trim).filter(|part| !part.is_empty()) else {
+                return Err(
+                    "metadata.command array must contain only non-empty string arguments"
+                        .to_string(),
+                );
+            };
+            command.push(part.to_string());
+        }
+        if command.is_empty() {
+            return Err("metadata.command array must contain at least one argument".to_string());
+        }
+        return Ok(command);
+    }
+    Err("metadata.command must be a string shell command or string argument array".to_string())
 }
 
 fn percent_encode(value: &str) -> String {
@@ -1806,6 +1821,10 @@ mod tests {
                 |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
                  mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
                     assert!(request.uri().path().ends_with("/pods/agent-remote-computer-test/exec"));
+                    let query = request.uri().query().expect("exec query");
+                    assert!(query.contains("command=sh"));
+                    assert!(query.contains("command=-lc"));
+                    assert!(query.contains("command=echo%20hello%20from%20pod"));
                     response.headers_mut().insert(
                         "sec-websocket-protocol",
                         "v4.channel.k8s.io".parse().expect("protocol header"),
@@ -1875,6 +1894,124 @@ mod tests {
         assert_eq!(exec_result["status"]["status"], "Success");
 
         server.await.expect("server task");
+        let _ = tokio::fs::remove_file(token_path).await;
+    }
+
+    #[tokio::test]
+    async fn kubernetes_runner_live_exec_preserves_array_command_arguments() {
+        let token_path =
+            std::env::temp_dir().join(format!("mandoforge-kube-token-{}.txt", Uuid::new_v4()));
+        tokio::fs::write(&token_path, "test-token")
+            .await
+            .expect("write token");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let addr = listener.local_addr().expect("addr");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept exec websocket");
+            let mut websocket = tokio_tungstenite::accept_hdr_async(
+                stream,
+                |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                 mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                    let query = request.uri().query().expect("exec query");
+                    assert!(query.contains("command=python3"));
+                    assert!(query.contains("command=-c"));
+                    assert!(query.contains("command=print%28%27hello%20world%27%29"));
+                    assert!(!query.contains("command=sh&command=-lc"));
+                    assert!(!query.contains("python3%20-c"));
+                    response.headers_mut().insert(
+                        "sec-websocket-protocol",
+                        "v4.channel.k8s.io".parse().expect("protocol header"),
+                    );
+                    Ok(response)
+                },
+            )
+            .await
+            .expect("accept websocket");
+            let mut status_frame = vec![3];
+            status_frame.extend_from_slice(br#"{"status":"Success","exitCode":0}"#);
+            websocket
+                .send(Message::Binary(status_frame))
+                .await
+                .expect("send status");
+            let _ = websocket.close(None).await;
+        });
+
+        let config = RemoteComputerRunnerConfig {
+            mode: "kubernetes".to_string(),
+            namespace: "agent-os".to_string(),
+            pod_template_path: test_pod_template_path(),
+            service_account: "mandoforge-remote-computer".to_string(),
+            kubeconfig_path: None,
+            kube_api_url: Some(format!("http://{addr}")),
+            bearer_token_path: Some(token_path.to_string_lossy().to_string()),
+            in_cluster: false,
+            mutation_enabled: true,
+            live_mutation_enabled: true,
+            execution_enabled: true,
+        };
+        let response = KubernetesRemoteComputerRunner
+            .mutate(
+                &config,
+                RemoteComputerRunnerDryRunRequest {
+                    operation: Some("live_exec".to_string()),
+                    remote_computer_id: None,
+                    session_id: None,
+                    pod_name: Some("agent-remote-computer-test".to_string()),
+                    metadata: Some(json!({"command": ["python3", "-c", "print('hello world')"]})),
+                },
+            )
+            .await;
+
+        assert_eq!(response.status, "exec_ok", "{}", response.message);
+        assert!(response.execution_enabled);
+
+        server.await.expect("server task");
+        let _ = tokio::fs::remove_file(token_path).await;
+    }
+
+    #[tokio::test]
+    async fn kubernetes_runner_live_exec_rejects_empty_array_command() {
+        let token_path =
+            std::env::temp_dir().join(format!("mandoforge-kube-token-{}.txt", Uuid::new_v4()));
+        tokio::fs::write(&token_path, "test-token")
+            .await
+            .expect("write token");
+        let config = RemoteComputerRunnerConfig {
+            mode: "kubernetes".to_string(),
+            namespace: "agent-os".to_string(),
+            pod_template_path: test_pod_template_path(),
+            service_account: "mandoforge-remote-computer".to_string(),
+            kubeconfig_path: None,
+            kube_api_url: Some("http://127.0.0.1:1".to_string()),
+            bearer_token_path: Some(token_path.to_string_lossy().to_string()),
+            in_cluster: false,
+            mutation_enabled: true,
+            live_mutation_enabled: true,
+            execution_enabled: true,
+        };
+        let response = KubernetesRemoteComputerRunner
+            .mutate(
+                &config,
+                RemoteComputerRunnerDryRunRequest {
+                    operation: Some("live_exec".to_string()),
+                    remote_computer_id: None,
+                    session_id: None,
+                    pod_name: Some("agent-remote-computer-test".to_string()),
+                    metadata: Some(json!({"command": []})),
+                },
+            )
+            .await;
+
+        assert_eq!(response.status, "exec_failed");
+        assert!(!response.execution_enabled);
+        assert!(
+            response.message.contains("at least one argument"),
+            "{}",
+            response.message
+        );
+        assert!(response.exec_result.is_none());
         let _ = tokio::fs::remove_file(token_path).await;
     }
 
@@ -2111,7 +2248,7 @@ mod tests {
         let result = call_kubernetes_exec_with_timeout(
             &config,
             "agent-remote-computer-test",
-            "sleep 30",
+            &["sh".to_string(), "-lc".to_string(), "sleep 30".to_string()],
             Duration::from_millis(50),
         )
         .await;
