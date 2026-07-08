@@ -16,6 +16,7 @@ It contains:
 - Remote Computer warm-pool example, kept outside the default kustomization.
 - Remote Computer KEDA ScaledObject example, kept outside the default kustomization.
 - Remote Computer pilot bundle at `../remote-computer-pilot/kustomization.yaml` that opts into JuiceFS, warm-pool, and Remote Computer KEDA examples together.
+- Agent Sandbox pilot bundle at `../agent-sandbox-pilot/kustomization.yaml` that layers Kubernetes SIG Agent Sandbox `SandboxTemplate`, `SandboxWarmPool`, and `SandboxClaim` resources over the Remote Computer pilot. It keeps MandoForge as runtime truth while moving sandbox lifecycle, per-sandbox workspace/state PVCs, and warm-pool allocation to Agent Sandbox.
 - Scheduler CronJob for due policy, approval, release, and MCP automation, using a dedicated ServiceAccount with token automount disabled and Secret-sourced scheduler subject, role, and shared token headers.
 - Postgres StatefulSet and Service.
 - ConfigMap for runtime configuration.
@@ -37,6 +38,12 @@ Render the opt-in Remote Computer pilot bundle before applying it to a real clus
 kubectl kustomize deploy/remote-computer-pilot --load-restrictor LoadRestrictionsNone
 ```
 
+Render the opt-in Agent Sandbox pilot bundle only after installing the upstream Agent Sandbox CRDs/controller:
+
+```bash
+kubectl kustomize deploy/agent-sandbox-pilot --load-restrictor LoadRestrictionsNone
+```
+
 Production notes:
 
 - Do not apply `secret.example.yaml` to production. The default manifests include only the secret delivery contract; create `mandoforge-secrets` from a secret manager, External Secrets Operator, SealedSecret, or equivalent reviewed delivery path.
@@ -54,5 +61,6 @@ Production notes:
 - Treat `remote-computer-warm-pool.yaml` as an opt-in example. The worker can claim persisted warm-pool Remote Computer records, but a production controller still needs to register prewarmed Pods, reset dirty workspaces, and refill the pool.
 - Treat `remote-computer-keda.yaml` as an opt-in example. It assumes Prometheus metrics that are not production-hardened yet.
 - Treat `../remote-computer-pilot/kustomization.yaml` as the reviewable bundle for enabling those examples together; do not apply it until storage credentials, Prometheus metrics, namespace policy, and state conflict rules have been reviewed.
+- Treat `../agent-sandbox-pilot/kustomization.yaml` as the reviewable bundle for the lower-latency sandbox direction. It requires the upstream Agent Sandbox CRDs. The template uses per-sandbox PVCs for `/workspace` and `/agent-state`, plus a shared pilot cache PVC for Cargo, pnpm, uv, and sccache paths. Split that cache PVC per repository, tenant, or worker pool before broad shared-cluster use if cache contention or cross-project dependency leakage becomes a concern.
 - Replace the scheduler example shared token before production exposure. If `MANDOFORGE_SCHEDULER_TOKEN` is set in the API runtime, `/api/scheduler/run-due` requires the CronJob to send the matching `x-mandoforge-scheduler-token` header in addition to Admin authorization.
 - The bundled OTel Collector exports to the collector `debug` exporter so local clusters have a real OTLP target without external credentials. Its NetworkPolicy allows ingress from the API Pod to OTLP HTTP and health ports only. Replace or extend its exporter pipeline before claiming production collector rollout; keep `MANDOFORGE_OTEL_COLLECTOR_HEALTH_ENDPOINT` pointed at the collector health extension rather than the OTLP HTTP receiver.

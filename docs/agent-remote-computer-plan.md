@@ -70,6 +70,7 @@ Covered today:
 - A mounted state-contract ConfigMap now defines the `/agent-state` layout for Memory, Notes, Skills, artifacts, lock files, and manifests. The contract records the current conflict rule: one active writer per session workspace, with shared Memory/Notes/Skills kept read-mostly until a lock-aware sync manager is configured.
 - A JuiceFS CSI example manifest documents the target shared `/agent-state` provider shape, but it is not included in the default kustomization and must be configured explicitly before use.
 - A warm-pool Deployment example documents the cold-start mitigation shape, but it is not included in the default kustomization and does not yet assign sessions to prestarted Pods. It now keeps the same fail-closed artifact discovery sidecar shape as the regular Remote Computer Pod template so prewarmed Pods do not diverge from the eventual session Pod contract.
+- An Agent Sandbox pilot overlay (`deploy/agent-sandbox-pilot`) documents the preferred next substrate: MandoForge keeps the session/policy/approval/audit/runtime-event source of truth, while Kubernetes SIG Agent Sandbox owns the lower-level `SandboxTemplate`, `SandboxWarmPool`, and `SandboxClaim` lifecycle. The pilot uses per-sandbox PVCs for workspace and agent state so Codex/Claude CLI context does not bleed between sessions, plus an explicit project-cache PVC for Cargo, pnpm, uv, and sccache paths to reduce repeated dependency and build work.
 - A KEDA ScaledObject example documents the queue-pressure scaling shape for the warm pool, but it is not included in the default kustomization and depends on production metrics work.
 - The production-state gate is currently green only for the single-node local-hostpath Whiskey pilot; multi-node distributed Memory/Notes/Skills promotion still needs a shared filesystem and a live state-sync runner proof.
 - `remote_computers` and `remote_computer_leases` persist control-plane lease state.
@@ -95,6 +96,7 @@ Not covered today:
 - Warm-pool Remote Computer records can be claimed by the worker when present, but there is not yet a production controller that registers and recycles prewarmed Pods automatically.
 - The artifact discovery sidecar is present but disabled by default; there is still no production artifact/state sync daemon running against real leased Pods.
 - No production KEDA/HPA queue-depth scaling for remote computer pools; the KEDA manifest is an opt-in example only.
+- No production Agent Sandbox controller integration yet; the pilot renders the upstream CRs, but the API does not yet create `SandboxClaim` resources or map claimed Sandbox identity back into `remote_computers`.
 
 ## Target Components
 
@@ -240,18 +242,19 @@ Stage 3 should make Remote Computer the primary sandbox substrate.
 2. Execute `shell.exec`, `codex.exec`, `file.write`, and `agent_cli.exec` inside the leased Pod behind explicit Kubernetes transport gates. The initial implementation is present; hardening remains around state sync, artifact sidecar session injection, and live-cluster operational runbooks.
 3. Add artifact and event sync from Pod to MandoForge.
 4. Add warm pool controller.
-5. Wire the KEDA queue-depth and pool-pressure example to real Prometheus metrics and an opt-in overlay.
-6. Add hard sandbox profiles:
+5. Add an Agent Sandbox runner adapter that creates a `SandboxClaim`, waits for the bound Sandbox Pod, persists the Pod/claim identity as a Remote Computer, and routes existing `pods/exec` transport through that claim.
+6. Wire the KEDA queue-depth and pool-pressure example to real Prometheus metrics and an opt-in overlay.
+7. Add hard sandbox profiles:
    - `read-only`
    - `workspace-write`
    - `network-limited`
    - `codex-workspace`
    - `gvisor-isolated`
    - `firecracker-isolated` later
-7. Promote the JuiceFS CSI and warm-pool examples into opt-in overlays once secret handling, namespace selection, state sync conflict rules, and Pod assignment are implemented.
-8. Add conflict policy for shared Memory/Notes/Skills writes.
-9. Add per-team/project Pod security and network policies.
-10. Add remote computer replay view in the Session Timeline.
+8. Promote the JuiceFS CSI, warm-pool, and Agent Sandbox examples into opt-in overlays once secret handling, namespace selection, state sync conflict rules, cache partitioning, and Pod/Sandbox assignment are implemented.
+9. Add conflict policy for shared Memory/Notes/Skills writes.
+10. Add per-team/project Pod security and network policies.
+11. Add remote computer replay view in the Session Timeline.
 
 Stage 3 acceptance:
 
@@ -279,7 +282,7 @@ Harden Remote Computer session lifecycle and state/artifact sync
 
 Concrete deliverables:
 
-- Add a warm-pool controller that registers prewarmed Pods as available Remote Computers, resets dirty workspaces, and refills the pool.
+- Add a warm-pool or Agent Sandbox claim controller that registers prewarmed Pods as available Remote Computers, resets dirty workspaces, and refills the pool.
 - Promote artifact discovery from disabled sidecar skeleton to assignment-aware session sidecar injection.
 - Add session terminal cleanup that releases or deletes Pods based on on-demand vs warm-pool origin.
 - Add live-cluster runbooks and tests proving Pod replacement, stale cleanup, and artifact sync do not bypass Tool Router, Policy Engine, or Approval Engine.
