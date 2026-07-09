@@ -84,6 +84,12 @@ async fn main() -> Result<()> {
         .map(|secs| (secs * 1000.0) as u64)
         .unwrap_or(2_000)
         .max(100);
+    let session_loop_heartbeat_interval = env::var("SESSION_LOOP_HEARTBEAT_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .map(Duration::from_secs_f64)
+        .unwrap_or_else(|| Duration::from_secs(30))
+        .max(Duration::from_millis(100));
     let max_jobs = env::var("MAX_JOBS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
@@ -112,36 +118,21 @@ async fn main() -> Result<()> {
             .into_iter()
             .filter(|job| job.status == "queued" || job.status == "running")
         {
-            let response = client
-                .post(format!("{base_url}/api/session-loop-jobs/{}/run", job.id))
-                .header("x-mandoforge-worker-id", &worker_id)
-                .worker_auth(&worker_subject, &worker_roles, api_token.as_deref())
-                .worker_environment(worker_environment_id.as_deref())
-                .worker_pool(worker_pool.as_deref())
-                .send()
-                .await
-                .with_context(|| format!("run session loop job {}", job.id))?;
-            if response.status() == StatusCode::NOT_FOUND
-                || response.status() == StatusCode::BAD_REQUEST
-            {
-                eprintln!("session loop job not claimable: {}", job.id);
+            let Some(updated) = run_session_loop_job_with_heartbeat(
+                &client,
+                &base_url,
+                &job.id,
+                &worker_id,
+                &worker_subject,
+                &worker_roles,
+                api_token.as_deref(),
+                worker_environment_id.as_deref(),
+                worker_pool.as_deref(),
+                session_loop_heartbeat_interval,
+            )
+            .await?
+            else {
                 continue;
-            }
-            let updated: SessionLoopJob = match response.error_for_status() {
-                Ok(response) => match response.json().await {
-                    Ok(updated) => updated,
-                    Err(error) => {
-                        eprintln!(
-                            "parse session loop job {} run response failed: {error}",
-                            job.id
-                        );
-                        continue;
-                    }
-                },
-                Err(error) => {
-                    eprintln!("run session loop job {} failed: {error}", job.id);
-                    continue;
-                }
             };
             processed += 1;
             println!(
@@ -258,6 +249,108 @@ async fn main() -> Result<()> {
             // Endpoint not available or timed out — brief sleep to avoid
             // hammering the API if the wait endpoint is down.
             sleep(Duration::from_millis(poll_interval_ms)).await;
+        }
+    }
+}
+
+async fn run_session_loop_job_with_heartbeat(
+    client: &reqwest::Client,
+    base_url: &str,
+    job_id: &str,
+    worker_id: &str,
+    worker_subject: &str,
+    worker_roles: &str,
+    api_token: Option<&str>,
+    worker_environment_id: Option<&str>,
+    worker_pool: Option<&str>,
+    heartbeat_interval: Duration,
+) -> Result<Option<SessionLoopJob>> {
+    let heartbeat = tokio::spawn(send_session_loop_heartbeats(
+        client.clone(),
+        base_url.to_string(),
+        job_id.to_string(),
+        worker_id.to_string(),
+        worker_subject.to_string(),
+        worker_roles.to_string(),
+        api_token.map(str::to_string),
+        worker_environment_id.map(str::to_string),
+        worker_pool.map(str::to_string),
+        heartbeat_interval,
+    ));
+    let response_result = client
+        .post(format!("{base_url}/api/session-loop-jobs/{job_id}/run"))
+        .header("x-mandoforge-worker-id", worker_id)
+        .worker_auth(worker_subject, worker_roles, api_token)
+        .worker_environment(worker_environment_id)
+        .worker_pool(worker_pool)
+        .send()
+        .await;
+    heartbeat.abort();
+    if let Err(error) = heartbeat.await
+        && !error.is_cancelled()
+    {
+        eprintln!("session loop heartbeat task failed: {error}");
+    }
+    let response = response_result.with_context(|| format!("run session loop job {job_id}"))?;
+    if response.status() == StatusCode::NOT_FOUND || response.status() == StatusCode::BAD_REQUEST {
+        eprintln!("session loop job not claimable: {job_id}");
+        return Ok(None);
+    }
+    let response = match response.error_for_status() {
+        Ok(response) => response,
+        Err(error) => {
+            eprintln!("run session loop job {job_id} failed: {error}");
+            return Ok(None);
+        }
+    };
+    match response.json().await {
+        Ok(updated) => Ok(Some(updated)),
+        Err(error) => {
+            eprintln!("parse session loop job {job_id} run response failed: {error}");
+            Ok(None)
+        }
+    }
+}
+
+async fn send_session_loop_heartbeats(
+    client: reqwest::Client,
+    base_url: String,
+    job_id: String,
+    worker_id: String,
+    worker_subject: String,
+    worker_roles: String,
+    api_token: Option<String>,
+    worker_environment_id: Option<String>,
+    worker_pool: Option<String>,
+    heartbeat_interval: Duration,
+) {
+    loop {
+        sleep(heartbeat_interval).await;
+        let response = client
+            .post(format!(
+                "{base_url}/api/session-loop-jobs/{job_id}/heartbeat"
+            ))
+            .header("x-mandoforge-worker-id", &worker_id)
+            .worker_auth(&worker_subject, &worker_roles, api_token.as_deref())
+            .worker_environment(worker_environment_id.as_deref())
+            .worker_pool(worker_pool.as_deref())
+            .send()
+            .await;
+        match response {
+            Ok(response) if response.status().is_success() => {}
+            Ok(response)
+                if response.status() == StatusCode::NOT_FOUND
+                    || response.status() == StatusCode::BAD_REQUEST => {}
+            Ok(response) => {
+                eprintln!(
+                    "session loop job heartbeat {} returned {}",
+                    job_id,
+                    response.status()
+                );
+            }
+            Err(error) => {
+                eprintln!("session loop job heartbeat {job_id} failed: {error}");
+            }
         }
     }
 }
@@ -598,6 +691,63 @@ mod tests {
 
         assert_eq!(processed, 1);
         assert_eq!(run_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn run_session_loop_job_sends_heartbeats_while_run_is_in_flight() {
+        let heartbeat_count = Arc::new(AtomicUsize::new(0));
+        let heartbeat_count_for_route = Arc::clone(&heartbeat_count);
+        let job_id = "00000000-0000-4000-8000-000000000020";
+        let base_url = serve_once(
+            Router::new()
+                .route(
+                    "/api/session-loop-jobs/{id}/run",
+                    post(move |Path(id): Path<String>| async move {
+                        assert_eq!(id, job_id);
+                        sleep(Duration::from_millis(50)).await;
+                        Json(json!({
+                            "id": job_id,
+                            "status": "completed"
+                        }))
+                    }),
+                )
+                .route(
+                    "/api/session-loop-jobs/{id}/heartbeat",
+                    post(move |Path(id): Path<String>| {
+                        let heartbeat_count = Arc::clone(&heartbeat_count_for_route);
+                        async move {
+                            assert_eq!(id, job_id);
+                            heartbeat_count.fetch_add(1, Ordering::SeqCst);
+                            Json(json!({
+                                "id": job_id,
+                                "status": "running"
+                            }))
+                        }
+                    }),
+                ),
+        )
+        .await;
+        let client = reqwest::Client::new();
+
+        let updated = run_session_loop_job_with_heartbeat(
+            &client,
+            &base_url,
+            job_id,
+            "worker-test-1",
+            "worker-subject",
+            "admin",
+            None,
+            None,
+            None,
+            Duration::from_millis(10),
+        )
+        .await
+        .expect("run session loop job")
+        .expect("updated job");
+
+        assert_eq!(updated.id, job_id);
+        assert_eq!(updated.status, "completed");
+        assert!(heartbeat_count.load(Ordering::SeqCst) > 0);
     }
 
     #[test]

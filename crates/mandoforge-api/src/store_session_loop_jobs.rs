@@ -209,6 +209,56 @@ impl AppState {
         .await
     }
 
+    pub(crate) async fn heartbeat_session_loop_job(
+        &self,
+        id: Uuid,
+        worker_id: &str,
+    ) -> Result<SessionLoopJob, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let job = store
+                    .session_loop_jobs
+                    .get_mut(&id)
+                    .ok_or_else(|| AppError::not_found("session loop job not found"))?;
+                let now = Utc::now();
+                let active_lease = job
+                    .lease_expires_at
+                    .is_some_and(|expires_at| expires_at > now);
+                if job.status != SessionLoopJobStatus::Running
+                    || job.worker_id.as_deref() != Some(worker_id)
+                    || !active_lease
+                {
+                    return Err(AppError::not_found("session loop job not found"));
+                }
+                job.lease_expires_at = Some(now + chrono::Duration::minutes(5));
+                Ok(job.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE session_loop_jobs
+                     SET lease_expires_at = now() + interval '5 minutes'
+                     WHERE tenant_id = $1
+                       AND id = $2
+                       AND status = 'running'
+                       AND worker_id = $3
+                       AND lease_expires_at > now()
+                     RETURNING id, session_id, environment_id, status, trigger_event_id,
+                               pending_event_seq_start, pending_event_seq_end, processed_event_seq, reason,
+                               enqueued_at, started_at, completed_at, worker_id, lease_expires_at,
+                               attempt_count, max_attempts, last_error",
+                )
+                .bind(self.current_tenant_id())
+                .bind(id)
+                .bind(worker_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("session loop job not found"))?;
+                session_loop_job_from_row(row)
+            }
+        }
+    }
+
     pub(crate) async fn discard_session_loop_job(
         &self,
         id: Uuid,

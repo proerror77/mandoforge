@@ -38,6 +38,10 @@ pub(crate) fn router() -> Router<AppState> {
             post(run_session_loop_job_route),
         )
         .route(
+            "/api/session-loop-jobs/{id}/heartbeat",
+            post(heartbeat_session_loop_job_route),
+        )
+        .route(
             "/api/execution-jobs/{id}/cancel",
             post(cancel_execution_job_route),
         )
@@ -198,6 +202,43 @@ async fn list_session_loop_jobs(
             })
             .collect(),
     ))
+}
+
+async fn heartbeat_session_loop_job_route(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<SessionLoopJob>, AppError> {
+    authorize_session_loop_job_run(&state, &headers, id).await?;
+    let job = state.get_session_loop_job(id).await?;
+    enforce_worker_environment_binding(&state, &headers, job.session_id, job.environment_id)
+        .await?;
+    enforce_worker_pool_binding(&state, &headers, job.session_id, job.environment_id).await?;
+    let worker_id = headers
+        .get("x-mandoforge-worker-id")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("session-loop-worker");
+    let heartbeat = state.heartbeat_session_loop_job(id, worker_id).await?;
+    let worker_pool = worker_pool_from_headers(&headers);
+    state
+        .append_event(
+            "worker",
+            Some(heartbeat.id),
+            heartbeat.session_id,
+            "k_agent.heartbeat",
+            json!({
+                "session_loop_job_id": heartbeat.id,
+                "environment_id": heartbeat.environment_id,
+                "worker_id": worker_id,
+                "worker_pool": worker_pool,
+                "lease_expires_at": heartbeat.lease_expires_at,
+                "dispatch_surface": "session_loop_job",
+                "authority_boundary": "environment_scheduling_only"
+            }),
+        )
+        .await?;
+    Ok(Json(heartbeat))
 }
 
 async fn run_session_loop_job_route(

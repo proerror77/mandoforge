@@ -659,6 +659,126 @@ async fn worker_environment_header_filters_session_loop_and_execution_jobs() {
 }
 
 #[tokio::test]
+async fn k_agent_heartbeat_extends_session_loop_lease() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let app = build_router(state.clone());
+    let agents = state.list_agents().await.expect("list seeded agents");
+    let agent = agents.first().expect("seeded agent");
+    let environment: Environment = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/environments",
+            json!({
+                "name": "K Agent Heartbeat",
+                "environment_type": "local",
+                "worker_queue_binding": {"queue": "heartbeat-pool"},
+                "release_state": "active",
+                "status": "enabled"
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let session: Session = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/sessions",
+            json!({
+                "agent_id": agent.id,
+                "environment_id": environment.id,
+                "title": "k agent heartbeat",
+                "message": "enqueue heartbeat loop job"
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let queued = session_loop_jobs_for_session(app.clone(), session.id)
+        .await
+        .into_iter()
+        .find(|job| job.status == SessionLoopJobStatus::Queued)
+        .expect("queued session loop job");
+    let running = state
+        .start_session_loop_job(queued.id, "k-agent-heartbeat")
+        .await
+        .expect("start loop job");
+    assert_eq!(running.status, SessionLoopJobStatus::Running);
+    assert_eq!(running.attempt_count, 1);
+
+    let heartbeat: SessionLoopJob = request_json(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/session-loop-jobs/{}/heartbeat", running.id))
+            .header("x-mandoforge-worker-id", "k-agent-heartbeat")
+            .header("x-mandoforge-subject", "worker-heartbeat")
+            .header("x-mandoforge-roles", "admin")
+            .header("x-mandoforge-environment-id", environment.id.to_string())
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(heartbeat.status, SessionLoopJobStatus::Running);
+    assert_eq!(heartbeat.worker_id.as_deref(), Some("k-agent-heartbeat"));
+    assert_eq!(heartbeat.attempt_count, 1);
+    assert!(heartbeat.lease_expires_at.is_some());
+
+    match &state.store {
+        StoreBackend::Memory(inner) => {
+            let mut store = inner.write().await;
+            let job = store
+                .session_loop_jobs
+                .get_mut(&running.id)
+                .expect("stored session loop job");
+            job.lease_expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        }
+        StoreBackend::Postgres(_) => unreachable!("test uses memory store"),
+    }
+    let (status, error) = request_value(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/session-loop-jobs/{}/heartbeat", running.id))
+            .header("x-mandoforge-worker-id", "k-agent-heartbeat")
+            .header("x-mandoforge-subject", "worker-heartbeat")
+            .header("x-mandoforge-roles", "admin")
+            .header("x-mandoforge-environment-id", environment.id.to_string())
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(error["error"], json!("session loop job not found"));
+
+    let events: Vec<SessionEvent> = request_json(
+        app,
+        Request::builder()
+            .uri(format!("/api/sessions/{}/events", session.id))
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(events.iter().any(|event| {
+        event.event_type == "k_agent.heartbeat"
+            && event.payload["session_loop_job_id"] == json!(running.id)
+            && event.payload["environment_id"] == json!(environment.id)
+            && event.payload["worker_id"] == json!("k-agent-heartbeat")
+            && event.payload["lease_expires_at"].as_str().is_some()
+            && event.payload["dispatch_surface"] == json!("session_loop_job")
+            && event.payload["authority_boundary"] == json!("environment_scheduling_only")
+    }));
+}
+
+#[tokio::test]
 async fn session_rejects_unknown_environment() {
     let app = test_app().await;
     let agents: Vec<Agent> = request_json(
