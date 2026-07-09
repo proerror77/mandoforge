@@ -9826,6 +9826,7 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
         "remote_computer",
         "task_grant",
         "approval",
+        "tool_router",
         "ontology_action_contract",
         "tool_spec",
         "eval_gate",
@@ -10050,6 +10051,33 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
                 .as_str()
                 .unwrap_or_default()
                 .contains("does not create business validity")
+    }));
+    assert!(product_capabilities.iter().any(|capability| {
+        capability["key"] == json!("tool_router")
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("POST /api/tools/{name}/execute"))
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("GET /api/tool-calls"))
+            && capability["evidence_events"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("tool.result"))
+            && capability["evidence_events"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("tool.failed"))
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("exact-argument execution gate")
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("records durable tool calls")
     }));
     assert!(product_capabilities.iter().any(|capability| {
         capability["key"] == json!("tool_spec")

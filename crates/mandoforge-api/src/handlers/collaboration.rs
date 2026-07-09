@@ -1751,6 +1751,27 @@ fn agent_os_product_capabilities() -> Vec<Value> {
             "authority_boundary": "Approval authorizes a concrete pending high-risk action or commit token; it does not create business validity, expand TaskGrant scope, bypass Policy or Tool Router checks, or replace audit evidence."
         }),
         json!({
+            "key": "tool_router",
+            "product_object": "ToolRouter",
+            "status": "available",
+            "api_routes": [
+                "GET /api/tools",
+                "POST /api/tools/{name}/execute",
+                "GET /api/tool-calls",
+                "GET /api/sessions/{id}/tool-calls"
+            ],
+            "lifecycle_actions": ["list_tools", "authorize_tool", "execute_tool", "record_tool_call", "record_tool_result", "record_tool_error"],
+            "evidence_events": [
+                "tool.call",
+                "tool.result",
+                "tool.error",
+                "runtime.tool_call",
+                "tool.completed",
+                "tool.failed"
+            ],
+            "authority_boundary": "ToolRouter is the exact-argument execution gate for tools; it enforces session visibility, Policy, TaskGrant, Approval, connector scope, and Ontology validity, and records durable tool calls instead of granting business authority itself."
+        }),
+        json!({
             "key": "ontology_action_contract",
             "product_object": "OntologyActionContract",
             "status": "available",
