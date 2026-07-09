@@ -609,13 +609,67 @@ async fn execution_job_artifact_return_evidence(
 ) -> Result<Value, AppError> {
     let tool_call = state.get_tool_call(job.tool_call_id).await?;
     let result = tool_call.result.unwrap_or(Value::Null);
+    let runtime_final_artifact_ids = result
+        .get("runtime_final_artifact_ids")
+        .cloned()
+        .unwrap_or(json!([]));
+    let artifact_lineage =
+        execution_job_artifact_lineage(state, job.session_id, &runtime_final_artifact_ids).await?;
     Ok(json!({
         "source": "tool_call.result",
         "runtime_adapter_event_count": result.get("runtime_adapter_event_count"),
         "runtime_turn_event_count": result.get("runtime_turn_event_count"),
         "runtime_final_artifact_count": result.get("runtime_final_artifact_count").cloned().unwrap_or(json!(0)),
-        "runtime_final_artifact_ids": result.get("runtime_final_artifact_ids").cloned().unwrap_or(json!([])),
+        "runtime_final_artifact_ids": runtime_final_artifact_ids,
+        "artifact_lineage_source": "session_events.artifact.created",
+        "artifact_lineage": artifact_lineage,
     }))
+}
+
+async fn execution_job_artifact_lineage(
+    state: &AppState,
+    session_id: Uuid,
+    runtime_final_artifact_ids: &Value,
+) -> Result<Value, AppError> {
+    let artifact_ids = runtime_final_artifact_ids
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter_map(|id| Uuid::parse_str(id).ok())
+        .collect::<HashSet<_>>();
+    if artifact_ids.is_empty() {
+        return Ok(json!([]));
+    }
+
+    let lineage = state
+        .list_events(session_id)
+        .await?
+        .into_iter()
+        .filter(|event| event.event_type == "artifact.created")
+        .filter(|event| {
+            event
+                .payload
+                .get("artifact_id")
+                .and_then(Value::as_str)
+                .and_then(|id| Uuid::parse_str(id).ok())
+                .is_some_and(|id| artifact_ids.contains(&id))
+        })
+        .map(|event| {
+            json!({
+                "event_id": event.id,
+                "event_seq": event.seq,
+                "artifact_id": event.payload.get("artifact_id").cloned().unwrap_or(Value::Null),
+                "name": event.payload.get("name").cloned().unwrap_or(Value::Null),
+                "path": event.payload.get("path").cloned().unwrap_or(Value::Null),
+                "artifact_type": event.payload.get("artifact_type").cloned().unwrap_or(Value::Null),
+                "source": event.payload.get("source").cloned().unwrap_or(Value::Null),
+                "turn_id": event.payload.get("turn_id").cloned().unwrap_or(Value::Null),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Ok(json!(lineage))
 }
 
 async fn append_k_agent_execution_job_event(

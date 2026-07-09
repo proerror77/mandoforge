@@ -24355,6 +24355,22 @@ async fn managed_cli_runtime_profile_can_drive_agent_cli_worker() {
         json!(runtime_final_artifact_id)
     );
     assert_eq!(
+        k_agent_completed.payload["artifact_return_evidence"]["artifact_lineage_source"],
+        json!("session_events.artifact.created")
+    );
+    assert_eq!(
+        k_agent_completed.payload["artifact_return_evidence"]["artifact_lineage"][0]["artifact_id"],
+        json!(runtime_final_artifact_id)
+    );
+    assert_eq!(
+        k_agent_completed.payload["artifact_return_evidence"]["artifact_lineage"][0]["source"],
+        json!("runtime.final")
+    );
+    assert_eq!(
+        k_agent_completed.payload["artifact_return_evidence"]["artifact_lineage"][0]["name"],
+        json!("runtime-final-message.md")
+    );
+    assert_eq!(
         k_agent_completed.payload["return_contract"],
         json!("execution_job_return_evidence")
     );
