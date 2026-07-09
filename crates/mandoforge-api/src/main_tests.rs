@@ -9823,6 +9823,7 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
         "agent_version",
         "environment_profile",
         "managed_session",
+        "context_packet",
         "artifact_store",
         "audit_logger",
         "remote_computer",
@@ -9977,6 +9978,29 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
                 .as_str()
                 .unwrap_or_default()
                 .contains("does not bypass Manager Runtime")
+    }));
+    assert!(product_capabilities.iter().any(|capability| {
+        capability["key"] == json!("context_packet")
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("POST /api/sessions/{id}/context-packet"))
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("POST /api/context-packets/{id}/render"))
+            && capability["evidence_events"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("context_packet.generated"))
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("scoped execution context")
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("does not issue TaskGrant")
     }));
     assert!(product_capabilities.iter().any(|capability| {
         capability["key"] == json!("artifact_store")

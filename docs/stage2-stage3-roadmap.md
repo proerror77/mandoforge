@@ -105,11 +105,17 @@ The first Collaboration Layer slice is now in place:
   intake, routing, and review.
 - `/api/capability-discovery` now exposes an Agent OS product capability catalog
   for WorkItem, ManagerPlan, AgentHandoff, WorkflowPack, DomainPack,
-  AgentVersion, EnvironmentProfile, ManagedSession, ArtifactStore, AuditLogger,
-  RemoteComputer, TaskGrant, PolicyEngine, Approval, ToolRouter,
-  OntologyActionContract, ToolSpec, EvalGate, Release, and Rollback, including
-  the existing API surfaces, lifecycle actions, audit/evidence events, and
-  authority boundaries for each capability.
+  AgentVersion, EnvironmentProfile, ManagedSession, ContextPacket,
+  ArtifactStore, AuditLogger, RemoteComputer, TaskGrant, PolicyEngine,
+  Approval, ToolRouter, OntologyActionContract, ToolSpec, EvalGate, Release,
+  and Rollback, including the existing API surfaces, lifecycle actions,
+  audit/evidence events, and authority boundaries for each capability.
+- The ContextPacket entry exposes existing session-scoped generation,
+  versioned readback, rendered execution context, semantic evidence, policy
+  reminders, runtime profile, and replay source references while preserving the
+  boundary that context construction cannot issue TaskGrant scope, approve
+  actions, bypass Tool Router checks, or grant access outside session
+  visibility.
 - The ArtifactStore and AuditLogger entries in `/api/capability-discovery`
   expose existing session-scoped artifact readback, RemoteComputer artifact
   sync/discovery evidence, collection/session audit-log readback, common audit
@@ -426,14 +432,16 @@ plans:
    transaction profile, execution mode, and existing ontology release gates.
 6. Pack / Release / Evidence: `/api/capability-discovery` now lists
    WorkItem, ManagerPlan, AgentHandoff, WorkflowPack, DomainPack, AgentVersion,
-   EnvironmentProfile, ManagedSession, ArtifactStore, AuditLogger,
+   EnvironmentProfile, ManagedSession, ContextPacket, ArtifactStore, AuditLogger,
    RemoteComputer, TaskGrant, PolicyEngine, Approval, ToolRouter,
    OntologyActionContract, ToolSpec, EvalGate, Release, and Rollback as
    auditable product capabilities with their existing routes, lifecycle actions,
-   evidence events, and authority boundaries. ArtifactStore and AuditLogger are
-   evidence/readback surfaces, not execution or business-authorization
-   shortcuts; PolicyEngine can gate or deny work but does not issue TaskGrant
-   scope or replace Tool Router and audit checks. WorkflowPack and DomainPack
+   evidence events, and authority boundaries. ContextPacket is a scoped context
+   construction/readback surface, not execution authority. ArtifactStore and
+   AuditLogger are evidence/readback surfaces, not execution or
+   business-authorization shortcuts; PolicyEngine can gate or deny work but does
+   not issue TaskGrant scope or replace Tool Router and audit checks.
+   WorkflowPack and DomainPack
    installations now also expose read-only per-installation
    capability readback through
    `/api/workflow-packs/installations/:id/capabilities`, including gate

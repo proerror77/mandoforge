@@ -1654,6 +1654,26 @@ fn agent_os_product_capabilities() -> Vec<Value> {
             "authority_boundary": "Session is the Managed Runtime event envelope; it records events, tool calls, artifacts, context packets, threads, and audit evidence, but does not bypass Manager Runtime, TaskGrant, Policy, Approval, Tool Router, or Environment scheduling."
         }),
         json!({
+            "key": "context_packet",
+            "product_object": "ContextPacket",
+            "status": "available",
+            "api_routes": [
+                "GET /api/sessions/{id}/context-packet",
+                "POST /api/sessions/{id}/context-packet",
+                "GET /api/sessions/{id}/context-packets",
+                "GET /api/context-packets/{id}",
+                "POST /api/context-packets/{id}/render"
+            ],
+            "lifecycle_actions": ["generate", "version", "list_session_packets", "render_execution_context", "pin_runtime_policy_and_semantic_scope", "record_replay_sources"],
+            "evidence_events": [
+                "context_packet.generated",
+                "semantic_object.fetched",
+                "semantic_objects.searched",
+                "semantic_links.expanded"
+            ],
+            "authority_boundary": "ContextPacket builds and renders scoped execution context from session, TaskGrant, runtime profile, policy, and semantic evidence; it does not issue TaskGrant scope, approve actions, bypass Tool Router checks, or grant access outside session visibility."
+        }),
+        json!({
             "key": "artifact_store",
             "product_object": "ArtifactStore",
             "status": "available",
