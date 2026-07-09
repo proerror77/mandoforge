@@ -2,23 +2,37 @@
 
 This plan records the target architecture for making MandoForge agents run inside Kubernetes Pod-based remote computers. The current repo has a control-plane skeleton plus an active assigned-Pod execution path behind explicit gates. It has a queue-backed worker, Docker shell sandbox support, Kubernetes API/worker/scheduler skeletons, worker readiness, a Remote Computer Pod template, restricted service account, RWX PVC placeholder, JuiceFS CSI example, warm-pool example, KEDA scaling example, deny-by-default NetworkPolicy, `GET /api/remote-computers/readiness`, `GET /api/remote-computers/runner/readiness`, fail-closed runner dry-run/mutate routes, persisted Remote Computer lease lifecycle APIs, persisted session attachment state, warm-pool claim, on-demand Pod creation when no warm-pool Remote Computer is available, and Kubernetes `pods/exec` transport for approved `file.write`, `shell.exec`, `codex.exec`, and `agent_cli.exec` jobs when all runtime gates are enabled. It does not yet mount a real shared distributed state filesystem or provide a production warm-pool controller.
 
-## Managed Agents Alignment
+## Full Agent OS Alignment
 
-This plan is now subordinate to the managed-agent resource model in
+This plan is subordinate to the Full Agent OS narrative in
+[Full Agent OS Narrative Design](superpowers/specs/2026-07-09-full-agent-os-narrative-design.md)
+and the managed-agent resource model in
 [Claude Managed Agents Alignment](claude-managed-agents-alignment.md).
 
-Remote Computer remains the target isolated execution substrate, but it should
-not be the top-level product object. The top-level chain is:
+Remote Computer remains the target isolated execution substrate, but it is not
+the top-level product object. The top-level runtime chain remains:
 
 ```text
 Agent -> Environment -> Session -> Events -> Threads
 ```
 
-Remote Computer should become `Environment(type=remote_computer)`: a
-self-hosted sandbox implementation claimed by an environment worker. The Remote
-Computer manager still owns Pod lease, state mount, artifact sync, heartbeat,
-and cleanup, but sessions should reach it through the Environment queue and
-session event stream rather than through a separate product path.
+Remote Computer should be reached through:
+
+```text
+Managed Runtime
+  -> Environment Scheduling Layer
+  -> K Agent
+  -> Remote Computer lease / Pod / warm-pool slot
+  -> CLI adapter or approved tool execution
+  -> runtime events, artifacts, usage, and audit
+```
+
+K Agent is the execution-side controller for sandbox and CLI dispatch. It may
+claim work, select Pods, prepare workspace/state mounts, launch Codex or Claude
+Code, stream runtime output, sync artifacts, and clean up leases. It does not
+own ManagerPlan, WorkItem routing authority, TaskGrant creation or expansion,
+Policy decisions, Approval decisions, Ontology validity, WorkflowPack release,
+or audit truth.
 
 ## Objective
 
@@ -31,17 +45,18 @@ Add an Agent Remote Computer layer that gives each approved agent run a leaseabl
 - Event, artifact, stdout, stderr, and state synchronization back into MandoForge.
 - Kubernetes-native scaling, replacement, and warm-pool operations.
 
-The core runtime shape becomes:
+The core execution shape becomes:
 
 ```text
-Agent Session
-  -> Harness / Tool Router / Policy Engine
-  -> Execution Job Queue
-  -> Remote Computer Manager
-  -> Kubernetes Pod lease
-  -> Mounted state filesystem
-  -> Sandbox / Codex / shell / tool execution
-  -> Artifact + Event + Audit sync
+WorkItem / ManagerPlan / WorkflowRun / Session
+  -> TaskGrant / Policy / Approval
+  -> Session Event / SessionLoopJob / ExecutionJob
+  -> Environment Scheduling
+  -> K Agent worker claim
+  -> Remote Computer lease or Pod claim
+  -> Mounted workspace and state filesystem
+  -> Sandbox / Codex / Claude Code / shell / tool execution
+  -> Runtime events + Artifact + Audit sync
 ```
 
 ## Why This Belongs In MandoForge
@@ -55,6 +70,22 @@ The current worker model proves the governance path: approval, queueing, lease, 
 - Scaled horizontally through Kubernetes.
 
 This matches the Generic Agent OS goal: agents are not just chat sessions; they are governed, auditable execution objects with durable state and isolated compute.
+
+## K Agent Guardrail
+
+K Agent must stay an Environment Scheduling component:
+
+- It may claim approved work for an Environment.
+- It may select or create an execution substrate.
+- It may dispatch CLI adapters and approved tool runners.
+- It may report heartbeats, runtime events, artifacts, usage, and cleanup state.
+- It must not grant authority, expand TaskGrants, approve high-risk actions,
+  decide Ontology validity, release WorkflowPacks, or become the audit source of
+  truth.
+
+If an implementation needs K Agent to make a business decision, that
+decision belongs in Manager Runtime, Governance, or Ontology Action Contract
+first, and K Agent should receive only the approved execution envelope.
 
 ## Current State
 
