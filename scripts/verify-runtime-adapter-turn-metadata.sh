@@ -77,6 +77,7 @@ schema_path="$shim_dir/decision.schema.json"
 shim="$shim_dir/codex"
 profile="codex-cli-evidence-$$"
 agent_name="Codex CLI Evidence Agent $$"
+environment_name="Codex CLI Evidence Environment $$"
 
 printf '%s\n' '{"type":"object","properties":{"decision":{"type":"string"}},"required":["decision"]}' >"$schema_path"
 cat >"$shim" <<'SH'
@@ -109,6 +110,20 @@ PROFILE_ID="$(
     | jq -r '.id'
 )"
 
+ENVIRONMENT_ID="$(
+  curl -fsS -X POST "$BASE_URL/api/environments" \
+    "${auth_headers[@]}" \
+    -H 'content-type: application/json' \
+    -d "$(jq -nc --arg name "$environment_name" --arg profile_id "$PROFILE_ID" '{
+      name: $name,
+      environment_type: "self_hosted",
+      runtime_profile_id: $profile_id,
+      release_state: "active",
+      status: "enabled"
+    }')" \
+    | jq -r '.id'
+)"
+
 AGENT_ID="$(
   curl -fsS -X POST "$BASE_URL/api/agents" \
     "${auth_headers[@]}" \
@@ -129,8 +144,9 @@ SESSION_ID="$(
   curl -fsS -X POST "$BASE_URL/api/sessions" \
     "${auth_headers[@]}" \
     -H 'content-type: application/json' \
-    -d "$(jq -nc --arg agent_id "$AGENT_ID" '{
+    -d "$(jq -nc --arg agent_id "$AGENT_ID" --arg environment_id "$ENVIRONMENT_ID" '{
       agent_id: $agent_id,
+      environment_id: $environment_id,
       title: "Runtime adapter turn metadata evidence"
     }')" \
     | jq -r '.id'
@@ -236,5 +252,6 @@ echo "$AUDIT_LOGS" | jq -e --arg profile "$profile" '
 echo "runtime adapter turn metadata verification ok"
 echo "session_id=$SESSION_ID"
 echo "profile_id=$PROFILE_ID"
+echo "environment_id=$ENVIRONMENT_ID"
 echo "agent_id=$AGENT_ID"
 echo "approval_id=$APPROVAL_ID"

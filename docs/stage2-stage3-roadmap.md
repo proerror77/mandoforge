@@ -339,8 +339,11 @@ plans:
    and final artifact IDs from the completed tool result, plus artifact lineage
    from the session `artifact.created` chain. K Agent execution-job events also
    record dispatch evidence for sandbox mode, runtime profile, execution
-   strategy, and Remote Computer assignment; full sandbox lifecycle dispatch
-   remains open.
+   strategy, and Remote Computer assignment. K Agent execution-job events now
+   also carry `k_agent_sandbox_lifecycle_dispatch` evidence that summarizes the
+   Remote Computer handoff/acknowledgement/transport/terminal lifecycle stages
+   from session events. Production-grade Pod lifecycle automation, continuous
+   sidecar artifact sync, and multi-node state synchronization remain open.
 4. Manager Runtime materialization: expand the reviewed ManagerPlan
    materialization policy with richer WorkflowRun selection. The current
    baseline already supports WorkflowRun-first materialization for reviewed

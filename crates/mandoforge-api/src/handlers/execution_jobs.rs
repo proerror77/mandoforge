@@ -681,6 +681,7 @@ async fn append_k_agent_execution_job_event(
     extra: Value,
 ) -> Result<(), AppError> {
     let dispatch_evidence = execution_job_dispatch_evidence(state, job).await?;
+    let sandbox_lifecycle_evidence = execution_job_sandbox_lifecycle_evidence(state, job).await?;
     state
         .append_event(
             "worker",
@@ -703,12 +704,108 @@ async fn append_k_agent_execution_job_event(
                     "authority_boundary": "environment_scheduling_only",
                     "return_contract": "execution_job_return_evidence",
                     "dispatch_evidence": dispatch_evidence,
+                    "sandbox_lifecycle_evidence": sandbox_lifecycle_evidence,
                 }),
                 extra,
             ),
         )
         .await
         .map(|_| ())
+}
+
+async fn execution_job_sandbox_lifecycle_evidence(
+    state: &AppState,
+    job: &crate::execution_queue::ExecutionJob,
+) -> Result<Value, AppError> {
+    let mut assignments = state
+        .list_remote_computer_job_assignments()
+        .await?
+        .into_iter()
+        .filter(|assignment| assignment.execution_job_id == job.id)
+        .collect::<Vec<_>>();
+    assignments.sort_by_key(|assignment| assignment.updated_at);
+    let latest_assignment = assignments.last();
+    let assignment_ids = assignments
+        .iter()
+        .map(|assignment| assignment.id)
+        .collect::<HashSet<_>>();
+    let remote_event_types = HashSet::from([
+        "remote_computer.execution_handoff_planned",
+        "remote_computer.warm_pool_claimed",
+        "remote_computer.on_demand_pod_provisioned",
+        "remote_computer.execution_handoff_assigned",
+        "remote_computer.execution_handoff_acknowledged",
+        "remote_computer.execution_transport_planned",
+        "remote_computer.execution_handoff_completed",
+        "remote_computer.execution_handoff_released",
+        "remote_computer.execution_handoff_failed",
+        "remote_computer.execution_handoff_canceled",
+        "remote_computer.on_demand_pod_cleaned_up",
+        "remote_computer.on_demand_pod_cleanup_failed",
+    ]);
+    let lifecycle_events = state
+        .list_events(job.session_id)
+        .await?
+        .into_iter()
+        .filter(|event| remote_event_types.contains(event.event_type.as_str()))
+        .filter(|event| {
+            event_uuid_matches(&event.payload, "execution_job_id", job.id)
+                || event
+                    .payload
+                    .get("assignment_id")
+                    .and_then(Value::as_str)
+                    .and_then(|id| Uuid::parse_str(id).ok())
+                    .is_some_and(|id| assignment_ids.contains(&id))
+        })
+        .map(|event| {
+            json!({
+                "event_id": event.id,
+                "event_seq": event.seq,
+                "event_type": event.event_type,
+                "assignment_id": event.payload.get("assignment_id").cloned().unwrap_or(Value::Null),
+                "remote_computer_id": event.payload.get("remote_computer_id").cloned().unwrap_or(Value::Null),
+                "lease_id": event.payload.get("lease_id").cloned().unwrap_or(Value::Null),
+                "status": event.payload.get("status").cloned().unwrap_or(Value::Null),
+                "execution_enabled": event.payload.get("execution_enabled").cloned().unwrap_or(Value::Null),
+                "handoff_mode": event.payload.get("handoff_mode").cloned().unwrap_or(Value::Null),
+                "transport_status": event.payload.get("transport_status").cloned().unwrap_or(Value::Null),
+                "pod_name": event.payload.get("pod_name").cloned().unwrap_or(Value::Null),
+            })
+        })
+        .collect::<Vec<_>>();
+    let observed_stage_events = lifecycle_events
+        .iter()
+        .filter_map(|event| event.get("event_type").and_then(Value::as_str))
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+
+    Ok(json!({
+        "contract": "k_agent_sandbox_lifecycle_dispatch",
+        "source": "session_events.remote_computer",
+        "sandbox_surface": if latest_assignment.is_some() { "remote_computer" } else { "host_or_self_hosted" },
+        "assignment_count": assignments.len(),
+        "assignment_id": latest_assignment.map(|assignment| assignment.id),
+        "assignment_status": latest_assignment.map(|assignment| assignment.status.as_str()),
+        "remote_computer_id": latest_assignment.map(|assignment| assignment.remote_computer_id),
+        "lease_id": latest_assignment.map(|assignment| assignment.lease_id),
+        "required_stage_events": [
+            "remote_computer.execution_handoff_planned",
+            "remote_computer.execution_handoff_acknowledged",
+            "remote_computer.execution_transport_planned",
+            "remote_computer.execution_handoff_completed"
+        ],
+        "observed_stage_events": observed_stage_events,
+        "event_count": lifecycle_events.len(),
+        "events": lifecycle_events,
+    }))
+}
+
+fn event_uuid_matches(payload: &Value, key: &str, expected: Uuid) -> bool {
+    payload
+        .get(key)
+        .and_then(Value::as_str)
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .is_some_and(|id| id == expected)
 }
 
 async fn execution_job_dispatch_evidence(

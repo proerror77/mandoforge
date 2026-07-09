@@ -40964,6 +40964,42 @@ async fn queue_backed_worker_defers_approved_tool_until_job_run() {
                 == json!("/api/v1/namespaces/agent-os/pods/agent-remote-computer-job/exec")
             && event.payload["execution_enabled"] == json!(false)
     }));
+    let k_agent_completed = events_after_worker_run
+        .iter()
+        .find(|event| {
+            event.event_type == "k_agent.completed"
+                && event.payload["execution_job_id"] == json!(job_id)
+        })
+        .expect("K Agent completion should carry sandbox lifecycle evidence");
+    let sandbox_lifecycle = &k_agent_completed.payload["sandbox_lifecycle_evidence"];
+    assert_eq!(
+        sandbox_lifecycle["contract"],
+        json!("k_agent_sandbox_lifecycle_dispatch")
+    );
+    assert_eq!(
+        sandbox_lifecycle["sandbox_surface"],
+        json!("remote_computer")
+    );
+    assert_eq!(sandbox_lifecycle["assignment_id"], json!(assignment.id));
+    assert_eq!(sandbox_lifecycle["assignment_status"], json!("completed"));
+    assert_eq!(sandbox_lifecycle["remote_computer_id"], json!(computer.id));
+    assert_eq!(sandbox_lifecycle["lease_id"], json!(lease.id));
+    let observed_stage_events = sandbox_lifecycle["observed_stage_events"]
+        .as_array()
+        .expect("observed stage events");
+    for expected in [
+        "remote_computer.execution_handoff_planned",
+        "remote_computer.execution_handoff_acknowledged",
+        "remote_computer.execution_transport_planned",
+        "remote_computer.execution_handoff_completed",
+    ] {
+        assert!(
+            observed_stage_events
+                .iter()
+                .any(|event_type| event_type == expected),
+            "missing sandbox lifecycle stage {expected}"
+        );
+    }
 
     let written = tokio::fs::read_to_string(workspace_file)
         .await
