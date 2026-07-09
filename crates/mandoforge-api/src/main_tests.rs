@@ -9823,6 +9823,8 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
         "agent_version",
         "environment_profile",
         "managed_session",
+        "artifact_store",
+        "audit_logger",
         "remote_computer",
         "task_grant",
         "approval",
@@ -9974,6 +9976,56 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
                 .as_str()
                 .unwrap_or_default()
                 .contains("does not bypass Manager Runtime")
+    }));
+    assert!(product_capabilities.iter().any(|capability| {
+        capability["key"] == json!("artifact_store")
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("GET /api/sessions/{id}/artifacts"))
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("POST /api/remote-computers/artifacts/sync"))
+            && capability["evidence_events"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("artifact.created"))
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("records execution evidence")
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("cannot authorize tools")
+    }));
+    assert!(product_capabilities.iter().any(|capability| {
+        capability["key"] == json!("audit_logger")
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("GET /api/audit-logs"))
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("GET /api/sessions/{id}/audit-logs"))
+            && capability["evidence_events"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("tool.completed"))
+            && capability["evidence_events"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("approval.requested"))
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("does not approve actions")
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("replace Manager Runtime")
     }));
     assert!(product_capabilities.iter().any(|capability| {
         capability["key"] == json!("remote_computer")

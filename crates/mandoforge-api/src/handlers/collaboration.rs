@@ -1654,6 +1654,42 @@ fn agent_os_product_capabilities() -> Vec<Value> {
             "authority_boundary": "Session is the Managed Runtime event envelope; it records events, tool calls, artifacts, context packets, threads, and audit evidence, but does not bypass Manager Runtime, TaskGrant, Policy, Approval, Tool Router, or Environment scheduling."
         }),
         json!({
+            "key": "artifact_store",
+            "product_object": "ArtifactStore",
+            "status": "available",
+            "api_routes": [
+                "GET /api/sessions/{id}/artifacts",
+                "POST /api/remote-computers/artifacts/sync",
+                "POST /api/remote-computers/artifacts/discover"
+            ],
+            "lifecycle_actions": ["persist_artifact", "append_artifact_event", "list_session_artifacts", "sync_remote_artifact", "discover_remote_artifact"],
+            "evidence_events": [
+                "artifact.created",
+                "remote_computer.artifact_synced",
+                "remote_computer.artifact_discovered"
+            ],
+            "authority_boundary": "ArtifactStore records execution evidence and output references; it cannot authorize tools, approve business actions, bypass TaskGrant, Policy, Approval, Tool Router, or Audit, or expose artifacts outside session visibility."
+        }),
+        json!({
+            "key": "audit_logger",
+            "product_object": "AuditLogger",
+            "status": "available",
+            "api_routes": [
+                "GET /api/audit-logs",
+                "GET /api/sessions/{id}/audit-logs"
+            ],
+            "lifecycle_actions": ["append_audit_log", "list_visible_audit_logs", "filter_by_session_visibility", "preserve_actor_action_resource_details"],
+            "evidence_events": [
+                "tool.completed",
+                "artifact.created",
+                "approval.requested",
+                "task_grant.issued",
+                "work_item.created",
+                "remote_computer.artifact_synced"
+            ],
+            "authority_boundary": "AuditLogger is the readback and evidence ledger; it does not approve actions, expand permissions, or replace Manager Runtime, TaskGrant, Policy, Approval, or Tool Router checks."
+        }),
+        json!({
             "key": "remote_computer",
             "product_object": "RemoteComputer",
             "status": "available",
