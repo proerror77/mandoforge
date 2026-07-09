@@ -13,8 +13,8 @@ use crate::{
     CreateManagerAgentPlan, CreateWorkflowRunFromDefinition, ManagerAgentPlan,
     MaterializeManagerAgentPlanHandoff, MaterializeManagerAgentPlanWorkflowRun,
     MaterializedManagerAgentPlanHandoff, MaterializedManagerAgentPlanWorkflowRun, Permission,
-    ReviewManagerAgentPlan, assign_agent_handoff_event_for_runtime, authorize_collection_request,
-    authorize_request, create_agent_handoff_event_for_session,
+    ReviewManagerAgentPlan, WorkflowRun, assign_agent_handoff_event_for_runtime,
+    authorize_collection_request, authorize_request, create_agent_handoff_event_for_session,
     create_workflow_run_from_definition_with_context, new_audit_log, normalize_handoff_risk_level,
     normalize_manager_plan_risk, normalize_manager_plan_status,
     record_agent_handoff_audit_and_event, record_manager_agent_plan_audit_and_event,
@@ -354,6 +354,22 @@ async fn materialize_manager_agent_plan_workflow_run(
     let definition = state
         .get_workflow_definition(input.workflow_definition_id)
         .await?;
+    if let Some(run) = find_existing_manager_plan_workflow_run(&state, definition.id, &plan).await?
+    {
+        authorize_request(
+            &state,
+            &headers,
+            Permission::SessionsRead,
+            "session",
+            Some(run.primary_session_id),
+        )
+        .await?;
+        return Ok(Json(MaterializedManagerAgentPlanWorkflowRun {
+            manager_plan: plan,
+            workflow_definition: definition,
+            workflow_run: run,
+        }));
+    }
     let title = input
         .title
         .filter(|title| !title.trim().is_empty())
@@ -436,6 +452,56 @@ async fn materialize_manager_agent_plan_workflow_run(
         workflow_definition: definition,
         workflow_run: run,
     }))
+}
+
+async fn find_existing_manager_plan_workflow_run(
+    state: &AppState,
+    workflow_definition_id: Uuid,
+    plan: &ManagerAgentPlan,
+) -> Result<Option<WorkflowRun>, AppError> {
+    for run in state.list_workflow_runs().await? {
+        if workflow_run_matches_manager_plan_materialization(&run, workflow_definition_id, plan)
+            && workflow_run_has_manager_plan_materialization_event(state, &run, plan).await?
+        {
+            return Ok(Some(run));
+        }
+    }
+    Ok(None)
+}
+
+fn workflow_run_matches_manager_plan_materialization(
+    run: &WorkflowRun,
+    workflow_definition_id: Uuid,
+    plan: &ManagerAgentPlan,
+) -> bool {
+    run.workflow_definition_id == workflow_definition_id
+        && run.source_work_item_id == plan.work_item_id
+        && run.input_payload.get("manager_plan_id") == Some(&json!(plan.id))
+        && run
+            .runtime_envelope
+            .get("request_envelope")
+            .and_then(|envelope| envelope.get("manager_plan_id"))
+            == Some(&json!(plan.id))
+}
+
+async fn workflow_run_has_manager_plan_materialization_event(
+    state: &AppState,
+    run: &WorkflowRun,
+    plan: &ManagerAgentPlan,
+) -> Result<bool, AppError> {
+    Ok(state
+        .list_events(run.primary_session_id)
+        .await?
+        .into_iter()
+        .any(|event| {
+            event.actor_type == "system"
+                && event.actor_id == Some(run.id)
+                && event.event_type == "manager_plan.workflow_run_materialized"
+                && event.payload.get("manager_plan_id") == Some(&json!(plan.id))
+                && event.payload.get("workflow_definition_id")
+                    == Some(&json!(run.workflow_definition_id))
+                && event.payload.get("workflow_run_id") == Some(&json!(run.id))
+        }))
 }
 
 fn manager_plan_workflow_input_payload(plan: &ManagerAgentPlan, input: Value) -> Value {

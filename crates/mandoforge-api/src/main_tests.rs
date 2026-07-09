@@ -5839,6 +5839,34 @@ async fn manager_plan_materialize_workflow_run_creates_root_grant_and_start_step
     )
     .await;
 
+    let spoofed_workflow_run: WorkflowRun = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-runs",
+            json!({
+                "workflow_definition_id": definition.id,
+                "source_work_item_id": work_item_id,
+                "title": "generic workflow run with manager plan fields",
+                "input_payload": {
+                    "manager_plan_id": reviewed.id,
+                    "operator_note": "generic workflow path"
+                },
+                "runtime_envelope": {"manager_plan_id": reviewed.id}
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    assert_eq!(
+        spoofed_workflow_run.input_payload["manager_plan_id"],
+        json!(reviewed.id)
+    );
+    assert_eq!(
+        spoofed_workflow_run.runtime_envelope["request_envelope"]["manager_plan_id"],
+        json!(reviewed.id)
+    );
+
     let materialized: MaterializedManagerAgentPlanWorkflowRun = request_json(
         app.clone(),
         json_request_with_headers(
@@ -5859,6 +5887,7 @@ async fn manager_plan_materialize_workflow_run_creates_root_grant_and_start_step
     .await;
     assert_eq!(materialized.manager_plan.id, reviewed.id);
     assert_eq!(materialized.workflow_definition.id, definition.id);
+    assert_ne!(materialized.workflow_run.id, spoofed_workflow_run.id);
     assert_eq!(
         materialized.workflow_run.workflow_definition_id,
         definition.id
@@ -5879,6 +5908,31 @@ async fn manager_plan_materialize_workflow_run_creates_root_grant_and_start_step
     assert_eq!(
         materialized.workflow_run.runtime_envelope["request_envelope"]["manager_plan_id"],
         json!(reviewed.id)
+    );
+    let duplicate_materialized: MaterializedManagerAgentPlanWorkflowRun = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!(
+                "/api/manager-plans/{}/materialize-workflow-run",
+                reviewed.id
+            ),
+            json!({
+                "workflow_definition_id": definition.id,
+                "title": "duplicate workflow run from manager plan",
+                "input_payload": {"operator_note": "should not replace existing run"}
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    assert_eq!(
+        duplicate_materialized.workflow_run.id,
+        materialized.workflow_run.id
+    );
+    assert_eq!(
+        duplicate_materialized.workflow_run.input_payload["operator_note"],
+        json!("use workflow-first path")
     );
 
     let steps: Vec<WorkflowStepRun> = request_json(
@@ -5940,6 +5994,13 @@ async fn manager_plan_materialize_workflow_run_creates_root_grant_and_start_step
             && event.payload["root_task_grant_id"]
                 == json!(materialized.workflow_run.root_task_grant_id)
     }));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_type == "manager_plan.workflow_run_materialized")
+            .count(),
+        1
+    );
 
     let activity: Value = request_json(
         app.clone(),
