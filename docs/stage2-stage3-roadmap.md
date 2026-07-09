@@ -108,6 +108,11 @@ The first Collaboration Layer slice is now in place:
   OntologyActionContract, ToolSpec, EvalGate, Release, and Rollback, including
   the existing API surfaces, lifecycle actions, audit/evidence events, and
   authority boundaries for each capability.
+- `/api/workflow-packs/installations/:id/capabilities` provides read-only
+  per-installation capability evidence for WorkflowPack and DomainPack
+  installations, summarizing manifest capabilities, gate evidence, bindings,
+  runtime objects, workflow definition release states, and audit trace without
+  creating any execution side channel.
 - `/api/agent-teammates`, `/api/squads`, and `/api/squads/:id/members` expose
   collaboration identities for runtime agents and squads without adding a
   second runtime orchestrator.
@@ -385,6 +390,10 @@ plans:
    WorkflowPack, DomainPack, AgentVersion, EnvironmentProfile,
    OntologyActionContract, ToolSpec, EvalGate, Release, and Rollback as
    auditable product capabilities with their existing routes, lifecycle
-   actions, evidence events, and authority boundaries. Focused
-   per-installation capability readback for WorkflowPack/DomainPack remains
-   open.
+   actions, evidence events, and authority boundaries. WorkflowPack and
+   DomainPack installations now also expose read-only per-installation
+   capability readback through
+   `/api/workflow-packs/installations/:id/capabilities`, including gate
+   evidence, bindings, runtime objects, workflow definition release states, and
+   audit trace. Deeper release/evidence readbacks for AgentVersion,
+   EnvironmentProfile, ToolSpec, and EvalGate remain open.

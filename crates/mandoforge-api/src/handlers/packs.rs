@@ -1,4 +1,7 @@
-use std::{collections::BTreeSet, path::Path as FsPath};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path as FsPath,
+};
 
 use axum::{
     Json, Router,
@@ -53,6 +56,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/api/workflow-packs/installations/{id}",
             get(get_workflow_pack_installation_route),
+        )
+        .route(
+            "/api/workflow-packs/installations/{id}/capabilities",
+            get(get_workflow_pack_installation_capabilities_route),
         )
         .route(
             "/api/workflow-packs/installations/{id}/bindings",
@@ -307,6 +314,97 @@ async fn get_workflow_pack_installation_route(
     Ok(Json(state.get_workflow_pack_installation(id).await?))
 }
 
+async fn get_workflow_pack_installation_capabilities_route(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "workflow_pack_installation",
+        Some(id),
+    )
+    .await?;
+    let installation = state.get_workflow_pack_installation(id).await?;
+    let bindings = state.list_workflow_pack_bindings(id).await?;
+    let runtime_objects = state.list_workflow_pack_runtime_objects(id).await?;
+    let workflow_definitions = state
+        .list_workflow_definitions()
+        .await?
+        .into_iter()
+        .filter(|definition| definition.pack_installation_id == Some(id))
+        .map(|definition| {
+            json!({
+                "id": definition.id,
+                "name": definition.name,
+                "entrypoint": definition.entrypoint,
+                "release_state": definition.release_state,
+                "execution_strategy": definition.execution_strategy,
+                "runtime_adapter": definition.runtime_adapter,
+                "runtime_mode": definition.runtime_mode,
+                "eval_gate_refs": definition.eval_gate_refs
+            })
+        })
+        .collect::<Vec<_>>();
+    let audit_trace = state
+        .list_audit_logs(None)
+        .await?
+        .into_iter()
+        .filter(|log| log.resource_type == "workflow_pack_installation" && log.resource_id == Some(id))
+        .map(|log| {
+            json!({
+                "id": log.id,
+                "action": log.action,
+                "created_at": log.created_at,
+                "status": log.details.get("status").cloned().unwrap_or(Value::Null),
+                "eval_gate_status": log.details.get("eval_gate_status").cloned().unwrap_or(Value::Null),
+                "release_gate_status": log.details.get("release_gate_status").cloned().unwrap_or(Value::Null)
+            })
+        })
+        .collect::<Vec<_>>();
+    let manifest_capabilities = installation
+        .manifest
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    Ok(Json(json!({
+        "installation": {
+            "id": installation.id,
+            "pack_id": installation.pack_id,
+            "kind": installation.kind,
+            "version": installation.version,
+            "status": installation.status,
+            "staged_at": installation.staged_at,
+            "released_at": installation.released_at,
+            "archived_at": installation.archived_at
+        },
+        "capabilities": manifest_capabilities,
+        "gate_status": {
+            "eval": installation.eval_gate_status,
+            "release": installation.release_gate_status,
+            "gate_evidence": installation.gate_evidence
+        },
+        "summary": {
+            "binding_count": bindings.len(),
+            "runtime_object_count": runtime_objects.len(),
+            "workflow_definition_count": workflow_definitions.len(),
+            "audit_event_count": audit_trace.len(),
+            "bindings_by_type": workflow_pack_count_bindings_by(&bindings, |binding| binding.binding_type.as_str()),
+            "bindings_by_status": workflow_pack_count_bindings_by(&bindings, |binding| binding.status.as_str()),
+            "runtime_objects_by_kind": workflow_pack_count_runtime_objects_by(&runtime_objects, |object| object.runtime_kind.as_str()),
+            "runtime_objects_by_status": workflow_pack_count_runtime_objects_by(&runtime_objects, |object| object.status.as_str())
+        },
+        "bindings": bindings,
+        "runtime_objects": runtime_objects,
+        "workflow_definitions": workflow_definitions,
+        "audit_trace": audit_trace,
+        "authority_boundary": "read-only product capability readback; execution still requires released workflow definitions, TaskGrant, Policy, Approval, Tool Router, session events, and audit evidence"
+    })))
+}
+
 async fn list_workflow_pack_bindings_route(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -339,6 +437,28 @@ async fn list_workflow_pack_runtime_objects_route(
     .await?;
     state.get_workflow_pack_installation(id).await?;
     Ok(Json(state.list_workflow_pack_runtime_objects(id).await?))
+}
+
+fn workflow_pack_count_bindings_by(
+    bindings: &[WorkflowPackBinding],
+    field: impl Fn(&WorkflowPackBinding) -> &str,
+) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for binding in bindings {
+        *counts.entry(field(binding).to_string()).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn workflow_pack_count_runtime_objects_by(
+    objects: &[WorkflowPackRuntimeObject],
+    field: impl Fn(&WorkflowPackRuntimeObject) -> &str,
+) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for object in objects {
+        *counts.entry(field(object).to_string()).or_insert(0) += 1;
+    }
+    counts
 }
 
 async fn install_workflow_pack_route(

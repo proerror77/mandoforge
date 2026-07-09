@@ -11029,6 +11029,81 @@ async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() 
             .iter()
             .all(|object| object["status"] == json!("released"))
     );
+    let released_capabilities: Value = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!(
+                "/api/workflow-packs/installations/{}/capabilities",
+                installed.id
+            ))
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(
+        released_capabilities["installation"]["status"],
+        json!("released")
+    );
+    assert_eq!(
+        released_capabilities["gate_status"]["eval"],
+        json!("passed")
+    );
+    assert_eq!(
+        released_capabilities["gate_status"]["release"],
+        json!("passed")
+    );
+    assert_eq!(
+        released_capabilities["gate_status"]["gate_evidence"]["evidence"]["eval_run_id"],
+        json!("eval-ai-governance-1")
+    );
+    let released_capability_bindings = released_capabilities["bindings"].as_array().unwrap();
+    let released_capability_runtime_objects =
+        released_capabilities["runtime_objects"].as_array().unwrap();
+    let released_capability_definitions = released_capabilities["workflow_definitions"]
+        .as_array()
+        .unwrap();
+    assert!(!released_capability_bindings.is_empty());
+    assert!(!released_capability_runtime_objects.is_empty());
+    assert!(!released_capability_definitions.is_empty());
+    assert_eq!(
+        released_capabilities["summary"]["binding_count"],
+        json!(released_capability_bindings.len())
+    );
+    assert_eq!(
+        released_capabilities["summary"]["runtime_object_count"],
+        json!(released_capability_runtime_objects.len())
+    );
+    assert_eq!(
+        released_capabilities["summary"]["workflow_definition_count"],
+        json!(released_capability_definitions.len())
+    );
+    assert_eq!(
+        released_capabilities["summary"]["bindings_by_status"]["released"],
+        json!(released_capability_bindings.len())
+    );
+    assert_eq!(
+        released_capabilities["summary"]["runtime_objects_by_status"]["released"],
+        json!(released_capability_runtime_objects.len())
+    );
+    assert!(
+        released_capability_definitions
+            .iter()
+            .all(|definition| definition["release_state"] == json!("released"))
+    );
+    assert!(
+        released_capabilities["audit_trace"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["action"] == json!("workflow_pack.released"))
+    );
+    assert!(
+        released_capabilities["authority_boundary"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("read-only")
+    );
     let released_workflow_definition: Value = request_json(
         app.clone(),
         Request::builder()
@@ -11108,6 +11183,41 @@ async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() 
     assert_eq!(
         rolled_back.gate_evidence["rollback"]["evidence"]["rollback_run_id"],
         json!("rollback-ai-governance-1")
+    );
+    let rolled_back_capabilities: Value = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!(
+                "/api/workflow-packs/installations/{}/capabilities",
+                installed.id
+            ))
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(
+        rolled_back_capabilities["installation"]["status"],
+        json!("rolled_back")
+    );
+    let rolled_back_capability_bindings = rolled_back_capabilities["bindings"].as_array().unwrap();
+    let rolled_back_capability_runtime_objects = rolled_back_capabilities["runtime_objects"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        rolled_back_capabilities["summary"]["bindings_by_status"]["rolled_back"],
+        json!(rolled_back_capability_bindings.len())
+    );
+    assert_eq!(
+        rolled_back_capabilities["summary"]["runtime_objects_by_status"]["rolled_back"],
+        json!(rolled_back_capability_runtime_objects.len())
+    );
+    assert!(
+        rolled_back_capabilities["audit_trace"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["action"] == json!("workflow_pack.rolled_back"))
     );
     let rolled_back_workflow_definition: Value = request_json(
         app.clone(),
