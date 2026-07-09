@@ -329,7 +329,10 @@ plans:
    surfaces. Execution-job K Agent claim and return evidence is also recorded
    for `/api/execution-jobs/:id/run`, including runtime artifact return counts
    and final artifact IDs from the completed tool result, plus artifact lineage
-   from the session `artifact.created` chain; sandbox dispatch remains open.
+   from the session `artifact.created` chain. K Agent execution-job events also
+   record dispatch evidence for sandbox mode, runtime profile, execution
+   strategy, and Remote Computer assignment; full sandbox lifecycle dispatch
+   remains open.
 4. Manager Runtime materialization: expand the reviewed ManagerPlan
    materialization policy with richer WorkflowRun selection. The current
    baseline already supports WorkflowRun-first materialization for reviewed

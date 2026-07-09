@@ -680,6 +680,7 @@ async fn append_k_agent_execution_job_event(
     worker_pool: Option<&str>,
     extra: Value,
 ) -> Result<(), AppError> {
+    let dispatch_evidence = execution_job_dispatch_evidence(state, job).await?;
     state
         .append_event(
             "worker",
@@ -701,12 +702,79 @@ async fn append_k_agent_execution_job_event(
                     "dispatch_surface": "execution_job",
                     "authority_boundary": "environment_scheduling_only",
                     "return_contract": "execution_job_return_evidence",
+                    "dispatch_evidence": dispatch_evidence,
                 }),
                 extra,
             ),
         )
         .await
         .map(|_| ())
+}
+
+async fn execution_job_dispatch_evidence(
+    state: &AppState,
+    job: &crate::execution_queue::ExecutionJob,
+) -> Result<Value, AppError> {
+    let tool_call = state.get_tool_call(job.tool_call_id).await?;
+    let assignment = state
+        .list_remote_computer_job_assignments()
+        .await?
+        .into_iter()
+        .find(|assignment| {
+            assignment.execution_job_id == job.id && assignment.status == "assigned"
+        });
+    let tool_args = &tool_call.args;
+    let mut evidence = json!({
+        "source": "tool_call.args",
+        "tool": job.tool_name,
+        "environment_id": job.environment_id,
+        "remote_computer_assignment_id": assignment.as_ref().map(|assignment| assignment.id),
+        "remote_computer_id": assignment.as_ref().map(|assignment| assignment.remote_computer_id),
+        "lease_id": assignment.as_ref().map(|assignment| assignment.lease_id),
+    });
+
+    if let Some(evidence) = evidence.as_object_mut() {
+        match job.tool_name.as_str() {
+            "codex.exec" => {
+                evidence.insert(
+                    "sandbox_mode".to_string(),
+                    tool_args
+                        .get("sandbox_mode")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                );
+                evidence.insert(
+                    "execution_strategy".to_string(),
+                    tool_args
+                        .get("execution_strategy")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                );
+            }
+            "agent_cli.exec" => {
+                evidence.insert(
+                    "runtime_profile".to_string(),
+                    tool_args.get("profile").cloned().unwrap_or(Value::Null),
+                );
+                evidence.insert(
+                    "cli_arg_count".to_string(),
+                    json!(
+                        tool_args
+                            .get("args")
+                            .and_then(Value::as_array)
+                            .map_or(0, Vec::len)
+                    ),
+                );
+                evidence.insert(
+                    "task_present".to_string(),
+                    json!(tool_args.get("task").is_some()),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    Ok(evidence)
 }
 
 fn merge_k_agent_execution_job_payload(mut base: Value, extra: Value) -> Value {

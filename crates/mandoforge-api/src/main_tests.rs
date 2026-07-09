@@ -23259,6 +23259,8 @@ async fn approved_codex_exec_can_use_app_server_strategy() {
 
 #[tokio::test]
 async fn queue_backed_worker_runs_codex_app_server_polling() {
+    let _env_guard = env_lock().lock().expect("env lock");
+    let _insecure_auth = EnvVarGuard::set("MANDOFORGE_INSECURE_DEV_AUTH", "1");
     let codex_client = Arc::new(RecordingCodexAppServerClient::default());
     let state = AppState {
         store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
@@ -23296,23 +23298,29 @@ async fn queue_backed_worker_runs_codex_app_server_polling() {
         app.clone(),
         Request::builder()
             .uri("/api/agents")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
             .body(Body::empty())
             .expect("valid request"),
     )
     .await;
     let session: Session = request_json(
         app.clone(),
-        json_request(
+        json_request_with_headers(
             "POST",
             "/api/sessions",
             json!({"agent_id": agents[0].id, "title": "queued codex app server"}),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
         ),
     )
     .await;
 
     let approval_required: Value = request_json(
         app.clone(),
-        json_request(
+        json_request_with_headers(
             "POST",
             "/api/tools/codex.exec/execute",
             json!({
@@ -23325,6 +23333,10 @@ async fn queue_backed_worker_runs_codex_app_server_polling() {
                     "poll_interval_ms": 0
                 }
             }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
         ),
     )
     .await;
@@ -23351,6 +23363,8 @@ async fn queue_backed_worker_runs_codex_app_server_polling() {
         app.clone(),
         Request::builder()
             .uri("/api/execution-jobs")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
             .body(Body::empty())
             .expect("valid request"),
     )
@@ -23367,6 +23381,8 @@ async fn queue_backed_worker_runs_codex_app_server_polling() {
         Request::builder()
             .method("POST")
             .uri(format!("/api/execution-jobs/{job_id}/run"))
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
             .header("x-mandoforge-worker-id", "codex-worker-1")
             .body(Body::empty())
             .expect("valid request"),
@@ -23377,6 +23393,8 @@ async fn queue_backed_worker_runs_codex_app_server_polling() {
         app.clone(),
         Request::builder()
             .uri(format!("/api/sessions/{}/events", session.id))
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
             .body(Body::empty())
             .expect("valid request"),
     )
@@ -23403,6 +23421,8 @@ async fn queue_backed_worker_runs_codex_app_server_polling() {
         app.clone(),
         Request::builder()
             .uri(format!("/api/sessions/{}/tool-calls", session.id))
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
             .body(Body::empty())
             .expect("valid request"),
     )
@@ -23421,6 +23441,8 @@ async fn queue_backed_worker_runs_codex_app_server_polling() {
         app.clone(),
         Request::builder()
             .uri(format!("/api/sessions/{}/events", session.id))
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
             .body(Body::empty())
             .expect("valid request"),
     )
@@ -23428,6 +23450,25 @@ async fn queue_backed_worker_runs_codex_app_server_polling() {
     assert!(events.iter().any(|event| {
         event.event_type == "execution.queued" && event.payload["tool"] == "codex.exec"
     }));
+    let k_agent_claimed = events
+        .iter()
+        .find(|event| {
+            event.event_type == "k_agent.claimed"
+                && event.payload["execution_job_id"] == json!(completed.id)
+        })
+        .expect("codex execution job K Agent claim evidence");
+    assert_eq!(
+        k_agent_claimed.payload["dispatch_evidence"]["source"],
+        json!("tool_call.args")
+    );
+    assert_eq!(
+        k_agent_claimed.payload["dispatch_evidence"]["sandbox_mode"],
+        json!("workspace-write")
+    );
+    assert_eq!(
+        k_agent_claimed.payload["dispatch_evidence"]["execution_strategy"],
+        json!("app-server")
+    );
     assert!(events.iter().any(|event| {
         event.event_type == "codex.task.event"
             && event.payload["runner"] == "app-server"
@@ -24369,6 +24410,22 @@ async fn managed_cli_runtime_profile_can_drive_agent_cli_worker() {
     assert_eq!(
         k_agent_completed.payload["artifact_return_evidence"]["artifact_lineage"][0]["name"],
         json!("runtime-final-message.md")
+    );
+    assert_eq!(
+        k_agent_completed.payload["dispatch_evidence"]["source"],
+        json!("tool_call.args")
+    );
+    assert_eq!(
+        k_agent_completed.payload["dispatch_evidence"]["runtime_profile"],
+        json!("claude-code-worker")
+    );
+    assert_eq!(
+        k_agent_completed.payload["dispatch_evidence"]["cli_arg_count"],
+        json!(2)
+    );
+    assert_eq!(
+        k_agent_completed.payload["dispatch_evidence"]["task_present"],
+        json!(true)
     );
     assert_eq!(
         k_agent_completed.payload["return_contract"],
