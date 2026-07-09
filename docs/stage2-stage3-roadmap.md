@@ -49,6 +49,9 @@ The Managed Runtime Layer has a strong baseline:
 - Sessions bound to agents and environments.
 - `/api/sessions/:id/events` as the event-driven session input path.
 - Queue-claimed `session_loop_jobs` with event cursor windows.
+- `k_agent.claimed` session events for Environment-bound session-loop claims,
+  recording the worker pool, worker id, lease expiry, attempt count, cursor
+  window, dispatch surface, and Environment Scheduling authority boundary.
 - Runtime adapter normalization for Codex CLI, Claude Code CLI, and Codex App
   Server turn output.
 - Durable session threads for manager-to-specialist handoff.
@@ -250,9 +253,9 @@ plans:
 1. Runtime adapter consolidation: make Environment runtime binding the only
    product entrypoint for managed runtime execution while keeping `agent_cli.exec`
    and `codex.exec` as compatibility facades.
-2. Environment Scheduling + K Agent: define the Environment Work Queue and
-   K Agent claim, lease, heartbeat, sandbox dispatch, and runtime event return
-   contract.
+2. Environment Scheduling + K Agent: complete the Environment Work Queue,
+   heartbeat, sandbox dispatch, and runtime event return contract. Session-loop
+   K Agent claim and lease evidence is already recorded as `k_agent.claimed`.
 3. Manager Runtime materialization: connect WorkItem, ManagerPlan, Assignment,
    Review, WorkflowRun, SessionThread, and TaskGrant with evidence gates.
 4. Ontology Action Contract enforcement: make action validity a checked input to

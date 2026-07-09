@@ -238,6 +238,27 @@ async fn run_session_loop_job_route(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("session-loop-worker");
     let running = state.start_session_loop_job(id, worker_id).await?;
+    let worker_pool = worker_pool_from_headers(&headers);
+    state
+        .append_event(
+            "worker",
+            Some(running.id),
+            running.session_id,
+            "k_agent.claimed",
+            json!({
+                "session_loop_job_id": running.id,
+                "environment_id": running.environment_id,
+                "worker_id": worker_id,
+                "worker_pool": worker_pool,
+                "lease_expires_at": running.lease_expires_at,
+                "attempt_count": running.attempt_count,
+                "pending_event_seq_start": running.pending_event_seq_start,
+                "pending_event_seq_end": running.pending_event_seq_end,
+                "dispatch_surface": "session_loop_job",
+                "authority_boundary": "environment_scheduling_only"
+            }),
+        )
+        .await?;
     state
         .append_event(
             "worker",

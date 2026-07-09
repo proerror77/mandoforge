@@ -447,6 +447,45 @@ async fn worker_environment_header_filters_session_loop_and_execution_jobs() {
             .any(|job| job.session_id == session_b.id),
         "worker pool A should not see B loop jobs: {loop_jobs_for_pool_a:?}"
     );
+    let loop_job_a = loop_jobs_for_a
+        .iter()
+        .find(|job| job.session_id == session_a.id)
+        .expect("environment A loop job");
+    let completed_loop_a: SessionLoopJob = request_json(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/session-loop-jobs/{}/run", loop_job_a.id))
+            .header("x-mandoforge-worker-id", "k-agent-worker-a")
+            .header("x-mandoforge-subject", "worker-a")
+            .header("x-mandoforge-roles", "admin")
+            .header("x-mandoforge-environment-id", environment_a.id.to_string())
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(completed_loop_a.status, SessionLoopJobStatus::Completed);
+    assert_eq!(
+        completed_loop_a.worker_id.as_deref(),
+        Some("k-agent-worker-a")
+    );
+    let events_a: Vec<SessionEvent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/sessions/{}/events", session_a.id))
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(events_a.iter().any(|event| {
+        event.event_type == "k_agent.claimed"
+            && event.payload["session_loop_job_id"] == json!(loop_job_a.id)
+            && event.payload["environment_id"] == json!(environment_a.id)
+            && event.payload["worker_id"] == json!("k-agent-worker-a")
+            && event.payload["lease_expires_at"].as_str().is_some()
+            && event.payload["dispatch_surface"] == json!("session_loop_job")
+            && event.payload["authority_boundary"] == json!("environment_scheduling_only")
+    }));
 
     let loop_job_b = session_loop_jobs_for_session(app.clone(), session_b.id)
         .await
