@@ -9827,6 +9827,7 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
         "audit_logger",
         "remote_computer",
         "task_grant",
+        "policy_engine",
         "approval",
         "tool_router",
         "ontology_action_contract",
@@ -10080,6 +10081,37 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
                 .as_str()
                 .unwrap_or_default()
                 .contains("Ontology can validate action shape")
+    }));
+    assert!(product_capabilities.iter().any(|capability| {
+        capability["key"] == json!("policy_engine")
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("POST /api/policy/simulate"))
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("POST /api/policy/revisions/{id}/gate"))
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("POST /api/policy/rollout/run-due"))
+            && capability["evidence_events"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("policy.revision_gated"))
+            && capability["evidence_events"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("policy.rollout_due_run"))
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("can require approval or deny work")
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("does not issue TaskGrant")
     }));
     assert!(product_capabilities.iter().any(|capability| {
         capability["key"] == json!("approval")

@@ -1751,6 +1751,40 @@ fn agent_os_product_capabilities() -> Vec<Value> {
             "authority_boundary": "TaskGrant is the scoped execution authority for workflow and tool work; Ontology can validate action shape, but execution still requires a matching TaskGrant plus Policy, Approval when needed, Tool Router enforcement, events, and audit."
         }),
         json!({
+            "key": "policy_engine",
+            "product_object": "PolicyEngine",
+            "status": "available",
+            "api_routes": [
+                "GET /api/policy",
+                "GET /api/policy/runtime",
+                "POST /api/policy/simulate",
+                "POST /api/policy/test",
+                "GET /api/policy/revisions",
+                "POST /api/policy/revisions",
+                "POST /api/policy/revisions/{id}/activate",
+                "GET /api/policy/revisions/{id}/diff",
+                "POST /api/policy/revisions/{id}/gate",
+                "GET /api/policy/rollout/orchestration/readiness",
+                "POST /api/policy/rollout/orchestration/validate",
+                "POST /api/policy/rollout/cancel",
+                "POST /api/policy/rollout/rollback",
+                "POST /api/policy/rollout/run-due"
+            ],
+            "lifecycle_actions": ["evaluate_tool_policy", "simulate", "test", "create_revision", "gate_revision", "activate_revision", "stage_rollout", "cancel_rollout", "rollback_rollout", "validate_orchestration", "run_due_rollouts"],
+            "evidence_events": [
+                "policy.simulated",
+                "policy.tested",
+                "policy.revision_created",
+                "policy.revision_gated",
+                "policy.revision_activated",
+                "policy.rollout_cancelled",
+                "policy.rollback_completed",
+                "policy.rollout_due_run",
+                "policy.rollout_orchestration_validation_run"
+            ],
+            "authority_boundary": "PolicyEngine evaluates and gates tool and rollout policy; it can require approval or deny work, but it does not issue TaskGrant scope, approve business actions, bypass Tool Router exact-argument checks, or replace audit evidence."
+        }),
+        json!({
             "key": "approval",
             "product_object": "Approval",
             "status": "available",
