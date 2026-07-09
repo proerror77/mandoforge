@@ -173,7 +173,7 @@ The next important direction is not another vertical demo. It is building the
 full Agent OS stack around the runtime kernel:
 
 ```text
-Work Surfaces -> Collaboration -> Manager Agent / Work Coordination -> Managed Runtime -> Semantic Layer -> Data Foundation
+Work Surfaces -> Collaboration -> Manager Agent -> Managed Runtime -> Governance -> Ontology Action Contract -> Environment Scheduling -> Execution Substrate
 ```
 
 The most important near-term slice is still **Managed Session Runtime**, because

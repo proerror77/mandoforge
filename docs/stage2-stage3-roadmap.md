@@ -180,7 +180,7 @@ Acceptance:
 - The UI can explain the run from the event stream alone.
 - Every tool action has a tool-call row and audit trail.
 
-### S4: Semantic Layer / Ontology Service
+### S4: Ontology Action Contract
 
 Goal: give agents stable business context instead of loose prompt stuffing.
 
