@@ -13,7 +13,7 @@ use crate::{
     CreateManagerAgentPlan, CreateWorkflowRunFromDefinition, ManagerAgentPlan,
     MaterializeManagerAgentPlanHandoff, MaterializeManagerAgentPlanWorkflowRun,
     MaterializedManagerAgentPlanHandoff, MaterializedManagerAgentPlanWorkflowRun, Permission,
-    ReviewManagerAgentPlan, SessionStatus, WorkflowRun, approval_is_expired,
+    ReviewManagerAgentPlan, SessionStatus, WorkflowDefinition, WorkflowRun, approval_is_expired,
     assign_agent_handoff_event_for_runtime, authorize_collection_request, authorize_request,
     create_agent_handoff_event_for_session, create_workflow_run_from_definition_with_context,
     new_audit_log, normalize_handoff_risk_level, normalize_manager_plan_risk,
@@ -347,14 +347,14 @@ async fn materialize_manager_agent_plan_workflow_run(
             "manager plan must be reviewed or approved before materialization",
         ));
     }
-    let definition = state
-        .get_workflow_definition(input.workflow_definition_id)
-        .await?;
+    let selection = resolve_manager_plan_workflow_definition(&state, &plan, &input).await?;
+    let definition = selection.definition.clone();
     let materialization_approval_id = manager_plan_workflow_materialization_approval_id(
         &state,
         &plan,
         &definition,
         input.approval_id,
+        &selection.evidence,
     )
     .await?;
     if let Some(run) = find_existing_manager_plan_workflow_run(&state, definition.id, &plan).await?
@@ -381,11 +381,13 @@ async fn materialize_manager_agent_plan_workflow_run(
         &plan,
         input.input_payload,
         materialization_approval_id,
+        &selection.evidence,
     );
     let runtime_envelope_request = manager_plan_workflow_runtime_envelope_request(
         &plan,
         input.runtime_envelope,
         materialization_approval_id,
+        &selection.evidence,
     );
     let run = create_workflow_run_from_definition_with_context(
         &state,
@@ -415,6 +417,7 @@ async fn materialize_manager_agent_plan_workflow_run(
                 "source_work_item_id": run.source_work_item_id,
                 "risk_classification": plan.risk_classification,
                 "approval_id": materialization_approval_id,
+                "workflow_selection": selection.evidence.clone(),
                 "execution_strategy": run.execution_strategy,
                 "runtime_adapter": run.runtime_adapter,
                 "runtime_mode": run.runtime_mode
@@ -443,6 +446,7 @@ async fn materialize_manager_agent_plan_workflow_run(
                 "root_task_grant_id": run.root_task_grant_id,
                 "source_work_item_id": run.source_work_item_id,
                 "approval_id": materialization_approval_id,
+                "workflow_selection": selection.evidence.clone(),
                 "input_digest": run.input_digest,
                 "execution_strategy": run.execution_strategy,
                 "runtime_adapter": run.runtime_adapter,
@@ -466,18 +470,216 @@ async fn materialize_manager_agent_plan_workflow_run(
     }))
 }
 
+#[derive(Debug, Clone)]
+struct ManagerPlanWorkflowDefinitionSelection {
+    definition: WorkflowDefinition,
+    evidence: Value,
+}
+
+async fn resolve_manager_plan_workflow_definition(
+    state: &AppState,
+    plan: &ManagerAgentPlan,
+    input: &MaterializeManagerAgentPlanWorkflowRun,
+) -> Result<ManagerPlanWorkflowDefinitionSelection, AppError> {
+    if let Some(id) = input.workflow_definition_id {
+        let definition = get_released_manager_plan_workflow_definition(state, id).await?;
+        return Ok(ManagerPlanWorkflowDefinitionSelection {
+            evidence: json!({
+                "mode": "workflow_definition_id",
+                "source": "request",
+                "workflow_definition_id": definition.id,
+                "workflow_name": definition.name,
+                "workflow_entrypoint": definition.entrypoint,
+                "workflow_pack_id": definition.pack_id,
+                "workflow_pack_installation_id": definition.pack_installation_id
+            }),
+            definition,
+        });
+    }
+
+    if let Some(selector) = manager_plan_workflow_selector_from_request(input) {
+        return resolve_manager_plan_workflow_definition_by_selector(state, selector).await;
+    }
+
+    if let Some(selector) = manager_plan_workflow_selector_from_specialist_selection(plan) {
+        return resolve_manager_plan_workflow_definition_by_selector(state, selector).await;
+    }
+
+    Err(AppError::bad_request(
+        "workflow_definition_id, workflow_entrypoint, or workflow_name is required for manager plan workflow materialization",
+    ))
+}
+
+async fn get_released_manager_plan_workflow_definition(
+    state: &AppState,
+    workflow_definition_id: Uuid,
+) -> Result<WorkflowDefinition, AppError> {
+    let definition = state
+        .get_workflow_definition(workflow_definition_id)
+        .await?;
+    if definition.release_state != "released" {
+        return Err(AppError::not_found(
+            "released workflow definition matching manager plan selection not found",
+        ));
+    }
+    Ok(definition)
+}
+
+async fn resolve_manager_plan_workflow_definition_by_selector(
+    state: &AppState,
+    selector: ManagerPlanWorkflowSelector,
+) -> Result<ManagerPlanWorkflowDefinitionSelection, AppError> {
+    let definitions = state.list_workflow_definitions().await?;
+    let mut candidates = definitions
+        .into_iter()
+        .filter(|definition| definition.release_state == "released")
+        .filter(|definition| selector.matches(definition))
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|definition| definition.created_at);
+    candidates.reverse();
+    if candidates.is_empty() {
+        return Err(AppError::not_found(
+            "released workflow definition matching manager plan selection not found",
+        ));
+    }
+    if candidates.len() > 1 {
+        return Err(AppError::bad_request(
+            "manager plan workflow selection matched multiple released workflow definitions",
+        ));
+    }
+
+    let definition = candidates.remove(0);
+    Ok(ManagerPlanWorkflowDefinitionSelection {
+        evidence: json!({
+            "mode": selector.mode,
+            "source": selector.source,
+            "workflow_definition_id": definition.id,
+            "workflow_name": definition.name,
+            "workflow_entrypoint": definition.entrypoint,
+            "workflow_pack_id": definition.pack_id,
+            "workflow_pack_installation_id": definition.pack_installation_id
+        }),
+        definition,
+    })
+}
+
+#[derive(Debug, Clone)]
+struct ManagerPlanWorkflowSelector {
+    source: &'static str,
+    mode: &'static str,
+    workflow_entrypoint: Option<String>,
+    workflow_name: Option<String>,
+    workflow_pack_id: Option<String>,
+    workflow_pack_installation_id: Option<Uuid>,
+}
+
+impl ManagerPlanWorkflowSelector {
+    fn matches(&self, definition: &WorkflowDefinition) -> bool {
+        self.workflow_entrypoint
+            .as_ref()
+            .is_none_or(|entrypoint| definition.entrypoint == *entrypoint)
+            && self
+                .workflow_name
+                .as_ref()
+                .is_none_or(|name| definition.name == *name)
+            && self
+                .workflow_pack_id
+                .as_ref()
+                .is_none_or(|pack_id| definition.pack_id.as_ref() == Some(pack_id))
+            && self
+                .workflow_pack_installation_id
+                .is_none_or(|installation_id| {
+                    definition.pack_installation_id == Some(installation_id)
+                })
+    }
+}
+
+fn manager_plan_workflow_selector_from_request(
+    input: &MaterializeManagerAgentPlanWorkflowRun,
+) -> Option<ManagerPlanWorkflowSelector> {
+    let workflow_entrypoint =
+        normalize_manager_plan_workflow_selector_text(input.workflow_entrypoint.as_deref());
+    let workflow_name =
+        normalize_manager_plan_workflow_selector_text(input.workflow_name.as_deref());
+    if workflow_entrypoint.is_none() && workflow_name.is_none() {
+        return None;
+    }
+    Some(ManagerPlanWorkflowSelector {
+        source: "request",
+        mode: if workflow_entrypoint.is_some() {
+            "workflow_entrypoint"
+        } else {
+            "workflow_name"
+        },
+        workflow_entrypoint,
+        workflow_name,
+        workflow_pack_id: normalize_manager_plan_workflow_selector_text(
+            input.workflow_pack_id.as_deref(),
+        ),
+        workflow_pack_installation_id: input.workflow_pack_installation_id,
+    })
+}
+
+fn manager_plan_workflow_selector_from_specialist_selection(
+    plan: &ManagerAgentPlan,
+) -> Option<ManagerPlanWorkflowSelector> {
+    let selection = plan.specialist_selection.as_object()?;
+    let workflow_entrypoint = manager_plan_selector_string(
+        selection,
+        &["workflow_entrypoint", "entrypoint", "workflow_key"],
+    );
+    let workflow_name = manager_plan_selector_string(selection, &["workflow_name", "name"]);
+    if workflow_entrypoint.is_none() && workflow_name.is_none() {
+        return None;
+    }
+    Some(ManagerPlanWorkflowSelector {
+        source: "manager_plan.specialist_selection",
+        mode: if workflow_entrypoint.is_some() {
+            "workflow_entrypoint"
+        } else {
+            "workflow_name"
+        },
+        workflow_entrypoint,
+        workflow_name,
+        workflow_pack_id: manager_plan_selector_string(selection, &["workflow_pack_id", "pack_id"]),
+        workflow_pack_installation_id: selection
+            .get("workflow_pack_installation_id")
+            .and_then(Value::as_str)
+            .and_then(|id| Uuid::parse_str(id).ok()),
+    })
+}
+
+fn manager_plan_selector_string(map: &Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        normalize_manager_plan_workflow_selector_text(map.get(*key).and_then(Value::as_str))
+    })
+}
+
+fn normalize_manager_plan_workflow_selector_text(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 async fn manager_plan_workflow_materialization_approval_id(
     state: &AppState,
     plan: &ManagerAgentPlan,
     definition: &crate::WorkflowDefinition,
     approval_id: Option<Uuid>,
+    workflow_selection: &Value,
 ) -> Result<Option<Uuid>, AppError> {
     if plan.risk_classification != "high" {
         return Ok(None);
     }
     let Some(approval_id) = approval_id else {
-        ensure_pending_manager_plan_workflow_materialization_approval(state, plan, definition)
-            .await?;
+        ensure_pending_manager_plan_workflow_materialization_approval(
+            state,
+            plan,
+            definition,
+            workflow_selection,
+        )
+        .await?;
         return Err(AppError::bad_request(
             "manager plan workflow materialization cannot auto-start high-risk plans",
         ));
@@ -491,6 +693,7 @@ async fn ensure_pending_manager_plan_workflow_materialization_approval(
     state: &AppState,
     plan: &ManagerAgentPlan,
     definition: &crate::WorkflowDefinition,
+    workflow_selection: &Value,
 ) -> Result<Approval, AppError> {
     let evidence = manager_plan_workflow_materialization_approval_evidence(plan, definition);
     if let Some(approval) = state.list_approvals().await?.into_iter().find(|approval| {
@@ -532,6 +735,7 @@ async fn ensure_pending_manager_plan_workflow_materialization_approval(
                 "risk_level": approval.risk_level,
                 "reason": approval.reason,
                 "evidence": approval.evidence,
+                "workflow_selection": workflow_selection,
                 "expires_at": approval.expires_at
             }),
         )
@@ -547,6 +751,7 @@ async fn ensure_pending_manager_plan_workflow_materialization_approval(
             json!({
                 "manager_plan_id": plan.id,
                 "workflow_definition_id": definition.id,
+                "workflow_selection": workflow_selection,
                 "action": approval.action,
                 "risk_level": approval.risk_level,
                 "expires_at": approval.expires_at
@@ -648,6 +853,7 @@ fn manager_plan_workflow_input_payload(
     plan: &ManagerAgentPlan,
     input: Value,
     approval_id: Option<Uuid>,
+    workflow_selection: &Value,
 ) -> Value {
     let mut payload = match input {
         Value::Object(map) => map,
@@ -666,6 +872,7 @@ fn manager_plan_workflow_input_payload(
     if let Some(approval_id) = approval_id {
         payload.insert("approval_id".to_string(), json!(approval_id));
     }
+    payload.insert("workflow_selection".to_string(), workflow_selection.clone());
     payload.insert("task_intake".to_string(), plan.task_intake.clone());
     payload.insert("decomposition".to_string(), plan.decomposition.clone());
     payload.insert(
@@ -688,6 +895,7 @@ fn manager_plan_workflow_runtime_envelope_request(
     plan: &ManagerAgentPlan,
     runtime_envelope: Value,
     approval_id: Option<Uuid>,
+    workflow_selection: &Value,
 ) -> Value {
     let mut envelope = match runtime_envelope {
         Value::Object(map) => map,
@@ -706,5 +914,6 @@ fn manager_plan_workflow_runtime_envelope_request(
     if let Some(approval_id) = approval_id {
         envelope.insert("approval_id".to_string(), json!(approval_id));
     }
+    envelope.insert("workflow_selection".to_string(), workflow_selection.clone());
     Value::Object(envelope)
 }

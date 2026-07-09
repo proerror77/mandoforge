@@ -123,7 +123,16 @@ pub(crate) struct MaterializedManagerAgentPlanHandoff {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct MaterializeManagerAgentPlanWorkflowRun {
-    pub(crate) workflow_definition_id: Uuid,
+    #[serde(default)]
+    pub(crate) workflow_definition_id: Option<Uuid>,
+    #[serde(default)]
+    pub(crate) workflow_entrypoint: Option<String>,
+    #[serde(default)]
+    pub(crate) workflow_name: Option<String>,
+    #[serde(default)]
+    pub(crate) workflow_pack_id: Option<String>,
+    #[serde(default)]
+    pub(crate) workflow_pack_installation_id: Option<Uuid>,
     #[serde(default)]
     pub(crate) approval_id: Option<Uuid>,
     #[serde(default)]

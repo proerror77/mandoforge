@@ -5806,7 +5806,10 @@ async fn manager_plan_materialize_workflow_run_creates_root_grant_and_start_step
                 "work_item_id": work_item_id,
                 "task_intake": {"goal": "Turn reviewed manager plan into WorkflowRun"},
                 "decomposition": {"steps": ["create workflow run", "issue root grant"]},
-                "specialist_selection": {"mode": "workflow_first"},
+                "specialist_selection": {
+                    "mode": "workflow_first",
+                    "workflow_entrypoint": "manager-plan-workflow-run"
+                },
                 "risk_classification": "medium",
                 "review": {"status": "pending"}
             }),
@@ -5880,7 +5883,6 @@ async fn manager_plan_materialize_workflow_run_creates_root_grant_and_start_step
                 reviewed.id
             ),
             json!({
-                "workflow_definition_id": definition.id,
                 "title": "workflow run from manager plan",
                 "input_payload": {"operator_note": "use workflow-first path"},
                 "runtime_envelope": {"materialization_entrypoint": "manager_plan"}
@@ -5913,6 +5915,22 @@ async fn manager_plan_materialize_workflow_run_creates_root_grant_and_start_step
         materialized.workflow_run.runtime_envelope["request_envelope"]["manager_plan_id"],
         json!(reviewed.id)
     );
+    assert_eq!(
+        materialized.workflow_run.input_payload["workflow_selection"],
+        json!({
+            "mode": "workflow_entrypoint",
+            "source": "manager_plan.specialist_selection",
+            "workflow_definition_id": definition.id,
+            "workflow_name": "Manager plan workflow run",
+            "workflow_entrypoint": "manager-plan-workflow-run",
+            "workflow_pack_id": null,
+            "workflow_pack_installation_id": null
+        })
+    );
+    assert_eq!(
+        materialized.workflow_run.runtime_envelope["request_envelope"]["workflow_selection"],
+        materialized.workflow_run.input_payload["workflow_selection"]
+    );
     let duplicate_materialized: MaterializedManagerAgentPlanWorkflowRun = request_json(
         app.clone(),
         json_request_with_headers(
@@ -5922,7 +5940,6 @@ async fn manager_plan_materialize_workflow_run_creates_root_grant_and_start_step
                 reviewed.id
             ),
             json!({
-                "workflow_definition_id": definition.id,
                 "title": "duplicate workflow run from manager plan",
                 "input_payload": {"operator_note": "should not replace existing run"}
             }),
@@ -5997,6 +6014,8 @@ async fn manager_plan_materialize_workflow_run_creates_root_grant_and_start_step
             && event.payload["workflow_run_id"] == json!(materialized.workflow_run.id)
             && event.payload["root_task_grant_id"]
                 == json!(materialized.workflow_run.root_task_grant_id)
+            && event.payload["workflow_selection"]["source"]
+                == json!("manager_plan.specialist_selection")
     }));
     assert_eq!(
         events
@@ -6043,6 +6062,7 @@ async fn manager_plan_materialize_workflow_run_creates_root_grant_and_start_step
             && log.resource_type == "workflow_run"
             && log.resource_id == Some(materialized.workflow_run.id)
             && log.details["manager_plan_id"] == json!(reviewed.id)
+            && log.details["workflow_selection"]["mode"] == json!("workflow_entrypoint")
     }));
 
     let high_risk_plan: ManagerAgentPlan = request_json(
@@ -6238,6 +6258,382 @@ async fn manager_plan_materialize_workflow_run_creates_root_grant_and_start_step
     assert_eq!(
         high_risk_materialized.workflow_run.runtime_envelope["request_envelope"]["approval_id"],
         json!(approved_approval.id)
+    );
+}
+
+#[tokio::test]
+async fn manager_plan_workflow_run_selection_prefers_request_selector_and_rejects_ambiguity() {
+    fn workflow_definition_body(
+        name: &str,
+        entrypoint: &str,
+        manager_id: Uuid,
+        release_state: &str,
+    ) -> Value {
+        json!({
+            "name": name,
+            "entrypoint": entrypoint,
+            "trigger_type": "manual",
+            "default_agent_id": manager_id,
+            "step_graph": {
+                "steps": [
+                    {"key": "manager_execute", "agent_role": "manager"}
+                ]
+            },
+            "handoff_rules": {
+                "root_task_grant": {
+                    "semantic_scopes": {
+                        "project_scope": "mandoforge",
+                        "workflow_scope": "manager-plan-workflow"
+                    },
+                    "memory_scope": {
+                        "mode": "snapshot_only",
+                        "allowed_scope_keys": [],
+                        "allowed_object_types": [],
+                        "allowed_source_types": [],
+                        "allowed_object_ids": [],
+                        "minimum_trust_level": "verified",
+                        "max_objects": 0,
+                        "approval_memory_allowed": false,
+                        "handoff_memory_allowed": false,
+                        "writeback_allowed": false
+                    },
+                    "tool_scope": {
+                        "read": ["file.read"],
+                        "write": ["agent_cli.exec"],
+                        "external_write": []
+                    },
+                    "connector_scope": {
+                        "mode": "read_only",
+                        "allowed_connector_ids": [],
+                        "allowed_tool_names": [],
+                        "tenant_scope": {},
+                        "side_effect_classes": []
+                    }
+                }
+            },
+            "release_state": release_state
+        })
+    }
+
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let app = build_router(state);
+    let admin_headers = [
+        ("x-mandoforge-subject", "admin-1"),
+        ("x-mandoforge-roles", "admin"),
+    ];
+    let work_item: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/work-items",
+            json!({
+                "title": "Select manager plan workflow",
+                "source": "manual",
+                "priority": "high"
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let work_item_id = work_item["id"].as_str().expect("work item id");
+    let manager: Agent = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/agents",
+            json!({
+                "name": "Workflow Selecting Manager",
+                "kind": "manager",
+                "agent_role": "manager",
+                "provider": "openai-compatible",
+                "model": "gpt-5.5-mini",
+                "tools": ["file.read", "agent_cli.exec"],
+                "semantic_scopes": {"project_scope": "mandoforge"}
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let manager_session: Session = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/sessions",
+            json!({
+                "agent_id": manager.id,
+                "title": "manager plan workflow selection",
+                "message": "Resolve reviewed manager plans into workflow runs."
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let legacy_definition: WorkflowDefinition = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-definitions",
+            workflow_definition_body(
+                "Legacy manager workflow",
+                "legacy-manager-plan-workflow",
+                manager.id,
+                "released",
+            ),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let request_definition: WorkflowDefinition = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-definitions",
+            workflow_definition_body(
+                "Request selected manager workflow",
+                "request-selected-manager-plan-workflow",
+                manager.id,
+                "released",
+            ),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let draft_definition: WorkflowDefinition = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-definitions",
+            workflow_definition_body(
+                "Draft manager workflow",
+                "draft-manager-plan-workflow",
+                manager.id,
+                "draft",
+            ),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let plan_with_legacy_selection: ManagerAgentPlan = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/sessions/{}/manager-plans", manager_session.id),
+            json!({
+                "work_item_id": work_item_id,
+                "task_intake": {"goal": "Use request selector at materialization time"},
+                "decomposition": {"steps": ["resolve workflow selector"]},
+                "specialist_selection": {
+                    "mode": "workflow_first",
+                    "workflow_definition_id": legacy_definition.id
+                },
+                "risk_classification": "medium",
+                "review": {"status": "pending"}
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let reviewed_legacy_plan: ManagerAgentPlan = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!(
+                "/api/manager-plans/{}/review",
+                plan_with_legacy_selection.id
+            ),
+            json!({
+                "status": "approved",
+                "review": {"status": "approved"}
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+
+    let (status, error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!(
+                "/api/manager-plans/{}/materialize-workflow-run",
+                reviewed_legacy_plan.id
+            ),
+            json!({"workflow_definition_id": draft_definition.id}),
+            &admin_headers,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        error["error"],
+        "released workflow definition matching manager plan selection not found"
+    );
+
+    let request_selected: MaterializedManagerAgentPlanWorkflowRun = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!(
+                "/api/manager-plans/{}/materialize-workflow-run",
+                reviewed_legacy_plan.id
+            ),
+            json!({
+                "workflow_entrypoint": "request-selected-manager-plan-workflow",
+                "title": "request selected workflow run"
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    assert_eq!(
+        request_selected.workflow_definition.id,
+        request_definition.id
+    );
+    assert_eq!(
+        request_selected.workflow_run.workflow_definition_id,
+        request_definition.id
+    );
+    assert_eq!(
+        request_selected.workflow_run.input_payload["workflow_selection"]["source"],
+        json!("request")
+    );
+    assert_eq!(
+        request_selected.workflow_run.input_payload["workflow_selection"]["workflow_definition_id"],
+        json!(request_definition.id)
+    );
+
+    let raw_id_only_plan: ManagerAgentPlan = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/sessions/{}/manager-plans", manager_session.id),
+            json!({
+                "work_item_id": work_item_id,
+                "task_intake": {"goal": "Raw workflow id in specialist selection is not execution authority"},
+                "decomposition": {"steps": ["resolve workflow selector"]},
+                "specialist_selection": {
+                    "mode": "workflow_first",
+                    "workflow_definition_id": legacy_definition.id
+                },
+                "risk_classification": "medium",
+                "review": {"status": "pending"}
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let reviewed_raw_id_only_plan: ManagerAgentPlan = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/manager-plans/{}/review", raw_id_only_plan.id),
+            json!({
+                "status": "approved",
+                "review": {"status": "approved"}
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let (status, error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!(
+                "/api/manager-plans/{}/materialize-workflow-run",
+                reviewed_raw_id_only_plan.id
+            ),
+            json!({}),
+            &admin_headers,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error["error"],
+        "workflow_definition_id, workflow_entrypoint, or workflow_name is required for manager plan workflow materialization"
+    );
+
+    let ambiguous_entrypoint = "ambiguous-manager-plan-workflow";
+    let _: WorkflowDefinition = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-definitions",
+            workflow_definition_body(
+                "Ambiguous manager workflow A",
+                ambiguous_entrypoint,
+                manager.id,
+                "released",
+            ),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let _: WorkflowDefinition = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-definitions",
+            workflow_definition_body(
+                "Ambiguous manager workflow B",
+                ambiguous_entrypoint,
+                manager.id,
+                "released",
+            ),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let ambiguous_plan: ManagerAgentPlan = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/sessions/{}/manager-plans", manager_session.id),
+            json!({
+                "work_item_id": work_item_id,
+                "task_intake": {"goal": "Reject ambiguous workflow selector"},
+                "decomposition": {"steps": ["resolve workflow selector"]},
+                "specialist_selection": {"mode": "workflow_first"},
+                "risk_classification": "medium",
+                "review": {"status": "pending"}
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let reviewed_ambiguous_plan: ManagerAgentPlan = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/manager-plans/{}/review", ambiguous_plan.id),
+            json!({
+                "status": "approved",
+                "review": {"status": "approved"}
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+
+    let (status, error) = request_value(
+        app,
+        json_request_with_headers(
+            "POST",
+            &format!(
+                "/api/manager-plans/{}/materialize-workflow-run",
+                reviewed_ambiguous_plan.id
+            ),
+            json!({"workflow_entrypoint": ambiguous_entrypoint}),
+            &admin_headers,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error["error"],
+        "manager plan workflow selection matched multiple released workflow definitions"
     );
 }
 

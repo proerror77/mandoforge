@@ -334,9 +334,10 @@ plans:
    baseline already supports WorkflowRun-first materialization for reviewed
    non-high-risk ManagerPlans, approval-gated materialization for reviewed
    high-risk ManagerPlans, idempotent reuse for the same ManagerPlan and
-   WorkflowDefinition, and handoff materialization into Assignment,
-   SessionThread, and child TaskGrant evidence when a parent WorkflowRun grant
-   is active.
+   WorkflowDefinition, released WorkflowDefinition selection by explicit id,
+   request selector, or ManagerPlan specialist-selection entrypoint/name, and
+   handoff materialization into Assignment, SessionThread, and child TaskGrant
+   evidence when a parent WorkflowRun grant is active.
 5. Ontology Action Contract object model: deepen BusinessObject, Rule,
    Relation, Metric, ActionContract, PermissionContract, ToolBinding,
    ValidationRule, and RiskClass representation beyond the current checked
