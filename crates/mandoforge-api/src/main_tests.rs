@@ -35468,6 +35468,120 @@ async fn work_surface_event_accepts_slack_native_webhook_signature() {
 }
 
 #[tokio::test]
+async fn work_surface_event_accepts_linear_native_webhook_signature() {
+    let _env_guard = env_lock().lock().expect("env lock");
+    let _secret = EnvVarGuard::set(
+        "MANDOFORGE_WORK_SURFACE_LINEAR_WEBHOOK_SECRET",
+        "surface-secret",
+    );
+    let app = test_app().await;
+    let payload = json!({
+        "surface": "linear",
+        "event_type": "issue.updated",
+        "external_id": "linear-1",
+        "title": "Linear native webhook intake",
+        "metadata": {
+            "webhook_id": "linear-event-1",
+            "data": {
+                "id": "LIN-1",
+                "identifier": "OPS-42",
+                "title": "Ship Agent OS runtime boundary"
+            }
+        }
+    });
+    let body = payload.to_string();
+    let signature = work_surface_raw_hmac_sha256_signature("surface-secret", body.as_bytes());
+
+    let ingested: WorkSurfaceIngestion = request_json(
+        app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/work-surface-events")
+            .header("x-mandoforge-subject", "linear-webhook")
+            .header("x-mandoforge-roles", "admin")
+            .header("linear-signature", signature.as_str())
+            .header("linear-delivery", "linear-delivery-1")
+            .body(Body::from(body))
+            .expect("valid request"),
+    )
+    .await;
+
+    assert_eq!(ingested.work_item.source, "linear");
+    assert_eq!(
+        ingested.work_item.metadata["work_surface"]["delivery_id"],
+        json!("linear-delivery-1")
+    );
+    assert_eq!(
+        ingested.work_item.metadata["work_surface"]["authentication"],
+        json!({
+            "mode": "linear_hmac_sha256",
+            "configured": true,
+            "verified": true,
+            "signature_present": true,
+            "signature_header": "linear-signature",
+            "secret_ref": "MANDOFORGE_WORK_SURFACE_LINEAR_WEBHOOK_SECRET"
+        })
+    );
+}
+
+#[tokio::test]
+async fn work_surface_event_accepts_jira_websub_signature() {
+    let _env_guard = env_lock().lock().expect("env lock");
+    let _secret = EnvVarGuard::set(
+        "MANDOFORGE_WORK_SURFACE_JIRA_WEBHOOK_SECRET",
+        "surface-secret",
+    );
+    let app = test_app().await;
+    let payload = json!({
+        "surface": "jira",
+        "event_type": "issue.updated",
+        "external_id": "jira-1",
+        "title": "Jira native webhook intake",
+        "metadata": {
+            "webhook_event_id": "jira-event-1",
+            "issue": {
+                "id": "10001",
+                "key": "OPS-42",
+                "fields": {"summary": "Ship Agent OS runtime boundary"}
+            }
+        }
+    });
+    let body = payload.to_string();
+    let signature = work_surface_test_signature("surface-secret", body.as_bytes());
+
+    let ingested: WorkSurfaceIngestion = request_json(
+        app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/work-surface-events")
+            .header("x-mandoforge-subject", "jira-webhook")
+            .header("x-mandoforge-roles", "admin")
+            .header("x-hub-signature", signature.as_str())
+            .header("x-atlassian-webhook-identifier", "jira-delivery-1")
+            .body(Body::from(body))
+            .expect("valid request"),
+    )
+    .await;
+
+    assert_eq!(ingested.work_item.source, "jira");
+    assert_eq!(
+        ingested.work_item.metadata["work_surface"]["delivery_id"],
+        json!("jira-delivery-1")
+    );
+    assert_eq!(
+        ingested.work_item.metadata["work_surface"]["authentication"],
+        json!({
+            "mode": "jira_websub_hmac_sha256",
+            "configured": true,
+            "verified": true,
+            "signature_present": true,
+            "signature_header": "x-hub-signature",
+            "secret_ref": "MANDOFORGE_WORK_SURFACE_JIRA_WEBHOOK_SECRET"
+        })
+    );
+}
+
+#[tokio::test]
 async fn work_surface_event_requires_signature_when_webhook_secret_is_configured() {
     let _env_guard = env_lock().lock().expect("env lock");
     let _secret = EnvVarGuard::set("MANDOFORGE_WORK_SURFACE_WEBHOOK_SECRET", "surface-secret");
@@ -35559,10 +35673,17 @@ async fn work_surface_event_does_not_replay_distinct_slack_events_with_same_time
 }
 
 fn work_surface_test_signature(secret: &str, body: &[u8]) -> String {
+    format!(
+        "sha256={}",
+        work_surface_raw_hmac_sha256_signature(secret, body)
+    )
+}
+
+fn work_surface_raw_hmac_sha256_signature(secret: &str, body: &[u8]) -> String {
     let mut mac =
         Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("valid hmac secret for test");
     mac.update(body);
-    format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
+    hex::encode(mac.finalize().into_bytes())
 }
 
 fn work_surface_slack_test_signature(secret: &str, timestamp: &str, body: &[u8]) -> String {

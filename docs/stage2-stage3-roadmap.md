@@ -314,12 +314,13 @@ plans:
    normalizes Feishu, Slack, GitHub, Jira, Linear, and Email into canonical
    WorkItem adapter metadata without starting runtime execution, verifies
    configured webhook HMAC signatures, records cursor/delivery replay evidence,
-   extracts richer platform object metadata, accepts GitHub and Slack native
-   webhook signature headers as connector-specific verification variants, and
+   extracts richer platform object metadata, accepts GitHub, Slack, Linear, and
+   Jira native webhook signature headers as connector-specific verification
+   variants, and
    preserves platform rate-limit plus live-readback evidence supplied by
    connector headers or payload metadata. Platform-specific OAuth/token
    lifecycle, active live API fetch/readback, MandoForge-enforced rate-limit
-   scheduling, and remaining connector-specific signature variants remain open.
+   scheduling, and Feishu/Email-specific authentication variants remain open.
 2. Runtime adapter consolidation: make Environment runtime binding the only
    product entrypoint for managed runtime execution. `agent_cli.exec` and
    `codex.exec` remain compatibility facades, but session-bound Environment

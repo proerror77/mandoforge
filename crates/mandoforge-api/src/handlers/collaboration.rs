@@ -147,6 +147,8 @@ async fn ingest_work_surface_event(
     let delivery_id = normalize_work_surface_optional_text(input.delivery_id.or_else(|| {
         header_value(&headers, "x-mandoforge-work-surface-delivery-id")
             .or_else(|| header_value(&headers, "x-github-delivery"))
+            .or_else(|| header_value(&headers, "linear-delivery"))
+            .or_else(|| header_value(&headers, "x-atlassian-webhook-identifier"))
             .map(str::to_string)
             .or_else(|| work_surface_delivery_id(&surface, &input.metadata))
     }));
@@ -714,6 +716,8 @@ fn work_surface_signature_present(headers: &HeaderMap, surface: &str) -> bool {
     header_value(headers, "x-mandoforge-work-surface-signature").is_some()
         || (surface == "github" && header_value(headers, "x-hub-signature-256").is_some())
         || (surface == "slack" && header_value(headers, "x-slack-signature").is_some())
+        || (surface == "linear" && header_value(headers, "linear-signature").is_some())
+        || (surface == "jira" && header_value(headers, "x-hub-signature").is_some())
 }
 
 fn verify_work_surface_signature(
@@ -745,6 +749,24 @@ fn verify_work_surface_signature(
         return Ok(WorkSurfaceSignatureVerification {
             mode: "slack_hmac_sha256",
             header: "x-slack-signature",
+        });
+    }
+    if surface == "linear"
+        && let Some(signature) = header_value(headers, "linear-signature")
+    {
+        verify_hmac_sha256_signature(signature, body, secret, "")?;
+        return Ok(WorkSurfaceSignatureVerification {
+            mode: "linear_hmac_sha256",
+            header: "linear-signature",
+        });
+    }
+    if surface == "jira"
+        && let Some(signature) = header_value(headers, "x-hub-signature")
+    {
+        verify_hmac_sha256_signature(signature, body, secret, "sha256=")?;
+        return Ok(WorkSurfaceSignatureVerification {
+            mode: "jira_websub_hmac_sha256",
+            header: "x-hub-signature",
         });
     }
     Err(AppError::unauthorized(
