@@ -614,6 +614,7 @@ async fn execution_job_artifact_return_evidence(
         "runtime_adapter_event_count": result.get("runtime_adapter_event_count"),
         "runtime_turn_event_count": result.get("runtime_turn_event_count"),
         "runtime_final_artifact_count": result.get("runtime_final_artifact_count").cloned().unwrap_or(json!(0)),
+        "runtime_final_artifact_ids": result.get("runtime_final_artifact_ids").cloned().unwrap_or(json!([])),
     }))
 }
 

@@ -24311,6 +24311,9 @@ async fn managed_cli_runtime_profile_can_drive_agent_cli_worker() {
     assert_eq!(result["runtime_adapter_event_count"], 3);
     assert_eq!(result["runtime_turn_event_count"], 6);
     assert_eq!(result["runtime_final_artifact_count"], 1);
+    let runtime_final_artifact_id = result["runtime_final_artifact_ids"][0]
+        .as_str()
+        .expect("runtime final artifact id");
     assert!(
         result["stdout"]
             .as_str()
@@ -24346,6 +24349,10 @@ async fn managed_cli_runtime_profile_can_drive_agent_cli_worker() {
     assert_eq!(
         k_agent_completed.payload["artifact_return_evidence"]["runtime_final_artifact_count"],
         json!(1)
+    );
+    assert_eq!(
+        k_agent_completed.payload["artifact_return_evidence"]["runtime_final_artifact_ids"][0],
+        json!(runtime_final_artifact_id)
     );
     assert_eq!(
         k_agent_completed.payload["return_contract"],

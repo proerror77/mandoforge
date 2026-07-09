@@ -2632,6 +2632,7 @@ async fn execute_approved_remote_computer_agent_cli(
                 "runtime_adapter_event_count": adapter_events.len(),
                 "runtime_turn_event_count": turn_recording.event_count,
                 "runtime_final_artifact_count": turn_recording.final_artifact_count,
+                "runtime_final_artifact_ids": turn_recording.final_artifact_ids,
                 "status": status,
                 "execution_enabled": true,
             }),
@@ -2664,6 +2665,7 @@ async fn execute_approved_remote_computer_agent_cli(
                 "runtime_adapter_event_count": adapter_events.len(),
                 "runtime_turn_event_count": turn_recording.event_count,
                 "runtime_final_artifact_count": turn_recording.final_artifact_count,
+                "runtime_final_artifact_ids": turn_recording.final_artifact_ids,
                 "runner": "remote_computer_pod_exec",
                 "remote_computer_id": target.remote_computer.id,
                 "assignment_id": assignment.id,
@@ -2699,6 +2701,7 @@ async fn execute_approved_remote_computer_agent_cli(
         "runtime_adapter_event_count": adapter_events.len(),
         "runtime_turn_event_count": turn_recording.event_count,
         "runtime_final_artifact_count": turn_recording.final_artifact_count,
+        "runtime_final_artifact_ids": turn_recording.final_artifact_ids,
     });
     if !exec_succeeded {
         let error_payload = json!({
@@ -2742,6 +2745,7 @@ async fn execute_approved_remote_computer_agent_cli(
                     "runtime_adapter_event_count": adapter_events.len(),
                     "runtime_turn_event_count": turn_recording.event_count,
                     "runtime_final_artifact_count": turn_recording.final_artifact_count,
+                    "runtime_final_artifact_ids": turn_recording.final_artifact_ids,
                     "resumed_after_approval": true
                 }),
             ))
@@ -2787,6 +2791,7 @@ async fn execute_approved_remote_computer_agent_cli(
                 "runtime_adapter_event_count": adapter_events.len(),
                 "runtime_turn_event_count": turn_recording.event_count,
                 "runtime_final_artifact_count": turn_recording.final_artifact_count,
+                "runtime_final_artifact_ids": turn_recording.final_artifact_ids,
                 "resumed_after_approval": true
             }),
         ))
@@ -2902,6 +2907,7 @@ async fn execute_approved_agent_cli(
                         "runtime_adapter_event_count": result.get("runtime_adapter_event_count"),
                         "runtime_turn_event_count": result.get("runtime_turn_event_count"),
                         "runtime_final_artifact_count": result.get("runtime_final_artifact_count"),
+                        "runtime_final_artifact_ids": result.get("runtime_final_artifact_ids"),
                         "resumed_after_approval": true
                     }),
                 ))
@@ -3899,6 +3905,7 @@ pub(crate) async fn run_agent_cli(
                 "runtime_adapter_event_count": adapter_events.len(),
                 "runtime_turn_event_count": turn_recording.event_count,
                 "runtime_final_artifact_count": turn_recording.final_artifact_count,
+                "runtime_final_artifact_ids": turn_recording.final_artifact_ids,
                 "runner": "agent-cli"
             }),
         )
@@ -3925,7 +3932,8 @@ pub(crate) async fn run_agent_cli(
         "stderr_truncated": stderr.truncated,
         "runtime_adapter_event_count": adapter_events.len(),
         "runtime_turn_event_count": turn_recording.event_count,
-        "runtime_final_artifact_count": turn_recording.final_artifact_count
+        "runtime_final_artifact_count": turn_recording.final_artifact_count,
+        "runtime_final_artifact_ids": turn_recording.final_artifact_ids
     }))
 }
 
@@ -4314,6 +4322,7 @@ async fn record_runtime_adapter_events(
 struct RuntimeAdapterTurnRecording {
     event_count: usize,
     final_artifact_count: usize,
+    final_artifact_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone)]
@@ -4377,6 +4386,7 @@ async fn record_runtime_adapter_turn_metadata(
     let mut recorded_event_count = 0;
     let mut final_artifact_count = 0;
     let mut final_artifact_id = None;
+    let mut final_artifact_ids = Vec::new();
 
     if let Some(started_event_index) = metadata.started_event_index {
         state
@@ -4494,6 +4504,7 @@ async fn record_runtime_adapter_turn_metadata(
         };
         let artifact = state.insert_artifact(artifact).await?;
         final_artifact_id = Some(artifact.id);
+        final_artifact_ids.push(artifact.id);
         final_artifact_count += 1;
         state
             .append_event(
@@ -4560,6 +4571,7 @@ async fn record_runtime_adapter_turn_metadata(
     Ok(RuntimeAdapterTurnRecording {
         event_count: recorded_event_count,
         final_artifact_count,
+        final_artifact_ids,
     })
 }
 
