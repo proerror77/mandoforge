@@ -2,16 +2,19 @@ use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::HeaderMap,
-    routing::get,
+    routing::{get, post},
 };
 use uuid::Uuid;
 
 use crate::{
-    AppError, AppState, OntologyActionContractGovernanceBoundary, OntologyActionContractListQuery,
+    AppError, AppState, CreateOntologyReleaseCandidateRequest,
+    OntologyActionContractGovernanceBoundary, OntologyActionContractListQuery,
     OntologyActionContractListResponse, OntologyActionContractProductView, OntologyEngineReadiness,
-    OntologyRegistry, Permission, SemanticObject, authorize_collection_request, authorize_request,
-    build_ontology_engine_readiness, ontology_action_contract_model_evidence,
-    ontology_action_contract_payload, ontology_registry, visible_semantic_objects_for_principal,
+    OntologyRegistry, OntologyRelease, Permission, SemanticObject, authorize_collection_request,
+    authorize_request, build_ontology_engine_readiness,
+    create_standalone_ontology_action_contract_release_candidate_with_actor,
+    ontology_action_contract_model_evidence, ontology_action_contract_payload, ontology_registry,
+    principal_from_request, visible_semantic_objects_for_principal,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -24,6 +27,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/api/ontology/action-contracts/{id}",
             get(get_ontology_action_contract),
+        )
+        .route(
+            "/api/ontology/action-contracts/{id}/release-candidate",
+            post(create_ontology_action_contract_release_candidate),
         )
         .route(
             "/api/ontology/engine-readiness",
@@ -93,6 +100,31 @@ async fn get_ontology_action_contract(
         return Err(AppError::not_found("ontology action contract not found"));
     }
     Ok(Json(ontology_action_contract_product_view(object)))
+}
+
+async fn create_ontology_action_contract_release_candidate(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateOntologyReleaseCandidateRequest>,
+) -> Result<Json<OntologyRelease>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "ontology_release",
+        None,
+    )
+    .await?;
+    let principal = principal_from_request(&state, &headers).await?;
+    create_standalone_ontology_action_contract_release_candidate_with_actor(
+        &state,
+        id,
+        input,
+        &principal.subject_id,
+    )
+    .await
+    .map(Json)
 }
 
 async fn get_ontology_engine_readiness(

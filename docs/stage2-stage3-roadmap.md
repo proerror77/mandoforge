@@ -367,8 +367,11 @@ plans:
    first-class read/list product API at `/api/ontology/action-contracts` with an
    explicit governance boundary showing that the contract grants action
    validity only, while TaskGrant, Policy, Approval, connector scope, and the
-   Tool Router remain execution authority. Release packaging for standalone
-   `OntologyActionContract` objects remains open.
+   Tool Router remain execution authority. Standalone
+   `OntologyActionContract` objects can now be packaged into ontology release
+   candidates through `/api/ontology/action-contracts/:id/release-candidate`;
+   the release evidence includes the action object id/type/key, contract model,
+   transaction profile, execution mode, and existing ontology release gates.
 6. Pack / Release / Evidence: make WorkflowPack, DomainPack, AgentVersion,
    EnvironmentProfile, OntologyActionContract, ToolSpec, EvalGate, Release, and
    Rollback auditable as product capabilities.

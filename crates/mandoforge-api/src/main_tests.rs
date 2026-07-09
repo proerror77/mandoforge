@@ -8497,6 +8497,146 @@ async fn ontology_action_contract_api_exposes_governed_product_view() {
 }
 
 #[tokio::test]
+async fn ontology_action_contract_release_candidate_packages_standalone_contract() {
+    let app = test_app().await;
+    let admin_headers = [
+        ("x-mandoforge-subject", "admin-1"),
+        ("x-mandoforge-roles", "admin"),
+    ];
+    let source: SemanticSource = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/semantic-sources",
+            json!({
+                "source_type": "workflow_pack",
+                "source_uri": "repo://packs/commerce/actions/refund_order.yaml",
+                "display_name": "Commerce refund action contract",
+                "metadata": {"pack_id": "commerce"},
+                "provenance": {"source": "ontology-action-contract-release-test"},
+                "freshness": {"state": "workspace_current"}
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let contract: SemanticObject = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/semantic-objects",
+            json!({
+                "source_id": source.id,
+                "object_type": "ontology_action_contract",
+                "object_key": "commerce.action.refund_order",
+                "title": "refund_order action contract",
+                "summary": "Governed refund action contract.",
+                "content": {
+                    "action_contract": {
+                        "domain_scope": "commerce",
+                        "business_object": {"type": "Order", "key_field": "order_id"},
+                        "permission_contract": {"scope": "write", "requires_task_grant": true},
+                        "tool_binding": {
+                            "connector_id": "tmall",
+                            "operation_id": "refund_order",
+                            "side_effect_class": "external_write"
+                        },
+                        "validation_rules": [{"field": "order_id", "required": true}],
+                        "risk_class": {"level": "high"},
+                        "transaction_profile": "proposal_only",
+                        "execution_mode": "proposal_only"
+                    }
+                },
+                "semantic_scopes": {
+                    "domain_scope": "commerce",
+                    "workflow_scope": "refunds",
+                    "memory_scope": "ontology-actions"
+                },
+                "provenance": {"source": "ontology-action-contract-release-test"},
+                "trust_level": "source_attested",
+                "freshness": "current"
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+
+    let release: OntologyRelease = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!(
+                "/api/ontology/action-contracts/{}/release-candidate",
+                contract.id
+            ),
+            json!({
+                "version": "commerce-action-contract-vtest-001",
+                "migration_policy": default_ontology_release_migration_policy()
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+
+    assert_eq!(release.status, "candidate");
+    assert_eq!(release.domain_scope, "commerce");
+    assert_eq!(release.source_run_id, None);
+    assert_eq!(release.action_count, 1);
+    assert_eq!(release.materialized_link_ids, json!([]));
+    assert_eq!(release.materialized_object_ids, json!([contract.id]));
+    let evidence_refs = release.evidence_refs.as_array().expect("evidence refs");
+    assert_eq!(evidence_refs.len(), 1);
+    assert_eq!(
+        evidence_refs[0]["source"],
+        json!("standalone_ontology_action_contract")
+    );
+    assert_eq!(
+        evidence_refs[0]["materialized_object_id"],
+        json!(contract.id)
+    );
+    assert_eq!(
+        evidence_refs[0]["materialized_object_type"],
+        json!("ontology_action_contract")
+    );
+    assert_eq!(
+        evidence_refs[0]["contract_model"]["risk_class"],
+        json!("high")
+    );
+    assert_eq!(
+        evidence_refs[0]["transaction_profile"],
+        json!("proposal_only")
+    );
+
+    let gated: OntologyRelease = request_json(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/ontology/releases/{}/gate", release.id))
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(gated.gate_result["status"], json!("passed"));
+
+    let audit_logs: Vec<AuditLog> = request_json(
+        app,
+        Request::builder()
+            .uri("/api/audit-logs")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(audit_logs.iter().any(|log| {
+        log.action == "ontology_release.candidate_created"
+            && log.resource_id == Some(release.id)
+            && log.details["source_object_id"] == json!(contract.id)
+    }));
+}
+
+#[tokio::test]
 async fn ontology_engine_readiness_reports_release_lifecycle_blockers() {
     let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
     let readiness = build_ontology_engine_readiness(&state)

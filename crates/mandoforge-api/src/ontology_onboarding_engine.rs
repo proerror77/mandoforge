@@ -3918,6 +3918,97 @@ pub(crate) async fn create_ontology_release_candidate_with_actor(
     Ok(release)
 }
 
+pub(crate) async fn create_standalone_ontology_action_contract_release_candidate_with_actor(
+    state: &AppState,
+    object_id: Uuid,
+    input: CreateOntologyReleaseCandidateRequest,
+    actor_subject: &str,
+) -> Result<OntologyRelease, AppError> {
+    let object = state.get_semantic_object(object_id).await?;
+    if object.object_type != "ontology_action_contract" {
+        return Err(AppError::bad_request(
+            "standalone ontology action contract release requires ontology_action_contract object",
+        ));
+    }
+    let contract = ontology_action_contract_payload(&object.content)
+        .ok_or_else(|| AppError::bad_request("ontology action contract payload is missing"))?;
+    let domain_scope = standalone_ontology_action_contract_domain_scope(&object, contract)?;
+    let active_release = state
+        .active_ontology_release_for_domain(&domain_scope)
+        .await?;
+    let now = Utc::now();
+    let version = input.version.unwrap_or_else(|| {
+        let entropy = Uuid::new_v4().simple().to_string();
+        format!(
+            "{}-action-contract-v{}-{}",
+            ontology_slug(&domain_scope),
+            now.format("%Y%m%d%H%M%S"),
+            &entropy[..8]
+        )
+    });
+    let contract_model = ontology_action_contract_model_evidence(contract, &object.object_type);
+    let release = OntologyRelease {
+        id: Uuid::new_v4(),
+        version,
+        domain_scope,
+        source_run_id: None,
+        parent_release_id: active_release.as_ref().map(|release| release.id),
+        rollback_target_release_id: active_release.as_ref().map(|release| release.id),
+        status: "candidate".to_string(),
+        release_class: ontology_release_class(input.release_class.as_deref())?,
+        object_count: 0,
+        relation_count: 0,
+        action_count: 1,
+        migration_policy: input
+            .migration_policy
+            .unwrap_or_else(default_ontology_release_migration_policy),
+        gate_result: json!({}),
+        materialized_object_ids: json!([object.id]),
+        materialized_link_ids: json!([]),
+        evidence_refs: json!([{
+            "source": "standalone_ontology_action_contract",
+            "materialized_object_id": object.id,
+            "materialized_object_type": object.object_type,
+            "materialized_object_key": object.object_key,
+            "contract_model": contract_model,
+            "transaction_profile": standalone_ontology_action_contract_transaction_profile(contract),
+            "execution_mode": standalone_ontology_action_contract_execution_mode(contract),
+        }]),
+        promoted_by: None,
+        promoted_at: None,
+        rolled_back_by: None,
+        rolled_back_at: None,
+        archived_at: None,
+        created_at: now,
+        updated_at: now,
+    };
+    let release = state.create_ontology_release(release).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "ontology_release.candidate_created",
+            "ontology_release",
+            Some(release.id),
+            json!({
+                "subject": actor_subject,
+                "release_id": release.id,
+                "version": release.version,
+                "domain_scope": release.domain_scope,
+                "source_run_id": release.source_run_id,
+                "source_object_id": object.id,
+                "source_object_type": object.object_type,
+                "release_class": release.release_class,
+                "object_count": release.object_count,
+                "relation_count": release.relation_count,
+                "action_count": release.action_count,
+            }),
+        ))
+        .await?;
+    Ok(release)
+}
+
 pub(crate) fn default_ontology_release_migration_policy() -> Value {
     json!({
         "compatibility": "backward_compatible",
@@ -3935,6 +4026,41 @@ pub(crate) fn ontology_release_class(value: Option<&str>) -> Result<String, AppE
             "unsupported ontology release_class: {other}"
         ))),
     }
+}
+
+fn standalone_ontology_action_contract_domain_scope(
+    object: &SemanticObject,
+    contract: &Value,
+) -> Result<String, AppError> {
+    object
+        .semantic_scopes
+        .get("domain_scope")
+        .and_then(Value::as_str)
+        .or_else(|| contract.get("domain_scope").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|scope| !scope.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            AppError::bad_request(
+                "standalone ontology action contract release requires domain_scope",
+            )
+        })
+}
+
+fn standalone_ontology_action_contract_transaction_profile(contract: &Value) -> String {
+    ontology_contract_string(contract, &["transaction_profile"])
+        .or_else(|| ontology_contract_path_string(contract, &["transaction_policy", "profile"]))
+        .unwrap_or("unspecified")
+        .to_string()
+}
+
+fn standalone_ontology_action_contract_execution_mode(contract: &Value) -> String {
+    ontology_contract_string(contract, &["execution_mode"])
+        .or_else(|| {
+            ontology_contract_path_string(contract, &["transaction_policy", "execution_mode"])
+        })
+        .unwrap_or("unspecified")
+        .to_string()
 }
 
 pub(crate) async fn ontology_release_materialized_semantic_object_ids(
