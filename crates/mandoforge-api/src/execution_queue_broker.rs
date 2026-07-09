@@ -1192,10 +1192,20 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
         let pending_job = pending
             .get_mut(&job_id)
             .ok_or_else(|| AppError::not_found("execution job not found"))?;
+        let now = Utc::now();
+        let lease_expired = pending_job.job.status == ExecutionJobStatus::Running
+            && pending_job
+                .job
+                .lease_expires_at
+                .as_ref()
+                .is_some_and(|lease_expires_at| lease_expires_at < &now);
+        if pending_job.job.status != ExecutionJobStatus::Queued && !lease_expired {
+            return Err(AppError::not_found("execution job not found"));
+        }
         pending_job.job.status = ExecutionJobStatus::Running;
-        pending_job.job.started_at = Some(Utc::now());
+        pending_job.job.started_at = Some(now);
         pending_job.job.worker_id = Some(worker_id.to_string());
-        pending_job.job.lease_expires_at = Some(Utc::now() + chrono::Duration::minutes(5));
+        pending_job.job.lease_expires_at = Some(now + chrono::Duration::minutes(5));
         pending_job.job.attempt_count += 1;
         Ok(pending_job.job.clone())
     }
@@ -1429,11 +1439,11 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
 #[cfg(test)]
 mod tests {
     use super::{
-        BrokerExecutionQueue, BrokerQueueConfig, BrokerQueueHealthCheck, BrokerQueueKind,
-        NatsJetStreamCommand, RedisExecutionJobPayload, RedisStreamClient, RedisStreamCommand,
-        ReservedBrokerQueueHealthCheck, encode_resp_array, nats_tcp_addr, parse_nats_messages,
-        parse_nats_protocol_messages, parse_redis_response, parse_xreadgroup_execution_jobs,
-        redis_tcp_addr,
+        BrokerExecutionQueue, BrokerPendingExecutionJob, BrokerQueueConfig, BrokerQueueHealthCheck,
+        BrokerQueueKind, NatsJetStreamCommand, RedisExecutionJobPayload, RedisStreamClient,
+        RedisStreamCommand, ReservedBrokerQueueHealthCheck, encode_resp_array, nats_tcp_addr,
+        parse_nats_messages, parse_nats_protocol_messages, parse_redis_response,
+        parse_xreadgroup_execution_jobs, redis_tcp_addr,
     };
     use crate::execution_queue::{ExecutionJobRequest, ExecutionJobStatus, ExecutionQueueBackend};
     use tokio::{
@@ -2177,5 +2187,49 @@ mod tests {
         assert_eq!(completed.status, ExecutionJobStatus::Completed);
 
         server.await.expect("server");
+    }
+
+    #[tokio::test]
+    async fn broker_execution_queue_rejects_duplicate_start_before_lease_expiry() {
+        let config = BrokerQueueConfig {
+            kind: BrokerQueueKind::Nats,
+            endpoint: "nats://127.0.0.1:4222".to_string(),
+            stream: "mandoforge.execution.jobs".to_string(),
+            consumer_group: "mandoforge-workers".to_string(),
+        };
+        let queue = BrokerExecutionQueue::nats(config);
+        let job = RedisExecutionJobPayload {
+            job_id: Some("00000000-0000-4000-8000-000000000044".parse().unwrap()),
+            session_id: "00000000-0000-4000-8000-000000000041".parse().unwrap(),
+            environment_id: None,
+            approval_id: "00000000-0000-4000-8000-000000000042".parse().unwrap(),
+            tool_call_id: "00000000-0000-4000-8000-000000000043".parse().unwrap(),
+            tool_name: "file.write".to_string(),
+            max_attempts: Some(3),
+        }
+        .into_execution_job();
+        let job_id = job.id;
+        queue.pending.write().await.insert(
+            job_id,
+            BrokerPendingExecutionJob {
+                message_id: "broker-message-1".to_string(),
+                job,
+            },
+        );
+
+        let running = queue.start(job_id, "worker-1").await.expect("start job");
+        assert_eq!(running.status, ExecutionJobStatus::Running);
+        assert_eq!(running.worker_id.as_deref(), Some("worker-1"));
+        assert_eq!(running.attempt_count, 1);
+        assert!(running.lease_expires_at.is_some());
+
+        let duplicate = queue
+            .start(job_id, "worker-2")
+            .await
+            .expect_err("duplicate broker start before lease expiry should fail");
+        assert!(duplicate.message.contains("execution job not found"));
+        let unchanged = queue.get(job_id).await.expect("stored job");
+        assert_eq!(unchanged.worker_id.as_deref(), Some("worker-1"));
+        assert_eq!(unchanged.attempt_count, 1);
     }
 }

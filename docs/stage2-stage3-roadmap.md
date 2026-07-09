@@ -60,6 +60,11 @@ The Managed Runtime Layer has a strong baseline:
   surfaces, preserving the worker identity, worker pool, cursor window,
   processed sequence, job/session status, and Environment Scheduling authority
   boundary.
+- `k_agent.claimed`, `k_agent.completed`, and `k_agent.failed` session events
+  for `/api/execution-jobs/:id/run`, recording the execution job id, approval
+  id, tool call id, tool, Environment, worker identity, worker pool, attempt
+  count, retry status, dispatch surface, and Environment Scheduling authority
+  boundary.
 - Runtime adapter normalization for Codex CLI, Claude Code CLI, and Codex App
   Server turn output.
 - `agent_cli.exec` remains a compatibility facade and records the session-bound
@@ -310,7 +315,9 @@ plans:
    evidence are already recorded as `k_agent.claimed`, `k_agent.heartbeat`,
    `k_agent.completed`, and `k_agent.failed`; completion/failure return
    evidence is shared across direct session-loop and workflow-step run
-   surfaces.
+   surfaces. Execution-job K Agent claim and return evidence is also recorded
+   for `/api/execution-jobs/:id/run`; sandbox dispatch and richer artifact
+   return evidence remain open.
 4. Manager Runtime materialization: expand the reviewed ManagerPlan
    materialization policy with richer WorkflowRun selection. The current
    baseline already supports WorkflowRun-first materialization for reviewed

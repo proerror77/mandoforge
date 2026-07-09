@@ -165,6 +165,14 @@ pub(crate) async fn run_execution_job(
     worker_id: &str,
 ) -> Result<ExecutionJob, AppError> {
     let job = state.execution_queue.start(job_id, worker_id).await?;
+    run_started_execution_job(state, job, worker_id).await
+}
+
+pub(crate) async fn run_started_execution_job(
+    state: &AppState,
+    job: ExecutionJob,
+    worker_id: &str,
+) -> Result<ExecutionJob, AppError> {
     if !crate::session_accepts_worker_execution(state, job.session_id).await? {
         return retry_or_fail_started_execution_job(
             state,

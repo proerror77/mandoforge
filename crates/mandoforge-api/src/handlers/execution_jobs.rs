@@ -23,7 +23,7 @@ use crate::{
     environment_worker_pool, execute_worker_load_validation, header_value, new_audit_log,
     reconcile_workflow_steps_after_session_loop_job, record_remote_computer_job_assignment_event,
     remote_computer_pod_execution_requested_from_env, remote_computer_runner_for_config,
-    run_execution_job, run_session_loop, session_accepts_worker_execution,
+    run_session_loop, run_started_execution_job, session_accepts_worker_execution,
     set_managed_session_status, visible_session_ids_for_principal,
     worker_environment_scope_required, worker_scope_headers_present,
 };
@@ -544,8 +544,106 @@ async fn run_execution_job_route(
         .and_then(|value| value.to_str().ok())
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("api");
-    let completed = run_execution_job(&state, id, worker_id).await?;
-    Ok(Json(completed))
+    let worker_pool = worker_pool_from_headers(&headers);
+    let started = state.execution_queue.start(id, worker_id).await?;
+    append_k_agent_execution_job_event(
+        &state,
+        &started,
+        "k_agent.claimed",
+        worker_id,
+        worker_pool.as_deref(),
+        json!({
+            "job_status": started.status.as_str(),
+        }),
+    )
+    .await?;
+    match run_started_execution_job(&state, started, worker_id).await {
+        Ok(updated) => {
+            let event_type = if updated.status == ExecutionJobStatus::Completed {
+                "k_agent.completed"
+            } else {
+                "k_agent.failed"
+            };
+            append_k_agent_execution_job_event(
+                &state,
+                &updated,
+                event_type,
+                worker_id,
+                worker_pool.as_deref(),
+                json!({
+                    "job_status": updated.status.as_str(),
+                    "retry_queued": updated.status == ExecutionJobStatus::Queued,
+                    "last_error": updated.last_error,
+                }),
+            )
+            .await?;
+            Ok(Json(updated))
+        }
+        Err(error) => {
+            let latest = state.execution_queue.get(id).await.unwrap_or(job);
+            append_k_agent_execution_job_event(
+                &state,
+                &latest,
+                "k_agent.failed",
+                worker_id,
+                worker_pool.as_deref(),
+                json!({
+                    "job_status": latest.status.as_str(),
+                    "retry_queued": latest.status == ExecutionJobStatus::Queued,
+                    "last_error": latest.last_error,
+                    "error": error.message.clone(),
+                }),
+            )
+            .await?;
+            Err(error)
+        }
+    }
+}
+
+async fn append_k_agent_execution_job_event(
+    state: &AppState,
+    job: &crate::execution_queue::ExecutionJob,
+    event_type: &str,
+    worker_id: &str,
+    worker_pool: Option<&str>,
+    extra: Value,
+) -> Result<(), AppError> {
+    state
+        .append_event(
+            "worker",
+            Some(job.id),
+            job.session_id,
+            event_type,
+            merge_k_agent_execution_job_payload(
+                json!({
+                    "execution_job_id": job.id,
+                    "approval_id": job.approval_id,
+                    "tool_call_id": job.tool_call_id,
+                    "tool": job.tool_name,
+                    "environment_id": job.environment_id,
+                    "worker_id": worker_id,
+                    "worker_pool": worker_pool,
+                    "attempt_count": job.attempt_count,
+                    "max_attempts": job.max_attempts,
+                    "lease_expires_at": job.lease_expires_at,
+                    "dispatch_surface": "execution_job",
+                    "authority_boundary": "environment_scheduling_only",
+                    "return_contract": "execution_job_return_evidence",
+                }),
+                extra,
+            ),
+        )
+        .await
+        .map(|_| ())
+}
+
+fn merge_k_agent_execution_job_payload(mut base: Value, extra: Value) -> Value {
+    if let (Some(base), Some(extra)) = (base.as_object_mut(), extra.as_object()) {
+        for (key, value) in extra {
+            base.insert(key.clone(), value.clone());
+        }
+    }
+    base
 }
 
 fn worker_environment_id_from_headers(headers: &HeaderMap) -> Result<Option<Uuid>, AppError> {

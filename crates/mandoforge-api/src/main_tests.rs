@@ -23481,6 +23481,40 @@ async fn queue_backed_worker_marks_nonzero_agent_cli_as_failed() {
     assert_eq!(agent_cli_call.status, "failed");
     assert!(agent_cli_call.error.is_some());
 
+    let events: Vec<SessionEvent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/sessions/{}/events", session.id))
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let k_agent_failed_events: Vec<&SessionEvent> = events
+        .iter()
+        .filter(|event| {
+            event.event_type == "k_agent.failed"
+                && event.payload["execution_job_id"] == json!(job_id)
+                && event.payload["dispatch_surface"] == json!("execution_job")
+                && event.payload["authority_boundary"] == json!("environment_scheduling_only")
+                && event.payload["return_contract"] == json!("execution_job_return_evidence")
+        })
+        .collect();
+    assert_eq!(k_agent_failed_events.len(), 3);
+    assert!(k_agent_failed_events.iter().any(|event| {
+        event.payload["job_status"] == json!("queued")
+            && event.payload["retry_queued"] == json!(true)
+            && event.payload["attempt_count"] == json!(1)
+            && event.payload["lease_expires_at"].is_null()
+    }));
+    assert!(k_agent_failed_events.iter().any(|event| {
+        event.payload["job_status"] == json!("failed")
+            && event.payload["retry_queued"] == json!(false)
+            && event.payload["attempt_count"] == json!(3)
+            && event.payload["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("exit code"))
+    }));
+
     let audit_logs: Vec<AuditLog> = request_json(
         app,
         Request::builder()

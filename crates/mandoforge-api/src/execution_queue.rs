@@ -201,7 +201,7 @@ pub(crate) enum ExecutionJobStatus {
 }
 
 impl ExecutionJobStatus {
-    fn as_str(&self) -> &'static str {
+    pub(crate) fn as_str(&self) -> &'static str {
         match self {
             Self::Queued => "queued",
             Self::Running => "running",
@@ -393,12 +393,24 @@ impl MemoryExecutionQueue {
             .iter_mut()
             .find(|job| job.id == job_id)
             .ok_or_else(|| AppError::not_found("execution job not found"))?;
+        let now = Utc::now();
+        let lease_expired = job.status == ExecutionJobStatus::Running
+            && job
+                .lease_expires_at
+                .as_ref()
+                .is_some_and(|lease_expires_at| lease_expires_at < &now);
+        if status == ExecutionJobStatus::Running
+            && job.status != ExecutionJobStatus::Queued
+            && !lease_expired
+        {
+            return Err(AppError::not_found("execution job not found"));
+        }
         job.status = status;
         match job.status {
             ExecutionJobStatus::Running => {
-                job.started_at = Some(Utc::now());
+                job.started_at = Some(now);
                 job.worker_id = worker_id.map(str::to_string);
-                job.lease_expires_at = Some(Utc::now() + chrono::Duration::minutes(5));
+                job.lease_expires_at = Some(now + chrono::Duration::minutes(5));
                 job.attempt_count += 1;
             }
             ExecutionJobStatus::Completed

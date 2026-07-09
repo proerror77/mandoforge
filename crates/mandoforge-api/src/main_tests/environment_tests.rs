@@ -662,6 +662,154 @@ async fn worker_environment_header_filters_session_loop_and_execution_jobs() {
         "worker pool A should not see B execution jobs: {execution_jobs_for_pool_a:?}"
     );
 
+    let execution_job_a = execution_jobs_for_a
+        .iter()
+        .find(|job| job.session_id == session_a.id)
+        .expect("environment A execution job");
+    let completed_execution_job_a: execution_queue::ExecutionJob = request_json(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/execution-jobs/{}/run", execution_job_a.id))
+            .header("x-mandoforge-worker-id", "k-agent-execution-worker-a")
+            .header("x-mandoforge-subject", "worker-a")
+            .header("x-mandoforge-roles", "admin")
+            .header("x-mandoforge-environment-id", environment_a.id.to_string())
+            .header("x-mandoforge-worker-pool", "worker-a")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(
+        completed_execution_job_a.status,
+        ExecutionJobStatus::Completed
+    );
+
+    let execution_events_a: Vec<SessionEvent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/sessions/{}/events", session_a.id))
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let execution_claimed_event = execution_events_a
+        .iter()
+        .find(|event| {
+            event.event_type == "k_agent.claimed"
+                && event.payload["execution_job_id"] == json!(execution_job_a.id)
+        })
+        .expect("execution job k_agent.claimed event");
+    assert_eq!(
+        execution_claimed_event.payload["environment_id"],
+        json!(environment_a.id)
+    );
+    assert_eq!(
+        execution_claimed_event.payload["worker_id"],
+        json!("k-agent-execution-worker-a")
+    );
+    assert_eq!(
+        execution_claimed_event.payload["worker_pool"],
+        json!("worker-a")
+    );
+    assert_eq!(
+        execution_claimed_event.payload["job_status"],
+        json!("running")
+    );
+    assert_eq!(
+        execution_claimed_event.payload["attempt_count"],
+        json!(completed_execution_job_a.attempt_count)
+    );
+    assert!(execution_claimed_event.payload["lease_expires_at"].is_string());
+    assert_eq!(
+        execution_claimed_event.payload["dispatch_surface"],
+        json!("execution_job")
+    );
+    assert_eq!(
+        execution_claimed_event.payload["authority_boundary"],
+        json!("environment_scheduling_only")
+    );
+    assert_eq!(
+        execution_claimed_event.payload["return_contract"],
+        json!("execution_job_return_evidence")
+    );
+    let execution_completed_event = execution_events_a
+        .iter()
+        .find(|event| {
+            event.event_type == "k_agent.completed"
+                && event.payload["execution_job_id"] == json!(execution_job_a.id)
+        })
+        .expect("execution job k_agent.completed event");
+    assert_eq!(
+        execution_completed_event.payload["job_status"],
+        json!("completed")
+    );
+    assert_eq!(
+        execution_completed_event.payload["tool"],
+        json!(execution_job_a.tool_name)
+    );
+    assert_eq!(
+        execution_completed_event.payload["attempt_count"],
+        json!(completed_execution_job_a.attempt_count)
+    );
+    assert_eq!(
+        execution_completed_event.payload["dispatch_surface"],
+        json!("execution_job")
+    );
+    assert_eq!(
+        execution_completed_event.payload["authority_boundary"],
+        json!("environment_scheduling_only")
+    );
+    assert_eq!(
+        execution_completed_event.payload["return_contract"],
+        json!("execution_job_return_evidence")
+    );
+    let k_agent_execution_event_count = execution_events_a
+        .iter()
+        .filter(|event| {
+            event.payload["execution_job_id"] == json!(execution_job_a.id)
+                && event.event_type.starts_with("k_agent.")
+        })
+        .count();
+    let (status, error) = request_value(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/execution-jobs/{}/run", execution_job_a.id))
+            .header(
+                "x-mandoforge-worker-id",
+                "k-agent-execution-worker-a-duplicate",
+            )
+            .header("x-mandoforge-subject", "worker-a")
+            .header("x-mandoforge-roles", "admin")
+            .header("x-mandoforge-environment-id", environment_a.id.to_string())
+            .header("x-mandoforge-worker-pool", "worker-a")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(error["error"], json!("execution job not found"));
+    let execution_events_after_duplicate: Vec<SessionEvent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/sessions/{}/events", session_a.id))
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(
+        execution_events_after_duplicate
+            .iter()
+            .filter(|event| {
+                event.payload["execution_job_id"] == json!(execution_job_a.id)
+                    && event.event_type.starts_with("k_agent.")
+            })
+            .count(),
+        k_agent_execution_event_count,
+        "duplicate execution job claim should not append fake K Agent evidence"
+    );
+
     let execution_job_b = request_json::<Vec<execution_queue::ExecutionJob>>(
         app.clone(),
         Request::builder()

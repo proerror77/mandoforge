@@ -183,9 +183,11 @@ use eval_judge::{EvalJudgeClient, EvalJudgeConfig, HttpEvalJudgeClient};
 #[cfg(test)]
 use eval_judge::{EvalJudgeRequest, EvalJudgeResponse, ReservedEvalJudgeClient};
 pub(crate) use eval_runtime::*;
+#[cfg(test)]
+use execution::run_execution_job;
 use execution::{
     AgentCliRequest, ExecutionWorker, ExecutionWorkerOutcome, InlineExecutionWorker,
-    QueueBackedExecutionWorker, run_agent_cli, run_execution_job, truncate_output,
+    QueueBackedExecutionWorker, run_agent_cli, run_started_execution_job, truncate_output,
 };
 #[cfg(test)]
 use execution::{codex_jsonl_event_type, parse_codex_jsonl};
