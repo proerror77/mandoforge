@@ -1688,6 +1688,29 @@ fn agent_os_product_capabilities() -> Vec<Value> {
             "authority_boundary": "Session is the Managed Runtime event envelope; it records events, tool calls, artifacts, context packets, threads, and audit evidence, but does not bypass Manager Runtime, TaskGrant, Policy, Approval, Tool Router, or Environment scheduling."
         }),
         json!({
+            "key": "session_event",
+            "product_object": "SessionEvent",
+            "status": "available",
+            "api_routes": [
+                "GET /api/sessions/{id}/events",
+                "POST /api/sessions/{id}/events",
+                "GET /api/sessions/{id}/stream",
+                "POST /api/sessions/{id}/messages",
+                "POST /api/sessions/{id}/run"
+            ],
+            "lifecycle_actions": ["append", "list", "stream", "replay_with_cursor", "enqueue_session_loop", "export_telemetry"],
+            "evidence_events": [
+                "user.message",
+                "user.custom_tool_result",
+                "tool.result",
+                "session.status_requires_action",
+                "execution.completed",
+                "agent.final",
+                "runtime.turn.completed"
+            ],
+            "authority_boundary": "SessionEvent is the durable event-log and replay surface for session input, runtime output, approvals, tool results, worker completions, and streaming cursors; it does not authorize work, create TaskGrant scope, approve actions, bypass Policy or Tool Router, or replace audit evidence."
+        }),
+        json!({
             "key": "session_thread",
             "product_object": "SessionThread",
             "status": "available",

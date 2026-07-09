@@ -9825,6 +9825,7 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
         "environment",
         "environment_profile",
         "managed_session",
+        "session_event",
         "session_thread",
         "runtime_turn",
         "context_packet",
@@ -10033,6 +10034,37 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
                 .as_str()
                 .unwrap_or_default()
                 .contains("does not bypass Manager Runtime")
+    }));
+    assert!(product_capabilities.iter().any(|capability| {
+        capability["key"] == json!("session_event")
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("POST /api/sessions/{id}/events"))
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("GET /api/sessions/{id}/stream"))
+            && capability["evidence_events"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("execution.completed"))
+            && capability["evidence_events"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("session.status_requires_action"))
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("durable event-log and replay surface")
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("does not authorize work")
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("replace audit evidence")
     }));
     assert!(product_capabilities.iter().any(|capability| {
         capability["key"] == json!("session_thread")
