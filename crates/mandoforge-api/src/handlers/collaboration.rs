@@ -376,29 +376,47 @@ fn work_surface_metadata(
     actor: Option<String>,
     assignee: Option<&str>,
 ) -> Value {
-    let work_surface = json!({
-        "surface": &adapter.surface,
-        "adapter": adapter.name,
-        "event_type": event_type,
-        "external_id": external_id,
-        "cursor": cursor,
-        "delivery_id": delivery_id,
-        "authentication": auth,
-        "rate_limit": work_surface_rate_limit_evidence(headers, &metadata),
-        "live_readback": work_surface_live_readback_evidence(headers, &metadata),
-        "occurred_at": occurred_at,
-        "actor": actor,
-        "extracted": if adapter.known {
+    let mut work_surface = Map::new();
+    work_surface.insert("surface".to_string(), json!(&adapter.surface));
+    work_surface.insert("adapter".to_string(), json!(adapter.name));
+    work_surface.insert("event_type".to_string(), json!(event_type));
+    work_surface.insert("external_id".to_string(), json!(external_id));
+    work_surface.insert("cursor".to_string(), json!(cursor));
+    work_surface.insert("delivery_id".to_string(), json!(delivery_id));
+    work_surface.insert("authentication".to_string(), auth);
+    work_surface.insert(
+        "rate_limit".to_string(),
+        work_surface_rate_limit_evidence(headers, &metadata),
+    );
+    work_surface.insert(
+        "live_readback".to_string(),
+        work_surface_live_readback_evidence(headers, &metadata),
+    );
+    if adapter.surface == "email" {
+        work_surface.insert(
+            "email_authentication".to_string(),
+            work_surface_email_authentication_evidence(headers, &metadata),
+        );
+    }
+    work_surface.insert("occurred_at".to_string(), json!(occurred_at));
+    work_surface.insert("actor".to_string(), json!(actor));
+    work_surface.insert(
+        "extracted".to_string(),
+        if adapter.known {
             work_surface_extracted_fields(&adapter.surface, &metadata)
         } else {
             json!({})
         },
-        "human_state": if adapter.known {
+    );
+    work_surface.insert(
+        "human_state".to_string(),
+        if adapter.known {
             work_surface_human_state(&metadata, assignee)
         } else {
             json!({})
-        }
-    });
+        },
+    );
+    let work_surface = Value::Object(work_surface);
     match metadata {
         Value::Object(mut object) => {
             object.insert("work_surface".to_string(), work_surface);
@@ -450,6 +468,39 @@ fn work_surface_live_readback_evidence(headers: &HeaderMap, metadata: &Value) ->
             "liveReadback",
             "live_readback_evidence",
             "api_readback",
+        ],
+    );
+    work_surface_observed_evidence(header_evidence, payload)
+}
+
+fn work_surface_email_authentication_evidence(headers: &HeaderMap, metadata: &Value) -> Value {
+    let header_evidence = work_surface_header_evidence(
+        headers,
+        &[
+            ("authentication_results", "authentication-results"),
+            ("arc_authentication_results", "arc-authentication-results"),
+            ("received_spf", "received-spf"),
+            ("dkim_signature", "dkim-signature"),
+            ("arc_seal", "arc-seal"),
+            ("arc_message_signature", "arc-message-signature"),
+            ("message_id", "message-id"),
+            ("return_path", "return-path"),
+            ("provider", "x-mandoforge-email-provider"),
+            ("spf_verdict", "x-mandoforge-email-spf"),
+            ("dkim_verdict", "x-mandoforge-email-dkim"),
+            ("dmarc_verdict", "x-mandoforge-email-dmarc"),
+        ],
+    );
+    let payload = work_surface_first_nested_value(
+        metadata,
+        &[
+            "email_authentication",
+            "emailAuthentication",
+            "authentication_results",
+            "authenticationResults",
+            "mail/authentication",
+            "envelope/authentication",
+            "headers/authentication-results",
         ],
     );
     work_surface_observed_evidence(header_evidence, payload)
@@ -514,6 +565,15 @@ fn work_surface_delivery_id(surface: &str, metadata: &Value) -> Option<String> {
         "linear" => &["delivery_id", "webhook_id", "notification/id", "event/id"],
         "jira" => &["delivery_id", "webhook_event_id", "issue/id"],
         "github" => &["delivery_id"],
+        "email" => &[
+            "delivery_id",
+            "message_id",
+            "messageId",
+            "message/id",
+            "mail/message_id",
+            "mail/messageId",
+            "envelope/message_id",
+        ],
         _ => &["delivery_id", "event_id"],
     };
     work_surface_first_nested_string(metadata, candidates)
@@ -567,6 +627,11 @@ fn work_surface_extracted_fields(surface: &str, metadata: &Value) -> Value {
                 "pull_request/id",
                 "pull_request/number",
                 "message/message_id",
+                "message_id",
+                "messageId",
+                "mail/message_id",
+                "mail/messageId",
+                "envelope/message_id",
                 "event/client_msg_id",
                 "event/ts",
                 "ticket/id",

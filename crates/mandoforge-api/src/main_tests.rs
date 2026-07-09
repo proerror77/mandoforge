@@ -35251,6 +35251,84 @@ async fn work_surface_event_adapters_normalize_supported_surfaces() {
 }
 
 #[tokio::test]
+async fn work_surface_event_preserves_email_authentication_evidence() {
+    let app = test_app().await;
+    let ingested: WorkSurfaceIngestion = request_json(
+        app,
+        json_request_with_headers(
+            "POST",
+            "/api/work-surface-events",
+            json!({
+                "surface": "email",
+                "event_type": "message.received",
+                "external_id": "email-1",
+                "title": "Email intake",
+                "metadata": {
+                    "message_id": "<ops-1@example.test>",
+                    "from": "customer@example.test",
+                    "to": ["support@example.test"],
+                    "subject": "Refund request",
+                    "authentication_results": {
+                        "spf": {"result": "pass", "domain": "example.test"},
+                        "dkim": {"result": "pass", "domain": "example.test"},
+                        "dmarc": {"result": "pass", "policy": "none"}
+                    }
+                }
+            }),
+            &[
+                ("x-mandoforge-subject", "email-ingestor"),
+                ("x-mandoforge-roles", "admin"),
+                (
+                    "authentication-results",
+                    "mx.example.test; spf=pass dkim=pass dmarc=pass",
+                ),
+                ("received-spf", "pass (example.test: domain is permitted)"),
+                ("dkim-signature", "v=1; d=example.test; b=abc123"),
+                ("message-id", "<ops-1@example.test>"),
+                ("x-mandoforge-email-provider", "inbound-relay"),
+                ("x-mandoforge-email-spf", "pass"),
+                ("x-mandoforge-email-dkim", "pass"),
+                ("x-mandoforge-email-dmarc", "pass"),
+            ],
+        ),
+    )
+    .await;
+
+    assert_eq!(ingested.work_item.source, "email");
+    assert_eq!(
+        ingested.work_item.metadata["work_surface"]["delivery_id"],
+        json!("<ops-1@example.test>")
+    );
+    assert_eq!(
+        ingested.work_item.metadata["work_surface"]["extracted"]["object_id"],
+        json!("<ops-1@example.test>")
+    );
+    assert_eq!(
+        ingested.work_item.metadata["work_surface"]["email_authentication"],
+        json!({
+            "observed": true,
+            "source": ["headers", "payload.metadata"],
+            "headers": {
+                "authentication_results": "mx.example.test; spf=pass dkim=pass dmarc=pass",
+                "received_spf": "pass (example.test: domain is permitted)",
+                "dkim_signature": "v=1; d=example.test; b=abc123",
+                "message_id": "<ops-1@example.test>",
+                "provider": "inbound-relay",
+                "spf_verdict": "pass",
+                "dkim_verdict": "pass",
+                "dmarc_verdict": "pass"
+            },
+            "payload": {
+                "spf": {"result": "pass", "domain": "example.test"},
+                "dkim": {"result": "pass", "domain": "example.test"},
+                "dmarc": {"result": "pass", "policy": "none"}
+            },
+            "mandoforge_enforced": false
+        })
+    );
+}
+
+#[tokio::test]
 async fn generic_work_surface_event_preserves_explicit_source_url_only() {
     let app = test_app().await;
     let ingested: WorkSurfaceIngestion = request_json(

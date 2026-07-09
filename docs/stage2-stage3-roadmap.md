@@ -91,6 +91,10 @@ The first Collaboration Layer slice is now in place:
   assignee, blocker, due date, source URL, and status metadata for operator
   review, plus extracted object, repository, channel, thread, project, label,
   and mention fields where the platform payload exposes them.
+- Email Work Surface intake preserves inbound mail authentication evidence from
+  relay headers and payload metadata, including Authentication-Results,
+  Received-SPF, DKIM, ARC, Message-ID, provider, and SPF/DKIM/DMARC verdicts,
+  while marking that evidence as observed rather than MandoForge-enforced.
 - `/api/work-items` creates and lists first-class WorkItems.
 - WorkItem creation persists source, priority, status, scope, and metadata.
 - `/api/work-items/:id/assignments` routes WorkItems to users, agents, squads,
@@ -317,10 +321,10 @@ plans:
    extracts richer platform object metadata, accepts GitHub, Slack, Linear, and
    Jira native webhook signature headers plus Feishu/Lark `X-Lark-Signature`
    as connector-specific verification variants, and
-   preserves platform rate-limit plus live-readback evidence supplied by
-   connector headers or payload metadata. Platform-specific OAuth/token
-   lifecycle, active live API fetch/readback, MandoForge-enforced rate-limit
-   scheduling, and Email-specific authentication evidence remain open.
+   preserves platform rate-limit, live-readback, and Email-specific
+   authentication evidence supplied by connector headers or payload metadata.
+   Platform-specific OAuth/token lifecycle, active live API fetch/readback, and
+   MandoForge-enforced rate-limit scheduling remain open.
 2. Runtime adapter consolidation: make Environment runtime binding the only
    product entrypoint for managed runtime execution. `agent_cli.exec` and
    `codex.exec` remain compatibility facades, but session-bound Environment
