@@ -326,8 +326,8 @@ plans:
    results, events, audit, and K Agent dispatch records. `codex.exec` no longer
    executes from request/env strategy without a session Environment binding, and
    `agent_cli.exec` no longer accepts the requested-profile escape hatch for
-   unbound sessions. Removing the remaining non-Environment agent/handoff
-   runtime-profile fallback remains open.
+   unbound sessions or falls back to agent/handoff runtime profiles outside the
+   session Environment binding.
 3. Environment Scheduling + K Agent: complete the Environment Work Queue,
    sandbox dispatch, and full runtime event/artifact return contract.
    Session-loop K Agent claim, lease, heartbeat, completion, and failure

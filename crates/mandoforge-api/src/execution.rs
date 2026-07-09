@@ -4130,7 +4130,7 @@ async fn enforce_bound_agent_cli_profile(
 ) -> Result<BoundAgentCliProfile, AppError> {
     let Some(bound_profile) = bound_agent_cli_profile(state, session_id).await? else {
         return Err(AppError::bad_request(
-            "agent_cli.exec requires a session-bound runtime profile",
+            "agent_cli.exec requires a session-bound environment runtime profile",
         ));
     };
     let bound_profile_name = normalize_agent_cli_profile(&bound_profile.name)?;
@@ -4158,33 +4158,7 @@ async fn bound_agent_cli_profile(
             }));
         }
     }
-
-    if let Some(assignment) = state
-        .list_agent_handoff_assignments(Some(session_id))
-        .await?
-        .into_iter()
-        .filter(|assignment| assignment.specialist_session_id == session_id)
-        .max_by_key(|assignment| assignment.created_at)
-        && let Some(profile_id) = assignment.runtime_profile_id
-    {
-        let profile = state.get_agent_runtime_profile(profile_id).await?;
-        return Ok(Some(BoundAgentCliProfile {
-            name: profile.name,
-            source: "handoff",
-        }));
-    }
-
-    let agent = state.get_agent(session.agent_id).await?;
-    match agent.runtime_profile_id {
-        Some(profile_id) => {
-            let profile = state.get_agent_runtime_profile(profile_id).await?;
-            Ok(Some(BoundAgentCliProfile {
-                name: profile.name,
-                source: "agent",
-            }))
-        }
-        None => Ok(None),
-    }
+    Ok(None)
 }
 
 async fn agent_cli_profile_config(

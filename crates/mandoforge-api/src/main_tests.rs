@@ -12511,7 +12511,6 @@ async fn delegated_runtime_step_runs_agent_cli_adapter_profile() {
         .expect("chmod fake claude code CLI");
 
     unsafe {
-        std::env::set_var("MANDOFORGE_ALLOW_REQUESTED_AGENT_CLI_PROFILE", "1");
         std::env::set_var("MANDOFORGE_AGENT_CLI_ALLOWED_PROFILES", "claude_code");
         std::env::set_var("MANDOFORGE_AGENT_CLI_CLAUDE_CODE_COMMAND", &shim_path);
         std::env::remove_var("MANDOFORGE_AGENT_CLI_CLAUDE_CODE_ARGS");
@@ -12599,7 +12598,6 @@ async fn delegated_runtime_step_runs_agent_cli_adapter_profile() {
     );
 
     unsafe {
-        std::env::remove_var("MANDOFORGE_ALLOW_REQUESTED_AGENT_CLI_PROFILE");
         std::env::remove_var("MANDOFORGE_AGENT_CLI_ALLOWED_PROFILES");
         std::env::remove_var("MANDOFORGE_AGENT_CLI_CLAUDE_CODE_COMMAND");
         std::env::remove_var("MANDOFORGE_AGENT_CLI_CLAUDE_CODE_ARGS");
@@ -24676,6 +24674,25 @@ async fn managed_agent_runtime_profile_can_drive_agent_cli_worker() {
     .await;
     assert_eq!(profile.name, "managed-coder");
     assert_eq!(profile.runtime_type, "agent_cli");
+    let environment: Environment = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/environments",
+            json!({
+                "name": "Managed Coder Environment",
+                "environment_type": "self_hosted",
+                "runtime_profile_id": profile.id,
+                "release_state": "active",
+                "status": "enabled"
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
 
     let profiles: Vec<AgentRuntimeProfile> = request_json(
         app.clone(),
@@ -24715,7 +24732,11 @@ async fn managed_agent_runtime_profile_can_drive_agent_cli_worker() {
         json_request(
             "POST",
             "/api/sessions",
-            json!({"agent_id": agent.id, "title": "managed agent CLI worker"}),
+            json!({
+                "agent_id": agent.id,
+                "environment_id": environment.id,
+                "title": "managed agent CLI worker"
+            }),
         ),
     )
     .await;
@@ -24846,6 +24867,25 @@ async fn managed_cli_runtime_profile_can_drive_agent_cli_worker() {
     )
     .await;
     assert_eq!(profile.runtime_type, "claude_code");
+    let environment: Environment = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/environments",
+            json!({
+                "name": "Claude Code Runtime Environment",
+                "environment_type": "self_hosted",
+                "runtime_profile_id": profile.id,
+                "release_state": "active",
+                "status": "enabled"
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
 
     let agent: Agent = request_json(
         app.clone(),
@@ -24873,7 +24913,11 @@ async fn managed_cli_runtime_profile_can_drive_agent_cli_worker() {
         json_request(
             "POST",
             "/api/sessions",
-            json!({"agent_id": agent.id, "title": "claude code CLI worker"}),
+            json!({
+                "agent_id": agent.id,
+                "environment_id": environment.id,
+                "title": "claude code CLI worker"
+            }),
         ),
     )
     .await;
@@ -25137,6 +25181,25 @@ async fn managed_codex_cli_runtime_profile_ingests_jsonl_into_session_events() {
     )
     .await;
     assert_eq!(profile.runtime_type, "codex_cli");
+    let environment: Environment = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/environments",
+            json!({
+                "name": "Codex CLI Runtime Environment",
+                "environment_type": "self_hosted",
+                "runtime_profile_id": profile.id,
+                "release_state": "active",
+                "status": "enabled"
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
 
     let agent: Agent = request_json(
         app.clone(),
@@ -25164,7 +25227,11 @@ async fn managed_codex_cli_runtime_profile_ingests_jsonl_into_session_events() {
         json_request(
             "POST",
             "/api/sessions",
-            json!({"agent_id": agent.id, "title": "codex CLI runtime worker"}),
+            json!({
+                "agent_id": agent.id,
+                "environment_id": environment.id,
+                "title": "codex CLI runtime worker"
+            }),
         ),
     )
     .await;
@@ -25391,6 +25458,25 @@ async fn managed_agent_runtime_profile_lifecycle_is_audited_and_fail_closed() {
     assert!(updated.remote_computer_required);
     assert_eq!(updated.timeout_seconds, Some(45));
     assert_eq!(updated.env["MANDOFORGE_PROFILE_STATE"], "disabled");
+    let environment: Environment = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/environments",
+            json!({
+                "name": "Disabled Runtime Environment",
+                "environment_type": "self_hosted",
+                "runtime_profile_id": profile.id,
+                "release_state": "active",
+                "status": "enabled"
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
 
     let agent: Agent = request_json(
         app.clone(),
@@ -25418,7 +25504,11 @@ async fn managed_agent_runtime_profile_lifecycle_is_audited_and_fail_closed() {
         json_request(
             "POST",
             "/api/sessions",
-            json!({"agent_id": agent.id, "title": "disabled profile must not run"}),
+            json!({
+                "agent_id": agent.id,
+                "environment_id": environment.id,
+                "title": "disabled profile must not run"
+            }),
         ),
     )
     .await;
@@ -25620,7 +25710,6 @@ async fn archived_agent_runtime_profile_is_hidden_and_not_resolvable() {
 #[tokio::test]
 async fn agent_cli_exec_requires_session_bound_runtime_profile() {
     let _env_guard = env_lock().lock().expect("env lock");
-    let _legacy_override = EnvVarGuard::remove("MANDOFORGE_ALLOW_REQUESTED_AGENT_CLI_PROFILE");
     let app = test_app_with_worker(Arc::new(QueueBackedExecutionWorker)).await;
     let profile: AgentRuntimeProfile = request_json(
         app.clone(),
@@ -25713,7 +25802,7 @@ async fn agent_cli_exec_requires_session_bound_runtime_profile() {
                 job.last_error
                     .as_deref()
                     .unwrap_or_default()
-                    .contains("session-bound runtime profile")
+                    .contains("session-bound environment runtime profile")
             );
         } else {
             assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -25721,7 +25810,7 @@ async fn agent_cli_exec_requires_session_bound_runtime_profile() {
                 body["error"]
                     .as_str()
                     .unwrap_or_default()
-                    .contains("session-bound runtime profile")
+                    .contains("session-bound environment runtime profile")
             );
         }
     }
