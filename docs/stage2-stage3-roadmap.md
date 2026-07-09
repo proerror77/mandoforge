@@ -104,7 +104,7 @@ The first Collaboration Layer slice is now in place:
 - `/api/work-items/:id/activity` exposes the human-readable Activity Feed for
   intake, routing, and review.
 - `/api/capability-discovery` now exposes an Agent OS product capability catalog
-  for WorkflowPack, DomainPack, AgentVersion, EnvironmentProfile,
+  for ManagerPlan, WorkflowPack, DomainPack, AgentVersion, EnvironmentProfile,
   OntologyActionContract, ToolSpec, EvalGate, Release, and Rollback, including
   the existing API surfaces, lifecycle actions, audit/evidence events, and
   authority boundaries for each capability.
