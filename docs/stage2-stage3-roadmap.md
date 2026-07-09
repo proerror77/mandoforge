@@ -224,6 +224,11 @@ Scope:
   bindings, retrieval context, and data contracts explicitly.
 - Keep context packet replay in the timeline so operators know what context an
   agent saw before acting.
+- Require Ontology Action Contract validity before governed connector tool
+  execution when the TaskGrant declares that boundary.
+- Keep TaskGrant, Policy, Approval, and Tool Router as the execution authority;
+  Ontology only validates the business action shape, rule binding, and tool
+  binding.
 - Keep memory writeback approval-gated.
 
 Acceptance:
@@ -232,6 +237,11 @@ Acceptance:
   and permission checks.
 - Operators can inspect why a context packet was built and which source objects
   contributed to it.
+- A read-only valid action can execute without approval when TaskGrant,
+  connector scope, and policy allow it.
+- A high-risk valid action still enters approval / `requires_action`.
+- An ontology-valid action cannot bypass TaskGrant, Policy, Approval, or
+  connector scope.
 
 ### S5: WorkflowPack / DomainPack Platform
 
@@ -300,8 +310,10 @@ plans:
    WorkflowDefinition, and handoff materialization into Assignment,
    SessionThread, and child TaskGrant evidence when a parent WorkflowRun grant
    is active.
-5. Ontology Action Contract enforcement: make action validity a checked input to
-   Tool Router without letting ontology bypass TaskGrant, Policy, or Approval.
+5. Ontology Action Contract object model: deepen BusinessObject, Rule,
+   Relation, Metric, ActionContract, PermissionContract, ToolBinding,
+   ValidationRule, and RiskClass representation beyond the current checked
+   `ontology_action_type` contract gate.
 6. Pack / Release / Evidence: make WorkflowPack, DomainPack, AgentVersion,
    EnvironmentProfile, OntologyActionContract, ToolSpec, EvalGate, Release, and
    Rollback auditable as product capabilities.

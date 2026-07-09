@@ -15380,6 +15380,15 @@ async fn workflow_tool_execution_enforces_ontology_action_contract_gate() {
     )
     .await;
     assert_eq!(approval_required["status"], json!("approval_required"));
+    let blocked_session = state
+        .get_session(Uuid::parse_str(session_id).expect("session uuid"))
+        .await
+        .expect("session enters requires_action");
+    assert_eq!(
+        blocked_session.status,
+        SessionStatus::RequiresAction,
+        "high-risk valid ontology action must pause the session for approval"
+    );
     let waiting_call = state
         .list_tool_calls(Some(Uuid::parse_str(session_id).expect("session uuid")))
         .await
@@ -15410,6 +15419,346 @@ async fn workflow_tool_execution_enforces_ontology_action_contract_gate() {
     assert!(events.iter().any(|event| {
         event.event_type == "ontology_action_contract.gate_failed"
             && event.payload["tool"] == json!("native.connector.call")
+    }));
+}
+
+#[tokio::test]
+async fn low_risk_ontology_valid_mcp_action_executes_without_approval_but_not_without_task_grant_scope()
+ {
+    let _env_guard = env_lock().lock().expect("env lock");
+    let _insecure_auth = EnvVarGuard::set("MANDOFORGE_INSECURE_DEV_AUTH", "1");
+    let mcp_client = Arc::new(RecordingMcpGatewayClient::default());
+    let state = AppState {
+        store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
+        execution_queue: ExecutionQueue::default(),
+        execution_worker: Arc::new(InlineExecutionWorker),
+        authorizer: Arc::new(RoleBasedAuthorizer),
+        observability_config: ObservabilityConfig {
+            service_name: "mandoforge-api-test".to_string(),
+            otlp_endpoint: None,
+            collector_health_endpoint: None,
+            sample_ratio: 1.0,
+        },
+        telemetry_exporter: Arc::new(ReservedTelemetryExporter),
+        mcp_gateway_config: Some(McpGatewayConfig {
+            endpoint: "http://mcp.test".to_string(),
+            timeout_seconds: 5,
+            allowed_servers: vec!["docs".to_string()],
+        }),
+        mcp_gateway_client: mcp_client.clone(),
+        codex_app_server_config: None,
+        codex_app_server_client: Arc::new(ReservedCodexAppServerClient),
+        eval_judge_config: None,
+        eval_judge_client: Arc::new(ReservedEvalJudgeClient),
+        cost_alert_webhook_url: None,
+        cost_alert_email_relay_url: None,
+        cost_alert_smtp_config: None,
+        approval_webhook_url: None,
+        workspace_root: test_workspace_root(),
+        tenant_id: Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
+        tenant_runtime_mode: TenantRuntimeMode::SingleRuntimeTenant,
+        policy: runtime_policy(PolicyConfig::default()),
+    };
+    let organization = state
+        .create_organization(
+            CreateOrganization {
+                name: "Ontology MCP Org".to_string(),
+                slug: "ontology-mcp-org".to_string(),
+            },
+            Some("admin-1".to_string()),
+        )
+        .await
+        .expect("create org");
+    let team = state
+        .create_team(
+            organization.id,
+            CreateTeam {
+                name: "Ontology MCP Team".to_string(),
+                slug: "ontology-mcp-team".to_string(),
+            },
+        )
+        .await
+        .expect("create team");
+    state
+        .create_provider_access(
+            team.id,
+            CreateProviderAccess {
+                provider_name: "openai-compatible".to_string(),
+                model_allowlist: vec!["gpt-5.5-mini".to_string()],
+            },
+        )
+        .await
+        .expect("create provider access");
+    state
+        .create_mcp_server(
+            team.id,
+            CreateMcpServerRecord {
+                name: "docs".to_string(),
+                transport: "http".to_string(),
+                config: json!({"source": "test"}),
+                tool_allowlist: vec!["lookup_order".to_string(), "delete_order".to_string()],
+            },
+        )
+        .await
+        .expect("create mcp server");
+    let semantic_scopes = json!({
+        "domain_scope": "commerce",
+        "workflow_scope": "order-read",
+        "lane_scope": "support",
+        "memory_scope": "ontology-actions"
+    });
+    let action_object = create_ontology_action_contract_object_for_test(
+        &state,
+        semantic_scopes.clone(),
+        "docs",
+        "lookup_order",
+        "read",
+    )
+    .await;
+    let denied_action_object = create_ontology_action_contract_object_for_test(
+        &state,
+        semantic_scopes.clone(),
+        "docs",
+        "delete_order",
+        "read",
+    )
+    .await;
+    let agent = state
+        .create_agent(CreateAgent {
+            name: "Ontology MCP Read Agent".to_string(),
+            kind: "orchestrator".to_string(),
+            provider: "openai-compatible".to_string(),
+            model: "gpt-5.5-mini".to_string(),
+            team_id: Some(team.id),
+            project_id: None,
+            runtime_profile_id: None,
+            agent_role: "manager".to_string(),
+            system_prompt: "Use read-only MCP actions only through ontology contracts.".to_string(),
+            runtime_config: json!({}),
+            tools: vec!["mcp.call".to_string()],
+            tool_policy: json!({}),
+            mcp_server_ids: vec![],
+            skill_ids: vec![],
+            workflow_pack_ids: vec![],
+            remote_computer_profile: json!({}),
+            semantic_scopes: semantic_scopes.clone(),
+            release_state: "draft".to_string(),
+        })
+        .await
+        .expect("create agent");
+    let definition = state
+        .create_workflow_definition(WorkflowDefinition {
+            id: Uuid::new_v4(),
+            pack_installation_id: None,
+            pack_id: None,
+            pack_version: None,
+            name: "Ontology MCP read workflow".to_string(),
+            entrypoint: "ontology-mcp-read".to_string(),
+            trigger_type: "manual".to_string(),
+            default_agent_id: agent.id,
+            default_environment_id: None,
+            input_schema_ref: None,
+            output_schema_ref: None,
+            step_graph: empty_json_object(),
+            handoff_rules: json!({
+                "root_task_grant": {
+                    "semantic_scopes": semantic_scopes.clone(),
+                    "memory_scope": {
+                        "mode": "snapshot_only",
+                        "allowed_object_types": ["ontology_action_type"],
+                        "minimum_trust_level": "source_attested",
+                        "max_objects": 5
+                    },
+                    "tool_scope": {
+                        "read": ["mcp.call"],
+                        "write": [],
+                        "external_write": []
+                    },
+                    "connector_scope": {
+                        "mode": "read_only",
+                        "allowed_connector_ids": ["docs"],
+                        "allowed_tool_names": ["lookup_order"],
+                        "tenant_scope": {"workspace_id": "docs-read"},
+                        "side_effect_classes": ["read"],
+                        "ontology_action_contract_required": true
+                    },
+                    "external_effects": {
+                        "publish": false,
+                        "payment": false,
+                        "external_message": false,
+                        "account_mutation": false,
+                        "ad_spend_mutation": false,
+                        "read": true,
+                        "ontology_action_contract_required": true
+                    }
+                }
+            }),
+            execution_strategy: default_workflow_execution_strategy(),
+            runtime_adapter: None,
+            runtime_mode: None,
+            runtime_capability_contract: empty_json_object(),
+            event_ingestion_policy: default_event_ingestion_policy(),
+            approval_policy_ref: None,
+            eval_gate_refs: Vec::new(),
+            release_state: "released".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            archived_at: None,
+        })
+        .await
+        .expect("workflow definition");
+    let app = build_router(state.clone());
+    let run: WorkflowRun = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-runs",
+            json!({"workflow_definition_id": definition.id}),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    let root_task_grant_id = run.root_task_grant_id.expect("root grant");
+    let packet = bind_latest_context_packet_to_task_grant_for_test(
+        &state,
+        run.primary_session_id,
+        root_task_grant_id,
+    )
+    .await;
+    assert!(
+        packet
+            .retrieved_objects
+            .iter()
+            .any(|object| object.id == action_object.id)
+    );
+    assert!(
+        packet
+            .retrieved_objects
+            .iter()
+            .any(|object| object.id == denied_action_object.id)
+    );
+
+    let result: Value = request_json(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri("/api/tools/mcp.call/execute")
+            .header("content-type", "application/json")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::from(
+                json!({
+                    "session_id": run.primary_session_id,
+                    "task_grant_id": root_task_grant_id,
+                    "args": {
+                        "server": "docs",
+                        "tool": "lookup_order",
+                        "args": {
+                            "side_effect_class": "read",
+                            "order_id": "order-42"
+                        }
+                    }
+                })
+                .to_string(),
+            ))
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(result["status"], json!("called"));
+    assert_eq!(result["result"]["server"], json!("docs"));
+    assert_eq!(result["result"]["tool"], json!("lookup_order"));
+    assert_eq!(mcp_client.requests.lock().await.len(), 1);
+    let completed_call = state
+        .list_tool_calls(Some(run.primary_session_id))
+        .await
+        .expect("tool calls")
+        .into_iter()
+        .find(|call| call.tool_name == "mcp.call" && call.status == "completed")
+        .expect("completed mcp call");
+    assert_eq!(completed_call.policy_decision["decision"], json!("allowed"));
+    assert_eq!(
+        completed_call.policy_decision["ontology_action_contract_gate"]["status"],
+        json!("passed")
+    );
+    assert_eq!(
+        completed_call.policy_decision["ontology_action_contract_gate"]["action_object_id"],
+        json!(action_object.id)
+    );
+
+    let grant = state
+        .get_task_grant(root_task_grant_id)
+        .await
+        .expect("root task grant");
+    let denied_action_args = json!({
+        "server": "docs",
+        "tool": "delete_order",
+        "args": {
+            "side_effect_class": "read",
+            "order_id": "order-42"
+        }
+    });
+    let denied_action_gate = evaluate_ontology_action_contract_gate(
+        &state,
+        Some(&grant),
+        "mcp.call",
+        &denied_action_args,
+    )
+    .await
+    .expect("evaluate ontology action contract gate")
+    .expect("ontology action contract gate");
+    assert_eq!(denied_action_gate["status"], json!("passed"));
+    assert_eq!(
+        denied_action_gate["action_object_id"],
+        json!(denied_action_object.id)
+    );
+
+    let (status, denied) = request_value(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri("/api/tools/mcp.call/execute")
+            .header("content-type", "application/json")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::from(
+                json!({
+                    "session_id": run.primary_session_id,
+                    "task_grant_id": root_task_grant_id,
+                    "args": denied_action_args
+                })
+                .to_string(),
+            ))
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(
+        denied["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("task grant connector scope does not allow MCP tool")
+    );
+    assert_eq!(
+        mcp_client.requests.lock().await.len(),
+        1,
+        "ontology-valid but connector-scope-denied calls must not reach the gateway"
+    );
+
+    let events: Vec<SessionEvent> = request_json(
+        app,
+        Request::builder()
+            .uri(format!("/api/sessions/{}/events", run.primary_session_id))
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(events.iter().any(|event| {
+        event.event_type == "policy.allowed" && event.payload["tool"] == json!("mcp.call")
+    }));
+    assert!(!events.iter().any(|event| {
+        event.event_type == "policy.requires_approval" && event.payload["tool"] == json!("mcp.call")
     }));
 }
 
