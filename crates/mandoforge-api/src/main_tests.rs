@@ -9822,6 +9822,7 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
         "work_surface_connector",
         "agent_version",
         "environment_profile",
+        "managed_session",
         "remote_computer",
         "task_grant",
         "approval",
@@ -9941,6 +9942,37 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
                 .contains(&json!(
                     "GET /api/agent-runtime-profiles/{id}/capability-readback"
                 ))
+    }));
+    assert!(product_capabilities.iter().any(|capability| {
+        capability["key"] == json!("managed_session")
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("POST /api/sessions/{id}/run"))
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("GET /api/sessions/{id}/stream"))
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("POST /api/session-loop-jobs/{id}/run"))
+            && capability["evidence_events"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("session.loop.started"))
+            && capability["evidence_events"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("artifact.created"))
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Managed Runtime event envelope")
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("does not bypass Manager Runtime")
     }));
     assert!(product_capabilities.iter().any(|capability| {
         capability["key"] == json!("remote_computer")

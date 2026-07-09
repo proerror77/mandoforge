@@ -1615,6 +1615,45 @@ fn agent_os_product_capabilities() -> Vec<Value> {
             "authority_boundary": "Environment profiles select runtime bindings; execution still flows through Managed Runtime, Tool Router, Policy, Approval, and Audit."
         }),
         json!({
+            "key": "managed_session",
+            "product_object": "Session",
+            "status": "available",
+            "api_routes": [
+                "GET /api/sessions",
+                "POST /api/sessions",
+                "GET /api/sessions/{id}",
+                "POST /api/sessions/{id}/run",
+                "POST /api/sessions/{id}/messages",
+                "GET /api/sessions/{id}/events",
+                "POST /api/sessions/{id}/events",
+                "GET /api/sessions/{id}/stream",
+                "GET /api/sessions/{id}/artifacts",
+                "GET /api/sessions/{id}/tool-calls",
+                "GET /api/sessions/{id}/audit-logs",
+                "GET /api/sessions/{id}/threads",
+                "GET /api/sessions/{id}/context-packet",
+                "POST /api/sessions/{id}/context-packet",
+                "GET /api/session-loop-jobs",
+                "POST /api/session-loop-jobs/{id}/run",
+                "POST /api/session-loop-jobs/{id}/heartbeat"
+            ],
+            "lifecycle_actions": ["create", "append_message", "append_event", "enqueue_session_loop", "run_session_loop_job", "heartbeat_session_loop_job", "stream_events", "list_artifacts", "list_tool_calls", "list_audit_logs", "render_context_packet"],
+            "evidence_events": [
+                "session.loop.queued",
+                "session.loop.started",
+                "session.loop.completed",
+                "session.loop.failed",
+                "session.loop.idle",
+                "session.loop.skipped",
+                "execution.completed",
+                "agent.final",
+                "artifact.created",
+                "thread.started",
+                "thread.status_changed"
+            ],
+            "authority_boundary": "Session is the Managed Runtime event envelope; it records events, tool calls, artifacts, context packets, threads, and audit evidence, but does not bypass Manager Runtime, TaskGrant, Policy, Approval, Tool Router, or Environment scheduling."
+        }),
+        json!({
             "key": "remote_computer",
             "product_object": "RemoteComputer",
             "status": "available",
