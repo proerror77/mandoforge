@@ -4,40 +4,42 @@ This roadmap tracks the product architecture for MandoForge as an Agent OS.
 
 ## Architecture
 
+The product architecture follows the Full Agent OS narrative:
+
 ```text
-Existing Work Surfaces
-  Slack / Feishu / GitHub / Jira / Linear / Email
+Work Surfaces
+  Feishu / Slack / GitHub / Jira / Linear / Email / Browser
         |
 Collaboration Layer
-  WorkItem / Project / Assignment / Review
-  Agent Teammate / Squad / Activity Feed
+  WorkItem / Project / Assignment / Review / Activity Feed / Squad
         |
-Manager Agent / Work Coordination Layer
-  Task decomposition / routing / escalation / review
+Manager Agent Layer
+  Intake / Plan / Decompose / Route / Delegate / Escalate / Review
         |
 Managed Runtime Layer
-  Session / Event Log / Tool Router / Policy
-  Approval / Audit / Artifact / Eval
+  Agent / Environment / Session / Events / Threads / Runtime Turns
         |
-Semantic Layer / Ontology Service
-  Business Objects / Metrics / Relations
-  Actions / Permissions / Tool Bindings
-  Retrieval Context / Data Contracts
+Governance Layer
+  Policy / Approval / RBAC / TaskGrant / Audit / Eval / Release / Rollback
         |
-Enterprise Data Foundation
-  Warehouse / Lakehouse / Postgres / Vector
-  Graph / Docs / APIs / Event Streams
+Ontology Action Contract Layer
+  Business Object / Rule / Relation / Metric / Action / Tool Binding / Validation
+        |
+Environment Scheduling Layer
+  Environment Work Queue / K Agent / Worker Lease / Sandbox Lifecycle / CLI Dispatch
+        |
+Execution Substrate
+  Codex / Claude Code / CMA / MCP / SQL / Shell / Remote Computer / APIs
 ```
 
 Claude Managed Agents remains a useful reference for the Managed Runtime Layer:
 Agent, Environment, Session, Events, and Threads. It is not the complete
 MandoForge architecture.
 
-MandoForge Agent Runtime owns the session/evidence system and calls Codex CLI,
-Claude Code CLI, Codex App Server, and future runtimes as adapters. Manager
-Agents are managed agents running on that runtime. They coordinate WorkItems,
-Assignments, Reviews, and child specialist threads; they are not a second
-runtime orchestrator.
+Palantir AIP remains a useful reference for enterprise operation patterns:
+context engineering, purpose-based controls, package/release/deploy, and
+Human+AI operation surfaces. MandoForge does not copy AIP's ontology-centered
+data-platform boundary.
 
 ## Current Baseline
 
@@ -94,6 +96,22 @@ up the stack.
 4. Keep worker claims bound to Environment and worker queue bindings.
 5. Keep SSE reconnect semantics so UI clients can resume without missing
    events.
+
+## Full Agent OS Implementation Phases
+
+1. Runtime Contract: keep event-driven sessions, runtime turns, `requires_action`,
+   and environment-bound runtime adapters on the single session-loop path.
+2. Environment Scheduling + K Agent: isolate sandbox and CLI dispatch from
+   business authority while preserving worker lease, event, artifact, and audit
+   evidence.
+3. Manager Runtime: make Manager Agents operate on WorkItems, ManagerPlans,
+   Assignments, Reviews, WorkflowRuns, SessionThreads, and TaskGrants.
+4. Ontology Action Contract: use Ontology for action validity, rules, tool
+   bindings, and validation; keep TaskGrant, Policy, Approval, and Tool Router
+   as execution authority.
+5. Pack / Release / Evidence: make WorkflowPack, DomainPack, AgentVersion,
+   EnvironmentProfile, OntologyActionContract, ToolSpec, EvalGate, Release, and
+   Rollback installable and auditable.
 
 ## Product Workstreams
 
