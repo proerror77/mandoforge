@@ -23481,6 +23481,20 @@ async fn queue_backed_worker_marks_nonzero_agent_cli_as_failed() {
     assert_eq!(agent_cli_call.status, "failed");
     assert!(agent_cli_call.error.is_some());
 
+    let audit_logs: Vec<AuditLog> = request_json(
+        app,
+        Request::builder()
+            .uri(format!("/api/sessions/{}/audit-logs", session.id))
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(audit_logs.iter().any(|log| {
+        log.action == "tool.failed"
+            && log.details["tool"] == "agent_cli.exec"
+            && log.details["runtime_binding_source"] == "requested"
+    }));
+
     unsafe {
         std::env::remove_var("MANDOFORGE_ALLOW_REQUESTED_AGENT_CLI_PROFILE");
         std::env::remove_var("MANDOFORGE_AGENT_CLI_ALLOWED_PROFILES");
@@ -24722,6 +24736,7 @@ async fn environment_runtime_profile_is_canonical_for_agent_cli_exec() {
         .expect("agent CLI result");
     assert_eq!(result["profile"], "environment-codex-worker");
     assert_eq!(result["profile_source"], "managed");
+    assert_eq!(result["runtime_binding_source"], "environment");
     assert_eq!(result["runtime_type"], "agent_cli");
     assert_eq!(result["runtime_adapter_event_count"], 0);
     assert!(
@@ -24739,7 +24754,7 @@ async fn environment_runtime_profile_is_canonical_for_agent_cli_exec() {
     assert!(!result["stdout"].as_str().unwrap().contains("source=agent"));
 
     let events: Vec<SessionEvent> = request_json(
-        app,
+        app.clone(),
         Request::builder()
             .uri(format!("/api/sessions/{}/events", session.id))
             .body(Body::empty())
@@ -24750,6 +24765,22 @@ async fn environment_runtime_profile_is_canonical_for_agent_cli_exec() {
         event.event_type == "agent_cli.task.completed"
             && event.payload["runtime_type"] == "agent_cli"
             && event.payload["profile"] == "environment-codex-worker"
+            && event.payload["runtime_binding_source"] == "environment"
+    }));
+
+    let audit_logs: Vec<AuditLog> = request_json(
+        app,
+        Request::builder()
+            .uri(format!("/api/sessions/{}/audit-logs", session.id))
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(audit_logs.iter().any(|log| {
+        log.action == "tool.completed"
+            && log.details["tool"] == "agent_cli.exec"
+            && log.details["profile"] == "environment-codex-worker"
+            && log.details["runtime_binding_source"] == "environment"
     }));
 }
 

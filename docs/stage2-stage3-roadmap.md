@@ -62,6 +62,9 @@ The Managed Runtime Layer has a strong baseline:
   boundary.
 - Runtime adapter normalization for Codex CLI, Claude Code CLI, and Codex App
   Server turn output.
+- `agent_cli.exec` remains a compatibility facade and records the session-bound
+  runtime binding source (`environment`, `handoff`, `agent`, or legacy
+  `requested`) in execution results, session events, and audit evidence.
 - Durable session threads for manager-to-specialist handoff.
 - Tool Router, Policy Engine, Approval Engine, Artifact Store, and Audit Logger.
 - SSE event streaming with reconnect cursors.

@@ -2515,7 +2515,9 @@ async fn execute_approved_remote_computer_agent_cli(
     let profile = normalize_agent_cli_profile(&request.profile)?;
     let target = remote_computer_pod_exec_target(state, approval.session_id, assignment).await?;
     let profile_config = agent_cli_profile_config(state, &profile).await?;
-    enforce_bound_agent_cli_profile(state, approval.session_id, &profile).await?;
+    let bound_profile =
+        enforce_bound_agent_cli_profile(state, approval.session_id, &profile).await?;
+    let runtime_binding_source = bound_profile.source;
     let profile_source = match profile_config.source {
         AgentCliProfileConfigSource::Managed => "managed",
         AgentCliProfileConfigSource::Environment => "environment",
@@ -2531,6 +2533,7 @@ async fn execute_approved_remote_computer_agent_cli(
             json!({
                 "profile": profile,
                 "profile_source": profile_source,
+                "runtime_binding_source": runtime_binding_source,
                 "runtime_type": runtime_type,
                 "task": &request.task,
                 "runner": "remote_computer_pod_exec",
@@ -2547,7 +2550,7 @@ async fn execute_approved_remote_computer_agent_cli(
         &target,
         approval.session_id,
         command,
-        json!({"tool_call_id": tool_call.id, "profile": profile, "profile_source": profile_source, "runtime_type": runtime_type}),
+        json!({"tool_call_id": tool_call.id, "profile": profile, "profile_source": profile_source, "runtime_binding_source": runtime_binding_source, "runtime_type": runtime_type}),
         "Remote Computer agent CLI exec did not return output",
     )
     .await?;
@@ -2614,6 +2617,7 @@ async fn execute_approved_remote_computer_agent_cli(
                 "profile": profile,
                 "workspace": target.workspace_path,
                 "profile_source": profile_source,
+                "runtime_binding_source": runtime_binding_source,
                 "runtime_type": runtime_type,
                 "stdout_bytes": stdout.original_bytes,
                 "stderr_bytes": stderr.original_bytes,
@@ -2634,6 +2638,7 @@ async fn execute_approved_remote_computer_agent_cli(
             json!({
                 "profile": profile,
                 "profile_source": profile_source,
+                "runtime_binding_source": runtime_binding_source,
                 "runtime_type": runtime_type,
                 "status": status,
                 "stdout": stdout.text,
@@ -2662,6 +2667,7 @@ async fn execute_approved_remote_computer_agent_cli(
         "runner": "remote_computer_pod_exec",
         "profile": profile,
         "profile_source": profile_source,
+        "runtime_binding_source": runtime_binding_source,
         "runtime_type": runtime_type,
         "remote_computer_id": target.remote_computer.id,
         "assignment_id": assignment.id,
@@ -2715,6 +2721,7 @@ async fn execute_approved_remote_computer_agent_cli(
                     "tool": tool_call.tool_name,
                     "profile": profile,
                     "profile_source": profile_source,
+                    "runtime_binding_source": runtime_binding_source,
                     "runtime_type": runtime_type,
                     "runner": "remote_computer_pod_exec",
                     "remote_computer_id": target.remote_computer.id,
@@ -2759,6 +2766,7 @@ async fn execute_approved_remote_computer_agent_cli(
                 "tool": tool_call.tool_name,
                 "profile": profile,
                 "profile_source": profile_source,
+                "runtime_binding_source": runtime_binding_source,
                 "runtime_type": runtime_type,
                 "runner": "remote_computer_pod_exec",
                 "remote_computer_id": target.remote_computer.id,
@@ -2847,6 +2855,13 @@ async fn execute_approved_agent_cli(
     tool_call: &ToolCall,
 ) -> Result<(), AppError> {
     let request: AgentCliRequest = serde_json::from_value(tool_call.args.clone())?;
+    let runtime_binding_source = match normalize_agent_cli_profile(&request.profile) {
+        Ok(profile) => enforce_bound_agent_cli_profile(state, approval.session_id, &profile)
+            .await
+            .ok()
+            .map(|bound_profile| bound_profile.source),
+        Err(_) => None,
+    };
     match run_agent_cli(state, approval.session_id, request).await {
         Ok(result) => {
             state
@@ -2873,6 +2888,7 @@ async fn execute_approved_agent_cli(
                         "tool": tool_call.tool_name,
                         "profile": result.get("profile"),
                         "profile_source": result.get("profile_source"),
+                        "runtime_binding_source": result.get("runtime_binding_source"),
                         "runtime_type": result.get("runtime_type"),
                         "runner": result.get("runner"),
                         "runtime_adapter_event_count": result.get("runtime_adapter_event_count"),
@@ -2906,7 +2922,12 @@ async fn execute_approved_agent_cli(
                     "tool.failed",
                     "tool_call",
                     Some(tool_call.id),
-                    json!({"tool": tool_call.tool_name, "error": error_payload, "resumed_after_approval": true}),
+                    json!({
+                        "tool": tool_call.tool_name,
+                        "runtime_binding_source": runtime_binding_source,
+                        "error": error_payload,
+                        "resumed_after_approval": true
+                    }),
                 ))
                 .await?;
             Err(error)
@@ -3769,7 +3790,8 @@ pub(crate) async fn run_agent_cli(
 ) -> Result<Value, AppError> {
     let profile = normalize_agent_cli_profile(&request.profile)?;
     let config = agent_cli_profile_config(state, &profile).await?;
-    enforce_bound_agent_cli_profile(state, session_id, &profile).await?;
+    let bound_profile = enforce_bound_agent_cli_profile(state, session_id, &profile).await?;
+    let runtime_binding_source = bound_profile.source;
     let runtime_type = config.runtime_type.clone();
     if config.remote_computer_required {
         return Err(AppError::bad_request(format!(
@@ -3787,6 +3809,7 @@ pub(crate) async fn run_agent_cli(
             "agent_cli.task.started",
             json!({
                 "profile": profile,
+                "runtime_binding_source": runtime_binding_source,
                 "runtime_type": runtime_type,
                 "task": &request.task,
                 "workspace": workspace,
@@ -3856,6 +3879,7 @@ pub(crate) async fn run_agent_cli(
             json!({
                 "profile": profile,
                 "profile_source": profile_source,
+                "runtime_binding_source": runtime_binding_source,
                 "runtime_type": runtime_type,
                 "exit_code": output.status.code(),
                 "stdout": stdout.text,
@@ -3882,6 +3906,7 @@ pub(crate) async fn run_agent_cli(
         "runner": "agent-cli",
         "profile": profile,
         "profile_source": profile_source,
+        "runtime_binding_source": runtime_binding_source,
         "runtime_type": runtime_type,
         "status": output.status.code(),
         "stdout": stdout.text,
@@ -3936,10 +3961,13 @@ async fn enforce_bound_agent_cli_profile(
     state: &AppState,
     session_id: Uuid,
     requested_profile: &str,
-) -> Result<(), AppError> {
+) -> Result<BoundAgentCliProfile, AppError> {
     let Some(bound_profile) = bound_agent_cli_profile(state, session_id).await? else {
         if env_flag("MANDOFORGE_ALLOW_REQUESTED_AGENT_CLI_PROFILE") {
-            return Ok(());
+            return Ok(BoundAgentCliProfile {
+                name: requested_profile.to_string(),
+                source: "requested",
+            });
         }
         return Err(AppError::bad_request(
             "agent_cli.exec requires a session-bound runtime profile",
@@ -3952,7 +3980,7 @@ async fn enforce_bound_agent_cli_profile(
             bound_profile.source
         )));
     }
-    Ok(())
+    Ok(bound_profile)
 }
 
 async fn bound_agent_cli_profile(
