@@ -23405,6 +23405,135 @@ async fn environment_runtime_profile_is_canonical_for_codex_exec() {
 }
 
 #[tokio::test]
+async fn environment_runtime_profile_blocks_codex_execution_strategy_override() {
+    let codex_client = Arc::new(RecordingCodexAppServerClient::default());
+    let app = test_app_with_codex_app_server(codex_client.clone()).await;
+    let profile: AgentRuntimeProfile = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/agent-runtime-profiles",
+            json!({
+                "name": "bound-codex-app-server",
+                "runtime_type": "codex_app_server",
+                "command": "codex-app-server",
+                "timeout_seconds": 30,
+                "remote_computer_required": false
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let environment: Environment = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/environments",
+            json!({
+                "name": "Codex Override Blocking Environment",
+                "environment_type": "self_hosted",
+                "runtime_profile_id": profile.id,
+                "release_state": "active",
+                "status": "enabled"
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let agents: Vec<Agent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/agents")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let session: Session = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/sessions",
+            json!({
+                "agent_id": agents[0].id,
+                "environment_id": environment.id,
+                "title": "codex environment blocks strategy override"
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let approval_required: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/tools/codex.exec/execute",
+            json!({
+                "session_id": session.id,
+                "args": {
+                    "task": "Must not bypass the Environment runtime binding",
+                    "sandbox_mode": "workspace-write",
+                    "execution_strategy": "cli"
+                }
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let approval_id = approval_required["approval_id"]
+        .as_str()
+        .expect("approval id");
+
+    let (status, body) = request_value(
+        app.clone(),
+        approve_request(format!("/api/approvals/{approval_id}/approve")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], json!("approved"));
+    let tool_calls: Vec<ToolCall> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/sessions/{}/tool-calls", session.id))
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let codex_call = tool_calls
+        .iter()
+        .find(|call| call.tool_name == "codex.exec")
+        .expect("codex tool call");
+    assert_eq!(codex_call.status, "failed");
+    assert!(
+        codex_call
+            .error
+            .as_ref()
+            .and_then(|error| error["error"].as_str())
+            .unwrap_or_default()
+            .contains("session environment runtime profile")
+    );
+    assert!(
+        codex_client.calls.lock().await.is_empty(),
+        "failed binding checks must not call the adapter"
+    );
+}
+
+#[tokio::test]
 async fn queue_backed_worker_runs_codex_app_server_polling() {
     let _env_guard = env_lock().lock().expect("env lock");
     let _insecure_auth = EnvVarGuard::set("MANDOFORGE_INSECURE_DEV_AUTH", "1");
