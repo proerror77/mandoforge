@@ -525,7 +525,7 @@ pub(crate) async fn propagate_remote_computer_execution_cancel(
             .into_iter()
             .find(|computer| computer.id == assignment.remote_computer_id)
             .ok_or_else(|| AppError::not_found("Remote computer not found"))?;
-        if let Some(pod_name) = remote_computer.pod_name.clone() {
+        if let Some(pod_name) = remote_computer_delete_name(&remote_computer) {
             let config = RemoteComputerRunnerConfig::from_env();
             let response = remote_computer_runner_for_config(&config)
                 .mutate(
@@ -579,4 +579,14 @@ pub(crate) async fn propagate_remote_computer_execution_cancel(
         "pod_delete_status": pod_delete_status,
         "pod_delete_message": pod_delete_message,
     }))
+}
+
+fn remote_computer_delete_name(remote_computer: &crate::RemoteComputer) -> Option<String> {
+    remote_computer
+        .metadata
+        .get("sandbox_claim_name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(ToString::to_string)
+        .or_else(|| remote_computer.pod_name.clone())
 }

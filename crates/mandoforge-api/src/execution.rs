@@ -18,7 +18,7 @@ use crate::execution_queue::{ExecutionJob, ExecutionJobRequest, ExecutionJobStat
 use crate::mcp_gateway::McpCallRequest;
 use crate::remote_computer_runner::{
     RemoteComputerRunner, RemoteComputerRunnerConfig, RemoteComputerRunnerDryRunRequest,
-    poll_kubernetes_pod_running, remote_computer_runner_for_config,
+    poll_agent_sandbox_pod_name, poll_kubernetes_pod_running, remote_computer_runner_for_config,
 };
 use crate::shell_runner::{shell_command, shell_runner};
 use crate::{
@@ -1197,7 +1197,7 @@ async fn claim_remote_computer_warm_pool_lease_for_job(
     Ok(Some(lease))
 }
 
-/// Creates a Pod on-demand for jobs that find no available warm-pool Remote Computer.
+/// Creates a Pod or Agent Sandbox claim on-demand for jobs that find no available warm-pool Remote Computer.
 /// Requires the full triple-gate (`mutation_enabled`, `live_mutation_enabled`, `execution_enabled`)
 /// plus `MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT=kubernetes` to be active; otherwise returns
 /// `Ok(None)`. Environment-bound Remote Computer jobs then fail closed at assignment validation
@@ -1213,20 +1213,28 @@ async fn provision_remote_computer_pod_for_job(
     }
     let config = RemoteComputerRunnerConfig::from_env();
     let runner = remote_computer_runner_for_config(&config);
-    // Deterministic pod name: lowercase hex, max 63 chars, dashes allowed
-    let pod_name = format!("agent-rc-{}", &job.session_id.simple().to_string()[..20]);
+    let agent_sandbox = remote_computer_agent_sandbox_requested(&config);
+    // Deterministic resource name: lowercase hex, max 63 chars, dashes allowed.
+    let resource_name = if agent_sandbox {
+        format!("agent-as-{}", &job.session_id.simple().to_string()[..20])
+    } else {
+        format!("agent-rc-{}", &job.session_id.simple().to_string()[..20])
+    };
     let remote_computer_id = on_demand_remote_computer_id(job.session_id);
     let mut created_pod = false;
-    // Check if a remote_computer record already exists for this pod (race guard)
-    let existing = state
-        .list_remote_computers()
-        .await?
-        .into_iter()
-        .find(|c| c.pod_name.as_deref() == Some(&pod_name));
+    // Check if a remote_computer record already exists for this resource (race guard).
+    let existing = state.list_remote_computers().await?.into_iter().find(|c| {
+        c.id == remote_computer_id
+            || c.pod_name.as_deref() == Some(&resource_name)
+            || c.metadata
+                .get("sandbox_claim_name")
+                .and_then(Value::as_str)
+                .is_some_and(|claim_name| claim_name == resource_name)
+    });
     let computer = if let Some(existing_computer) = existing {
         existing_computer
     } else {
-        // Attempt to create the Pod via the runner
+        // Attempt to create the Pod or SandboxClaim via the runner.
         let create_response = runner
             .mutate(
                 &config,
@@ -1234,7 +1242,7 @@ async fn provision_remote_computer_pod_for_job(
                     operation: Some("live_create".to_string()),
                     remote_computer_id: Some(remote_computer_id),
                     session_id: Some(job.session_id),
-                    pod_name: Some(pod_name.clone()),
+                    pod_name: Some(resource_name.clone()),
                     metadata: Some(json!({
                         "tenant_id": state.current_tenant_id(),
                         "assignment_id": "",
@@ -1253,12 +1261,12 @@ async fn provision_remote_computer_pod_for_job(
             && !remote_computer_pod_create_already_exists(&create_response)
         {
             return Err(AppError::internal(format!(
-                "Remote Computer Pod creation failed: {}",
+                "Remote Computer runtime creation failed: {}",
                 create_response.message
             )));
         }
         created_pod = create_response.status == "mutation_ok";
-        // Wait for Pod to reach Running phase
+        // Wait for Pod to reach Running phase. Agent Sandbox first resolves the claimed pod name.
         let ready_timeout = Duration::from_secs(
             std::env::var("MANDOFORGE_REMOTE_COMPUTER_POD_READY_TIMEOUT_SECONDS")
                 .ok()
@@ -1273,15 +1281,50 @@ async fn provision_remote_computer_pod_for_job(
                 .filter(|v| *v > 0)
                 .unwrap_or(2000),
         );
+        let runtime_pod_name = if agent_sandbox {
+            match poll_agent_sandbox_pod_name(
+                &config,
+                &resource_name,
+                ready_timeout,
+                ready_interval,
+            )
+            .await
+            {
+                Ok(pod_name) => pod_name,
+                Err(error) => {
+                    let cleanup_error = if created_pod {
+                        cleanup_on_demand_remote_computer_pod_after_failed_provision(
+                            state,
+                            runner.as_ref(),
+                            &config,
+                            &resource_name,
+                            job,
+                            worker_id,
+                            "agent_sandbox_pod_not_bound",
+                        )
+                        .await
+                    } else {
+                        None
+                    };
+                    return Err(remote_computer_pod_provision_error(
+                        format!("Agent Sandbox Pod not bound: {error}"),
+                        cleanup_error,
+                    ));
+                }
+            }
+        } else {
+            resource_name.clone()
+        };
         if let Err(error) =
-            poll_kubernetes_pod_running(&config, &pod_name, ready_timeout, ready_interval).await
+            poll_kubernetes_pod_running(&config, &runtime_pod_name, ready_timeout, ready_interval)
+                .await
         {
             let cleanup_error = if created_pod {
                 cleanup_on_demand_remote_computer_pod_after_failed_provision(
                     state,
                     runner.as_ref(),
                     &config,
-                    &pod_name,
+                    &resource_name,
                     job,
                     worker_id,
                     "pod_not_ready",
@@ -1301,14 +1344,20 @@ async fn provision_remote_computer_pod_for_job(
         match state
             .create_remote_computer(CreateRemoteComputer {
                 id: Some(remote_computer_id),
-                name: pod_name.clone(),
-                profile: Some("workspace-write".to_string()),
+                name: resource_name.clone(),
+                profile: Some(if agent_sandbox {
+                    "agent-sandbox".to_string()
+                } else {
+                    "workspace-write".to_string()
+                }),
                 namespace: Some(config.namespace.clone()),
-                pod_name: Some(pod_name.clone()),
+                pod_name: Some(runtime_pod_name.clone()),
                 workspace_path: Some("/workspace".to_string()),
                 state_mount_path: Some("/agent-state".to_string()),
                 metadata: Some(json!({
                     "on_demand": true,
+                    "runtime_substrate": if agent_sandbox { "agent-sandbox" } else { "kubernetes-pod" },
+                    "sandbox_claim_name": if agent_sandbox { Some(resource_name.clone()) } else { None },
                     "session_id": job.session_id,
                     "session_workspace_path": remote_session_workspace_path_from_base("/workspace", job.session_id),
                     "provisioned_by_worker": worker_id,
@@ -1324,7 +1373,14 @@ async fn provision_remote_computer_pod_for_job(
                     .list_remote_computers()
                     .await?
                     .into_iter()
-                    .find(|c| c.pod_name.as_deref() == Some(&pod_name))
+                    .find(|c| {
+                        c.id == remote_computer_id
+                            || c.pod_name.as_deref() == Some(&runtime_pod_name)
+                            || c.metadata
+                                .get("sandbox_claim_name")
+                                .and_then(Value::as_str)
+                                .is_some_and(|claim_name| claim_name == resource_name)
+                    })
                 {
                     existing
                 } else {
@@ -1334,7 +1390,7 @@ async fn provision_remote_computer_pod_for_job(
                                 state,
                                 runner.as_ref(),
                                 &config,
-                                &pod_name,
+                                &resource_name,
                                 job,
                                 worker_id,
                                 "remote_computer_record_failed",
@@ -1381,7 +1437,7 @@ async fn provision_remote_computer_pod_for_job(
                     state,
                     runner.as_ref(),
                     &config,
-                    &pod_name,
+                    &remote_computer_kubernetes_delete_name(&computer),
                     job,
                     worker_id,
                     "remote_computer_lease_failed",
@@ -1399,7 +1455,8 @@ async fn provision_remote_computer_pod_for_job(
     let details = json!({
         "lease_id": lease.id,
         "remote_computer_id": lease.remote_computer_id,
-        "pod_name": pod_name,
+        "pod_name": computer.pod_name,
+        "sandbox_claim_name": computer.metadata.get("sandbox_claim_name"),
         "session_id": lease.session_id,
         "worker_id": lease.worker_id,
         "status": lease.status,
@@ -1534,6 +1591,21 @@ fn remote_computer_pod_create_already_exists(
     response.would_create_pod
         && response.live_mutation_attempted
         && response.live_mutation_status_code == Some(StatusCode::CONFLICT.as_u16())
+}
+
+fn remote_computer_agent_sandbox_requested(config: &RemoteComputerRunnerConfig) -> bool {
+    matches!(config.mode.as_str(), "agent-sandbox" | "k8s-agent-sandbox")
+}
+
+fn remote_computer_kubernetes_delete_name(remote_computer: &RemoteComputer) -> String {
+    remote_computer
+        .metadata
+        .get("sandbox_claim_name")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(ToString::to_string)
+        .or_else(|| remote_computer.pod_name.clone())
+        .unwrap_or_else(|| remote_computer.name.clone())
 }
 
 fn on_demand_remote_computer_id(session_id: Uuid) -> Uuid {
@@ -5382,6 +5454,28 @@ mod tests {
             on_demand_remote_computer_id(session_id)
         );
         assert_ne!(on_demand_remote_computer_id(session_id), session_id);
+    }
+
+    #[test]
+    fn remote_computer_delete_name_prefers_agent_sandbox_claim() {
+        let remote_computer = RemoteComputer {
+            id: Uuid::new_v4(),
+            name: "agent-as-session".to_string(),
+            profile: "agent-sandbox".to_string(),
+            status: "leased".to_string(),
+            namespace: "agent-os".to_string(),
+            pod_name: Some("warm-pod-1".to_string()),
+            workspace_path: "/workspace".to_string(),
+            state_mount_path: "/agent-state".to_string(),
+            metadata: json!({"sandbox_claim_name": "agent-as-session"}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        assert_eq!(
+            remote_computer_kubernetes_delete_name(&remote_computer),
+            "agent-as-session"
+        );
     }
 
     #[test]

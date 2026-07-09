@@ -18,6 +18,8 @@ const IN_CLUSTER_KUBERNETES_API_URL: &str = "https://kubernetes.default.svc";
 const IN_CLUSTER_SERVICE_ACCOUNT_TOKEN: &str =
     "/var/run/secrets/kubernetes.io/serviceaccount/token";
 const IN_CLUSTER_SERVICE_ACCOUNT_CA: &str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
+const DEFAULT_AGENT_SANDBOX_WARM_POOL: &str = "mandoforge-agent-runtime";
+const AGENT_SANDBOX_POD_NAME_ANNOTATION: &str = "agents.x-k8s.io/pod-name";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RemoteComputerRunnerConfig {
@@ -151,7 +153,9 @@ pub(crate) fn remote_computer_runner_for_config(
     config: &RemoteComputerRunnerConfig,
 ) -> Box<dyn RemoteComputerRunner> {
     match config.mode.as_str() {
-        "kubernetes" | "k8s" => Box::new(KubernetesRemoteComputerRunner),
+        "kubernetes" | "k8s" | "agent-sandbox" | "k8s-agent-sandbox" => {
+            Box::new(KubernetesRemoteComputerRunner)
+        }
         _ => Box::new(ReservedRemoteComputerRunner),
     }
 }
@@ -253,15 +257,16 @@ impl RemoteComputerRunner for ReservedRemoteComputerRunner {
 #[async_trait]
 impl RemoteComputerRunner for KubernetesRemoteComputerRunner {
     fn readiness(&self, config: &RemoteComputerRunnerConfig) -> RemoteComputerRunnerReadiness {
+        let agent_sandbox = remote_computer_agent_sandbox_requested(config);
         let client_access = kubernetes_client_access(config);
         let client_configured = client_access.is_some();
         let api_server_configured = config.kube_api_url.is_some() || config.in_cluster;
         let bearer_token_configured = kubernetes_bearer_token_configured(config);
         let template_present = Path::new(&config.pod_template_path).exists();
-        let configured = client_configured && template_present;
+        let configured = client_configured && (agent_sandbox || template_present);
         let status = if configured {
             "dry_run_ready"
-        } else if !template_present {
+        } else if !agent_sandbox && !template_present {
             "template_missing"
         } else {
             "client_missing"
@@ -288,12 +293,18 @@ impl RemoteComputerRunner for KubernetesRemoteComputerRunner {
                 "live_create".to_string(),
                 "live_delete".to_string(),
                 "live_exec".to_string(),
+                "live_create_sandbox_claim".to_string(),
+                "live_delete_sandbox_claim".to_string(),
             ],
-            message: if configured && config.mutation_enabled && config.live_mutation_enabled {
+            message: if agent_sandbox && configured && config.mutation_enabled && config.live_mutation_enabled {
+                "Kubernetes Agent Sandbox adapter is configured for explicit live SandboxClaim create/delete and optional Pod exec"
+            } else if agent_sandbox && configured {
+                "Kubernetes Agent Sandbox adapter is configured for dry-run planning; SandboxClaim mutation remains disabled until both mutation gates are enabled"
+            } else if configured && config.mutation_enabled && config.live_mutation_enabled {
                 "Kubernetes Remote Computer adapter is configured for explicit live Pod create/delete and optional Pod exec"
             } else if configured {
                 "Kubernetes Remote Computer adapter is configured for dry-run planning; Pod mutation remains disabled until both mutation gates are enabled"
-            } else if !template_present {
+            } else if !agent_sandbox && !template_present {
                 "Kubernetes Remote Computer adapter is selected, but the Pod template is missing"
             } else if api_server_configured && !bearer_token_configured {
                 "Kubernetes Remote Computer adapter has an API server URL, but no readable bearer token is configured"
@@ -311,6 +322,7 @@ impl RemoteComputerRunner for KubernetesRemoteComputerRunner {
         config: &RemoteComputerRunnerConfig,
         request: RemoteComputerRunnerDryRunRequest,
     ) -> RemoteComputerRunnerDryRunResponse {
+        let agent_sandbox = remote_computer_agent_sandbox_requested(config);
         let operation = request
             .operation
             .clone()
@@ -326,12 +338,26 @@ impl RemoteComputerRunner for KubernetesRemoteComputerRunner {
             .filter(|pod_name| !pod_name.trim().is_empty())
             .unwrap_or_else(|| "agent-remote-computer-dry-run".to_string());
         let kubernetes_api_path = if operation_is_create {
-            Some(format!("/api/v1/namespaces/{}/pods", config.namespace))
+            if agent_sandbox {
+                Some(format!(
+                    "/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/{}/sandboxclaims",
+                    config.namespace
+                ))
+            } else {
+                Some(format!("/api/v1/namespaces/{}/pods", config.namespace))
+            }
         } else if operation_is_delete {
-            Some(format!(
-                "/api/v1/namespaces/{}/pods/{}",
-                config.namespace, pod_name
-            ))
+            if agent_sandbox {
+                Some(format!(
+                    "/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/{}/sandboxclaims/{}",
+                    config.namespace, pod_name
+                ))
+            } else {
+                Some(format!(
+                    "/api/v1/namespaces/{}/pods/{}",
+                    config.namespace, pod_name
+                ))
+            }
         } else if operation_is_probe {
             Some("/version".to_string())
         } else if operation_is_exec {
@@ -404,6 +430,7 @@ impl RemoteComputerRunner for KubernetesRemoteComputerRunner {
         config: &RemoteComputerRunnerConfig,
         request: RemoteComputerRunnerDryRunRequest,
     ) -> RemoteComputerRunnerDryRunResponse {
+        let agent_sandbox = remote_computer_agent_sandbox_requested(config);
         let operation = request
             .operation
             .clone()
@@ -418,12 +445,26 @@ impl RemoteComputerRunner for KubernetesRemoteComputerRunner {
             .filter(|pod_name| valid_kubernetes_name(pod_name))
             .unwrap_or_else(|| live_pod_name(&request));
         let kubernetes_api_path = if operation_is_create {
-            Some(format!("/api/v1/namespaces/{}/pods", config.namespace))
+            if agent_sandbox {
+                Some(format!(
+                    "/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/{}/sandboxclaims",
+                    config.namespace
+                ))
+            } else {
+                Some(format!("/api/v1/namespaces/{}/pods", config.namespace))
+            }
         } else if operation_is_delete {
-            Some(format!(
-                "/api/v1/namespaces/{}/pods/{}",
-                config.namespace, pod_name
-            ))
+            if agent_sandbox {
+                Some(format!(
+                    "/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/{}/sandboxclaims/{}",
+                    config.namespace, pod_name
+                ))
+            } else {
+                Some(format!(
+                    "/api/v1/namespaces/{}/pods/{}",
+                    config.namespace, pod_name
+                ))
+            }
         } else if operation_is_exec {
             Some(format!(
                 "/api/v1/namespaces/{}/pods/{}/exec",
@@ -438,7 +479,22 @@ impl RemoteComputerRunner for KubernetesRemoteComputerRunner {
             && config.live_mutation_enabled
             && client_access.is_some();
         let mutation_result = if gates_open && (operation_is_create || operation_is_delete) {
-            Some(call_kubernetes_mutation(config, operation_is_create, &pod_name, &request).await)
+            if agent_sandbox {
+                Some(
+                    call_agent_sandbox_claim_mutation(
+                        config,
+                        operation_is_create,
+                        &pod_name,
+                        &request,
+                    )
+                    .await,
+                )
+            } else {
+                Some(
+                    call_kubernetes_mutation(config, operation_is_create, &pod_name, &request)
+                        .await,
+                )
+            }
         } else {
             None
         };
@@ -514,6 +570,9 @@ impl RemoteComputerRunner for KubernetesRemoteComputerRunner {
                     .to_string()
             } else if let Some(message) = mutation_failed_message {
                 format!("Kubernetes mutation failed: {message}")
+            } else if mutation_result.is_some() && agent_sandbox {
+                "Kubernetes Agent Sandbox claim mutation completed; no tool execution or execution job was started"
+                    .to_string()
             } else if mutation_result.is_some() {
                 "Kubernetes Pod mutation completed; no tool execution or execution job was started"
                     .to_string()
@@ -548,6 +607,10 @@ impl RemoteComputerRunner for KubernetesRemoteComputerRunner {
             exec_result: exec_result_payload,
         }
     }
+}
+
+fn remote_computer_agent_sandbox_requested(config: &RemoteComputerRunnerConfig) -> bool {
+    matches!(config.mode.as_str(), "agent-sandbox" | "k8s-agent-sandbox")
 }
 
 async fn probe_kubernetes_version(
@@ -627,6 +690,124 @@ async fn call_kubernetes_mutation(
         ));
     }
     Ok((status_code, body))
+}
+
+async fn call_agent_sandbox_claim_mutation(
+    config: &RemoteComputerRunnerConfig,
+    create: bool,
+    claim_name: &str,
+    request: &RemoteComputerRunnerDryRunRequest,
+) -> Result<(u16, Value), KubernetesMutationError> {
+    let access = kubernetes_client_access(config).ok_or_else(|| {
+        KubernetesMutationError::without_status("supported Kubernetes API client is not configured")
+    })?;
+    let token = tokio::fs::read_to_string(&access.bearer_token_path)
+        .await
+        .map_err(|err| {
+            KubernetesMutationError::without_status(format!("failed to read bearer token: {err}"))
+        })?;
+    let client = kubernetes_http_client(&access, Duration::from_secs(10))
+        .await
+        .map_err(KubernetesMutationError::without_status)?;
+    let url = if create {
+        format!(
+            "{}/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/{}/sandboxclaims",
+            access.api_url,
+            percent_encode(&config.namespace)
+        )
+    } else {
+        format!(
+            "{}/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/{}/sandboxclaims/{}",
+            access.api_url,
+            percent_encode(&config.namespace),
+            percent_encode(claim_name)
+        )
+    };
+    let request = if create {
+        client.post(url).bearer_auth(token.trim()).json(
+            &build_agent_sandbox_claim_request(config, claim_name, request)
+                .map_err(KubernetesMutationError::without_status)?,
+        )
+    } else {
+        client.delete(url).bearer_auth(token.trim())
+    };
+    let response = request.send().await.map_err(|err| {
+        KubernetesMutationError::without_status(format!(
+            "failed to call Kubernetes Agent Sandbox API: {err}"
+        ))
+    })?;
+    let status_code = response.status().as_u16();
+    let body = response
+        .json::<Value>()
+        .await
+        .unwrap_or_else(|_| json!({"status_code": status_code}));
+    if !(200..300).contains(&status_code) {
+        return Err(KubernetesMutationError::with_status(
+            status_code,
+            format!("Kubernetes Agent Sandbox API returned HTTP {status_code}"),
+        ));
+    }
+    Ok((status_code, body))
+}
+
+pub(crate) async fn poll_agent_sandbox_pod_name(
+    config: &RemoteComputerRunnerConfig,
+    claim_name: &str,
+    timeout: Duration,
+    interval: Duration,
+) -> Result<String, String> {
+    let access = kubernetes_client_access(config)
+        .ok_or_else(|| "supported Kubernetes API client is not configured".to_string())?;
+    let poll_interval = interval.max(Duration::from_millis(100));
+    let deadline = Instant::now() + timeout;
+    let client = kubernetes_http_client(&access, Duration::from_secs(10)).await?;
+    loop {
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "SandboxClaim did not expose a bound Pod within {:.0}s",
+                timeout.as_secs_f64()
+            ));
+        }
+        let token = tokio::fs::read_to_string(&access.bearer_token_path)
+            .await
+            .map_err(|err| format!("failed to read bearer token: {err}"))?;
+        let url = format!(
+            "{}/apis/agents.x-k8s.io/v1beta1/namespaces/{}/sandboxes/{}",
+            access.api_url,
+            percent_encode(&config.namespace),
+            percent_encode(claim_name)
+        );
+        let response = client
+            .get(&url)
+            .bearer_auth(token.trim())
+            .send()
+            .await
+            .map_err(|err| format!("failed to GET Agent Sandbox status: {err}"))?;
+        let status_code = response.status().as_u16();
+        if status_code == 404 {
+            // The controller creates the Sandbox after accepting the claim.
+        } else if !(200..300).contains(&status_code) {
+            return Err(format!(
+                "Agent Sandbox status GET returned HTTP {status_code}"
+            ));
+        } else {
+            let body: Value = response
+                .json()
+                .await
+                .map_err(|err| format!("failed to parse Agent Sandbox status: {err}"))?;
+            if let Some(pod_name) = body
+                .pointer(&format!(
+                    "/metadata/annotations/{}",
+                    AGENT_SANDBOX_POD_NAME_ANNOTATION.replace('/', "~1")
+                ))
+                .and_then(Value::as_str)
+                .filter(|value| valid_kubernetes_name(value))
+            {
+                return Ok(pod_name.to_string());
+            }
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1143,6 +1324,86 @@ fn build_kubernetes_pod_request(
         ],
     )?;
     Ok(pod)
+}
+
+fn build_agent_sandbox_claim_request(
+    config: &RemoteComputerRunnerConfig,
+    claim_name: &str,
+    request: &RemoteComputerRunnerDryRunRequest,
+) -> Result<Value, String> {
+    let warm_pool = agent_sandbox_warm_pool_name(request);
+    let mut labels = serde_json::Map::new();
+    labels.insert("app.kubernetes.io/name".to_string(), json!("mandoforge"));
+    labels.insert(
+        "mandoforge.io/runtime-substrate".to_string(),
+        json!("agent-sandbox"),
+    );
+    insert_optional_pod_tracking_label(&mut labels, "mandoforge.io/session-id", request.session_id);
+    insert_optional_pod_tracking_label(
+        &mut labels,
+        "mandoforge.io/remote-computer-id",
+        request.remote_computer_id,
+    );
+    insert_optional_pod_tracking_metadata_label(
+        &mut labels,
+        request,
+        "tenant_id",
+        "mandoforge.io/tenant-id",
+    );
+    let mut annotations = serde_json::Map::new();
+    annotations.insert(
+        "mandoforge.io/lifecycle".to_string(),
+        json!("session-bound-agent-sandbox"),
+    );
+    insert_optional_pod_tracking_annotation(
+        &mut annotations,
+        "mandoforge.io/session-id",
+        request.session_id,
+    );
+    insert_optional_pod_tracking_annotation(
+        &mut annotations,
+        "mandoforge.io/remote-computer-id",
+        request.remote_computer_id,
+    );
+    insert_optional_pod_tracking_metadata_annotation(
+        &mut annotations,
+        request,
+        "tenant_id",
+        "mandoforge.io/tenant-id",
+    );
+    Ok(json!({
+        "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+        "kind": "SandboxClaim",
+        "metadata": {
+            "name": claim_name,
+            "namespace": config.namespace,
+            "labels": labels,
+            "annotations": annotations
+        },
+        "spec": {
+            "warmPoolRef": {
+                "name": warm_pool
+            }
+        }
+    }))
+}
+
+fn agent_sandbox_warm_pool_name(request: &RemoteComputerRunnerDryRunRequest) -> String {
+    request
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("sandbox_warm_pool"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| valid_kubernetes_name(value))
+        .map(ToString::to_string)
+        .or_else(|| {
+            std::env::var("MANDOFORGE_AGENT_SANDBOX_WARM_POOL")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| valid_kubernetes_name(value))
+        })
+        .unwrap_or_else(|| DEFAULT_AGENT_SANDBOX_WARM_POOL.to_string())
 }
 
 fn load_kubernetes_pod_template(config: &RemoteComputerRunnerConfig) -> Result<Value, String> {
@@ -2437,6 +2698,137 @@ mod tests {
         assert_eq!(delete.live_mutation_status_code, Some(200));
         assert!(delete.would_delete_pod);
         assert!(!delete.execution_enabled);
+
+        server.abort();
+        let _ = tokio::fs::remove_file(token_path).await;
+    }
+
+    #[tokio::test]
+    async fn agent_sandbox_runner_creates_claim_and_resolves_bound_pod() {
+        async fn create_claim(headers: HeaderMap, Json(body): Json<Value>) -> Json<Value> {
+            assert_eq!(
+                headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok()),
+                Some("Bearer test-token")
+            );
+            assert_eq!(body["apiVersion"], "extensions.agents.x-k8s.io/v1beta1");
+            assert_eq!(body["kind"], "SandboxClaim");
+            assert_eq!(body["metadata"]["name"], "agent-as-session");
+            assert_eq!(
+                body["metadata"]["labels"]["mandoforge.io/runtime-substrate"],
+                "agent-sandbox"
+            );
+            assert_eq!(
+                body["spec"]["warmPoolRef"]["name"],
+                "mandoforge-agent-runtime"
+            );
+            Json(json!({"metadata": {"name": "agent-as-session"}}))
+        }
+
+        async fn get_sandbox(AxumPath(claim_name): AxumPath<String>) -> Json<Value> {
+            assert_eq!(claim_name, "agent-as-session");
+            Json(json!({
+                "metadata": {
+                    "annotations": {
+                        "agents.x-k8s.io/pod-name": "warm-pod-1"
+                    }
+                }
+            }))
+        }
+
+        async fn delete_claim(AxumPath(claim_name): AxumPath<String>) -> Json<Value> {
+            assert_eq!(claim_name, "agent-as-session");
+            Json(json!({"status": "Success"}))
+        }
+
+        let token_path =
+            std::env::temp_dir().join(format!("mandoforge-kube-token-{}.txt", Uuid::new_v4()));
+        tokio::fs::write(&token_path, "test-token")
+            .await
+            .expect("write token");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let addr = listener.local_addr().expect("addr");
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route(
+                        "/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/agent-os/sandboxclaims",
+                        post(create_claim),
+                    )
+                    .route(
+                        "/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/agent-os/sandboxclaims/{claim_name}",
+                        delete(delete_claim),
+                    )
+                    .route(
+                        "/apis/agents.x-k8s.io/v1beta1/namespaces/agent-os/sandboxes/{claim_name}",
+                        get(get_sandbox),
+                    ),
+            )
+            .await
+            .expect("mock kube server");
+        });
+
+        let config = RemoteComputerRunnerConfig {
+            mode: "agent-sandbox".to_string(),
+            namespace: "agent-os".to_string(),
+            pod_template_path: "missing-pod-template-is-ok-for-agent-sandbox".to_string(),
+            service_account: "mandoforge-remote-computer".to_string(),
+            kubeconfig_path: None,
+            kube_api_url: Some(format!("http://{addr}")),
+            bearer_token_path: Some(token_path.to_string_lossy().to_string()),
+            in_cluster: false,
+            mutation_enabled: true,
+            live_mutation_enabled: true,
+            execution_enabled: false,
+        };
+        let create = KubernetesRemoteComputerRunner
+            .mutate(
+                &config,
+                RemoteComputerRunnerDryRunRequest {
+                    operation: Some("live_create".to_string()),
+                    remote_computer_id: None,
+                    session_id: Some(Uuid::nil()),
+                    pod_name: Some("agent-as-session".to_string()),
+                    metadata: None,
+                },
+            )
+            .await;
+        assert_eq!(create.status, "mutation_ok");
+        assert!(create.live_mutation_attempted);
+        assert!(create.would_create_pod);
+        assert_eq!(
+            create.kubernetes_api_path.as_deref(),
+            Some("/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/agent-os/sandboxclaims")
+        );
+
+        let pod_name = poll_agent_sandbox_pod_name(
+            &config,
+            "agent-as-session",
+            Duration::from_secs(1),
+            Duration::from_millis(10),
+        )
+        .await
+        .expect("bound pod");
+        assert_eq!(pod_name, "warm-pod-1");
+
+        let delete = KubernetesRemoteComputerRunner
+            .mutate(
+                &config,
+                RemoteComputerRunnerDryRunRequest {
+                    operation: Some("live_delete".to_string()),
+                    remote_computer_id: None,
+                    session_id: None,
+                    pod_name: Some("agent-as-session".to_string()),
+                    metadata: None,
+                },
+            )
+            .await;
+        assert_eq!(delete.status, "mutation_ok");
+        assert!(delete.would_delete_pod);
 
         server.abort();
         let _ = tokio::fs::remove_file(token_path).await;

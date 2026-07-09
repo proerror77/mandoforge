@@ -22,6 +22,7 @@ data:
   MANDOFORGE_REMOTE_COMPUTER_BEARER_TOKEN_PATH: "/var/run/secrets/kubernetes.io/serviceaccount/token"
   MANDOFORGE_REMOTE_COMPUTER_IN_CLUSTER: "true"
   MANDOFORGE_REMOTE_COMPUTER_WARM_POOL: "true"
+  MANDOFORGE_AGENT_SANDBOX_WARM_POOL: "mandoforge-agent-runtime"
   MANDOFORGE_SERVICE_NAME: "mandoforge-api"
   MANDOFORGE_OTEL_EXPORTER_OTLP_ENDPOINT: "http://mandoforge-otel-collector:4318"
   MANDOFORGE_OTEL_COLLECTOR_HEALTH_ENDPOINT: "http://mandoforge-otel-collector:13133/healthz"

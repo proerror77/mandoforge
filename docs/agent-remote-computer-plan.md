@@ -76,7 +76,7 @@ Covered today:
 - `remote_computers` and `remote_computer_leases` persist control-plane lease state.
 - Lease lifecycle APIs write `remote_computer.*` session events and audit logs without executing tools.
 - `RemoteComputerRunner` exists as a reserved/fail-closed boundary with Admin-only readiness, dry-run, and explicit mutate endpoints.
-- `KubernetesRemoteComputerRunner` exists as an explicit `MANDOFORGE_REMOTE_COMPUTER_RUNNER=kubernetes` adapter skeleton. It validates template/client config, including kubeconfig or API-server-plus-bearer-token inputs, can perform a read-only `/version` probe, reports Pod create/delete intent, and can call the Kubernetes Pod create/delete API only when both mutation gates are explicitly enabled.
+- `KubernetesRemoteComputerRunner` exists as an explicit `MANDOFORGE_REMOTE_COMPUTER_RUNNER=kubernetes` adapter skeleton. It validates template/client config, including kubeconfig or API-server-plus-bearer-token inputs, can perform a read-only `/version` probe, reports Pod create/delete intent, and can call the Kubernetes Pod create/delete API only when both mutation gates are explicitly enabled. It also supports `MANDOFORGE_REMOTE_COMPUTER_RUNNER=agent-sandbox` for the same execution transport: create a `SandboxClaim`, resolve the bound Sandbox Pod from the `agents.x-k8s.io/pod-name` annotation, persist the claim identity in Remote Computer metadata, and reuse Kubernetes `pods/exec`.
 - Kubernetes dry-runs return the planned API path, namespace, pod name, and template path so future live calls have an auditable request plan before mutation is enabled.
 - Kubernetes live mutation is gated by both `MANDOFORGE_REMOTE_COMPUTER_MUTATION_ENABLED` and `MANDOFORGE_REMOTE_COMPUTER_LIVE_MUTATION_ENABLED`; it remains Admin-only.
 - `remote_computer_session_attachments` persists session-to-lease attach/release state and stale attach detection without moving tool execution into Pods.
@@ -96,7 +96,7 @@ Not covered today:
 - Warm-pool Remote Computer records can be claimed by the worker when present, but there is not yet a production controller that registers and recycles prewarmed Pods automatically.
 - The artifact discovery sidecar is present but disabled by default; there is still no production artifact/state sync daemon running against real leased Pods.
 - No production KEDA/HPA queue-depth scaling for remote computer pools; the KEDA manifest is an opt-in example only.
-- No production Agent Sandbox controller integration yet; the pilot renders the upstream template and warm-pool CRs, but the API does not yet create `SandboxClaim` resources or map claimed Sandbox identity back into `remote_computers`. The smoke overlay can create a manual claim for controller verification only.
+- Agent Sandbox controller integration is now adapter-level only: the worker can create `SandboxClaim` resources and map the claimed Pod into `remote_computers` when `MANDOFORGE_REMOTE_COMPUTER_RUNNER=agent-sandbox`, but production promotion still requires live cluster evidence, state-sync proof, and controller lifecycle hardening.
 
 ## Target Components
 
@@ -242,7 +242,7 @@ Stage 3 should make Remote Computer the primary sandbox substrate.
 2. Execute `shell.exec`, `codex.exec`, `file.write`, and `agent_cli.exec` inside the leased Pod behind explicit Kubernetes transport gates. The initial implementation is present; hardening remains around state sync, artifact sidecar session injection, and live-cluster operational runbooks.
 3. Add artifact and event sync from Pod to MandoForge.
 4. Add warm pool controller.
-5. Add an Agent Sandbox runner adapter that creates a `SandboxClaim`, waits for the bound Sandbox Pod, persists the Pod/claim identity as a Remote Computer, and routes existing `pods/exec` transport through that claim.
+5. Harden the Agent Sandbox runner adapter with live cluster evidence, claim cleanup sweeps, state-sync proof, and production lifecycle validation.
 6. Wire the KEDA queue-depth and pool-pressure example to real Prometheus metrics and an opt-in overlay.
 7. Add hard sandbox profiles:
    - `read-only`

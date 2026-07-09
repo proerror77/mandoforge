@@ -123,7 +123,7 @@ pub(crate) async fn execute_remote_computer_stale_reclaim(
                 .unwrap_or_default()
                 .into_iter()
                 .find(|c| c.id == lease.remote_computer_id)
-                .and_then(|c| c.pod_name)
+                .and_then(|c| remote_computer_delete_name(&c))
         {
             let config = RemoteComputerRunnerConfig::from_env();
             let runner = remote_computer_runner_for_config(&config);
@@ -179,6 +179,16 @@ pub(crate) async fn execute_remote_computer_stale_reclaim(
         ))
         .await?;
     Ok(run)
+}
+
+fn remote_computer_delete_name(remote_computer: &crate::RemoteComputer) -> Option<String> {
+    remote_computer
+        .metadata
+        .get("sandbox_claim_name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(ToString::to_string)
+        .or_else(|| remote_computer.pod_name.clone())
 }
 
 pub(crate) async fn ensure_remote_computer_lock_refs_match_session(
