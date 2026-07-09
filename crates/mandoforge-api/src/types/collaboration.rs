@@ -129,6 +129,10 @@ pub(crate) struct IngestWorkSurfaceEvent {
     pub(crate) event_type: String,
     #[serde(default)]
     pub(crate) external_id: Option<String>,
+    #[serde(default)]
+    pub(crate) cursor: Option<String>,
+    #[serde(default)]
+    pub(crate) delivery_id: Option<String>,
     pub(crate) title: String,
     #[serde(default)]
     pub(crate) description: Option<String>,
@@ -150,6 +154,8 @@ pub(crate) struct IngestWorkSurfaceEvent {
 pub(crate) struct WorkSurfaceIngestion {
     pub(crate) work_item: WorkItem,
     pub(crate) activity: WorkItemActivityEntry,
+    pub(crate) replayed: bool,
+    pub(crate) replay_of_work_item_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

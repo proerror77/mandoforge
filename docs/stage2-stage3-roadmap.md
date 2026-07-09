@@ -82,10 +82,15 @@ The first Collaboration Layer slice is now in place:
   WorkItems without starting runtime execution, preserving surface identity,
   event type, external id, source URL, actor, timestamp, metadata, Activity Feed
   evidence, and audit evidence.
+- The shared Work Surface intake now records webhook-authentication evidence,
+  verifies configured HMAC signatures, preserves cursor and delivery ids, and
+  treats repeated cursor or delivery submissions as replay evidence
+  on the existing WorkItem rather than starting a duplicate runtime path.
 - The same intake path normalizes Feishu, Slack, GitHub, Jira, Linear, and
   Email events into canonical surface adapters and preserves owner, reviewer,
   assignee, blocker, due date, source URL, and status metadata for operator
-  review.
+  review, plus extracted object, repository, channel, thread, project, label,
+  and mention fields where the platform payload exposes them.
 - `/api/work-items` creates and lists first-class WorkItems.
 - WorkItem creation persists source, priority, status, scope, and metadata.
 - `/api/work-items/:id/assignments` routes WorkItems to users, agents, squads,
@@ -305,11 +310,13 @@ Acceptance:
 The Full Agent OS narrative should be implemented through separate focused
 plans:
 
-1. Work Surface connectors: add platform webhook authentication, cursor
-   replay, and richer payload extraction for Feishu, Slack, GitHub, Jira,
-   Linear, and Email. The shared `/api/work-surface-events` intake already
-   normalizes those surfaces into canonical WorkItem adapter metadata without
-   starting runtime execution.
+1. Work Surface connectors: the shared `/api/work-surface-events` intake now
+   normalizes Feishu, Slack, GitHub, Jira, Linear, and Email into canonical
+   WorkItem adapter metadata without starting runtime execution, verifies
+   configured webhook HMAC signatures, records cursor/delivery replay evidence,
+   and extracts richer platform object metadata. Platform-specific OAuth/token
+   lifecycle, live API readback, rate-limit handling, and connector-specific
+   signature variants remain open.
 2. Runtime adapter consolidation: make Environment runtime binding the only
    product entrypoint for managed runtime execution while keeping `agent_cli.exec`
    and `codex.exec` as compatibility facades.

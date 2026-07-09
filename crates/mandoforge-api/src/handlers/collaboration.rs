@@ -1,11 +1,14 @@
 use axum::{
     Json, Router,
+    body::Bytes,
     extract::{Path, State},
     http::HeaderMap,
     routing::{get, post},
 };
 use chrono::Utc;
+use hmac::{Hmac, Mac};
 use serde_json::{Map, Value, json};
+use sha2::Sha256;
 use uuid::Uuid;
 
 use crate::{
@@ -13,8 +16,9 @@ use crate::{
     CreateSquadMember, CreateWorkItem, CreateWorkItemAssignment, CreateWorkItemReview,
     IngestWorkSurfaceEvent, Permission, Squad, SquadMember, WorkItem, WorkItemActivityEntry,
     WorkItemAssignment, WorkItemReview, WorkSurfaceIngestion, authorize_request,
-    capability_failure_modes, capability_primary_action, capability_sample_tasks, new_audit_log,
-    principal_from_request, project_work_item_semantic_object, validate_work_item_semantic_scopes,
+    capability_failure_modes, capability_primary_action, capability_sample_tasks, header_value,
+    new_audit_log, principal_from_request, project_work_item_semantic_object,
+    validate_work_item_semantic_scopes,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -121,7 +125,7 @@ async fn create_work_item(
 async fn ingest_work_surface_event(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(input): Json<IngestWorkSurfaceEvent>,
+    body: Bytes,
 ) -> Result<Json<WorkSurfaceIngestion>, AppError> {
     let principal = principal_from_request(&state, &headers).await?;
     let request = AuthorizationRequest {
@@ -131,9 +135,21 @@ async fn ingest_work_surface_event(
         resource_id: None,
     };
     state.authorizer.authorize(&principal, &request).await?;
+    let input: IngestWorkSurfaceEvent =
+        serde_json::from_slice(&body).map_err(|_| AppError::bad_request("invalid JSON body"))?;
     let adapter = work_surface_adapter(input.surface)?;
     let surface = adapter.surface;
     let event_type = required_work_surface_text(input.event_type, "event_type")?;
+    let auth = verify_work_surface_webhook_auth(&headers, &body, &surface)?;
+    let cursor = normalize_work_surface_optional_text(input.cursor.or_else(|| {
+        header_value(&headers, "x-mandoforge-work-surface-cursor").map(str::to_string)
+    }));
+    let delivery_id = normalize_work_surface_optional_text(input.delivery_id.or_else(|| {
+        header_value(&headers, "x-mandoforge-work-surface-delivery-id")
+            .or_else(|| header_value(&headers, "x-github-delivery"))
+            .map(str::to_string)
+            .or_else(|| work_surface_delivery_id(&surface, &input.metadata))
+    }));
     let source_url = if adapter.known {
         input
             .source_url
@@ -148,11 +164,72 @@ async fn ingest_work_surface_event(
         adapter.known,
         &event_type,
         input.external_id,
+        cursor.clone(),
+        delivery_id.clone(),
+        auth.clone(),
         input.occurred_at,
         input.actor.clone(),
         input.assignee.as_deref(),
     );
     validate_work_item_semantic_scopes(&metadata)?;
+    if let Some(existing) = find_work_surface_replay(
+        &state,
+        &surface,
+        &event_type,
+        cursor.as_deref(),
+        delivery_id.as_deref(),
+    )
+    .await?
+    {
+        let replay_metadata = work_surface_activity_metadata(
+            &surface,
+            &event_type,
+            existing.source_url.clone(),
+            existing
+                .metadata
+                .get("work_surface")
+                .cloned()
+                .unwrap_or(Value::Null),
+            true,
+            Some(existing.id),
+        );
+        let activity = state
+            .append_work_item_activity_entry(
+                existing.id,
+                "work_surface.replayed",
+                Some(principal.subject_id.clone()),
+                Some("work_surface"),
+                None,
+                format!("Replayed {} event: {}", surface, existing.title),
+                replay_metadata.clone(),
+            )
+            .await?;
+        state
+            .append_audit_log(new_audit_log(
+                None,
+                "work_surface",
+                None,
+                "work_surface.replayed",
+                "work_item",
+                Some(existing.id),
+                json!({
+                    "subject": principal.subject_id,
+                    "surface": surface,
+                    "event_type": event_type,
+                    "work_item_id": existing.id,
+                    "cursor": cursor,
+                    "delivery_id": delivery_id,
+                    "metadata": replay_metadata
+                }),
+            ))
+            .await?;
+        return Ok(Json(WorkSurfaceIngestion {
+            replay_of_work_item_id: Some(existing.id),
+            work_item: existing,
+            activity,
+            replayed: true,
+        }));
+    }
     let work_item = state
         .create_work_item(CreateWorkItem {
             organization_id: None,
@@ -168,12 +245,18 @@ async fn ingest_work_surface_event(
             metadata,
         })
         .await?;
-    let activity_metadata = json!({
-        "surface": surface,
-        "event_type": event_type,
-        "source_url": work_item.source_url,
-        "work_surface": work_item.metadata.get("work_surface").cloned().unwrap_or(Value::Null)
-    });
+    let activity_metadata = work_surface_activity_metadata(
+        &surface,
+        &event_type,
+        work_item.source_url.clone(),
+        work_item
+            .metadata
+            .get("work_surface")
+            .cloned()
+            .unwrap_or(Value::Null),
+        false,
+        None,
+    );
     let activity = state
         .append_work_item_activity_entry(
             work_item.id,
@@ -208,6 +291,8 @@ async fn ingest_work_surface_event(
     Ok(Json(WorkSurfaceIngestion {
         work_item,
         activity,
+        replayed: false,
+        replay_of_work_item_id: None,
     }))
 }
 
@@ -220,6 +305,30 @@ fn required_work_surface_text(value: String, field: &str) -> Result<String, AppE
     } else {
         Ok(trimmed.to_string())
     }
+}
+
+fn normalize_work_surface_optional_text(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn work_surface_activity_metadata(
+    surface: &str,
+    event_type: &str,
+    source_url: Option<String>,
+    work_surface: Value,
+    replayed: bool,
+    replay_of_work_item_id: Option<Uuid>,
+) -> Value {
+    json!({
+        "surface": surface,
+        "event_type": event_type,
+        "source_url": source_url,
+        "work_surface": work_surface,
+        "replayed": replayed,
+        "replay_of_work_item_id": replay_of_work_item_id
+    })
 }
 
 struct WorkSurfaceAdapter {
@@ -260,6 +369,9 @@ fn work_surface_metadata(
     known_adapter: bool,
     event_type: &str,
     external_id: Option<String>,
+    cursor: Option<String>,
+    delivery_id: Option<String>,
+    auth: Value,
     occurred_at: Option<String>,
     actor: Option<String>,
     assignee: Option<&str>,
@@ -269,8 +381,16 @@ fn work_surface_metadata(
         "adapter": adapter,
         "event_type": event_type,
         "external_id": external_id,
+        "cursor": cursor,
+        "delivery_id": delivery_id,
+        "authentication": auth,
         "occurred_at": occurred_at,
         "actor": actor,
+        "extracted": if known_adapter {
+            work_surface_extracted_fields(surface, &metadata)
+        } else {
+            json!({})
+        },
         "human_state": if known_adapter {
             work_surface_human_state(&metadata, assignee)
         } else {
@@ -298,6 +418,28 @@ fn work_surface_source_url(metadata: &Value) -> Option<String> {
     )
 }
 
+fn work_surface_delivery_id(surface: &str, metadata: &Value) -> Option<String> {
+    let candidates: &[&str] = match surface {
+        "slack" => &[
+            "delivery_id",
+            "event_id",
+            "event/event_id",
+            "event/client_msg_id",
+        ],
+        "feishu" => &[
+            "delivery_id",
+            "event_id",
+            "header/event_id",
+            "event/message/message_id",
+        ],
+        "linear" => &["delivery_id", "webhook_id", "notification/id", "event/id"],
+        "jira" => &["delivery_id", "webhook_event_id", "issue/id"],
+        "github" => &["delivery_id"],
+        _ => &["delivery_id", "event_id"],
+    };
+    work_surface_first_nested_string(metadata, candidates)
+}
+
 fn work_surface_human_state(metadata: &Value, assignee: Option<&str>) -> Value {
     let mut state = Map::new();
     for (field, keys) in [
@@ -323,6 +465,72 @@ fn work_surface_human_state(metadata: &Value, assignee: Option<&str>) -> Value {
     Value::Object(state)
 }
 
+fn work_surface_extracted_fields(surface: &str, metadata: &Value) -> Value {
+    let mut extracted = Map::new();
+    for (field, candidates) in [
+        (
+            "object_type",
+            &[
+                "object_type",
+                "type",
+                "issue/type",
+                "pull_request/type",
+                "event/type",
+            ][..],
+        ),
+        (
+            "object_id",
+            &[
+                "object_id",
+                "id",
+                "issue/number",
+                "issue/id",
+                "pull_request/id",
+                "pull_request/number",
+                "message/message_id",
+                "event/client_msg_id",
+                "event/ts",
+                "ticket/id",
+            ][..],
+        ),
+        (
+            "repository",
+            &["repository", "repo", "repository/full_name", "project/repo"][..],
+        ),
+        (
+            "channel",
+            &["channel", "chat_id", "message/chat_id", "event/channel"][..],
+        ),
+        (
+            "thread",
+            &[
+                "thread",
+                "thread_id",
+                "message/thread_id",
+                "event/thread_ts",
+            ][..],
+        ),
+        (
+            "project",
+            &["project", "project/key", "issue/project", "team/key"][..],
+        ),
+        (
+            "labels",
+            &["labels", "tags", "issue/labels", "pull_request/labels"][..],
+        ),
+        (
+            "mentions",
+            &["mentions", "mentioned_users", "event/mentions"][..],
+        ),
+    ] {
+        if let Some(value) = work_surface_first_nested_value(metadata, candidates) {
+            extracted.insert(field.to_string(), value);
+        }
+    }
+    extracted.insert("surface".to_string(), json!(surface));
+    Value::Object(extracted)
+}
+
 fn work_surface_first_string(metadata: &Value, keys: &[&str]) -> Option<String> {
     keys.iter()
         .find_map(|key| metadata.get(*key)?.as_str().map(str::to_string))
@@ -330,6 +538,113 @@ fn work_surface_first_string(metadata: &Value, keys: &[&str]) -> Option<String> 
 
 fn work_surface_first_value(metadata: &Value, keys: &[&str]) -> Option<Value> {
     keys.iter().find_map(|key| metadata.get(*key).cloned())
+}
+
+fn work_surface_first_nested_string(metadata: &Value, keys: &[&str]) -> Option<String> {
+    work_surface_first_nested_value(metadata, keys)
+        .and_then(|value| value.as_str().map(str::to_string))
+}
+
+fn work_surface_first_nested_value(metadata: &Value, keys: &[&str]) -> Option<Value> {
+    keys.iter().find_map(|key| {
+        if let Some(value) = metadata.get(*key) {
+            return Some(value.clone());
+        }
+        let pointer = format!("/{key}");
+        metadata.pointer(&pointer).cloned()
+    })
+}
+
+async fn find_work_surface_replay(
+    state: &AppState,
+    surface: &str,
+    event_type: &str,
+    cursor: Option<&str>,
+    delivery_id: Option<&str>,
+) -> Result<Option<WorkItem>, AppError> {
+    if cursor.is_none() && delivery_id.is_none() {
+        return Ok(None);
+    }
+    let work_items = state.list_work_items().await?;
+    Ok(work_items.into_iter().find(|work_item| {
+        let Some(work_surface) = work_item.metadata.get("work_surface") else {
+            return false;
+        };
+        work_surface.get("surface").and_then(Value::as_str) == Some(surface)
+            && work_surface.get("event_type").and_then(Value::as_str) == Some(event_type)
+            && ((cursor.is_some() && work_surface.get("cursor").and_then(Value::as_str) == cursor)
+                || (delivery_id.is_some()
+                    && work_surface.get("delivery_id").and_then(Value::as_str) == delivery_id))
+    }))
+}
+
+fn verify_work_surface_webhook_auth(
+    headers: &HeaderMap,
+    body: &[u8],
+    surface: &str,
+) -> Result<Value, AppError> {
+    let signature_present = header_value(headers, "x-mandoforge-work-surface-signature").is_some();
+    let Some((secret_ref, secret)) = work_surface_webhook_secret(surface) else {
+        return Ok(json!({
+            "mode": "mandoforge_rbac",
+            "configured": false,
+            "verified": false,
+            "signature_present": signature_present
+        }));
+    };
+    verify_work_surface_signature(headers, body, &secret)?;
+    Ok(json!({
+        "mode": "hmac_sha256",
+        "configured": true,
+        "verified": true,
+        "signature_present": true,
+        "secret_ref": secret_ref
+    }))
+}
+
+fn work_surface_webhook_secret(surface: &str) -> Option<(String, String)> {
+    let surface_key = surface
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    [
+        format!("MANDOFORGE_WORK_SURFACE_{surface_key}_WEBHOOK_SECRET"),
+        "MANDOFORGE_WORK_SURFACE_WEBHOOK_SECRET".to_string(),
+    ]
+    .into_iter()
+    .find_map(|key| {
+        std::env::var(&key)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(|value| (key, value))
+    })
+}
+
+fn verify_work_surface_signature(
+    headers: &HeaderMap,
+    body: &[u8],
+    secret: &str,
+) -> Result<(), AppError> {
+    let signature = header_value(headers, "x-mandoforge-work-surface-signature")
+        .ok_or_else(|| AppError::unauthorized("missing x-mandoforge-work-surface-signature"))?;
+    let signature = signature
+        .strip_prefix("sha256=")
+        .unwrap_or(signature)
+        .trim();
+    let signature_bytes =
+        hex::decode(signature).map_err(|_| AppError::unauthorized("non-hex signature"))?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+        .map_err(|_| AppError::internal("hmac key error"))?;
+    mac.update(body);
+    mac.verify_slice(&signature_bytes)
+        .map_err(|_| AppError::unauthorized("signature mismatch"))
 }
 
 async fn list_agent_teammates(
