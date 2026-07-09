@@ -719,7 +719,12 @@ fn build_stage2_evidence_requirements(_open_gaps: &[String]) -> Vec<Stage2Eviden
             evidence_job_manifests: vec![
                 "deploy/stage2-evidence/ontology-engine-production-job.example.yaml",
             ],
-            readiness_endpoints: vec!["/api/ontology/engine-readiness"],
+            readiness_endpoints: vec![
+                "/api/ontology/engine-readiness",
+                "/api/ontology/action-contracts",
+                "/api/ontology/action-contracts/{id}",
+                "/api/ontology/action-contracts/{id}/release-candidate",
+            ],
             validation_endpoints: vec!["./scripts/ontology-engine-production-gate.sh"],
             required_flags: vec![],
             required_artifacts: vec!["ontology-engine-production/summary.json"],

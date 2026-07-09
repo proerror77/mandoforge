@@ -271,6 +271,9 @@ fn build_enterprise_product_completion_lanes(
             readiness_endpoints: vec![
                 "/api/ontology/engine-readiness",
                 "/api/ontology/registry",
+                "/api/ontology/action-contracts",
+                "/api/ontology/action-contracts/{id}",
+                "/api/ontology/action-contracts/{id}/release-candidate",
                 "/api/semantic-graph",
                 "/api/semantic-workbench",
             ],

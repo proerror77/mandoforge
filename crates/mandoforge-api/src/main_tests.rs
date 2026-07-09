@@ -2403,6 +2403,22 @@ Stage 2 is not complete.
             .contains(&"workflowpack-enterprise-lifecycle/summary.json".to_string())
     );
 
+    let ontology_engine = readiness
+        .evidence_requirements
+        .iter()
+        .find(|requirement| requirement.id == "ontology-engine-production")
+        .expect("missing ontology engine production evidence requirement");
+    assert!(
+        ontology_engine
+            .readiness_endpoints
+            .contains(&"/api/ontology/action-contracts".to_string())
+    );
+    assert!(
+        ontology_engine
+            .readiness_endpoints
+            .contains(&"/api/ontology/action-contracts/{id}/release-candidate".to_string())
+    );
+
     let enterprise_security_controls = readiness
         .evidence_requirements
         .iter()
@@ -3237,6 +3253,16 @@ fn enterprise_product_readiness_reports_customer_grade_blockers() {
         ontology
             .evidence_scripts
             .contains(&"./scripts/ontology-release-workflow-trigger-gate.sh".to_string())
+    );
+    assert!(
+        ontology
+            .readiness_endpoints
+            .contains(&"/api/ontology/action-contracts".to_string())
+    );
+    assert!(
+        ontology
+            .readiness_endpoints
+            .contains(&"/api/ontology/action-contracts/{id}/release-candidate".to_string())
     );
     assert!(
         ontology
