@@ -9815,6 +9815,7 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
     let product_capabilities = discovery["product_capabilities"].as_array().unwrap();
     for key in [
         "work_item",
+        "work_item_assignment",
         "manager_plan",
         "agent_handoff",
         "workflow_pack",
@@ -9865,6 +9866,33 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
                 .as_str()
                 .unwrap_or_default()
                 .contains("do not start runtime execution")
+    }));
+    assert!(product_capabilities.iter().any(|capability| {
+        capability["key"] == json!("work_item_assignment")
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("POST /api/work-items/{id}/assignments"))
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("GET /api/work-items/{id}/activity"))
+            && capability["evidence_events"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("work_item.assignment_created"))
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("routes Collaboration Layer ownership")
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("does not start runtime execution")
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("assignee may execute tools")
     }));
     assert!(product_capabilities.iter().any(|capability| {
         capability["key"] == json!("manager_plan")

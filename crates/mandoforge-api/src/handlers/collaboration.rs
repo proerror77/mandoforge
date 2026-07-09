@@ -1458,6 +1458,22 @@ fn agent_os_product_capabilities() -> Vec<Value> {
             "authority_boundary": "WorkItems coordinate Collaboration Layer work and semantic context; they do not start runtime execution or bypass Manager Runtime, Policy, Approval, TaskGrant, Tool Router, or Audit."
         }),
         json!({
+            "key": "work_item_assignment",
+            "product_object": "WorkItemAssignment",
+            "status": "available",
+            "api_routes": [
+                "GET /api/work-items/{id}/assignments",
+                "POST /api/work-items/{id}/assignments",
+                "GET /api/work-items/{id}/activity",
+                "GET /api/audit-logs"
+            ],
+            "lifecycle_actions": ["list", "assign_user", "assign_agent", "assign_squad", "record_activity", "record_audit"],
+            "evidence_events": [
+                "work_item.assignment_created"
+            ],
+            "authority_boundary": "WorkItemAssignment routes Collaboration Layer ownership to users, agents, squads, or teams and records activity/audit evidence; it does not start runtime execution, create TaskGrant scope, approve actions, bypass Manager Runtime, Policy, Tool Router, or Audit, or imply that the assignee may execute tools."
+        }),
+        json!({
             "key": "work_surface_connector",
             "product_object": "WorkSurfaceConnector",
             "status": "available",
