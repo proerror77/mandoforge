@@ -5,14 +5,17 @@ use axum::{
     routing::{get, post},
 };
 use chrono::Utc;
+use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
 use crate::{
     AppError, AppState, CreateAgentHandoffAssignment, CreateAgentHandoffEvent,
-    CreateManagerAgentPlan, ManagerAgentPlan, MaterializeManagerAgentPlanHandoff,
-    MaterializedManagerAgentPlanHandoff, Permission, ReviewManagerAgentPlan,
-    assign_agent_handoff_event_for_runtime, authorize_collection_request, authorize_request,
-    create_agent_handoff_event_for_session, normalize_handoff_risk_level,
+    CreateManagerAgentPlan, CreateWorkflowRunFromDefinition, ManagerAgentPlan,
+    MaterializeManagerAgentPlanHandoff, MaterializeManagerAgentPlanWorkflowRun,
+    MaterializedManagerAgentPlanHandoff, MaterializedManagerAgentPlanWorkflowRun, Permission,
+    ReviewManagerAgentPlan, assign_agent_handoff_event_for_runtime, authorize_collection_request,
+    authorize_request, create_agent_handoff_event_for_session,
+    create_workflow_run_from_definition_with_context, new_audit_log, normalize_handoff_risk_level,
     normalize_manager_plan_risk, normalize_manager_plan_status,
     record_agent_handoff_audit_and_event, record_manager_agent_plan_audit_and_event,
     record_manager_agent_plan_work_item_activity, visible_session_ids_for_principal,
@@ -37,6 +40,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/api/manager-plans/{id}/materialize-handoff",
             post(materialize_manager_agent_plan_handoff),
+        )
+        .route(
+            "/api/manager-plans/{id}/materialize-workflow-run",
+            post(materialize_manager_agent_plan_workflow_run),
         )
 }
 
@@ -317,4 +324,170 @@ async fn materialize_manager_agent_plan_handoff(
         handoff,
         assignment,
     }))
+}
+
+async fn materialize_manager_agent_plan_workflow_run(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<MaterializeManagerAgentPlanWorkflowRun>,
+) -> Result<Json<MaterializedManagerAgentPlanWorkflowRun>, AppError> {
+    let plan = state.get_manager_agent_plan(id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRun,
+        "session",
+        Some(plan.session_id),
+    )
+    .await?;
+    if plan.status != "reviewed" && plan.status != "approved" {
+        return Err(AppError::bad_request(
+            "manager plan must be reviewed or approved before materialization",
+        ));
+    }
+    if plan.risk_classification == "high" {
+        return Err(AppError::bad_request(
+            "manager plan workflow materialization cannot auto-start high-risk plans",
+        ));
+    }
+    let definition = state
+        .get_workflow_definition(input.workflow_definition_id)
+        .await?;
+    let title = input
+        .title
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or_else(|| format!("Manager plan workflow: {}", definition.name));
+    let input_payload = manager_plan_workflow_input_payload(&plan, input.input_payload);
+    let runtime_envelope_request =
+        manager_plan_workflow_runtime_envelope_request(&plan, input.runtime_envelope);
+    let run = create_workflow_run_from_definition_with_context(
+        &state,
+        &definition,
+        CreateWorkflowRunFromDefinition {
+            title,
+            input_payload,
+            runtime_envelope_request,
+            source_work_item_id: plan.work_item_id,
+            environment_id: input.environment_id,
+            session_message: Some(format!("ManagerPlan {}", plan.id)),
+        },
+    )
+    .await?;
+    state
+        .append_event(
+            "system",
+            Some(run.id),
+            run.primary_session_id,
+            "manager_plan.workflow_run_materialized",
+            json!({
+                "manager_plan_id": plan.id,
+                "source_manager_session_id": plan.session_id,
+                "workflow_definition_id": definition.id,
+                "workflow_run_id": run.id,
+                "root_task_grant_id": run.root_task_grant_id,
+                "source_work_item_id": run.source_work_item_id,
+                "risk_classification": plan.risk_classification,
+                "execution_strategy": run.execution_strategy,
+                "runtime_adapter": run.runtime_adapter,
+                "runtime_mode": run.runtime_mode
+            }),
+        )
+        .await?;
+    let audit = record_manager_agent_plan_audit_and_event(
+        &state,
+        &plan,
+        "manager_plan.workflow_run_materialized",
+    )
+    .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(run.primary_session_id),
+            "system",
+            Some(run.id),
+            "workflow_run.created",
+            "workflow_run",
+            Some(run.id),
+            json!({
+                "manager_plan_id": plan.id,
+                "source_manager_session_id": plan.session_id,
+                "workflow_definition_id": definition.id,
+                "primary_session_id": run.primary_session_id,
+                "root_task_grant_id": run.root_task_grant_id,
+                "source_work_item_id": run.source_work_item_id,
+                "input_digest": run.input_digest,
+                "execution_strategy": run.execution_strategy,
+                "runtime_adapter": run.runtime_adapter,
+                "runtime_mode": run.runtime_mode
+            }),
+        ))
+        .await?;
+    record_manager_agent_plan_work_item_activity(
+        &state,
+        &ManagerAgentPlan {
+            audit_trace_id: Some(audit.id),
+            ..plan.clone()
+        },
+        "manager_plan.workflow_run_materialized",
+    )
+    .await?;
+    Ok(Json(MaterializedManagerAgentPlanWorkflowRun {
+        manager_plan: plan,
+        workflow_definition: definition,
+        workflow_run: run,
+    }))
+}
+
+fn manager_plan_workflow_input_payload(plan: &ManagerAgentPlan, input: Value) -> Value {
+    let mut payload = match input {
+        Value::Object(map) => map,
+        _ => Map::new(),
+    };
+    payload.insert("manager_plan_id".to_string(), json!(plan.id));
+    payload.insert(
+        "source_manager_session_id".to_string(),
+        json!(plan.session_id),
+    );
+    payload.insert("manager_agent_id".to_string(), json!(plan.manager_agent_id));
+    payload.insert(
+        "risk_classification".to_string(),
+        json!(plan.risk_classification),
+    );
+    payload.insert("task_intake".to_string(), plan.task_intake.clone());
+    payload.insert("decomposition".to_string(), plan.decomposition.clone());
+    payload.insert(
+        "specialist_selection".to_string(),
+        plan.specialist_selection.clone(),
+    );
+    if let Some(work_item_id) = plan.work_item_id {
+        payload.insert("work_item_id".to_string(), json!(work_item_id));
+    }
+    if let Some(specialist_agent_id) = plan.specialist_agent_id {
+        payload.insert(
+            "specialist_agent_id".to_string(),
+            json!(specialist_agent_id),
+        );
+    }
+    Value::Object(payload)
+}
+
+fn manager_plan_workflow_runtime_envelope_request(
+    plan: &ManagerAgentPlan,
+    runtime_envelope: Value,
+) -> Value {
+    let mut envelope = match runtime_envelope {
+        Value::Object(map) => map,
+        _ => Map::new(),
+    };
+    envelope.insert("manager_plan_id".to_string(), json!(plan.id));
+    envelope.insert(
+        "source_manager_session_id".to_string(),
+        json!(plan.session_id),
+    );
+    envelope.insert("manager_agent_id".to_string(), json!(plan.manager_agent_id));
+    envelope.insert(
+        "risk_classification".to_string(),
+        json!(plan.risk_classification),
+    );
+    Value::Object(envelope)
 }

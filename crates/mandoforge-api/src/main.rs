@@ -320,7 +320,8 @@ pub(crate) use types::agent_handoff::{
     AgentHandoffAssignment, AgentHandoffEvent, AttachAgentHandoffRemoteComputerAssignment,
     CreateAgentHandoffAssignment, CreateAgentHandoffEvent, CreateManagerAgentPlan,
     EscalateAgentHandoffEvent, ManagerAgentPlan, MaterializeManagerAgentPlanHandoff,
-    MaterializedManagerAgentPlanHandoff, ReviewManagerAgentPlan, TransitionAgentHandoffEvent,
+    MaterializeManagerAgentPlanWorkflowRun, MaterializedManagerAgentPlanHandoff,
+    MaterializedManagerAgentPlanWorkflowRun, ReviewManagerAgentPlan, TransitionAgentHandoffEvent,
 };
 pub(crate) use types::approval::{
     Approval, ApprovalCommitBinding, ApprovalCommitToken, ApprovalEscalationDueRun,

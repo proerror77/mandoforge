@@ -5683,6 +5683,354 @@ async fn manager_plan_materialize_handoff_creates_runtime_assignment() {
 }
 
 #[tokio::test]
+async fn manager_plan_materialize_workflow_run_creates_root_grant_and_start_step() {
+    let app = test_app().await;
+    let admin_headers = [
+        ("x-mandoforge-subject", "admin-1"),
+        ("x-mandoforge-roles", "admin"),
+    ];
+    let work_item: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/work-items",
+            json!({
+                "title": "Materialize manager plan as workflow",
+                "source": "manual",
+                "priority": "high",
+                "metadata": {"layer": "manager_runtime"}
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let work_item_id = work_item["id"].as_str().expect("work item id");
+    let manager: Agent = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/agents",
+            json!({
+                "name": "Workflow Materializing Manager",
+                "kind": "manager",
+                "agent_role": "manager",
+                "provider": "openai-compatible",
+                "model": "gpt-5.5-mini",
+                "tools": ["file.read", "agent_cli.exec"],
+                "semantic_scopes": {
+                    "project_scope": "mandoforge",
+                    "workflow_scope": "manager-plan-workflow"
+                }
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let manager_session: Session = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/sessions",
+            json!({
+                "agent_id": manager.id,
+                "title": "manager plan to workflow run",
+                "message": "Review then materialize as a WorkflowRun."
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let definition: WorkflowDefinition = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-definitions",
+            json!({
+                "name": "Manager plan workflow run",
+                "entrypoint": "manager-plan-workflow-run",
+                "trigger_type": "manual",
+                "default_agent_id": manager.id,
+                "step_graph": {
+                    "steps": [
+                        {"key": "manager_execute", "agent_role": "manager"}
+                    ]
+                },
+                "handoff_rules": {
+                    "root_task_grant": {
+                        "semantic_scopes": {
+                            "project_scope": "mandoforge",
+                            "workflow_scope": "manager-plan-workflow"
+                        },
+                        "memory_scope": {
+                            "mode": "snapshot_only",
+                            "allowed_scope_keys": [],
+                            "allowed_object_types": [],
+                            "allowed_source_types": [],
+                            "allowed_object_ids": [],
+                            "minimum_trust_level": "verified",
+                            "max_objects": 0,
+                            "approval_memory_allowed": false,
+                            "handoff_memory_allowed": false,
+                            "writeback_allowed": false
+                        },
+                        "tool_scope": {
+                            "read": ["file.read"],
+                            "write": ["agent_cli.exec"],
+                            "external_write": []
+                        },
+                        "connector_scope": {
+                            "mode": "read_only",
+                            "allowed_connector_ids": [],
+                            "allowed_tool_names": [],
+                            "tenant_scope": {},
+                            "side_effect_classes": []
+                        }
+                    }
+                },
+                "release_state": "released"
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let plan: ManagerAgentPlan = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/sessions/{}/manager-plans", manager_session.id),
+            json!({
+                "work_item_id": work_item_id,
+                "task_intake": {"goal": "Turn reviewed manager plan into WorkflowRun"},
+                "decomposition": {"steps": ["create workflow run", "issue root grant"]},
+                "specialist_selection": {"mode": "workflow_first"},
+                "risk_classification": "medium",
+                "review": {"status": "pending"}
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let (status, error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/manager-plans/{}/materialize-workflow-run", plan.id),
+            json!({"workflow_definition_id": definition.id}),
+            &admin_headers,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error["error"],
+        "manager plan must be reviewed or approved before materialization"
+    );
+    let reviewed: ManagerAgentPlan = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/manager-plans/{}/review", plan.id),
+            json!({
+                "status": "approved",
+                "review": {"status": "approved", "summary": "Materialize as workflow run"}
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+
+    let materialized: MaterializedManagerAgentPlanWorkflowRun = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!(
+                "/api/manager-plans/{}/materialize-workflow-run",
+                reviewed.id
+            ),
+            json!({
+                "workflow_definition_id": definition.id,
+                "title": "workflow run from manager plan",
+                "input_payload": {"operator_note": "use workflow-first path"},
+                "runtime_envelope": {"materialization_entrypoint": "manager_plan"}
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    assert_eq!(materialized.manager_plan.id, reviewed.id);
+    assert_eq!(materialized.workflow_definition.id, definition.id);
+    assert_eq!(
+        materialized.workflow_run.workflow_definition_id,
+        definition.id
+    );
+    assert_eq!(
+        materialized.workflow_run.source_work_item_id,
+        Some(Uuid::parse_str(work_item_id).expect("work item uuid"))
+    );
+    assert!(materialized.workflow_run.root_task_grant_id.is_some());
+    assert_eq!(
+        materialized.workflow_run.input_payload["manager_plan_id"],
+        json!(reviewed.id)
+    );
+    assert_eq!(
+        materialized.workflow_run.input_payload["operator_note"],
+        json!("use workflow-first path")
+    );
+    assert_eq!(
+        materialized.workflow_run.runtime_envelope["request_envelope"]["manager_plan_id"],
+        json!(reviewed.id)
+    );
+
+    let steps: Vec<WorkflowStepRun> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!(
+                "/api/workflow-runs/{}/steps",
+                materialized.workflow_run.id
+            ))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let start_step = steps
+        .iter()
+        .find(|step| step.step_key == "manager_execute")
+        .expect("start step materialized");
+    assert_eq!(
+        start_step.task_grant_id,
+        materialized.workflow_run.root_task_grant_id
+    );
+    assert_eq!(start_step.agent_id, Some(manager.id));
+
+    let grants: Vec<TaskGrant> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!(
+                "/api/workflow-runs/{}/task-grants",
+                materialized.workflow_run.id
+            ))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let root_grant = grants
+        .iter()
+        .find(|grant| Some(grant.id) == materialized.workflow_run.root_task_grant_id)
+        .expect("root task grant issued");
+    assert_eq!(root_grant.workflow_run_id, materialized.workflow_run.id);
+    assert_eq!(root_grant.grantee_agent_id, Some(manager.id));
+
+    let events: Vec<SessionEvent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!(
+                "/api/sessions/{}/events",
+                materialized.workflow_run.primary_session_id
+            ))
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(events.iter().any(|event| {
+        event.event_type == "manager_plan.workflow_run_materialized"
+            && event.payload["manager_plan_id"] == json!(reviewed.id)
+            && event.payload["workflow_run_id"] == json!(materialized.workflow_run.id)
+            && event.payload["root_task_grant_id"]
+                == json!(materialized.workflow_run.root_task_grant_id)
+    }));
+
+    let activity: Value = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/work-items/{work_item_id}/activity"))
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(
+        activity
+            .as_array()
+            .expect("activity entries")
+            .iter()
+            .any(|entry| entry["event_type"] == "manager_plan.workflow_run_materialized")
+    );
+    let audit_logs: Vec<AuditLog> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/audit-logs")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(audit_logs.iter().any(|log| {
+        log.action == "manager_plan.workflow_run_materialized"
+            && log.resource_type == "manager_agent_plan"
+            && log.resource_id == Some(reviewed.id)
+    }));
+    assert!(audit_logs.iter().any(|log| {
+        log.action == "workflow_run.created"
+            && log.resource_type == "workflow_run"
+            && log.resource_id == Some(materialized.workflow_run.id)
+            && log.details["manager_plan_id"] == json!(reviewed.id)
+    }));
+
+    let high_risk_plan: ManagerAgentPlan = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/sessions/{}/manager-plans", manager_session.id),
+            json!({
+                "work_item_id": work_item_id,
+                "task_intake": {"goal": "Try high-risk workflow auto materialization"},
+                "decomposition": {"steps": ["should fail closed"]},
+                "specialist_selection": {"mode": "workflow_first"},
+                "risk_classification": "high",
+                "review": {"status": "pending"}
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let high_risk_reviewed: ManagerAgentPlan = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/manager-plans/{}/review", high_risk_plan.id),
+            json!({
+                "status": "approved",
+                "review": {"status": "approved"}
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let (status, error) = request_value(
+        app,
+        json_request_with_headers(
+            "POST",
+            &format!(
+                "/api/manager-plans/{}/materialize-workflow-run",
+                high_risk_reviewed.id
+            ),
+            json!({"workflow_definition_id": definition.id}),
+            &admin_headers,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error["error"],
+        "manager plan workflow materialization cannot auto-start high-risk plans"
+    );
+}
+
+#[tokio::test]
 async fn manager_agent_run_routes_are_not_platform_control_plane() {
     let app = test_app().await;
 

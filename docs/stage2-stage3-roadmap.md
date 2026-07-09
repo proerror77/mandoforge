@@ -87,6 +87,14 @@ The first Collaboration Layer slice is now in place:
   SessionThread, and, when a parent WorkflowRun TaskGrant is active, the
   downstream WorkflowStepRun and child TaskGrant. High-risk or approval-required
   handoffs still fail closed instead of being auto-accepted.
+- `/api/manager-plans/:id/materialize-workflow-run` turns a reviewed or
+  approved non-high-risk ManagerPlan into a WorkflowRun through the shared
+  WorkflowDefinition runtime path, preserving the source WorkItem, creating the
+  primary Session, issuing the root TaskGrant, materializing start
+  WorkflowStepRuns, and recording ManagerPlan evidence in input/runtime
+  envelopes, session events, WorkItem Activity Feed, and audit logs. High-risk
+  ManagerPlans still fail closed until an explicit approval-token path is
+  implemented.
 - WorkItems with `metadata.semantic_scopes` are projected into `semantic_objects`
   as `work_item:*` records so context packets can retrieve Collaboration Layer
   work as runtime context.
@@ -272,10 +280,12 @@ plans:
    sandbox dispatch, and runtime event return contract. Session-loop K Agent
    claim, lease, and heartbeat evidence are already recorded as
    `k_agent.claimed` and `k_agent.heartbeat`.
-4. Manager Runtime materialization: complete the main WorkflowRun-first
-   materialization path for reviewed ManagerPlans. The handoff materialization
-   path already connects ManagerPlan, Assignment, SessionThread, and child
-   TaskGrant evidence when a parent WorkflowRun grant is active.
+4. Manager Runtime materialization: expand the reviewed ManagerPlan
+   materialization policy with idempotency, approval-token support for
+   high-risk plans, and richer WorkflowRun selection. The current baseline
+   already supports WorkflowRun-first materialization for reviewed non-high-risk
+   ManagerPlans and handoff materialization into Assignment, SessionThread, and
+   child TaskGrant evidence when a parent WorkflowRun grant is active.
 5. Ontology Action Contract enforcement: make action validity a checked input to
    Tool Router without letting ontology bypass TaskGrant, Policy, or Approval.
 6. Pack / Release / Evidence: make WorkflowPack, DomainPack, AgentVersion,

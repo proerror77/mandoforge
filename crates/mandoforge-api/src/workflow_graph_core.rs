@@ -616,6 +616,15 @@ pub(crate) fn workflow_run_runtime_envelope(
     Value::Object(envelope)
 }
 
+pub(crate) struct CreateWorkflowRunFromDefinition {
+    pub(crate) title: String,
+    pub(crate) input_payload: Value,
+    pub(crate) runtime_envelope_request: Value,
+    pub(crate) source_work_item_id: Option<Uuid>,
+    pub(crate) environment_id: Option<Uuid>,
+    pub(crate) session_message: Option<String>,
+}
+
 pub(crate) async fn create_workflow_run_from_definition(
     state: &AppState,
     definition: &WorkflowDefinition,
@@ -623,12 +632,36 @@ pub(crate) async fn create_workflow_run_from_definition(
     input_payload: Value,
     runtime_envelope_request: Value,
 ) -> Result<WorkflowRun, AppError> {
+    create_workflow_run_from_definition_with_context(
+        state,
+        definition,
+        CreateWorkflowRunFromDefinition {
+            title,
+            input_payload,
+            runtime_envelope_request,
+            source_work_item_id: None,
+            environment_id: None,
+            session_message: None,
+        },
+    )
+    .await
+}
+
+pub(crate) async fn create_workflow_run_from_definition_with_context(
+    state: &AppState,
+    definition: &WorkflowDefinition,
+    input: CreateWorkflowRunFromDefinition,
+) -> Result<WorkflowRun, AppError> {
     if definition.release_state != "released" {
         return Err(AppError::bad_request(
             "workflow run requires a released workflow definition",
         ));
     }
-    if let Some(environment_id) = definition.default_environment_id {
+    if let Some(work_item_id) = input.source_work_item_id {
+        state.ensure_work_item_exists(work_item_id).await?;
+    }
+    let environment_id = input.environment_id.or(definition.default_environment_id);
+    if let Some(environment_id) = environment_id {
         state.get_environment(environment_id).await?;
     }
     let execution_strategy = definition.execution_strategy.clone();
@@ -642,14 +675,14 @@ pub(crate) async fn create_workflow_run_from_definition(
     let session = state
         .create_session(CreateSession {
             agent_id: definition.default_agent_id,
-            environment_id: definition.default_environment_id,
-            title,
-            message: None,
+            environment_id,
+            title: input.title,
+            message: input.session_message,
         })
         .await?;
     ensure_primary_session_thread(state, session.id).await?;
     let now = Utc::now();
-    let input_digest = workflow_input_digest(&input_payload);
+    let input_digest = workflow_input_digest(&input.input_payload);
     let delegation_status =
         (execution_strategy == "delegated_runtime").then_some("submitted".to_string());
     let runtime_envelope = workflow_run_runtime_envelope(
@@ -658,7 +691,7 @@ pub(crate) async fn create_workflow_run_from_definition(
         runtime_adapter.as_deref(),
         runtime_mode.as_deref(),
         None,
-        &runtime_envelope_request,
+        &input.runtime_envelope_request,
     );
     let run = state
         .create_workflow_run(WorkflowRun {
@@ -666,12 +699,12 @@ pub(crate) async fn create_workflow_run_from_definition(
             workflow_definition_id: definition.id,
             pack_installation_id: definition.pack_installation_id,
             source_event_id: None,
-            source_work_item_id: None,
+            source_work_item_id: input.source_work_item_id,
             source_schedule_id: None,
             status: "queued".to_string(),
             primary_session_id: session.id,
             root_task_grant_id: None,
-            input_payload,
+            input_payload: input.input_payload,
             input_digest,
             execution_strategy,
             runtime_adapter,

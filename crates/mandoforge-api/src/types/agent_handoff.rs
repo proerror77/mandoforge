@@ -122,6 +122,26 @@ pub(crate) struct MaterializedManagerAgentPlanHandoff {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct MaterializeManagerAgentPlanWorkflowRun {
+    pub(crate) workflow_definition_id: Uuid,
+    #[serde(default)]
+    pub(crate) environment_id: Option<Uuid>,
+    #[serde(default)]
+    pub(crate) title: Option<String>,
+    #[serde(default = "crate::empty_json_object")]
+    pub(crate) input_payload: Value,
+    #[serde(default = "crate::empty_json_object")]
+    pub(crate) runtime_envelope: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct MaterializedManagerAgentPlanWorkflowRun {
+    pub(crate) manager_plan: ManagerAgentPlan,
+    pub(crate) workflow_definition: crate::WorkflowDefinition,
+    pub(crate) workflow_run: crate::WorkflowRun,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct CreateAgentHandoffEvent {
     pub(crate) target_agent_id: Uuid,
     #[serde(default)]
