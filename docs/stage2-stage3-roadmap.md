@@ -113,6 +113,9 @@ The first Collaboration Layer slice is now in place:
   installations, summarizing manifest capabilities, gate evidence, bindings,
   runtime objects, workflow definition release states, and audit trace without
   creating any execution side channel.
+- `/api/eval/runs/:id/capability-readback` provides read-only EvalGate
+  capability evidence from existing EvalRun, EvalCase, gate decision, and drift
+  decision state without turning eval gates into execution authority.
 - `/api/agent-teammates`, `/api/squads`, and `/api/squads/:id/members` expose
   collaboration identities for runtime agents and squads without adding a
   second runtime orchestrator.
@@ -395,5 +398,8 @@ plans:
    capability readback through
    `/api/workflow-packs/installations/:id/capabilities`, including gate
    evidence, bindings, runtime objects, workflow definition release states, and
-   audit trace. Deeper release/evidence readbacks for AgentVersion,
-   EnvironmentProfile, ToolSpec, and EvalGate remain open.
+   audit trace. EvalGate now exposes read-only capability readback through
+   `/api/eval/runs/:id/capability-readback`, including run state, case ids,
+   gate decision, drift decision, and authority boundary. Deeper
+   release/evidence readbacks for AgentVersion, EnvironmentProfile, and
+   ToolSpec remain open.

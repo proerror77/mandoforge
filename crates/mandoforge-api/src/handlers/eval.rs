@@ -41,6 +41,10 @@ pub(crate) fn router() -> Router<AppState> {
         )
         .route("/api/eval/runs", get(list_eval_runs))
         .route("/api/eval/runs/{id}/gate", post(gate_eval_run))
+        .route(
+            "/api/eval/runs/{id}/capability-readback",
+            get(get_eval_run_capability_readback),
+        )
         .route("/api/eval/runs/{id}/drift", get(get_eval_run_drift))
 }
 
@@ -323,4 +327,52 @@ async fn get_eval_run_drift(
         .filter(|candidate| candidate.created_at <= run.created_at)
         .max_by_key(|candidate| candidate.created_at);
     Ok(Json(build_eval_drift_decision(&run, baseline.as_ref())))
+}
+
+async fn get_eval_run_capability_readback(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "eval_run", Some(id)).await?;
+    let run = state
+        .list_eval_runs(None)
+        .await?
+        .into_iter()
+        .find(|run| run.id == id)
+        .ok_or_else(|| AppError::not_found("eval run not found"))?;
+    let cases = state.list_eval_cases(run.dataset_id).await?;
+    let baseline = state
+        .list_eval_runs(Some(run.dataset_id))
+        .await?
+        .into_iter()
+        .filter(|candidate| candidate.id != run.id && candidate.agent_id == run.agent_id)
+        .filter(|candidate| candidate.created_at <= run.created_at)
+        .max_by_key(|candidate| candidate.created_at);
+    let gate = build_eval_gate_decision(&run, 1.0, true);
+    let drift = build_eval_drift_decision(&run, baseline.as_ref());
+    Ok(Json(json!({
+        "product_object": "EvalGate",
+        "run": {
+            "id": run.id,
+            "dataset_id": run.dataset_id,
+            "agent_id": run.agent_id,
+            "agent_version_id": run.agent_version_id,
+            "status": run.status,
+            "score": run.score,
+            "created_at": run.created_at,
+            "details": run.details
+        },
+        "gate_decision": gate,
+        "drift_decision": drift,
+        "case_count": cases.len(),
+        "case_ids": cases.into_iter().map(|case| case.id).collect::<Vec<_>>(),
+        "evidence_sources": [
+            "eval_run",
+            "eval_cases",
+            "gate_decision",
+            "drift_decision"
+        ],
+        "authority_boundary": "read-only EvalGate capability readback; eval gates produce release evidence but do not execute business actions"
+    })))
 }

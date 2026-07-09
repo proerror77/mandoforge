@@ -39695,6 +39695,30 @@ async fn admin_can_create_eval_dataset_cases_and_version_bound_run() {
     assert_eq!(drift.baseline_run_id, Some(run.id));
     assert_eq!(drift.status, "stable");
     assert_eq!(drift.score_delta, Some(0.0));
+    let readback: Value = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!(
+                "/api/eval/runs/{}/capability-readback",
+                second_run.id
+            ))
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(readback["product_object"], json!("EvalGate"));
+    assert_eq!(readback["run"]["id"], json!(second_run.id));
+    assert_eq!(readback["gate_decision"]["status"], json!("passed"));
+    assert_eq!(readback["drift_decision"]["baseline_run_id"], json!(run.id));
+    assert_eq!(readback["case_count"], json!(3));
+    assert!(
+        readback["authority_boundary"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("read-only")
+    );
 
     let (status, gate_error) = request_value(
         app.clone(),
@@ -39784,6 +39808,28 @@ async fn admin_can_create_eval_dataset_cases_and_version_bound_run() {
             .failure_reasons
             .iter()
             .any(|reason| reason.contains("score"))
+    );
+    let failed_readback: Value = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!(
+                "/api/eval/runs/{}/capability-readback",
+                failing_run.id
+            ))
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(failed_readback["gate_decision"]["status"], json!("failed"));
+    assert_eq!(failed_readback["run"]["status"], json!("failed"));
+    assert!(
+        failed_readback["gate_decision"]["failure_reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason.as_str().unwrap_or_default().contains("score"))
     );
 
     let release: AgentRelease = request_json(
