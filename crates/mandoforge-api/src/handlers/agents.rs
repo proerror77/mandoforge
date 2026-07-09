@@ -47,6 +47,10 @@ pub(crate) fn router() -> Router<AppState> {
             get(get_agent_runtime_profile_release_gate),
         )
         .route(
+            "/api/agent-runtime-profiles/{id}/capability-readback",
+            get(get_agent_runtime_profile_capability_readback),
+        )
+        .route(
             "/api/environments",
             get(list_environments).post(create_environment),
         )
@@ -279,6 +283,85 @@ async fn get_agent_runtime_profile_release_gate(
     .await?;
     let profile = state.get_agent_runtime_profile(id).await?;
     Ok(Json(evaluate_agent_runtime_profile_release_gate(&profile)))
+}
+
+async fn get_agent_runtime_profile_capability_readback(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "agent_runtime_profile",
+        Some(id),
+    )
+    .await?;
+    let profile = state.get_agent_runtime_profile(id).await?;
+    let release_gate = evaluate_agent_runtime_profile_release_gate(&profile);
+    let bound_environments: Vec<_> = state
+        .list_environments()
+        .await?
+        .into_iter()
+        .filter(|environment| environment.runtime_profile_id == Some(profile.id))
+        .collect();
+    let bound_agents: Vec<_> = state
+        .list_agents()
+        .await?
+        .into_iter()
+        .filter(|agent| agent.runtime_profile_id == Some(profile.id))
+        .collect();
+    Ok(Json(json!({
+        "product_object": "EnvironmentProfile",
+        "runtime_profile": {
+            "id": profile.id,
+            "name": profile.name,
+            "runtime_type": profile.runtime_type,
+            "command": profile.command,
+            "default_args": profile.default_args,
+            "timeout_seconds": profile.timeout_seconds,
+            "remote_computer_required": profile.remote_computer_required,
+            "status": profile.status,
+            "created_at": profile.created_at,
+            "updated_at": profile.updated_at,
+            "archived_at": profile.archived_at
+        },
+        "release_gate": release_gate,
+        "environment_bindings": bound_environments
+            .iter()
+            .map(|environment| json!({
+                "id": environment.id,
+                "name": environment.name,
+                "environment_type": environment.environment_type,
+                "release_state": environment.release_state,
+                "status": environment.status
+            }))
+            .collect::<Vec<_>>(),
+        "agent_bindings": bound_agents
+            .iter()
+            .map(|agent| json!({
+                "id": agent.id,
+                "name": agent.name,
+                "kind": agent.kind,
+                "agent_role": agent.agent_role,
+                "release_state": agent.release_state
+            }))
+            .collect::<Vec<_>>(),
+        "summary": {
+            "environment_binding_count": bound_environments.len(),
+            "agent_binding_count": bound_agents.len(),
+            "environments_by_status": count_values(bound_environments.iter().map(|environment| environment.status.as_str())),
+            "agents_by_release_state": count_values(bound_agents.iter().map(|agent| agent.release_state.as_str()))
+        },
+        "evidence_sources": [
+            "agent_runtime_profile",
+            "agent_runtime_profile_release_gate",
+            "environments",
+            "agents"
+        ],
+        "authority_boundary": "read-only EnvironmentProfile capability readback; runtime profiles select managed runtime bindings while execution remains gated by Managed Runtime, Tool Router, Policy, Approval, and Audit"
+    })))
 }
 
 async fn update_agent_runtime_profile(

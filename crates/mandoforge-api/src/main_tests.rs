@@ -9722,6 +9722,15 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
                 ))
     }));
     assert!(product_capabilities.iter().any(|capability| {
+        capability["key"] == json!("environment_profile")
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(
+                    "GET /api/agent-runtime-profiles/{id}/capability-readback"
+                ))
+    }));
+    assert!(product_capabilities.iter().any(|capability| {
         capability["key"] == json!("eval_gate")
             && capability["api_routes"]
                 .as_array()
@@ -26107,6 +26116,99 @@ async fn managed_agent_runtime_profile_lifecycle_is_audited_and_fail_closed() {
             && log.details["before"]["status"] == "enabled"
             && log.details["after"]["status"] == "disabled"
     }));
+}
+
+#[tokio::test]
+async fn agent_runtime_profile_capability_readback_summarizes_bindings() {
+    let app = test_app().await;
+    let admin_headers = [
+        ("x-mandoforge-subject", "admin-1"),
+        ("x-mandoforge-roles", "admin"),
+    ];
+    let profile: AgentRuntimeProfile = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/agent-runtime-profiles",
+            json!({
+                "name": "readback-codex-cli",
+                "runtime_type": "codex_cli",
+                "command": "codex",
+                "default_args": ["exec"],
+                "timeout_seconds": 60
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let environment: Environment = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/environments",
+            json!({
+                "name": "Readback Environment",
+                "environment_type": "self_hosted",
+                "runtime_profile_id": profile.id,
+                "release_state": "active",
+                "status": "enabled"
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let agent: Agent = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/agents",
+            json!({
+                "name": "Readback Runtime Agent",
+                "kind": "specialist",
+                "agent_role": "specialist",
+                "provider": "openai-compatible",
+                "model": "gpt-5.5-mini",
+                "runtime_profile_id": profile.id,
+                "tools": ["agent_cli.exec"]
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+
+    let readback: Value = request_json(
+        app,
+        Request::builder()
+            .uri(format!(
+                "/api/agent-runtime-profiles/{}/capability-readback",
+                profile.id
+            ))
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(readback["product_object"], json!("EnvironmentProfile"));
+    assert_eq!(readback["runtime_profile"]["id"], json!(profile.id));
+    assert_eq!(readback["release_gate"]["profile_id"], json!(profile.id));
+    assert_eq!(readback["summary"]["environment_binding_count"], json!(1));
+    assert_eq!(readback["summary"]["agent_binding_count"], json!(1));
+    assert_eq!(
+        readback["environment_bindings"][0]["id"],
+        json!(environment.id)
+    );
+    assert_eq!(readback["agent_bindings"][0]["id"], json!(agent.id));
+    assert_eq!(
+        readback["summary"]["environments_by_status"]["enabled"],
+        json!(1)
+    );
+    assert!(
+        readback["authority_boundary"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("read-only")
+    );
 }
 
 #[tokio::test]

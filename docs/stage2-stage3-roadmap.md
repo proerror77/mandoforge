@@ -117,6 +117,10 @@ The first Collaboration Layer slice is now in place:
   AgentVersion capability evidence from existing version, runtime contract,
   tool contract, policy contract, EvalRun evidence, and AgentRelease evidence
   without turning a version record into release or execution authority.
+- `/api/agent-runtime-profiles/:id/capability-readback` provides read-only
+  EnvironmentProfile capability evidence from existing runtime profile,
+  release gate, environment bindings, and agent bindings without turning an
+  environment profile into execution authority.
 - `/api/eval/runs/:id/capability-readback` provides read-only EvalGate
   capability evidence from existing EvalRun, EvalCase, gate decision, and drift
   decision state without turning eval gates into execution authority.
@@ -404,8 +408,11 @@ plans:
    evidence, bindings, runtime objects, workflow definition release states, and
    audit trace. AgentVersion now exposes read-only capability readback through
    `/api/agents/:id/versions/:version/capability-readback`, including runtime,
-   tool, policy, eval, and release evidence. EvalGate now exposes read-only
-   capability readback through
+   tool, policy, eval, and release evidence. EnvironmentProfile now exposes
+   read-only capability readback through
+   `/api/agent-runtime-profiles/:id/capability-readback`, including runtime
+   profile state, release gate, environment bindings, and agent bindings.
+   EvalGate now exposes read-only capability readback through
    `/api/eval/runs/:id/capability-readback`, including run state, case ids,
    gate decision, drift decision, and authority boundary. Deeper
-   release/evidence readbacks for EnvironmentProfile and ToolSpec remain open.
+   release/evidence readback for ToolSpec remains open.

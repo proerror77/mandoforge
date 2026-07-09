@@ -1422,6 +1422,7 @@ fn agent_os_product_capabilities() -> Vec<Value> {
                 "POST /api/agent-runtime-profiles",
                 "GET /api/agent-runtime-profile-release-gates",
                 "GET /api/agent-runtime-profiles/{id}/release-gate",
+                "GET /api/agent-runtime-profiles/{id}/capability-readback",
                 "GET /api/environments"
             ],
             "lifecycle_actions": ["create", "update", "archive", "evaluate_release_gate", "bind_environment"],
