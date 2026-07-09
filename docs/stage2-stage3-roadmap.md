@@ -374,8 +374,11 @@ plans:
    strategy, and Remote Computer assignment. K Agent execution-job events now
    also carry `k_agent_sandbox_lifecycle_dispatch` evidence that summarizes the
    Remote Computer handoff/acknowledgement/transport/terminal lifecycle stages
-   from session events. Production-grade Pod lifecycle automation, continuous
-   sidecar artifact sync, and multi-node state synchronization remain open.
+   from session events. Remote Computer readiness now includes sidecar
+   supervision, sidecar recovery validation, and production state-sync
+   controller evidence. Production-grade Pod lifecycle automation, continuous
+   sidecar artifact sync, and customer-grade multi-node state synchronization
+   evidence remain open.
 4. Manager Runtime materialization: expand the reviewed ManagerPlan
    materialization policy with richer WorkflowRun selection. The current
    baseline already supports WorkflowRun-first materialization for reviewed
