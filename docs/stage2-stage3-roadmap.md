@@ -241,3 +241,22 @@ Acceptance:
 - Do not let Manager Agents become a separate runtime orchestrator.
 - Do not expose worker queue internals as the primary product model.
 - Do not model the runtime session loop as an always-running LLM daemon.
+
+## Follow-Up Implementation Plans
+
+The Full Agent OS narrative should be implemented through separate focused
+plans:
+
+1. Runtime adapter consolidation: make Environment runtime binding the only
+   product entrypoint for managed runtime execution while keeping `agent_cli.exec`
+   and `codex.exec` as compatibility facades.
+2. Environment Scheduling + K Agent: define the Environment Work Queue and
+   K Agent claim, lease, heartbeat, sandbox dispatch, and runtime event return
+   contract.
+3. Manager Runtime materialization: connect WorkItem, ManagerPlan, Assignment,
+   Review, WorkflowRun, SessionThread, and TaskGrant with evidence gates.
+4. Ontology Action Contract enforcement: make action validity a checked input to
+   Tool Router without letting ontology bypass TaskGrant, Policy, or Approval.
+5. Pack / Release / Evidence: make WorkflowPack, DomainPack, AgentVersion,
+   EnvironmentProfile, OntologyActionContract, ToolSpec, EvalGate, Release, and
+   Rollback auditable as product capabilities.
