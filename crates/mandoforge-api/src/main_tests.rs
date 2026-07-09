@@ -30026,6 +30026,27 @@ async fn session_loop_job_enqueue_preserves_queued_job_while_another_job_runs() 
         .expect("owning worker can complete loop job");
     assert_eq!(completed.status, SessionLoopJobStatus::Completed);
     assert_eq!(completed.processed_event_seq, Some(first_event.seq));
+    let completed_retry = state
+        .start_session_loop_job(completed.id, "loop-worker-a")
+        .await
+        .expect_err("completed job cannot be restarted by retry");
+    assert_eq!(completed_retry.status, StatusCode::NOT_FOUND);
+
+    let second_running = state
+        .start_session_loop_job(second.id, "loop-worker-b")
+        .await
+        .expect("second worker can start after first job completes");
+    assert_eq!(
+        second_running.pending_event_seq_start,
+        Some(second_event.seq)
+    );
+    assert_eq!(second_running.pending_event_seq_end, Some(second_event.seq));
+    assert_eq!(second_running.processed_event_seq, Some(first_event.seq));
+    let second_completed = state
+        .complete_session_loop_job(second_running.id, "loop-worker-b")
+        .await
+        .expect("second job completes without reprocessing first event");
+    assert_eq!(second_completed.processed_event_seq, Some(second_event.seq));
 }
 
 #[tokio::test]
