@@ -9822,6 +9822,7 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
         "work_surface_connector",
         "agent_version",
         "environment_profile",
+        "remote_computer",
         "ontology_action_contract",
         "tool_spec",
         "eval_gate",
@@ -9938,6 +9939,37 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
                 .contains(&json!(
                     "GET /api/agent-runtime-profiles/{id}/capability-readback"
                 ))
+    }));
+    assert!(product_capabilities.iter().any(|capability| {
+        capability["key"] == json!("remote_computer")
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("GET /api/remote-computers/readiness"))
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("POST /api/remote-computers/artifacts/sync"))
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("POST /api/remote-computers/runner/dry-run"))
+            && capability["evidence_events"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("remote_computer.execution_handoff_planned"))
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Environment Scheduling")
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Manager Runtime")
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("TaskGrant")
     }));
     assert!(product_capabilities.iter().any(|capability| {
         capability["key"] == json!("tool_spec")

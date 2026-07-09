@@ -1615,6 +1615,48 @@ fn agent_os_product_capabilities() -> Vec<Value> {
             "authority_boundary": "Environment profiles select runtime bindings; execution still flows through Managed Runtime, Tool Router, Policy, Approval, and Audit."
         }),
         json!({
+            "key": "remote_computer",
+            "product_object": "RemoteComputer",
+            "status": "available",
+            "api_routes": [
+                "GET /api/remote-computers",
+                "POST /api/remote-computers",
+                "GET /api/remote-computers/readiness",
+                "GET /api/remote-computers/production-path",
+                "POST /api/remote-computers/{id}/leases",
+                "GET /api/remote-computer-leases",
+                "POST /api/remote-computer-leases/{id}/attach",
+                "POST /api/remote-computer-leases/{id}/heartbeat",
+                "POST /api/remote-computer-leases/{id}/release",
+                "GET /api/remote-computer-job-assignments",
+                "POST /api/remote-computers/artifacts/sync",
+                "POST /api/remote-computers/artifacts/discover",
+                "GET /api/remote-computers/sidecars/heartbeats",
+                "POST /api/remote-computers/sidecars/heartbeats",
+                "POST /api/remote-computers/state-sync/validate",
+                "GET /api/remote-computers/runner/readiness",
+                "POST /api/remote-computers/runner/dry-run"
+            ],
+            "lifecycle_actions": ["create", "lease", "attach", "heartbeat", "assign_execution_job", "sync_artifacts", "discover_artifacts", "record_sidecar_heartbeat", "validate_state_sync", "report_readiness"],
+            "evidence_events": [
+                "remote_computer.leased",
+                "remote_computer.attached",
+                "remote_computer.execution_handoff_planned",
+                "remote_computer.execution_handoff_assigned",
+                "remote_computer.execution_handoff_acknowledged",
+                "remote_computer.execution_transport_planned",
+                "remote_computer.execution_handoff_completed",
+                "remote_computer.execution_handoff_released",
+                "remote_computer.state_lock_acquired",
+                "remote_computer.state_lock_released",
+                "remote_computer.sidecar_heartbeat",
+                "remote_computer.sidecar_recovery_run",
+                "remote_computer.artifact_synced",
+                "remote_computer.artifact_discovered"
+            ],
+            "authority_boundary": "RemoteComputer is an Environment Scheduling and Execution Substrate capability; it leases and reports sandbox state only after Manager Runtime, TaskGrant, Policy, Approval, Tool Router, session events, artifacts, and audit boundaries authorize the work."
+        }),
+        json!({
             "key": "ontology_action_contract",
             "product_object": "OntologyActionContract",
             "status": "available",
