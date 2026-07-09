@@ -138,7 +138,7 @@ async fn ingest_work_surface_event(
     let input: IngestWorkSurfaceEvent =
         serde_json::from_slice(&body).map_err(|_| AppError::bad_request("invalid JSON body"))?;
     let adapter = work_surface_adapter(input.surface)?;
-    let surface = adapter.surface;
+    let surface = adapter.surface.clone();
     let event_type = required_work_surface_text(input.event_type, "event_type")?;
     let auth = verify_work_surface_webhook_auth(&headers, &body, &surface)?;
     let cursor = normalize_work_surface_optional_text(input.cursor.or_else(|| {
@@ -159,9 +159,8 @@ async fn ingest_work_surface_event(
     };
     let metadata = work_surface_metadata(
         input.metadata,
-        &surface,
-        adapter.name,
-        adapter.known,
+        &headers,
+        &adapter,
         &event_type,
         input.external_id,
         cursor.clone(),
@@ -364,9 +363,8 @@ fn work_surface_adapter(value: String) -> Result<WorkSurfaceAdapter, AppError> {
 
 fn work_surface_metadata(
     metadata: Value,
-    surface: &str,
-    adapter: &str,
-    known_adapter: bool,
+    headers: &HeaderMap,
+    adapter: &WorkSurfaceAdapter,
     event_type: &str,
     external_id: Option<String>,
     cursor: Option<String>,
@@ -377,21 +375,23 @@ fn work_surface_metadata(
     assignee: Option<&str>,
 ) -> Value {
     let work_surface = json!({
-        "surface": surface,
-        "adapter": adapter,
+        "surface": &adapter.surface,
+        "adapter": adapter.name,
         "event_type": event_type,
         "external_id": external_id,
         "cursor": cursor,
         "delivery_id": delivery_id,
         "authentication": auth,
+        "rate_limit": work_surface_rate_limit_evidence(headers, &metadata),
+        "live_readback": work_surface_live_readback_evidence(headers, &metadata),
         "occurred_at": occurred_at,
         "actor": actor,
-        "extracted": if known_adapter {
-            work_surface_extracted_fields(surface, &metadata)
+        "extracted": if adapter.known {
+            work_surface_extracted_fields(&adapter.surface, &metadata)
         } else {
             json!({})
         },
-        "human_state": if known_adapter {
+        "human_state": if adapter.known {
             work_surface_human_state(&metadata, assignee)
         } else {
             json!({})
@@ -409,6 +409,83 @@ fn work_surface_metadata(
             Value::Object(object)
         }
     }
+}
+
+fn work_surface_rate_limit_evidence(headers: &HeaderMap, metadata: &Value) -> Value {
+    let header_evidence = work_surface_header_evidence(
+        headers,
+        &[
+            ("limit", "x-ratelimit-limit"),
+            ("remaining", "x-ratelimit-remaining"),
+            ("reset", "x-ratelimit-reset"),
+            ("retry_after", "retry-after"),
+        ],
+    );
+    let payload = work_surface_first_nested_value(
+        metadata,
+        &["rate_limit", "rateLimit", "rate_limit_evidence"],
+    );
+    work_surface_observed_evidence(header_evidence, payload)
+}
+
+fn work_surface_live_readback_evidence(headers: &HeaderMap, metadata: &Value) -> Value {
+    let header_evidence = work_surface_header_evidence(
+        headers,
+        &[
+            ("status", "x-mandoforge-work-surface-readback-status"),
+            ("source", "x-mandoforge-work-surface-readback-source"),
+            (
+                "external_object_id",
+                "x-mandoforge-work-surface-readback-object-id",
+            ),
+            ("checked_at", "x-mandoforge-work-surface-readback-at"),
+        ],
+    );
+    let payload = work_surface_first_nested_value(
+        metadata,
+        &[
+            "live_readback",
+            "liveReadback",
+            "live_readback_evidence",
+            "api_readback",
+        ],
+    );
+    work_surface_observed_evidence(header_evidence, payload)
+}
+
+fn work_surface_header_evidence(
+    headers: &HeaderMap,
+    fields: &[(&str, &str)],
+) -> Map<String, Value> {
+    let mut evidence = Map::new();
+    for (field, header) in fields {
+        if let Some(value) = header_value(headers, header) {
+            evidence.insert((*field).to_string(), json!(value));
+        }
+    }
+    evidence
+}
+
+fn work_surface_observed_evidence(
+    header_evidence: Map<String, Value>,
+    payload: Option<Value>,
+) -> Value {
+    let has_headers = !header_evidence.is_empty();
+    let has_payload = payload.is_some();
+    let mut sources = Vec::new();
+    if has_headers {
+        sources.push("headers");
+    }
+    if has_payload {
+        sources.push("payload.metadata");
+    }
+    json!({
+        "observed": has_headers || has_payload,
+        "source": sources,
+        "headers": header_evidence,
+        "payload": payload.unwrap_or(Value::Null),
+        "mandoforge_enforced": false,
+    })
 }
 
 fn work_surface_source_url(metadata: &Value) -> Option<String> {

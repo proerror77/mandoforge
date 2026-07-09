@@ -35072,6 +35072,17 @@ async fn work_surface_event_verifies_webhook_signature_and_replays_by_cursor() {
                 "number": 42,
                 "labels": ["refund", "ops"]
             },
+            "rate_limit": {
+                "policy": "github-rest",
+                "limit": 5000,
+                "remaining": 4997
+            },
+            "live_readback": {
+                "source": "github.rest.issue",
+                "status": "observed",
+                "external_object_id": "issue-42",
+                "checked_at": "2026-07-09T00:00:00Z"
+            },
             "state": "open",
             "requested_reviewer": "finance-lead"
         }
@@ -35087,6 +35098,15 @@ async fn work_surface_event_verifies_webhook_signature_and_replays_by_cursor() {
             .header("x-mandoforge-subject", "github-webhook")
             .header("x-mandoforge-roles", "admin")
             .header("x-mandoforge-work-surface-signature", signature.as_str())
+            .header("x-ratelimit-limit", "5000")
+            .header("x-ratelimit-remaining", "4997")
+            .header("x-ratelimit-reset", "1783569600")
+            .header("x-mandoforge-work-surface-readback-status", "observed")
+            .header(
+                "x-mandoforge-work-surface-readback-source",
+                "github.rest.issue",
+            )
+            .header("x-mandoforge-work-surface-readback-object-id", "issue-42")
             .body(Body::from(body.clone()))
             .expect("valid request"),
     )
@@ -35102,6 +35122,43 @@ async fn work_surface_event_verifies_webhook_signature_and_replays_by_cursor() {
             "signature_present": true,
             "signature_header": "x-mandoforge-work-surface-signature",
             "secret_ref": "MANDOFORGE_WORK_SURFACE_GITHUB_WEBHOOK_SECRET"
+        })
+    );
+    assert_eq!(
+        ingested.work_item.metadata["work_surface"]["rate_limit"],
+        json!({
+            "observed": true,
+            "source": ["headers", "payload.metadata"],
+            "headers": {
+                "limit": "5000",
+                "remaining": "4997",
+                "reset": "1783569600"
+            },
+            "payload": {
+                "policy": "github-rest",
+                "limit": 5000,
+                "remaining": 4997
+            },
+            "mandoforge_enforced": false
+        })
+    );
+    assert_eq!(
+        ingested.work_item.metadata["work_surface"]["live_readback"],
+        json!({
+            "observed": true,
+            "source": ["headers", "payload.metadata"],
+            "headers": {
+                "status": "observed",
+                "source": "github.rest.issue",
+                "external_object_id": "issue-42"
+            },
+            "payload": {
+                "source": "github.rest.issue",
+                "status": "observed",
+                "external_object_id": "issue-42",
+                "checked_at": "2026-07-09T00:00:00Z"
+            },
+            "mandoforge_enforced": false
         })
     );
     assert_eq!(
