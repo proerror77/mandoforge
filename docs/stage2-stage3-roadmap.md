@@ -67,6 +67,12 @@ The Managed Runtime Layer has a strong baseline:
   boundary.
 - Runtime adapter normalization for Codex CLI, Claude Code CLI, and Codex App
   Server turn output.
+- Runtime Turn evidence is recorded through existing session-scoped surfaces:
+  `runtime.turn.started`, `runtime.item`, `runtime.tool_call`,
+  `runtime.usage`, `runtime.final`, `runtime.turn.completed`,
+  `artifact.created`, and `execution.completed`, with session events,
+  tool-call readback, artifacts, and audit logs as the source of truth rather
+  than provider stdout replay.
 - `agent_cli.exec` remains a compatibility facade and records the session-bound
   runtime binding source (`environment`, `handoff`, `agent`, or legacy
   `requested`) in execution results, session events, and audit evidence.
@@ -105,11 +111,17 @@ The first Collaboration Layer slice is now in place:
   intake, routing, and review.
 - `/api/capability-discovery` now exposes an Agent OS product capability catalog
   for WorkItem, ManagerPlan, AgentHandoff, WorkflowPack, DomainPack,
-  AgentVersion, EnvironmentProfile, ManagedSession, ContextPacket,
+  AgentVersion, EnvironmentProfile, ManagedSession, RuntimeTurn, ContextPacket,
   ArtifactStore, AuditLogger, RemoteComputer, KAgent, TaskGrant, PolicyEngine,
   Approval, ToolRouter, OntologyActionContract, ToolSpec, EvalGate, Release,
   and Rollback, including the existing API surfaces, lifecycle actions,
   audit/evidence events, and authority boundaries for each capability.
+- The RuntimeTurn entry exposes existing runtime adapter turn creation, polling,
+  item normalization, tool-call and usage recording, final artifact persistence,
+  completion, and session-loop resume surfaces while preserving the boundary
+  that RuntimeTurn cannot authorize work, replace the Session event log, bypass
+  Manager Runtime, TaskGrant, Policy, Approval, Tool Router, or Environment
+  scheduling, or treat provider stdout replay as truth.
 - The ContextPacket entry exposes existing session-scoped generation,
   versioned readback, rendered execution context, semantic evidence, policy
   reminders, runtime profile, and replay source references while preserving the

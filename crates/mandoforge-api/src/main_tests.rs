@@ -9823,6 +9823,7 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
         "agent_version",
         "environment_profile",
         "managed_session",
+        "runtime_turn",
         "context_packet",
         "artifact_store",
         "audit_logger",
@@ -9979,6 +9980,41 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
                 .as_str()
                 .unwrap_or_default()
                 .contains("does not bypass Manager Runtime")
+    }));
+    assert!(product_capabilities.iter().any(|capability| {
+        capability["key"] == json!("runtime_turn")
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("GET /api/sessions/{id}/events"))
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("POST /api/execution-jobs/{id}/run"))
+            && capability["evidence_events"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("runtime.turn.started"))
+            && capability["evidence_events"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("runtime.turn.completed"))
+            && capability["evidence_events"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("runtime.final"))
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("normalizes provider and CLI adapter output")
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("does not authorize work")
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("provider stdout replay")
     }));
     assert!(product_capabilities.iter().any(|capability| {
         capability["key"] == json!("context_packet")

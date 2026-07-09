@@ -1654,6 +1654,34 @@ fn agent_os_product_capabilities() -> Vec<Value> {
             "authority_boundary": "Session is the Managed Runtime event envelope; it records events, tool calls, artifacts, context packets, threads, and audit evidence, but does not bypass Manager Runtime, TaskGrant, Policy, Approval, Tool Router, or Environment scheduling."
         }),
         json!({
+            "key": "runtime_turn",
+            "product_object": "RuntimeTurn",
+            "status": "available",
+            "api_routes": [
+                "POST /api/sessions/{id}/run",
+                "GET /api/sessions/{id}/events",
+                "GET /api/sessions/{id}/stream",
+                "GET /api/sessions/{id}/tool-calls",
+                "GET /api/sessions/{id}/artifacts",
+                "GET /api/sessions/{id}/audit-logs",
+                "GET /api/session-loop-jobs",
+                "POST /api/session-loop-jobs/{id}/run",
+                "POST /api/execution-jobs/{id}/run"
+            ],
+            "lifecycle_actions": ["create_runtime_turn", "poll_runtime_turn", "normalize_runtime_item", "record_runtime_tool_call", "record_runtime_usage", "persist_final_artifact", "complete_runtime_turn", "resume_session_loop"],
+            "evidence_events": [
+                "runtime.turn.started",
+                "runtime.item",
+                "runtime.tool_call",
+                "runtime.usage",
+                "runtime.final",
+                "runtime.turn.completed",
+                "artifact.created",
+                "execution.completed"
+            ],
+            "authority_boundary": "RuntimeTurn normalizes provider and CLI adapter output into session events, tool-call evidence, usage, final artifacts, and audit readback; it does not authorize work, replace the Session event log, bypass Manager Runtime, TaskGrant, Policy, Approval, Tool Router, or Environment scheduling, or make provider stdout replay the source of truth."
+        }),
+        json!({
             "key": "context_packet",
             "product_object": "ContextPacket",
             "status": "available",
