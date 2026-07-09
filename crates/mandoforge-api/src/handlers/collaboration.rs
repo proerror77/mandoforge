@@ -1654,6 +1654,28 @@ fn agent_os_product_capabilities() -> Vec<Value> {
             "authority_boundary": "Session is the Managed Runtime event envelope; it records events, tool calls, artifacts, context packets, threads, and audit evidence, but does not bypass Manager Runtime, TaskGrant, Policy, Approval, Tool Router, or Environment scheduling."
         }),
         json!({
+            "key": "session_thread",
+            "product_object": "SessionThread",
+            "status": "available",
+            "api_routes": [
+                "GET /api/sessions/{id}/threads",
+                "GET /api/session-threads",
+                "GET /api/session-threads/{id}",
+                "POST /api/manager-plans/{id}/materialize-handoff",
+                "POST /api/agent-handoffs/{id}/assignment",
+                "POST /api/session-loop-jobs/{id}/run"
+            ],
+            "lifecycle_actions": ["ensure_primary_thread", "create_child_thread", "assign_handoff_thread", "list_session_threads", "read_thread", "record_status_change"],
+            "evidence_events": [
+                "thread.started",
+                "thread.status_changed",
+                "agent_handoff.assigned",
+                "session.loop.started",
+                "session.loop.completed"
+            ],
+            "authority_boundary": "SessionThread isolates primary and specialist runtime lanes inside the Session event envelope; it coordinates handoff and status readback, but does not execute tools, create TaskGrant scope, approve actions, bypass Policy or Tool Router checks, or replace session events and audit evidence."
+        }),
+        json!({
             "key": "runtime_turn",
             "product_object": "RuntimeTurn",
             "status": "available",

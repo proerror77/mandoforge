@@ -76,7 +76,8 @@ The Managed Runtime Layer has a strong baseline:
 - `agent_cli.exec` remains a compatibility facade and records the session-bound
   runtime binding source (`environment`, `handoff`, `agent`, or legacy
   `requested`) in execution results, session events, and audit evidence.
-- Durable session threads for manager-to-specialist handoff.
+- Durable SessionThread records for primary and specialist runtime lanes,
+  manager-to-specialist handoff, status readback, and event/audit evidence.
 - Tool Router, Policy Engine, Approval Engine, Artifact Store, and Audit Logger.
 - SSE event streaming with reconnect cursors.
 - Session-first UI shell for Agent, Environment, Event Stream, Blocking
@@ -111,11 +112,17 @@ The first Collaboration Layer slice is now in place:
   intake, routing, and review.
 - `/api/capability-discovery` now exposes an Agent OS product capability catalog
   for WorkItem, ManagerPlan, AgentHandoff, WorkflowPack, DomainPack,
-  AgentVersion, EnvironmentProfile, ManagedSession, RuntimeTurn, ContextPacket,
-  ArtifactStore, AuditLogger, RemoteComputer, KAgent, TaskGrant, PolicyEngine,
-  Approval, ToolRouter, OntologyActionContract, ToolSpec, EvalGate, Release,
-  and Rollback, including the existing API surfaces, lifecycle actions,
-  audit/evidence events, and authority boundaries for each capability.
+  AgentVersion, EnvironmentProfile, ManagedSession, SessionThread,
+  RuntimeTurn, ContextPacket, ArtifactStore, AuditLogger, RemoteComputer,
+  KAgent, TaskGrant, PolicyEngine, Approval, ToolRouter,
+  OntologyActionContract, ToolSpec, EvalGate, Release, and Rollback, including
+  the existing API surfaces, lifecycle actions, audit/evidence events, and
+  authority boundaries for each capability.
+- The SessionThread entry exposes existing primary/specialist thread readback,
+  handoff assignment, session-loop status-change evidence, and thread events
+  while preserving the boundary that threads cannot execute tools, create
+  TaskGrant scope, approve actions, bypass Policy or Tool Router checks, or
+  replace session events and audit evidence.
 - The RuntimeTurn entry exposes existing runtime adapter turn creation, polling,
   item normalization, tool-call and usage recording, final artifact persistence,
   completion, and session-loop resume surfaces while preserving the boundary
@@ -450,13 +457,15 @@ plans:
    transaction profile, execution mode, and existing ontology release gates.
 6. Pack / Release / Evidence: `/api/capability-discovery` now lists
    WorkItem, ManagerPlan, AgentHandoff, WorkflowPack, DomainPack, AgentVersion,
-   EnvironmentProfile, ManagedSession, RuntimeTurn, ContextPacket,
+   EnvironmentProfile, ManagedSession, SessionThread, RuntimeTurn, ContextPacket,
    ArtifactStore, AuditLogger, RemoteComputer, KAgent, TaskGrant, PolicyEngine,
    Approval, ToolRouter, OntologyActionContract, ToolSpec, EvalGate, Release,
    and Rollback as
    auditable product capabilities with their existing routes, lifecycle actions,
    evidence events, and authority boundaries. ContextPacket is a scoped context
-   construction/readback surface, not execution authority. RuntimeTurn is the
+   construction/readback surface, not execution authority. SessionThread is the
+   readback and isolation surface for primary/specialist runtime lanes, not a
+   tool execution or authorization surface. RuntimeTurn is the
    session-scoped adapter-output normalization surface for runtime events,
    tool-call evidence, usage, final artifacts, and audit readback, not
    execution authority or provider-stdout truth. ArtifactStore and AuditLogger

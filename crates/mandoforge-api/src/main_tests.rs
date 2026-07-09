@@ -9823,6 +9823,7 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
         "agent_version",
         "environment_profile",
         "managed_session",
+        "session_thread",
         "runtime_turn",
         "context_packet",
         "artifact_store",
@@ -9980,6 +9981,37 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
                 .as_str()
                 .unwrap_or_default()
                 .contains("does not bypass Manager Runtime")
+    }));
+    assert!(product_capabilities.iter().any(|capability| {
+        capability["key"] == json!("session_thread")
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("GET /api/sessions/{id}/threads"))
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("GET /api/session-threads/{id}"))
+            && capability["evidence_events"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("thread.started"))
+            && capability["evidence_events"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("thread.status_changed"))
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("isolates primary and specialist runtime lanes")
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("does not execute tools")
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("create TaskGrant scope")
     }));
     assert!(product_capabilities.iter().any(|capability| {
         capability["key"] == json!("runtime_turn")
