@@ -40,36 +40,41 @@ MandoForge 做的就是这一层公共能力。上面可以长出各行各业的
 
 ## Agent OS 分层
 
-MandoForge 的主架构是 Agent OS，不是生产验收证据包：
+MandoForge 是 runtime-centered Enterprise Agent OS。
+中心是 Manager Runtime 和 Managed Runtime：谁发起工作、谁拆解任务、谁被分配、
+哪个 agent 运行、在哪个 environment 运行、看到了什么 context、调用了什么 tool、
+调用是否被授权、谁批准了、发生了什么，以及这次运行能不能回放、发布或回滚。
 
 ```text
-Existing Work Surfaces
-  Slack / 飞书 / GitHub / Jira / Linear / Email
+Work Surfaces
+  飞书 / Slack / GitHub / Jira / Linear / Email / Browser
         |
 Collaboration Layer
-  WorkItem / Project / Assignment / Review
-  Agent Teammate / Squad / Activity Feed
+  WorkItem / Project / Assignment / Review / Activity Feed / Squad
         |
-Manager Agent / Work Coordination Layer
-  Task decomposition / routing / escalation / review
+Manager Agent Layer
+  Intake / Plan / Decompose / Route / Delegate / Escalate / Review
         |
 Managed Runtime Layer
-  Session / Event Log / Tool Router / Policy
-  Approval / Audit / Artifact / Eval
+  Agent / Environment / Session / Events / Threads / Runtime Turns
         |
-Semantic Layer / Ontology Service
-  Business Objects / Metrics / Relations
-  Actions / Permissions / Tool Bindings
-  Retrieval Context / Data Contracts
+Governance Layer
+  Policy / Approval / RBAC / TaskGrant / Audit / Eval / Release / Rollback
         |
-Enterprise Data Foundation
-  Warehouse / Lakehouse / Postgres / Vector
-  Graph / Docs / APIs / Event Streams
+Ontology Action Contract Layer
+  Business Object / Rule / Relation / Metric / Action / Tool Binding / Validation
+        |
+Environment Scheduling Layer
+  Environment Work Queue / K Agent / Worker Lease / Sandbox Lifecycle / CLI Dispatch
+        |
+Execution Substrate
+  Codex / Claude Code / CMA / MCP / SQL / Shell / Remote Computer / APIs
 ```
 
 Claude Managed Agents 的 `Agent -> Environment -> Session -> Events -> Threads`
 只适合作为 Managed Runtime Layer 的参考模型，不是整个 Agent OS 的产品架构。
-上层协作、Manager Agent、Semantic Layer 仍然是 MandoForge 自己的 Agent OS 产品层。
+Palantir AIP 只作为 context engineering、受治理动作、package/release/deploy
+和 Human+AI operation surfaces 的企业运行参考。二者都不是产品中心。
 
 Runtime 边界要固定成：
 
@@ -84,6 +89,12 @@ cursor、streaming 和 worker lease。Codex CLI / Claude Code CLI 是被
 MandoForge 调用和监管的执行后端。Manager Agent 是跑在这个 runtime 上的
 managed agent，负责 WorkItem / Assignment 协调，不拥有另一套执行栈。
 
+对于 delegated runtime workflow，MandoForge 负责外层企业运行 envelope：
+WorkflowRun identity、Workflow Pack binding、TaskGrant、memory scope、
+approval policy、audit、artifacts 和 UI observability。Claude Code、Codex
+App Server 或 Codex CLI 可以负责内部动态 multi-agent 执行，但事件和 artifacts
+必须回流到 MandoForge runtime record。
+
 ## 它不是哪些东西？
 
 - 它不是一个现成的垂直行业 SaaS。
@@ -92,7 +103,9 @@ managed agent，负责 WorkItem / Assignment 协调，不拥有另一套执行�
 - 它不是只包装 OpenAI API 的轻量 demo。
 - 它现在也还不是生产级完整平台。
 
-它当前更准确的状态是：**一个 Rust 写的 Agent OS Kernel 雏形**。Managed Runtime Layer 已经支撑 repo-controlled pilot；Collaboration、Manager Agent 和 Semantic Layer 是下一步产品化重点。
+它当前更准确的状态是：**一个 Rust 写的 Agent OS Kernel 雏形**。Managed
+Runtime Layer 已经支撑 repo-controlled pilot；Collaboration、Manager Agent
+和 Ontology Action Contract layers 是下一步产品化重点。
 
 ## 核心运行闭环
 
@@ -162,11 +175,11 @@ Stage 2 的 repo-controlled pilot 已完成。核心完成证据应该是 runtim
 Agent OS 分层上推进：
 
 ```text
-Work Surfaces -> Collaboration -> Manager Agent / Work Coordination -> Managed Runtime -> Semantic Layer -> Data Foundation
+Work Surfaces -> Collaboration -> Manager Agent -> Managed Runtime -> Governance -> Ontology Action Contract -> Environment Scheduling -> Execution Substrate
 ```
 
 近期重点仍然是 **Managed Session Runtime**，因为上层 Collaboration / Manager
-Agent / Semantic Layer 都依赖一个可靠的 event-driven runtime：
+Agent / Ontology Action Contract 都依赖一个可靠的 event-driven runtime：
 
 ```text
 创建或恢复 Session，写入 user events，让 runtime session loop 通过受治理的 Environment queue 执行，调用选定的 CLI/runtime adapter，并把 model/tool/session events 实时回流到 UI。
@@ -194,6 +207,16 @@ Agent / Semantic Layer 都依赖一个可靠的 event-driven runtime：
 - `Environment(type=remote_computer)` 现在负责自动 Remote Computer 分配：approved execution jobs 只会自动 claim 与 session environment contract 匹配的 lease 或 warm-pool resource；绑定 remote environment 但未启用 Remote Computer execution transport 时会 fail closed，不会静默退回本地执行。
 - UI 的开始任务表单会加载 environments，并把新 session 绑定到选择的环境。
 - UI 的运行路径先围绕 managed-session 对象组织：Agent、Environment、Event Stream、Blocking Actions、Artifacts 和 Threads；worker、Remote Computer、provider、secret、MCP、tenant 等底层设施保留在系统状态和高级面板里。
+- Dynamic Workflow Plans 是一等 review envelope：`POST /api/dynamic-workflow-plans`
+  校验 phases、agent fleet limits、governance、validation 和 materialization
+  policy；review approval gate 之后才 materialize 成普通 `WorkflowDefinition`、
+  `WorkflowRun`、primary session、root `TaskGrant` 和 start steps。Delegated
+  plans 可以交给 Claude Code 或 Codex App Server，但不能绕过 MandoForge policy
+  和 audit。
+- Semantic Ontology Builder 是 proposal-only：`POST /api/semantic-ontology/builder`
+  接收 operator/AI first-draft context，规范化 object 和 relation candidates，
+  记录 source refs 和 review gates，并创建 `ontology_expansion` semantic object
+  等待 review。它不会直接改 ontology registry 或 durable organizational memory。
 - Enterprise Ontology Fast-Onboarding 已通过 Semantic console 和 `/api/ontology/onboarding/*` 暴露：seed packs、demo runs、schema understanding、review graph、proposal review、materialization、calibration 和 compiled tool specs。用法见 [Ontology Builder Usage](docs/ontology-builder-usage.md)。
 
 Runtime 对齐状态记录在 [Claude Managed Agents Alignment](docs/claude-managed-agents-alignment.md)
@@ -202,8 +225,8 @@ Runtime 对齐状态记录在 [Claude Managed Agents Alignment](docs/claude-mana
 streaming、Environment-bound worker claim 和 lease-fenced job finalization 展开。
 第一个 WorkItem intake、assignment-routing、review、Activity Feed、Agent
 Teammate/Squad 和 Manager Plan binding 切片现在已经能持久化 collaboration work 并写入
-audit evidence；下一步主线应该继续往 UI workflow surfaces、Semantic Objects 推进，而
-不是继续扩展旁支部署验证包。
+audit evidence；下一步主线应该继续往 Workflow Pack-defined manager roles、
+UI workflow surfaces 和 Ontology Action Contract enforcement 推进，而不是继续扩展旁支部署验证包。
 
 ## 本地运行
 
@@ -361,7 +384,9 @@ kubectl -n agent-os port-forward svc/mandoforge-api 8787:8787
 - [Stage 1 Plan](docs/stage1-plan.md)
 - [Stage 1 Completion Audit](docs/stage1-completion-audit.md)
 - [Stage 2 Completion Audit](docs/stage2-completion-audit.md)
+- [Enterprise Product Completion Contract](docs/enterprise-product-completion-contract.md)
 - [Claude Managed Agents Alignment](docs/claude-managed-agents-alignment.md) - 仅作为 runtime-layer 参考
+- [Full Agent OS Narrative Design](docs/superpowers/specs/2026-07-09-full-agent-os-narrative-design.md)
 - [MandoForge Roadmap v2](docs/mandoforge-roadmap-v2.md)
 - [Agent OS Product Roadmap](docs/stage2-stage3-roadmap.md)
 - [Workflow Pack Adaptation Plan](docs/workflow-pack-adaptation-plan.md)
