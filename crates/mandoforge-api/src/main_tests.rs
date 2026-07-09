@@ -2447,6 +2447,11 @@ Stage 2 is not complete.
     );
     assert!(
         live_connector_semantics
+            .readiness_endpoints
+            .contains(&"/api/work-surface-events/capability-readback".to_string())
+    );
+    assert!(
+        live_connector_semantics
             .required_artifacts
             .contains(&"live-connector-production-semantics/tmall-top/summary.json".to_string())
     );
@@ -3198,6 +3203,11 @@ fn enterprise_product_readiness_reports_customer_grade_blockers() {
         live_connectors
             .evidence_scripts
             .contains(&"./scripts/live-connector-production-semantics-gate.sh".to_string())
+    );
+    assert!(
+        live_connectors
+            .readiness_endpoints
+            .contains(&"/api/work-surface-events/capability-readback".to_string())
     );
     assert!(
         live_connectors

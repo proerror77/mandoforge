@@ -664,7 +664,10 @@ fn build_stage2_evidence_requirements(_open_gaps: &[String]) -> Vec<Stage2Eviden
             evidence_job_manifests: vec![
                 "deploy/stage2-evidence/live-connector-production-semantics-job.example.yaml",
             ],
-            readiness_endpoints: vec!["/api/native-connectors/production-readiness"],
+            readiness_endpoints: vec![
+                "/api/native-connectors/production-readiness",
+                "/api/work-surface-events/capability-readback",
+            ],
             validation_endpoints: vec!["./scripts/live-connector-production-semantics-gate.sh"],
             required_flags: vec![],
             required_artifacts: vec![

@@ -233,6 +233,7 @@ fn build_enterprise_product_completion_lanes(
             production_target: "Platform-specific live connectors with OAuth/token lifecycle, rate limits, idempotency, reconciliation, webhook ingestion, and compensation policy",
             readiness_endpoints: vec![
                 "/api/native-connectors/production-readiness",
+                "/api/work-surface-events/capability-readback",
                 "/api/workflow-packs/installations",
                 "/api/stage2/readiness",
             ],
