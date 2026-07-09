@@ -9770,6 +9770,7 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
     for key in [
         "workflow_pack",
         "domain_pack",
+        "work_surface_connector",
         "agent_version",
         "environment_profile",
         "ontology_action_contract",
@@ -9797,6 +9798,17 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
                 .as_array()
                 .unwrap()
                 .contains(&json!("workflow_pack.rolled_back"))
+    }));
+    assert!(product_capabilities.iter().any(|capability| {
+        capability["key"] == json!("work_surface_connector")
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("GET /api/work-surface-events/capability-readback"))
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("do not start runtime execution")
     }));
     assert!(product_capabilities.iter().any(|capability| {
         capability["key"] == json!("ontology_action_contract")
@@ -35960,6 +35972,32 @@ async fn work_surface_event_verifies_webhook_signature_and_replays_by_cursor() {
     assert_eq!(replayed.replay_of_work_item_id, Some(ingested.work_item.id));
     assert_eq!(replayed.activity.event_type, "work_surface.replayed");
     assert_eq!(replayed.activity.metadata["replayed"], json!(true));
+
+    let readback: Value = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/work-surface-events/capability-readback")
+            .header("x-mandoforge-subject", "github-webhook")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(readback["product_object"], json!("WorkSurfaceConnector"));
+    assert_eq!(readback["summary"]["ingested_work_surface_count"], json!(1));
+    assert_eq!(readback["summary"]["surfaces"]["github"], json!(1));
+    assert_eq!(readback["summary"]["verified_webhook_count"], json!(1));
+    assert_eq!(readback["summary"]["rate_limit_evidence_count"], json!(1));
+    assert_eq!(
+        readback["summary"]["live_readback_evidence_count"],
+        json!(1)
+    );
+    assert!(
+        readback["open_boundaries"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("MandoForge-enforced rate-limit scheduling"))
+    );
 
     let work_items: Vec<WorkItem> = request_json(
         app,

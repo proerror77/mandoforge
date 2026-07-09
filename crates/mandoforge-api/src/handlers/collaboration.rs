@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use axum::{
     Json, Router,
     body::Bytes,
@@ -28,6 +30,10 @@ pub(crate) fn router() -> Router<AppState> {
             get(list_work_items).post(create_work_item),
         )
         .route("/api/work-surface-events", post(ingest_work_surface_event))
+        .route(
+            "/api/work-surface-events/capability-readback",
+            get(get_work_surface_capability_readback),
+        )
         .route(
             "/api/agent-teammates",
             get(list_agent_teammates).post(create_agent_teammate),
@@ -295,6 +301,82 @@ async fn ingest_work_surface_event(
         replayed: false,
         replay_of_work_item_id: None,
     }))
+}
+
+async fn get_work_surface_capability_readback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "work_surface_event",
+        None,
+    )
+    .await?;
+    let work_items = state.list_work_items().await?;
+    let work_surfaces = work_items
+        .iter()
+        .filter_map(|item| item.metadata.get("work_surface"))
+        .collect::<Vec<_>>();
+    let mut surfaces = BTreeMap::new();
+    for work_surface in &work_surfaces {
+        if let Some(surface) = work_surface.get("surface").and_then(Value::as_str) {
+            *surfaces.entry(surface.to_string()).or_insert(0usize) += 1;
+        }
+    }
+    let observed_count = |field: &str| {
+        work_surfaces
+            .iter()
+            .filter(|work_surface| {
+                work_surface
+                    .get(field)
+                    .and_then(|value| value.get("observed"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            })
+            .count()
+    };
+    Ok(Json(json!({
+        "product_object": "WorkSurfaceConnector",
+        "summary": {
+            "ingested_work_surface_count": work_surfaces.len(),
+            "surfaces": surfaces,
+            "verified_webhook_count": work_surfaces
+                .iter()
+                .filter(|work_surface| {
+                    work_surface
+                        .get("authentication")
+                        .and_then(|value| value.get("verified"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                })
+                .count(),
+            "rate_limit_evidence_count": observed_count("rate_limit"),
+            "live_readback_evidence_count": observed_count("live_readback"),
+            "email_authentication_evidence_count": observed_count("email_authentication")
+        },
+        "evidence_sources": [
+            "work_items.metadata.work_surface",
+            "work_surface.ingested_activity",
+            "work_surface.ingested_audit"
+        ],
+        "implemented_boundaries": [
+            "canonical WorkItem intake",
+            "configured webhook signature verification",
+            "cursor_or_delivery_replay_detection",
+            "observed rate-limit evidence preservation",
+            "observed live-readback evidence preservation",
+            "observed email authentication evidence preservation"
+        ],
+        "open_boundaries": [
+            "platform OAuth/token lifecycle",
+            "active live API fetch/readback",
+            "MandoForge-enforced rate-limit scheduling"
+        ],
+        "authority_boundary": "read-only Work Surface capability readback; connector evidence can create WorkItems but cannot start runtime execution or bypass Manager Runtime, Policy, Approval, or Audit"
+    })))
 }
 
 fn required_work_surface_text(value: String, field: &str) -> Result<String, AppError> {
@@ -1349,6 +1431,21 @@ async fn get_capability_discovery(
 
 fn agent_os_product_capabilities() -> Vec<Value> {
     vec![
+        json!({
+            "key": "work_surface_connector",
+            "product_object": "WorkSurfaceConnector",
+            "status": "available",
+            "api_routes": [
+                "POST /api/work-surface-events",
+                "GET /api/work-surface-events/capability-readback"
+            ],
+            "lifecycle_actions": ["ingest", "verify_webhook", "detect_replay", "preserve_observed_evidence", "readback"],
+            "evidence_events": [
+                "work_surface.ingested",
+                "work_surface.replayed"
+            ],
+            "authority_boundary": "Work Surface connectors create governed WorkItems and evidence readbacks only; they do not start runtime execution or bypass Manager Runtime, Policy, Approval, or Audit."
+        }),
         json!({
             "key": "workflow_pack",
             "product_object": "WorkflowPack",

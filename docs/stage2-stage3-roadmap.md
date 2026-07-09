@@ -113,6 +113,11 @@ The first Collaboration Layer slice is now in place:
   installations, summarizing manifest capabilities, gate evidence, bindings,
   runtime objects, workflow definition release states, and audit trace without
   creating any execution side channel.
+- `/api/work-surface-events/capability-readback` provides read-only Work
+  Surface connector evidence from existing WorkItem metadata, including
+  webhook verification, replay detection, observed rate-limit evidence,
+  observed live-readback evidence, and Email authentication evidence without
+  starting runtime execution.
 - `/api/agents/:id/versions/:version/capability-readback` provides read-only
   AgentVersion capability evidence from existing version, runtime contract,
   tool contract, policy contract, EvalRun evidence, and AgentRelease evidence
@@ -348,7 +353,9 @@ plans:
    as connector-specific verification variants, and
    preserves platform rate-limit, live-readback, and Email-specific
    authentication evidence supplied by connector headers or payload metadata.
-   Platform-specific OAuth/token lifecycle, active live API fetch/readback, and
+   `/api/work-surface-events/capability-readback` now exposes that observed
+   connector evidence without claiming execution authority. Platform-specific
+   OAuth/token lifecycle, active live API fetch/readback, and
    MandoForge-enforced rate-limit scheduling remain open.
 2. Runtime adapter consolidation: make Environment runtime binding the only
    product entrypoint for managed runtime execution. `agent_cli.exec` and
