@@ -1752,6 +1752,31 @@ fn agent_os_product_capabilities() -> Vec<Value> {
             "authority_boundary": "RemoteComputer is an Environment Scheduling and Execution Substrate capability; it leases and reports sandbox state only after Manager Runtime, TaskGrant, Policy, Approval, Tool Router, session events, artifacts, and audit boundaries authorize the work."
         }),
         json!({
+            "key": "k_agent",
+            "product_object": "KAgent",
+            "status": "available",
+            "api_routes": [
+                "GET /api/execution-jobs",
+                "GET /api/queue/notify-wait",
+                "GET /api/session-loop-jobs",
+                "POST /api/session-loop-jobs/{id}/run",
+                "POST /api/session-loop-jobs/{id}/heartbeat",
+                "POST /api/execution-jobs/{id}/run",
+                "POST /api/execution-jobs/{id}/cancel",
+                "POST /api/execution-jobs/{id}/remote-computer-lease",
+                "GET /api/execution-jobs/worker-readiness",
+                "POST /api/execution-jobs/worker-load-validation/run"
+            ],
+            "lifecycle_actions": ["poll_queue", "claim_session_loop_job", "heartbeat_worker_lease", "run_session_loop_job", "run_execution_job", "return_completion_evidence", "return_failure_evidence", "cancel_execution_job", "attach_remote_computer_lease", "validate_worker_readiness"],
+            "evidence_events": [
+                "k_agent.claimed",
+                "k_agent.heartbeat",
+                "k_agent.completed",
+                "k_agent.failed"
+            ],
+            "authority_boundary": "KAgent is the Environment Scheduling worker and CLI/sandbox dispatch surface; it claims, runs, heartbeats, and returns evidence for already-authorized work, but does not own ManagerPlan, create or expand TaskGrant, decide Policy or Approval, grant Ontology validity, release WorkflowPacks, or replace audit truth."
+        }),
+        json!({
             "key": "task_grant",
             "product_object": "TaskGrant",
             "status": "available",

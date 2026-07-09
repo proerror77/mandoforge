@@ -106,7 +106,7 @@ The first Collaboration Layer slice is now in place:
 - `/api/capability-discovery` now exposes an Agent OS product capability catalog
   for WorkItem, ManagerPlan, AgentHandoff, WorkflowPack, DomainPack,
   AgentVersion, EnvironmentProfile, ManagedSession, ContextPacket,
-  ArtifactStore, AuditLogger, RemoteComputer, TaskGrant, PolicyEngine,
+  ArtifactStore, AuditLogger, RemoteComputer, KAgent, TaskGrant, PolicyEngine,
   Approval, ToolRouter, OntologyActionContract, ToolSpec, EvalGate, Release,
   and Rollback, including the existing API surfaces, lifecycle actions,
   audit/evidence events, and authority boundaries for each capability.
@@ -127,6 +127,12 @@ The first Collaboration Layer slice is now in place:
   preserving the boundary that policy can require approval or deny work but
   cannot issue TaskGrant scope, approve business actions, bypass exact tool
   routing, or replace audit evidence.
+- The KAgent entry exposes existing execution-job queue, session-loop worker,
+  heartbeat, worker-readiness, worker-load-validation, RemoteComputer lease
+  assignment, and `k_agent.*` return-evidence surfaces while preserving the
+  boundary that K Agent schedules and dispatches already-authorized work but
+  does not own ManagerPlan, TaskGrant, Policy, Approval, Ontology validity,
+  WorkflowPack release, or audit truth.
 - `/api/workflow-packs/installations/:id/capabilities` provides read-only
   per-installation capability evidence for WorkflowPack and DomainPack
   installations, summarizing manifest capabilities, gate evidence, bindings,
@@ -433,14 +439,15 @@ plans:
 6. Pack / Release / Evidence: `/api/capability-discovery` now lists
    WorkItem, ManagerPlan, AgentHandoff, WorkflowPack, DomainPack, AgentVersion,
    EnvironmentProfile, ManagedSession, ContextPacket, ArtifactStore, AuditLogger,
-   RemoteComputer, TaskGrant, PolicyEngine, Approval, ToolRouter,
+   RemoteComputer, KAgent, TaskGrant, PolicyEngine, Approval, ToolRouter,
    OntologyActionContract, ToolSpec, EvalGate, Release, and Rollback as
    auditable product capabilities with their existing routes, lifecycle actions,
    evidence events, and authority boundaries. ContextPacket is a scoped context
    construction/readback surface, not execution authority. ArtifactStore and
    AuditLogger are evidence/readback surfaces, not execution or
    business-authorization shortcuts; PolicyEngine can gate or deny work but does
-   not issue TaskGrant scope or replace Tool Router and audit checks.
+   not issue TaskGrant scope or replace Tool Router and audit checks. KAgent is
+   the Environment Scheduling worker/dispatch surface, not business authority.
    WorkflowPack and DomainPack
    installations now also expose read-only per-installation
    capability readback through

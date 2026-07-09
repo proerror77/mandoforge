@@ -9827,6 +9827,7 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
         "artifact_store",
         "audit_logger",
         "remote_computer",
+        "k_agent",
         "task_grant",
         "policy_engine",
         "approval",
@@ -10082,6 +10083,33 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
                 .as_str()
                 .unwrap_or_default()
                 .contains("TaskGrant")
+    }));
+    assert!(product_capabilities.iter().any(|capability| {
+        capability["key"] == json!("k_agent")
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("GET /api/execution-jobs"))
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("POST /api/session-loop-jobs/{id}/run"))
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("GET /api/execution-jobs/worker-readiness"))
+            && capability["evidence_events"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("k_agent.completed"))
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Environment Scheduling worker")
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("does not own ManagerPlan")
     }));
     assert!(product_capabilities.iter().any(|capability| {
         capability["key"] == json!("task_grant")
