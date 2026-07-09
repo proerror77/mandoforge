@@ -3846,6 +3846,7 @@ pub(crate) async fn create_ontology_release_candidate_with_actor(
         ontology_release_materialized_semantic_object_ids(state, &proposals).await?;
     let materialized_link_ids =
         ontology_release_materialized_semantic_link_ids(state, &proposals).await?;
+    let evidence_refs = ontology_release_evidence_refs(state, &proposals).await?;
     let now = Utc::now();
     let version = input.version.unwrap_or_else(|| {
         let entropy = Uuid::new_v4().simple().to_string();
@@ -3883,18 +3884,7 @@ pub(crate) async fn create_ontology_release_candidate_with_actor(
         gate_result: json!({}),
         materialized_object_ids: json!(materialized_object_ids),
         materialized_link_ids: json!(materialized_link_ids),
-        evidence_refs: json!(
-            proposals
-                .iter()
-                .map(|proposal| {
-                    json!({
-                        "proposal_id": proposal.id,
-                        "proposal_type": proposal.proposal_type,
-                        "review_status": proposal.review_status,
-                    })
-                })
-                .collect::<Vec<_>>()
-        ),
+        evidence_refs: json!(evidence_refs),
         promoted_by: None,
         promoted_at: None,
         rolled_back_by: None,
@@ -3964,23 +3954,104 @@ pub(crate) async fn ontology_release_materialized_semantic_object_ids(
         .await?
         .into_iter()
         .filter(|object| {
-            let proposal_matches = object
-                .content
-                .get("proposal_id")
-                .and_then(Value::as_str)
-                .and_then(|value| Uuid::parse_str(value).ok())
-                .or_else(|| {
-                    object
-                        .provenance
-                        .get("proposal_id")
-                        .and_then(Value::as_str)
-                        .and_then(|value| Uuid::parse_str(value).ok())
-                })
-                .is_some_and(|proposal_id| proposal_ids.contains(&proposal_id));
+            let proposal_matches = ontology_release_semantic_object_materialized(object)
+                && ontology_release_semantic_object_proposal_id(object)
+                    .is_some_and(|proposal_id| proposal_ids.contains(&proposal_id));
             proposal_matches || object_keys.contains(&object.object_key)
         })
         .map(|object| object.id)
         .collect())
+}
+
+pub(crate) async fn ontology_release_evidence_refs(
+    state: &AppState,
+    proposals: &[OntologyOnboardingProposalDraft],
+) -> Result<Vec<Value>, AppError> {
+    let semantic_objects = state.list_semantic_objects().await?;
+    Ok(proposals
+        .iter()
+        .map(|proposal| ontology_release_evidence_ref(proposal, &semantic_objects))
+        .collect())
+}
+
+pub(crate) fn ontology_release_evidence_ref(
+    proposal: &OntologyOnboardingProposalDraft,
+    semantic_objects: &[SemanticObject],
+) -> Value {
+    let mut evidence = json!({
+        "proposal_id": proposal.id,
+        "proposal_type": proposal.proposal_type,
+        "review_status": proposal.review_status,
+    });
+    let Some(object) =
+        ontology_release_materialized_semantic_object_for_proposal(proposal, semantic_objects)
+    else {
+        return evidence;
+    };
+    let Some(evidence) = evidence.as_object_mut() else {
+        return json!({
+            "proposal_id": proposal.id,
+            "proposal_type": proposal.proposal_type,
+            "review_status": proposal.review_status,
+        });
+    };
+    evidence.insert("materialized_object_id".to_string(), json!(object.id));
+    evidence.insert(
+        "materialized_object_type".to_string(),
+        json!(object.object_type),
+    );
+    evidence.insert(
+        "materialized_object_key".to_string(),
+        json!(object.object_key),
+    );
+
+    if proposal.proposal_type == "action"
+        && let Some(contract) = ontology_action_contract_payload(&object.content)
+    {
+        evidence.insert(
+            "contract_model".to_string(),
+            ontology_action_contract_model_evidence(contract, &object.object_type),
+        );
+    }
+    Value::Object(evidence.clone())
+}
+
+fn ontology_release_materialized_semantic_object_for_proposal<'a>(
+    proposal: &OntologyOnboardingProposalDraft,
+    semantic_objects: &'a [SemanticObject],
+) -> Option<&'a SemanticObject> {
+    let object_key = ontology_release_materialized_semantic_object_key(proposal);
+    if let Some(object_key) = object_key.as_deref()
+        && let Some(object) = semantic_objects
+            .iter()
+            .find(|object| object.object_key == object_key)
+    {
+        return Some(object);
+    }
+    semantic_objects.iter().find(|object| {
+        ontology_release_semantic_object_materialized(object)
+            && ontology_release_semantic_object_proposal_id(object) == Some(proposal.id)
+    })
+}
+
+fn ontology_release_semantic_object_proposal_id(object: &SemanticObject) -> Option<Uuid> {
+    object
+        .content
+        .get("proposal_id")
+        .and_then(Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .or_else(|| {
+            object
+                .provenance
+                .get("proposal_id")
+                .and_then(Value::as_str)
+                .and_then(|value| Uuid::parse_str(value).ok())
+        })
+}
+
+fn ontology_release_semantic_object_materialized(object: &SemanticObject) -> bool {
+    object.provenance.get("source").and_then(Value::as_str)
+        == Some("ontology_onboarding.materialize")
 }
 
 pub(crate) fn ontology_release_materialized_semantic_object_key(

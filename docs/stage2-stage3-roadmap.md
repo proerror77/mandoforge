@@ -352,8 +352,10 @@ plans:
    ValidationRule, and RiskClass representation beyond the current checked
    `ontology_action_type` contract gate. The gate already accepts richer
    `ontology_action_contract` semantic objects with nested ToolBinding and
-   model evidence; product APIs and release packaging for those contracts remain
-   open.
+   model evidence. Ontology release candidates now package each materialized
+   action object's id/type/key and action contract model evidence into
+   `evidence_refs`; first-class product APIs and release packaging for standalone
+   `OntologyActionContract` objects remain open.
 6. Pack / Release / Evidence: make WorkflowPack, DomainPack, AgentVersion,
    EnvironmentProfile, OntologyActionContract, ToolSpec, EvalGate, Release, and
    Rollback auditable as product capabilities.

@@ -1093,11 +1093,11 @@ async fn ontology_release_candidate_captures_materialized_proposals() {
         .find(|proposal| proposal.proposal_type == "object")
         .map(|proposal| proposal.id)
         .expect("object proposal");
-    let action_proposal = run
+    let (action_proposal, action_name) = run
         .proposals
         .iter()
         .find(|proposal| proposal.proposal_type == "action")
-        .map(|proposal| proposal.id)
+        .map(|proposal| (proposal.id, proposal.name.clone()))
         .expect("action proposal");
     review_ontology_onboarding_proposal_for_test(
         &state,
@@ -1144,6 +1144,29 @@ async fn ontology_release_candidate_captures_materialized_proposals() {
             .materialized_object_ids
             .as_array()
             .is_some_and(|ids| !ids.is_empty())
+    );
+    let evidence_refs = release.evidence_refs.as_array().expect("evidence refs");
+    let action_evidence_ref = evidence_refs
+        .iter()
+        .find(|evidence| evidence["proposal_id"] == json!(action_proposal))
+        .expect("action evidence ref");
+    assert_eq!(action_evidence_ref["proposal_type"], json!("action"));
+    assert!(action_evidence_ref["materialized_object_id"].is_string());
+    assert_eq!(
+        action_evidence_ref["materialized_object_type"],
+        json!("ontology_action_type")
+    );
+    assert_eq!(
+        action_evidence_ref["materialized_object_key"],
+        json!(format!("commerce.action.{action_name}"))
+    );
+    assert_eq!(
+        action_evidence_ref["contract_model"]["object_type"],
+        json!("ontology_action_type")
+    );
+    assert_eq!(
+        action_evidence_ref["contract_model"]["risk_class"],
+        json!("unspecified")
     );
     let audit_logs = state.list_audit_logs(None).await.expect("audit logs");
     assert!(audit_logs.iter().any(|log| {
