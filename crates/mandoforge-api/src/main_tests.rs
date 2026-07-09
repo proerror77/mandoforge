@@ -9823,6 +9823,8 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
         "agent_version",
         "environment_profile",
         "remote_computer",
+        "task_grant",
+        "approval",
         "ontology_action_contract",
         "tool_spec",
         "eval_gate",
@@ -9970,6 +9972,52 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
                 .as_str()
                 .unwrap_or_default()
                 .contains("TaskGrant")
+    }));
+    assert!(product_capabilities.iter().any(|capability| {
+        capability["key"] == json!("task_grant")
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("GET /api/workflow-runs/{id}/task-grants"))
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("GET /api/task-grants/{id}"))
+            && capability["evidence_events"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("task_grant.denied"))
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("scoped execution authority")
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Ontology can validate action shape")
+    }));
+    assert!(product_capabilities.iter().any(|capability| {
+        capability["key"] == json!("approval")
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("POST /api/approvals/{id}/approve"))
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("POST /api/approvals/{id}/deliver"))
+            && capability["evidence_events"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("approval.requested"))
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("concrete pending high-risk action")
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("does not create business validity")
     }));
     assert!(product_capabilities.iter().any(|capability| {
         capability["key"] == json!("tool_spec")

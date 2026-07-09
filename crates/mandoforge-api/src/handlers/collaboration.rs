@@ -1657,6 +1657,61 @@ fn agent_os_product_capabilities() -> Vec<Value> {
             "authority_boundary": "RemoteComputer is an Environment Scheduling and Execution Substrate capability; it leases and reports sandbox state only after Manager Runtime, TaskGrant, Policy, Approval, Tool Router, session events, artifacts, and audit boundaries authorize the work."
         }),
         json!({
+            "key": "task_grant",
+            "product_object": "TaskGrant",
+            "status": "available",
+            "api_routes": [
+                "GET /api/workflow-runs/{id}/task-grants",
+                "POST /api/workflow-runs/{id}/task-grants",
+                "GET /api/task-grants/{id}",
+                "POST /api/workflow-step-runs/{id}/claim",
+                "POST /api/workflow-step-runs/{id}/run"
+            ],
+            "lifecycle_actions": ["issue_root_grant", "issue_child_grant", "validate_child_scope", "bind_context_packet", "check_tool_scope", "deny_out_of_scope_tool"],
+            "evidence_events": [
+                "task_grant.issued",
+                "task_grant.checked",
+                "task_grant.denied"
+            ],
+            "authority_boundary": "TaskGrant is the scoped execution authority for workflow and tool work; Ontology can validate action shape, but execution still requires a matching TaskGrant plus Policy, Approval when needed, Tool Router enforcement, events, and audit."
+        }),
+        json!({
+            "key": "approval",
+            "product_object": "Approval",
+            "status": "available",
+            "api_routes": [
+                "GET /api/approvals",
+                "POST /api/approvals/{id}/approve",
+                "POST /api/approvals/{id}/reject",
+                "POST /api/approvals/{id}/expire",
+                "POST /api/approvals/{id}/modify",
+                "POST /api/approvals/{id}/escalate",
+                "POST /api/approvals/{id}/deliver",
+                "GET /api/approval-groups",
+                "POST /api/approval-groups",
+                "GET /api/approval-escalation-rules",
+                "POST /api/approval-escalation-rules",
+                "POST /api/approvals/escalations/run-due",
+                "GET /api/approvals/notification-routing/summary",
+                "POST /api/approvals/notifications/run"
+            ],
+            "lifecycle_actions": ["request", "approve", "reject", "expire", "modify", "escalate", "deliver_notification", "run_due_escalations"],
+            "evidence_events": [
+                "approval.requested",
+                "approval.approved",
+                "approval.rejected",
+                "approval.expired",
+                "approval.modified",
+                "approval.escalated",
+                "approval.group_created",
+                "approval.escalation_rule_created",
+                "approval.escalation_due_run",
+                "approval.notification_delivered",
+                "approval.notification_delivery_run"
+            ],
+            "authority_boundary": "Approval authorizes a concrete pending high-risk action or commit token; it does not create business validity, expand TaskGrant scope, bypass Policy or Tool Router checks, or replace audit evidence."
+        }),
+        json!({
             "key": "ontology_action_contract",
             "product_object": "OntologyActionContract",
             "status": "available",
