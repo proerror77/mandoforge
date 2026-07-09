@@ -19,36 +19,43 @@ The goal is to build a reusable operating layer for agents across industries. A 
 
 ## Agent OS Stack
 
-MandoForge is organized as an Agent OS, not as a production-evidence checklist:
+MandoForge is a runtime-centered Enterprise Agent OS.
+The center is the Manager Runtime and Managed Runtime: who started work, who
+decomposed it, who was assigned, which agent ran, which environment ran it,
+which context it saw, which tool it called, whether the call was authorized, who
+approved it, what happened, and whether the run can be replayed, released, or
+rolled back.
 
 ```text
-Existing Work Surfaces
-  Slack / Feishu / GitHub / Jira / Linear / Email
+Work Surfaces
+  Feishu / Slack / GitHub / Jira / Linear / Email / Browser
         |
 Collaboration Layer
-  WorkItem / Project / Assignment / Review
-  Agent Teammate / Squad / Activity Feed
+  WorkItem / Project / Assignment / Review / Activity Feed / Squad
         |
-Manager Agent / Work Coordination Layer
-  Task decomposition / routing / escalation / review
+Manager Agent Layer
+  Intake / Plan / Decompose / Route / Delegate / Escalate / Review
         |
 Managed Runtime Layer
-  Session / Event Log / Tool Router / Policy
-  Approval / Audit / Artifact / Eval
+  Agent / Environment / Session / Events / Threads / Runtime Turns
         |
-Semantic Layer / Ontology Service
-  Business Objects / Metrics / Relations
-  Actions / Permissions / Tool Bindings
-  Retrieval Context / Data Contracts
+Governance Layer
+  Policy / Approval / RBAC / TaskGrant / Audit / Eval / Release / Rollback
         |
-Enterprise Data Foundation
-  Warehouse / Lakehouse / Postgres / Vector
-  Graph / Docs / APIs / Event Streams
+Ontology Action Contract Layer
+  Business Object / Rule / Relation / Metric / Action / Tool Binding / Validation
+        |
+Environment Scheduling Layer
+  Environment Work Queue / K Agent / Worker Lease / Sandbox Lifecycle / CLI Dispatch
+        |
+Execution Substrate
+  Codex / Claude Code / CMA / MCP / SQL / Shell / Remote Computer / APIs
 ```
 
-The Managed Runtime Layer can borrow the useful parts of Claude Managed Agents:
-Agent, Environment, Session, Events, and Threads. That model does not define the
-whole Agent OS. The higher product layers remain MandoForge-owned.
+Claude Managed Agents is a runtime reference for `Agent -> Environment ->
+Session -> Events -> Threads`. Palantir AIP is an enterprise operation reference
+for context engineering, governed actions, package/release/deploy, and
+Human+AI application surfaces. Neither is the product center.
 
 The runtime boundary is explicit:
 
@@ -430,6 +437,7 @@ These manifests are a self-hosted pilot starting point, not a production hardeni
 - [Stage 2 Completion Audit](docs/stage2-completion-audit.md)
 - [Enterprise Product Completion Contract](docs/enterprise-product-completion-contract.md)
 - [Claude Managed Agents Alignment](docs/claude-managed-agents-alignment.md) - runtime-layer reference only
+- [Full Agent OS Narrative Design](docs/superpowers/specs/2026-07-09-full-agent-os-narrative-design.md)
 - [MandoForge Roadmap v2](docs/mandoforge-roadmap-v2.md)
 - [Agent OS Product Roadmap](docs/stage2-stage3-roadmap.md)
 - [Workflow Pack Adaptation Plan](docs/workflow-pack-adaptation-plan.md)
