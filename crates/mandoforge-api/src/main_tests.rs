@@ -9826,6 +9826,7 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
         "environment_profile",
         "managed_session",
         "session_event",
+        "session_loop_job",
         "session_thread",
         "runtime_turn",
         "context_packet",
@@ -10065,6 +10066,37 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
                 .as_str()
                 .unwrap_or_default()
                 .contains("replace audit evidence")
+    }));
+    assert!(product_capabilities.iter().any(|capability| {
+        capability["key"] == json!("session_loop_job")
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("GET /api/session-loop-jobs"))
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("POST /api/session-loop-jobs/{id}/heartbeat"))
+            && capability["evidence_events"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("session.loop.queued"))
+            && capability["evidence_events"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("k_agent.heartbeat"))
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("event cursor windows")
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("does not decide business policy")
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("grant Ontology validity")
     }));
     assert!(product_capabilities.iter().any(|capability| {
         capability["key"] == json!("session_thread")

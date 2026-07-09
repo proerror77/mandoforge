@@ -1711,6 +1711,30 @@ fn agent_os_product_capabilities() -> Vec<Value> {
             "authority_boundary": "SessionEvent is the durable event-log and replay surface for session input, runtime output, approvals, tool results, worker completions, and streaming cursors; it does not authorize work, create TaskGrant scope, approve actions, bypass Policy or Tool Router, or replace audit evidence."
         }),
         json!({
+            "key": "session_loop_job",
+            "product_object": "SessionLoopJob",
+            "status": "available",
+            "api_routes": [
+                "GET /api/session-loop-jobs",
+                "POST /api/session-loop-jobs/{id}/run",
+                "POST /api/session-loop-jobs/{id}/heartbeat",
+                "POST /api/sessions/{id}/events",
+                "POST /api/sessions/{id}/messages",
+                "POST /api/sessions/{id}/run"
+            ],
+            "lifecycle_actions": ["enqueue", "list", "claim", "heartbeat", "complete", "fail", "discard_terminal", "preserve_cursor_window"],
+            "evidence_events": [
+                "session.loop.queued",
+                "session.loop.started",
+                "session.loop.completed",
+                "session.loop.failed",
+                "session.loop.idle",
+                "session.loop.skipped",
+                "k_agent.heartbeat"
+            ],
+            "authority_boundary": "SessionLoopJob is the queued Managed Runtime worker unit with event cursor windows, worker lease, heartbeat, and completion/failure evidence; it does not decide business policy, create TaskGrant scope, approve actions, bypass Tool Router, grant Ontology validity, or replace session events and audit evidence."
+        }),
+        json!({
             "key": "session_thread",
             "product_object": "SessionThread",
             "status": "available",

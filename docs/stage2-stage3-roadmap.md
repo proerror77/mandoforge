@@ -53,7 +53,8 @@ The Managed Runtime Layer has a strong baseline:
 - First-class SessionEvent append, list, stream, replay, and cursor surfaces
   for session input, runtime output, approvals, tool results, and worker
   completions.
-- Queue-claimed `session_loop_jobs` with event cursor windows.
+- First-class SessionLoopJob queue, claim, heartbeat, completion/failure, and
+  event cursor-window evidence.
 - `k_agent.claimed` session events for Environment-bound session-loop claims,
   recording the worker pool, worker id, lease expiry, attempt count, cursor
   window, dispatch surface, and Environment Scheduling authority boundary.
@@ -118,11 +119,11 @@ The first Collaboration Layer slice is now in place:
 - `/api/capability-discovery` now exposes an Agent OS product capability catalog
   for WorkItem, ManagerPlan, AgentHandoff, WorkflowPack, DomainPack, Agent,
   AgentVersion, Environment, EnvironmentProfile, ManagedSession, SessionEvent,
-  SessionThread, RuntimeTurn, ContextPacket, ArtifactStore, AuditLogger,
-  RemoteComputer, KAgent, TaskGrant, PolicyEngine, Approval, ToolRouter,
-  OntologyActionContract, ToolSpec, EvalGate, Release, and Rollback, including
-  the existing API surfaces, lifecycle actions, audit/evidence events, and
-  authority boundaries for each capability.
+  SessionLoopJob, SessionThread, RuntimeTurn, ContextPacket, ArtifactStore,
+  AuditLogger, RemoteComputer, KAgent, TaskGrant, PolicyEngine, Approval,
+  ToolRouter, OntologyActionContract, ToolSpec, EvalGate, Release, and
+  Rollback, including the existing API surfaces, lifecycle actions,
+  audit/evidence events, and authority boundaries for each capability.
 - The Agent entry exposes existing managed runtime identity, version, agent
   card, runtime-profile binding, tool/skill/workflow-pack, and semantic-scope
   records while preserving the boundary that Agent cannot execute work, release
@@ -139,6 +140,11 @@ The first Collaboration Layer slice is now in place:
   while preserving the boundary that events cannot authorize work, issue
   TaskGrant scope, approve actions, bypass Policy or Tool Router, or replace
   audit evidence.
+- The SessionLoopJob entry exposes existing queue, worker claim, heartbeat,
+  completion/failure, terminal discard, worker lease, and event cursor-window
+  evidence while preserving the boundary that jobs cannot decide business
+  policy, issue TaskGrant scope, approve actions, bypass Tool Router, grant
+  Ontology validity, or replace session events and audit evidence.
 - The SessionThread entry exposes existing primary/specialist thread readback,
   handoff assignment, session-loop status-change evidence, and thread events
   while preserving the boundary that threads cannot execute tools, create
@@ -479,10 +485,10 @@ plans:
 6. Pack / Release / Evidence: `/api/capability-discovery` now lists
    WorkItem, ManagerPlan, AgentHandoff, WorkflowPack, DomainPack, Agent,
    AgentVersion, Environment, EnvironmentProfile, ManagedSession,
-   SessionEvent, SessionThread, RuntimeTurn, ContextPacket, ArtifactStore,
-   AuditLogger, RemoteComputer, KAgent, TaskGrant, PolicyEngine, Approval,
-   ToolRouter, OntologyActionContract, ToolSpec, EvalGate, Release, and
-   Rollback as
+   SessionEvent, SessionLoopJob, SessionThread, RuntimeTurn, ContextPacket,
+   ArtifactStore, AuditLogger, RemoteComputer, KAgent, TaskGrant, PolicyEngine,
+   Approval, ToolRouter, OntologyActionContract, ToolSpec, EvalGate, Release,
+   and Rollback as
    auditable product capabilities with their existing routes, lifecycle actions,
    evidence events, and authority boundaries. ContextPacket is a scoped context
    construction/readback surface, not execution authority. Agent is the managed
@@ -491,7 +497,8 @@ plans:
    placement and binding surface for runtime profiles, worker queues, and
    substrate requirements, not execution authority. SessionEvent is the durable
    event-log, replay, and streaming surface, not authorization or audit
-   replacement. SessionThread is the
+   replacement. SessionLoopJob is the queued worker/cursor unit, not business
+   authority or ontology validity. SessionThread is the
    readback and isolation surface for primary/specialist runtime lanes, not a
    tool execution or authorization surface. RuntimeTurn is the
    session-scoped adapter-output normalization surface for runtime events,
