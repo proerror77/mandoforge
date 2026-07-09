@@ -112,12 +112,18 @@ The first Collaboration Layer slice is now in place:
   intake, routing, and review.
 - `/api/capability-discovery` now exposes an Agent OS product capability catalog
   for WorkItem, ManagerPlan, AgentHandoff, WorkflowPack, DomainPack,
-  AgentVersion, EnvironmentProfile, ManagedSession, SessionThread,
+  AgentVersion, Environment, EnvironmentProfile, ManagedSession, SessionThread,
   RuntimeTurn, ContextPacket, ArtifactStore, AuditLogger, RemoteComputer,
   KAgent, TaskGrant, PolicyEngine, Approval, ToolRouter,
   OntologyActionContract, ToolSpec, EvalGate, Release, and Rollback, including
   the existing API surfaces, lifecycle actions, audit/evidence events, and
   authority boundaries for each capability.
+- The Environment entry exposes existing placement and binding records for
+  runtime profiles, worker queues, RemoteComputer profiles, state mounts,
+  network policy, vault requirements, and MCP requirements while preserving the
+  boundary that Environment cannot execute work, issue TaskGrant scope, approve
+  actions, bypass Policy or Tool Router, or replace session events and audit
+  evidence.
 - The SessionThread entry exposes existing primary/specialist thread readback,
   handoff assignment, session-loop status-change evidence, and thread events
   while preserving the boundary that threads cannot execute tools, create
@@ -457,13 +463,15 @@ plans:
    transaction profile, execution mode, and existing ontology release gates.
 6. Pack / Release / Evidence: `/api/capability-discovery` now lists
    WorkItem, ManagerPlan, AgentHandoff, WorkflowPack, DomainPack, AgentVersion,
-   EnvironmentProfile, ManagedSession, SessionThread, RuntimeTurn, ContextPacket,
-   ArtifactStore, AuditLogger, RemoteComputer, KAgent, TaskGrant, PolicyEngine,
-   Approval, ToolRouter, OntologyActionContract, ToolSpec, EvalGate, Release,
-   and Rollback as
+   Environment, EnvironmentProfile, ManagedSession, SessionThread, RuntimeTurn,
+   ContextPacket, ArtifactStore, AuditLogger, RemoteComputer, KAgent,
+   TaskGrant, PolicyEngine, Approval, ToolRouter, OntologyActionContract,
+   ToolSpec, EvalGate, Release, and Rollback as
    auditable product capabilities with their existing routes, lifecycle actions,
    evidence events, and authority boundaries. ContextPacket is a scoped context
-   construction/readback surface, not execution authority. SessionThread is the
+   construction/readback surface, not execution authority. Environment is the
+   placement and binding surface for runtime profiles, worker queues, and
+   substrate requirements, not execution authority. SessionThread is the
    readback and isolation surface for primary/specialist runtime lanes, not a
    tool execution or authorization surface. RuntimeTurn is the
    session-scoped adapter-output normalization surface for runtime events,

@@ -1593,6 +1593,25 @@ fn agent_os_product_capabilities() -> Vec<Value> {
             "authority_boundary": "Agent releases remain governed by release policy, approval, deployment validation, and rollback controllers."
         }),
         json!({
+            "key": "environment",
+            "product_object": "Environment",
+            "status": "available",
+            "api_routes": [
+                "GET /api/environments",
+                "POST /api/environments",
+                "GET /api/environments/{id}",
+                "PATCH /api/environments/{id}",
+                "DELETE /api/environments/{id}"
+            ],
+            "lifecycle_actions": ["create", "update", "archive", "bind_runtime_profile", "bind_worker_queue", "bind_remote_computer_profile"],
+            "evidence_events": [
+                "environment.created",
+                "environment.updated",
+                "environment.archived"
+            ],
+            "authority_boundary": "Environment binds runtime profile, worker queue, remote computer, state, network, vault, and MCP requirements for placement; it does not execute work, grant TaskGrant scope, approve actions, bypass Policy or Tool Router, or replace session events and audit evidence."
+        }),
+        json!({
             "key": "environment_profile",
             "product_object": "EnvironmentProfile",
             "status": "available",

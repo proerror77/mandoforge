@@ -9821,6 +9821,7 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
         "domain_pack",
         "work_surface_connector",
         "agent_version",
+        "environment",
         "environment_profile",
         "managed_session",
         "session_thread",
@@ -9941,6 +9942,33 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
                 .contains(&json!(
                     "GET /api/agents/{id}/versions/{version}/capability-readback"
                 ))
+    }));
+    assert!(product_capabilities.iter().any(|capability| {
+        capability["key"] == json!("environment")
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("POST /api/environments"))
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("PATCH /api/environments/{id}"))
+            && capability["evidence_events"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("environment.archived"))
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("binds runtime profile")
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("does not execute work")
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("grant TaskGrant scope")
     }));
     assert!(product_capabilities.iter().any(|capability| {
         capability["key"] == json!("environment_profile")
