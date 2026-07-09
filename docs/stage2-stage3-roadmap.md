@@ -362,8 +362,12 @@ plans:
    `ontology_action_contract` semantic objects with nested ToolBinding and
    model evidence. Ontology release candidates now package each materialized
    action object's id/type/key and action contract model evidence into
-   `evidence_refs`; first-class product APIs and release packaging for standalone
-   `OntologyActionContract` objects remain open.
+   `evidence_refs`. Standalone `OntologyActionContract` objects now have a
+   first-class read/list product API at `/api/ontology/action-contracts` with an
+   explicit governance boundary showing that the contract grants action
+   validity only, while TaskGrant, Policy, Approval, connector scope, and the
+   Tool Router remain execution authority. Release packaging for standalone
+   `OntologyActionContract` objects remains open.
 6. Pack / Release / Evidence: make WorkflowPack, DomainPack, AgentVersion,
    EnvironmentProfile, OntologyActionContract, ToolSpec, EvalGate, Release, and
    Rollback auditable as product capabilities.

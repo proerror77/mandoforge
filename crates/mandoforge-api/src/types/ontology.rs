@@ -31,6 +31,53 @@ pub(crate) struct OntologyRelationType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OntologyActionContractListQuery {
+    #[serde(default)]
+    pub(crate) q: Option<String>,
+    #[serde(default)]
+    pub(crate) domain_scope: Option<String>,
+    #[serde(default)]
+    pub(crate) status: Option<String>,
+    #[serde(default)]
+    pub(crate) limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OntologyActionContractListResponse {
+    pub(crate) count: usize,
+    pub(crate) contracts: Vec<OntologyActionContractProductView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OntologyActionContractProductView {
+    pub(crate) id: Uuid,
+    pub(crate) object_key: String,
+    pub(crate) title: String,
+    pub(crate) summary: String,
+    pub(crate) status: String,
+    pub(crate) trust_level: String,
+    pub(crate) freshness: String,
+    pub(crate) semantic_scopes: Value,
+    pub(crate) source_uri: Option<String>,
+    pub(crate) contract: Value,
+    pub(crate) contract_model: Value,
+    pub(crate) governance_boundary: OntologyActionContractGovernanceBoundary,
+    pub(crate) created_at: DateTime<Utc>,
+    pub(crate) updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OntologyActionContractGovernanceBoundary {
+    pub(crate) validity_authority: String,
+    pub(crate) execution_authority: String,
+    pub(crate) auto_execute: bool,
+    pub(crate) requires_task_grant: bool,
+    pub(crate) requires_policy_check: bool,
+    pub(crate) requires_connector_scope: bool,
+    pub(crate) high_risk_enters_requires_action: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct OntologyOnboardingField {
     pub(crate) name: String,
     pub(crate) field_type: String,

@@ -8363,6 +8363,140 @@ async fn ontology_registry_exposes_core_objects_and_allowed_relations() {
 }
 
 #[tokio::test]
+async fn ontology_action_contract_api_exposes_governed_product_view() {
+    let app = test_app().await;
+    let admin_headers = [("x-mandoforge-roles", "admin")];
+    let source: SemanticSource = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/semantic-sources",
+            json!({
+                "source_type": "workflow_pack",
+                "source_uri": "repo://packs/commerce/actions/lookup_order.yaml",
+                "display_name": "Commerce action contracts",
+                "metadata": {"pack_id": "commerce"},
+                "provenance": {"source": "ontology-action-contract-api-test"},
+                "freshness": {"state": "workspace_current"}
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let contract: SemanticObject = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/semantic-objects",
+            json!({
+                "source_id": source.id,
+                "object_type": "ontology_action_contract",
+                "object_key": "commerce.action.lookup_order",
+                "title": "lookup_order action contract",
+                "summary": "Valid read-only order lookup action for the commerce connector.",
+                "content": {
+                    "action_contract": {
+                        "domain_scope": "commerce",
+                        "business_object": {"type": "Order", "key_field": "order_id"},
+                        "rules": [{"id": "order_exists", "expression": "order_id != null"}],
+                        "relations": [{"from": "Order", "to": "Customer", "kind": "belongs_to"}],
+                        "metrics": [{"name": "lookup_count", "unit": "request"}],
+                        "permission_contract": {"scope": "read", "requires_task_grant": true},
+                        "tool_binding": {
+                            "connector_id": "docs",
+                            "operation_id": "lookup_order",
+                            "side_effect_class": "read"
+                        },
+                        "validation_rules": [{"field": "order_id", "required": true}],
+                        "risk_class": {"level": "low"}
+                    }
+                },
+                "semantic_scopes": {
+                    "domain_scope": "commerce",
+                    "workflow_scope": "refunds",
+                    "memory_scope": "ontology-actions"
+                },
+                "provenance": {"source": "ontology-action-contract-api-test"},
+                "trust_level": "source_attested",
+                "freshness": "current"
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let _: SemanticObject = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/semantic-objects",
+            json!({
+                "source_id": source.id,
+                "object_type": "decision",
+                "object_key": "commerce.decision.not-an-action-contract",
+                "title": "Not an action contract",
+                "summary": "This object must not appear in the action contract product API.",
+                "content": {"decision": "not executable"},
+                "semantic_scopes": {"domain_scope": "commerce"},
+                "provenance": {"source": "ontology-action-contract-api-test"},
+                "trust_level": "source_attested",
+                "freshness": "current"
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+
+    let list: Value = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/ontology/action-contracts?domain_scope=commerce")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(list["count"], json!(1));
+    let listed = &list["contracts"][0];
+    assert_eq!(listed["id"], json!(contract.id));
+    assert_eq!(listed["object_key"], json!("commerce.action.lookup_order"));
+    assert_eq!(
+        listed["contract"]["business_object"]["type"],
+        json!("Order")
+    );
+    assert_eq!(listed["contract_model"]["has_tool_binding"], json!(true));
+    assert_eq!(listed["contract_model"]["validation_rule_count"], json!(1));
+    assert_eq!(listed["contract_model"]["risk_class"], json!("low"));
+    assert_eq!(
+        listed["governance_boundary"]["validity_authority"],
+        json!("ontology_action_contract")
+    );
+    assert_eq!(
+        listed["governance_boundary"]["execution_authority"],
+        json!("task_grant_policy_approval_tool_router")
+    );
+    assert_eq!(listed["governance_boundary"]["auto_execute"], json!(false));
+    assert_eq!(
+        listed["governance_boundary"]["requires_task_grant"],
+        json!(true)
+    );
+
+    let fetched: Value = request_json(
+        app,
+        Request::builder()
+            .uri(format!("/api/ontology/action-contracts/{}", contract.id))
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(fetched["id"], json!(contract.id));
+    assert_eq!(
+        fetched["governance_boundary"]["high_risk_enters_requires_action"],
+        json!(true)
+    );
+}
+
+#[tokio::test]
 async fn ontology_engine_readiness_reports_release_lifecycle_blockers() {
     let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
     let readiness = build_ontology_engine_readiness(&state)
