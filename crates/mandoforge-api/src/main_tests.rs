@@ -5465,6 +5465,224 @@ async fn manager_agent_plan_binds_work_item_without_starting_runtime_execution()
 }
 
 #[tokio::test]
+async fn manager_plan_materialize_handoff_creates_runtime_assignment() {
+    let app = test_app().await;
+    let specialist: Agent = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/agents",
+            json!({
+                "name": "Materialized Runtime Specialist",
+                "kind": "specialist",
+                "agent_role": "specialist",
+                "provider": "openai-compatible",
+                "model": "gpt-5.5-mini",
+                "tools": ["agent_cli.exec", "file.read"],
+                "semantic_scopes": {
+                    "project_scope": "mandoforge",
+                    "service_scope": "mandoforge-api",
+                    "workflow_scope": "manager-materialization"
+                }
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let manager: Agent = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/agents",
+            json!({
+                "name": "Materializing Manager",
+                "kind": "manager",
+                "agent_role": "manager",
+                "provider": "openai-compatible",
+                "model": "gpt-5.5-mini",
+                "runtime_config": {
+                    "handoffs": {
+                        "allowed_targets": [{
+                            "target_agent_id": specialist.id,
+                            "intents": ["implement_backend_slice"],
+                            "schema_versions": ["handoff.v1"],
+                            "risk_levels": ["medium"],
+                            "approval_required": false
+                        }]
+                    }
+                }
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let manager_session: Session = request_json(
+        app.clone(),
+        json_request(
+            "POST",
+            "/api/sessions",
+            json!({
+                "agent_id": manager.id,
+                "title": "manager materializes handoff",
+                "message": "Review then materialize specialist work."
+            }),
+        ),
+    )
+    .await;
+    let plan: ManagerAgentPlan = request_json(
+        app.clone(),
+        json_request(
+            "POST",
+            &format!("/api/sessions/{}/manager-plans", manager_session.id),
+            json!({
+                "specialist_agent_id": specialist.id,
+                "task_intake": {"goal": "Implement the Manager Runtime materialization slice"},
+                "decomposition": {"steps": ["create handoff", "assign specialist"]},
+                "specialist_selection": {"selected_agent_id": specialist.id},
+                "risk_classification": "medium",
+                "review": {"status": "pending"}
+            }),
+        ),
+    )
+    .await;
+    let reviewed: ManagerAgentPlan = request_json(
+        app.clone(),
+        json_request(
+            "POST",
+            &format!("/api/manager-plans/{}/review", plan.id),
+            json!({
+                "status": "approved",
+                "review": {"status": "approved", "summary": "Materialize the specialist handoff"}
+            }),
+        ),
+    )
+    .await;
+
+    let materialized: MaterializedManagerAgentPlanHandoff = request_json(
+        app.clone(),
+        json_request(
+            "POST",
+            &format!("/api/manager-plans/{}/materialize-handoff", reviewed.id),
+            json!({
+                "intent": "implement_backend_slice",
+                "payload": {"slice": "manager runtime materialization"},
+                "schema_version": "handoff.v1",
+                "risk_level": "medium",
+                "assigned_by": "manager-agent",
+                "metadata": {"materialization_entrypoint": "manager_plan"}
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(materialized.manager_plan.id, reviewed.id);
+    assert_eq!(materialized.handoff.status, "accepted");
+    assert_eq!(materialized.handoff.manager_plan_id, Some(reviewed.id));
+    assert_eq!(materialized.assignment.manager_plan_id, reviewed.id);
+    assert_eq!(
+        materialized.assignment.agent_handoff_event_id,
+        materialized.handoff.id
+    );
+    assert_eq!(
+        materialized.assignment.source_session_id,
+        manager_session.id
+    );
+    assert_ne!(
+        materialized.assignment.specialist_session_id,
+        manager_session.id
+    );
+    assert_eq!(
+        materialized.assignment.metadata["materialization_entrypoint"],
+        json!("manager_plan")
+    );
+
+    let threads: Vec<SessionThread> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/sessions/{}/threads", manager_session.id))
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(threads.iter().any(|thread| {
+        thread.thread_kind == "specialist"
+            && thread.source_handoff_id == Some(materialized.handoff.id)
+            && thread.specialist_session_id == Some(materialized.assignment.specialist_session_id)
+            && thread.agent_id == specialist.id
+    }));
+
+    let events: Vec<SessionEvent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/sessions/{}/events", manager_session.id))
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    for event_type in [
+        "agent_handoff.requested",
+        "agent_handoff.accepted",
+        "agent_handoff.assigned",
+        "thread.started",
+    ] {
+        assert!(
+            events.iter().any(|event| event.event_type == event_type),
+            "missing manager materialization event: {event_type}"
+        );
+    }
+
+    let high_risk_plan: ManagerAgentPlan = request_json(
+        app.clone(),
+        json_request(
+            "POST",
+            &format!("/api/sessions/{}/manager-plans", manager_session.id),
+            json!({
+                "specialist_agent_id": specialist.id,
+                "task_intake": {"goal": "Try a high-risk auto handoff"},
+                "decomposition": {"steps": ["should not auto materialize"]},
+                "specialist_selection": {"selected_agent_id": specialist.id},
+                "risk_classification": "high",
+                "review": {"status": "pending"}
+            }),
+        ),
+    )
+    .await;
+    let high_risk_reviewed: ManagerAgentPlan = request_json(
+        app.clone(),
+        json_request(
+            "POST",
+            &format!("/api/manager-plans/{}/review", high_risk_plan.id),
+            json!({
+                "status": "approved",
+                "review": {"status": "approved"}
+            }),
+        ),
+    )
+    .await;
+    let (status, error) = request_value(
+        app,
+        json_request(
+            "POST",
+            &format!(
+                "/api/manager-plans/{}/materialize-handoff",
+                high_risk_reviewed.id
+            ),
+            json!({
+                "intent": "implement_backend_slice",
+                "payload": {"slice": "blocked high risk"},
+                "schema_version": "handoff.v1",
+                "risk_level": "high"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error["error"],
+        "manager plan handoff materialization cannot auto-accept high-risk or approval-required handoffs"
+    );
+}
+
+#[tokio::test]
 async fn manager_agent_run_routes_are_not_platform_control_plane() {
     let app = test_app().await;
 

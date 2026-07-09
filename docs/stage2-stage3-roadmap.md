@@ -75,6 +75,11 @@ The first Collaboration Layer slice is now in place:
   second runtime orchestrator.
 - `/api/work-items/:id/manager-plans` exposes Manager Agent planning records
   bound to the WorkItem without starting specialist runtime execution.
+- `/api/manager-plans/:id/materialize-handoff` turns a reviewed or approved
+  ManagerPlan into an accepted handoff, specialist assignment, child
+  SessionThread, and, when a parent WorkflowRun TaskGrant is active, the
+  downstream WorkflowStepRun and child TaskGrant. High-risk or approval-required
+  handoffs still fail closed instead of being auto-accepted.
 - WorkItems with `metadata.semantic_scopes` are projected into `semantic_objects`
   as `work_item:*` records so context packets can retrieve Collaboration Layer
   work as runtime context.
@@ -256,8 +261,10 @@ plans:
 2. Environment Scheduling + K Agent: complete the Environment Work Queue,
    heartbeat, sandbox dispatch, and runtime event return contract. Session-loop
    K Agent claim and lease evidence is already recorded as `k_agent.claimed`.
-3. Manager Runtime materialization: connect WorkItem, ManagerPlan, Assignment,
-   Review, WorkflowRun, SessionThread, and TaskGrant with evidence gates.
+3. Manager Runtime materialization: complete the main WorkflowRun-first
+   materialization path for reviewed ManagerPlans. The handoff materialization
+   path already connects ManagerPlan, Assignment, SessionThread, and child
+   TaskGrant evidence when a parent WorkflowRun grant is active.
 4. Ontology Action Contract enforcement: make action validity a checked input to
    Tool Router without letting ontology bypass TaskGrant, Policy, or Approval.
 5. Pack / Release / Evidence: make WorkflowPack, DomainPack, AgentVersion,

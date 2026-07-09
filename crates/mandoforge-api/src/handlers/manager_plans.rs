@@ -8,11 +8,14 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use crate::{
-    AppError, AppState, CreateManagerAgentPlan, ManagerAgentPlan, Permission,
-    ReviewManagerAgentPlan, authorize_collection_request, authorize_request,
+    AppError, AppState, CreateAgentHandoffAssignment, CreateAgentHandoffEvent,
+    CreateManagerAgentPlan, ManagerAgentPlan, MaterializeManagerAgentPlanHandoff,
+    MaterializedManagerAgentPlanHandoff, Permission, ReviewManagerAgentPlan,
+    assign_agent_handoff_event_for_runtime, authorize_collection_request, authorize_request,
+    create_agent_handoff_event_for_session, normalize_handoff_risk_level,
     normalize_manager_plan_risk, normalize_manager_plan_status,
-    record_manager_agent_plan_audit_and_event, record_manager_agent_plan_work_item_activity,
-    visible_session_ids_for_principal,
+    record_agent_handoff_audit_and_event, record_manager_agent_plan_audit_and_event,
+    record_manager_agent_plan_work_item_activity, visible_session_ids_for_principal,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -30,6 +33,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/api/manager-plans/{id}/review",
             post(review_manager_agent_plan),
+        )
+        .route(
+            "/api/manager-plans/{id}/materialize-handoff",
+            post(materialize_manager_agent_plan_handoff),
         )
 }
 
@@ -220,4 +227,94 @@ async fn review_manager_agent_plan(
         )
         .await?;
     Ok(Json(reviewed))
+}
+
+async fn materialize_manager_agent_plan_handoff(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<MaterializeManagerAgentPlanHandoff>,
+) -> Result<Json<MaterializedManagerAgentPlanHandoff>, AppError> {
+    let plan = state.get_manager_agent_plan(id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRun,
+        "session",
+        Some(plan.session_id),
+    )
+    .await?;
+    if plan.status != "reviewed" && plan.status != "approved" {
+        return Err(AppError::bad_request(
+            "manager plan must be reviewed or approved before materialization",
+        ));
+    }
+    let target_agent_id = input
+        .target_agent_id
+        .or(plan.specialist_agent_id)
+        .ok_or_else(|| {
+            AppError::bad_request(
+                "manager plan materialization requires target_agent_id or specialist_agent_id",
+            )
+        })?;
+    if let Some(specialist_agent_id) = plan.specialist_agent_id
+        && specialist_agent_id != target_agent_id
+    {
+        return Err(AppError::bad_request(
+            "target_agent_id must match the manager plan specialist_agent_id",
+        ));
+    }
+    let risk_level = normalize_handoff_risk_level(&input.risk_level)?;
+    if risk_level == "high" || input.approval_required {
+        return Err(AppError::bad_request(
+            "manager plan handoff materialization cannot auto-accept high-risk or approval-required handoffs",
+        ));
+    }
+    let handoff = create_agent_handoff_event_for_session(
+        &state,
+        plan.session_id,
+        CreateAgentHandoffEvent {
+            target_agent_id,
+            manager_plan_id: Some(plan.id),
+            intent: input.intent,
+            payload: input.payload,
+            schema_version: input.schema_version,
+            risk_level,
+            approval_required: input.approval_required,
+            semantic_scopes: input.semantic_scopes,
+            runtime_profile_id: input.runtime_profile_id,
+            remote_computer_required: input.remote_computer_required,
+            review_status: None,
+            human_escalation_status: None,
+        },
+    )
+    .await?;
+    let audit = record_agent_handoff_audit_and_event(
+        &state,
+        &handoff,
+        "agent_handoff.accepted",
+        Some("manager plan materialized handoff".to_string()),
+    )
+    .await?;
+    let handoff = state
+        .update_agent_handoff_event_status(handoff.id, "accepted", Some(audit.id))
+        .await?;
+    let assignment = assign_agent_handoff_event_for_runtime(
+        &state,
+        &handoff,
+        CreateAgentHandoffAssignment {
+            specialist_session_id: input.specialist_session_id,
+            title: input.title,
+            message: input.message,
+            remote_computer_job_assignment_id: None,
+            assigned_by: input.assigned_by,
+            metadata: input.metadata,
+        },
+    )
+    .await?;
+    Ok(Json(MaterializedManagerAgentPlanHandoff {
+        manager_plan: plan,
+        handoff,
+        assignment,
+    }))
 }
