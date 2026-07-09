@@ -315,12 +315,12 @@ plans:
    WorkItem adapter metadata without starting runtime execution, verifies
    configured webhook HMAC signatures, records cursor/delivery replay evidence,
    extracts richer platform object metadata, accepts GitHub, Slack, Linear, and
-   Jira native webhook signature headers as connector-specific verification
-   variants, and
+   Jira native webhook signature headers plus Feishu/Lark `X-Lark-Signature`
+   as connector-specific verification variants, and
    preserves platform rate-limit plus live-readback evidence supplied by
    connector headers or payload metadata. Platform-specific OAuth/token
    lifecycle, active live API fetch/readback, MandoForge-enforced rate-limit
-   scheduling, and Feishu/Email-specific authentication variants remain open.
+   scheduling, and Email-specific authentication evidence remain open.
 2. Runtime adapter consolidation: make Environment runtime binding the only
    product entrypoint for managed runtime execution. `agent_cli.exec` and
    `codex.exec` remain compatibility facades, but session-bound Environment

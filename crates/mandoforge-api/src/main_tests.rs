@@ -9,7 +9,7 @@ use axum::{
 };
 use futures_util::StreamExt;
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -35722,6 +35722,66 @@ async fn work_surface_event_accepts_jira_websub_signature() {
 }
 
 #[tokio::test]
+async fn work_surface_event_accepts_feishu_native_signature() {
+    let _env_guard = env_lock().lock().expect("env lock");
+    let _secret = EnvVarGuard::set(
+        "MANDOFORGE_WORK_SURFACE_FEISHU_WEBHOOK_SECRET",
+        "surface-secret",
+    );
+    let app = test_app().await;
+    let payload = json!({
+        "surface": "feishu",
+        "event_type": "message.created",
+        "external_id": "feishu-1",
+        "title": "Feishu native webhook intake",
+        "metadata": {
+            "header": {"event_id": "feishu-event-1"},
+            "event": {
+                "message": {"message_id": "om_123"},
+                "sender": {"sender_id": {"open_id": "ou_123"}}
+            }
+        }
+    });
+    let body = payload.to_string();
+    let timestamp = Utc::now().timestamp().to_string();
+    let nonce = "feishu-nonce-1";
+    let signature =
+        work_surface_feishu_test_signature("surface-secret", &timestamp, nonce, body.as_bytes());
+
+    let ingested: WorkSurfaceIngestion = request_json(
+        app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/work-surface-events")
+            .header("x-mandoforge-subject", "feishu-webhook")
+            .header("x-mandoforge-roles", "admin")
+            .header("x-lark-request-timestamp", timestamp)
+            .header("x-lark-request-nonce", nonce)
+            .header("x-lark-signature", signature.as_str())
+            .body(Body::from(body))
+            .expect("valid request"),
+    )
+    .await;
+
+    assert_eq!(ingested.work_item.source, "feishu");
+    assert_eq!(
+        ingested.work_item.metadata["work_surface"]["delivery_id"],
+        json!("feishu-event-1")
+    );
+    assert_eq!(
+        ingested.work_item.metadata["work_surface"]["authentication"],
+        json!({
+            "mode": "feishu_sha256",
+            "configured": true,
+            "verified": true,
+            "signature_present": true,
+            "signature_header": "x-lark-signature",
+            "secret_ref": "MANDOFORGE_WORK_SURFACE_FEISHU_WEBHOOK_SECRET"
+        })
+    );
+}
+
+#[tokio::test]
 async fn work_surface_event_requires_signature_when_webhook_secret_is_configured() {
     let _env_guard = env_lock().lock().expect("env lock");
     let _secret = EnvVarGuard::set("MANDOFORGE_WORK_SURFACE_WEBHOOK_SECRET", "surface-secret");
@@ -35834,6 +35894,20 @@ fn work_surface_slack_test_signature(secret: &str, timestamp: &str, body: &[u8])
     mac.update(b":");
     mac.update(body);
     format!("v0={}", hex::encode(mac.finalize().into_bytes()))
+}
+
+fn work_surface_feishu_test_signature(
+    secret: &str,
+    timestamp: &str,
+    nonce: &str,
+    body: &[u8],
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(timestamp.as_bytes());
+    hasher.update(nonce.as_bytes());
+    hasher.update(secret.as_bytes());
+    hasher.update(body);
+    hex::encode(hasher.finalize())
 }
 
 #[tokio::test]

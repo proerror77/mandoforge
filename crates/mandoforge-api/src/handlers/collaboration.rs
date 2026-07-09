@@ -8,7 +8,7 @@ use axum::{
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use serde_json::{Map, Value, json};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
@@ -718,6 +718,7 @@ fn work_surface_signature_present(headers: &HeaderMap, surface: &str) -> bool {
         || (surface == "slack" && header_value(headers, "x-slack-signature").is_some())
         || (surface == "linear" && header_value(headers, "linear-signature").is_some())
         || (surface == "jira" && header_value(headers, "x-hub-signature").is_some())
+        || (surface == "feishu" && header_value(headers, "x-lark-signature").is_some())
 }
 
 fn verify_work_surface_signature(
@@ -769,6 +770,15 @@ fn verify_work_surface_signature(
             header: "x-hub-signature",
         });
     }
+    if surface == "feishu"
+        && let Some(signature) = header_value(headers, "x-lark-signature")
+    {
+        verify_feishu_signature(headers, body, secret, signature)?;
+        return Ok(WorkSurfaceSignatureVerification {
+            mode: "feishu_sha256",
+            header: "x-lark-signature",
+        });
+    }
     Err(AppError::unauthorized(
         "missing work surface webhook signature",
     ))
@@ -788,6 +798,41 @@ fn verify_hmac_sha256_signature(
     mac.update(body);
     mac.verify_slice(&signature_bytes)
         .map_err(|_| AppError::unauthorized("signature mismatch"))
+}
+
+fn verify_feishu_signature(
+    headers: &HeaderMap,
+    body: &[u8],
+    secret: &str,
+    signature: &str,
+) -> Result<(), AppError> {
+    let timestamp = header_value(headers, "x-lark-request-timestamp")
+        .ok_or_else(|| AppError::unauthorized("missing x-lark-request-timestamp"))?;
+    let nonce = header_value(headers, "x-lark-request-nonce")
+        .ok_or_else(|| AppError::unauthorized("missing x-lark-request-nonce"))?;
+    let mut hasher = Sha256::new();
+    hasher.update(timestamp.as_bytes());
+    hasher.update(nonce.as_bytes());
+    hasher.update(secret.as_bytes());
+    hasher.update(body);
+    let expected = hex::encode(hasher.finalize());
+    if constant_time_str_eq(expected.as_str(), signature.trim()) {
+        Ok(())
+    } else {
+        Err(AppError::unauthorized("signature mismatch"))
+    }
+}
+
+fn constant_time_str_eq(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right.iter())
+        .fold(0u8, |diff, (left, right)| diff | (left ^ right))
+        == 0
 }
 
 fn verify_slack_signature(
