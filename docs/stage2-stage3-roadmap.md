@@ -121,6 +121,10 @@ The first Collaboration Layer slice is now in place:
   EnvironmentProfile capability evidence from existing runtime profile,
   release gate, environment bindings, and agent bindings without turning an
   environment profile into execution authority.
+- `/api/ontology/onboarding/runs/:id/tool-specs/capability-readback` provides
+  read-only ToolSpec capability evidence from existing ontology onboarding run
+  state and materialized tool specs without granting TaskGrant, Policy,
+  Approval, connector scope, or Tool Router execution authority.
 - `/api/eval/runs/:id/capability-readback` provides read-only EvalGate
   capability evidence from existing EvalRun, EvalCase, gate decision, and drift
   decision state without turning eval gates into execution authority.
@@ -412,7 +416,10 @@ plans:
    read-only capability readback through
    `/api/agent-runtime-profiles/:id/capability-readback`, including runtime
    profile state, release gate, environment bindings, and agent bindings.
-   EvalGate now exposes read-only capability readback through
+   ToolSpec now exposes read-only capability readback through
+   `/api/ontology/onboarding/runs/:id/tool-specs/capability-readback`,
+   including run state, materialized specs, approval requirements, execution
+   modes, and risk distribution. EvalGate now exposes read-only capability
+   readback through
    `/api/eval/runs/:id/capability-readback`, including run state, case ids,
-   gate decision, drift decision, and authority boundary. Deeper
-   release/evidence readback for ToolSpec remains open.
+   gate decision, drift decision, and authority boundary.

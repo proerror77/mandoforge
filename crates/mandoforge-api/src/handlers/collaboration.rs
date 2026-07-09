@@ -1458,6 +1458,7 @@ fn agent_os_product_capabilities() -> Vec<Value> {
             "status": "available",
             "api_routes": [
                 "GET /api/ontology/onboarding/runs/{id}/tool-specs",
+                "GET /api/ontology/onboarding/runs/{id}/tool-specs/capability-readback",
                 "POST /api/workflow-packs/validate"
             ],
             "lifecycle_actions": ["generate", "review", "materialize", "validate_pack_contract"],

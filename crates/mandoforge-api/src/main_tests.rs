@@ -1044,6 +1044,99 @@ async fn ontology_onboarding_generates_agent_tool_specs() {
 }
 
 #[tokio::test]
+async fn ontology_onboarding_tool_spec_capability_readback_summarizes_materialized_specs() {
+    let app = test_app().await;
+    let admin_headers = [
+        ("x-mandoforge-subject", "admin-1"),
+        ("x-mandoforge-roles", "admin"),
+    ];
+    let run: OntologyOnboardingRun = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/ontology/onboarding/demo-runs",
+            json!({}),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let action_proposal_ids = run
+        .proposals
+        .iter()
+        .filter(|proposal| proposal.proposal_type == "action")
+        .map(|proposal| proposal.id)
+        .collect::<Vec<_>>();
+    assert!(action_proposal_ids.len() >= 4);
+    for proposal_id in &action_proposal_ids {
+        let _: OntologyOnboardingProposalDraft = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/ontology/onboarding/proposals/{proposal_id}/review"),
+                json!({
+                    "decision": "approve",
+                    "reason": "action contract has policy and audit metadata"
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+    }
+    let materialized: OntologyOnboardingMaterializationResult = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/ontology/onboarding/runs/{}/materialize", run.id),
+            json!({}),
+            &admin_headers,
+        ),
+    )
+    .await;
+    assert!(materialized.tool_spec_count >= 4);
+
+    let readback: Value = request_json(
+        app,
+        Request::builder()
+            .uri(format!(
+                "/api/ontology/onboarding/runs/{}/tool-specs/capability-readback",
+                run.id
+            ))
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(readback["product_object"], json!("ToolSpec"));
+    assert_eq!(readback["run"]["id"], json!(run.id));
+    assert_eq!(
+        readback["summary"]["tool_spec_count"],
+        json!(materialized.tool_spec_count)
+    );
+    assert_eq!(
+        readback["summary"]["approval_required_count"],
+        json!(materialized.tool_spec_count)
+    );
+    assert!(
+        readback["tool_specs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|spec| spec["name"] == json!("commerce.refund_order"))
+    );
+    assert_eq!(
+        readback["summary"]["execution_modes"]["proposal_only"],
+        json!(materialized.tool_spec_count)
+    );
+    assert!(
+        readback["authority_boundary"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("read-only")
+    );
+}
+
+#[tokio::test]
 async fn ontology_release_candidate_requires_materialized_proposals() {
     let app = test_app().await;
     let headers = [
@@ -9728,6 +9821,15 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
                 .unwrap()
                 .contains(&json!(
                     "GET /api/agent-runtime-profiles/{id}/capability-readback"
+                ))
+    }));
+    assert!(product_capabilities.iter().any(|capability| {
+        capability["key"] == json!("tool_spec")
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(
+                    "GET /api/ontology/onboarding/runs/{id}/tool-specs/capability-readback"
                 ))
     }));
     assert!(product_capabilities.iter().any(|capability| {

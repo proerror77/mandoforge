@@ -1,9 +1,12 @@
+use std::collections::BTreeMap;
+
 use axum::{
     Json, Router,
     extract::{Path, State},
     http::HeaderMap,
     routing::{get, post},
 };
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
@@ -62,6 +65,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/api/ontology/onboarding/runs/{id}/tool-specs",
             get(list_ontology_onboarding_tool_specs),
+        )
+        .route(
+            "/api/ontology/onboarding/runs/{id}/tool-specs/capability-readback",
+            get(get_ontology_onboarding_tool_specs_capability_readback),
         )
         .route(
             "/api/ontology/onboarding/curated-datasets/{id}/review",
@@ -304,6 +311,59 @@ async fn list_ontology_onboarding_tool_specs(
     }))
 }
 
+async fn get_ontology_onboarding_tool_specs_capability_readback(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::AgentsRead,
+        "ontology_onboarding",
+        Some(id),
+    )
+    .await?;
+    let run = get_ontology_onboarding_run_for_state(&state, id).await?;
+    let tool_specs = ontology_onboarding_tool_specs_for_run(&state, id).await?;
+    let approval_required_count = tool_specs
+        .iter()
+        .filter(|spec| spec.approval_required)
+        .count();
+    let read_only_count = tool_specs.iter().filter(|spec| spec.read_only).count();
+    Ok(Json(json!({
+        "product_object": "ToolSpec",
+        "run": {
+            "id": run.id,
+            "source_mode": run.source_mode,
+            "status": run.status,
+            "dataset_count": run.dataset_count,
+            "profile_count": run.profile_count,
+            "proposal_count": run.proposal_count,
+            "approved_count": run.approved_count,
+            "materialized_count": run.materialized_count
+        },
+        "tool_specs": tool_specs,
+        "summary": {
+            "tool_spec_count": tool_specs.len(),
+            "approval_required_count": approval_required_count,
+            "read_only_count": read_only_count,
+            "write_or_effectful_count": tool_specs.len().saturating_sub(read_only_count),
+            "tool_kinds": count_values(tool_specs.iter().map(|spec| spec.tool_kind.as_str())),
+            "execution_modes": count_values(tool_specs.iter().map(|spec| spec.execution_mode.as_str())),
+            "read_write_risks": count_values(tool_specs.iter().map(|spec| spec.read_write_risk.as_str())),
+            "tool_spec_ids": tool_specs.iter().map(|spec| spec.id).collect::<Vec<_>>(),
+            "source_proposal_ids": tool_specs.iter().map(|spec| spec.source_proposal_id).collect::<Vec<_>>()
+        },
+        "evidence_sources": [
+            "ontology_onboarding_run",
+            "approved_action_proposals",
+            "materialized_tool_specs"
+        ],
+        "authority_boundary": "read-only ToolSpec capability readback; tool specs describe governed bindings and do not grant TaskGrant, Policy, Approval, connector scope, or Tool Router execution authority"
+    })))
+}
+
 async fn review_ontology_curated_dataset(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -328,4 +388,11 @@ async fn review_ontology_curated_dataset(
     )
     .await
     .map(Json)
+}
+
+fn count_values<'a>(values: impl Iterator<Item = &'a str>) -> BTreeMap<String, usize> {
+    values.fold(BTreeMap::new(), |mut counts, value| {
+        *counts.entry(value.to_string()).or_default() += 1;
+        counts
+    })
 }
