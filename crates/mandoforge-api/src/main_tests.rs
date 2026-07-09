@@ -33589,6 +33589,154 @@ async fn work_surface_event_ingests_work_item_without_runtime_execution() {
 }
 
 #[tokio::test]
+async fn work_surface_event_adapters_normalize_supported_surfaces() {
+    let app = test_app().await;
+    let cases = [
+        ("lark", "feishu", "feishu.work_surface"),
+        ("feishu", "feishu", "feishu.work_surface"),
+        ("slack", "slack", "slack.work_surface"),
+        ("gh", "github", "github.work_surface"),
+        ("github", "github", "github.work_surface"),
+        ("jira", "jira", "jira.work_surface"),
+        ("linear", "linear", "linear.work_surface"),
+        ("mail", "email", "email.work_surface"),
+        ("email", "email", "email.work_surface"),
+    ];
+
+    for (input_surface, expected_surface, expected_adapter) in cases {
+        let expected_url = format!("https://example.test/{input_surface}/123");
+        let payload = json!({
+            "surface": input_surface,
+            "event_type": "issue.updated",
+            "external_id": format!("{input_surface}-123"),
+            "title": format!("{input_surface} intake"),
+            "priority": "normal",
+            "assignee": "agent:manager",
+            "metadata": {
+                "source_url": false,
+                "url": format!("https://example.test/{input_surface}/123"),
+                "owner": "ops",
+                "reviewer": "qa",
+                "blocker": "waiting_customer",
+                "deadline": "2026-07-10",
+                "state": "triage"
+            }
+        });
+        let ingested: WorkSurfaceIngestion = request_json(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/work-surface-events",
+                payload,
+                &[
+                    ("x-mandoforge-subject", "surface-ingestor"),
+                    ("x-mandoforge-roles", "admin"),
+                ],
+            ),
+        )
+        .await;
+
+        assert_eq!(ingested.work_item.source, expected_surface);
+        assert_eq!(
+            ingested.work_item.source_url.as_deref(),
+            Some(expected_url.as_str())
+        );
+        assert_eq!(
+            ingested.work_item.metadata["work_surface"]["adapter"],
+            json!(expected_adapter)
+        );
+        assert_eq!(
+            ingested.work_item.metadata["work_surface"]["human_state"],
+            json!({
+                "owner": "ops",
+                "reviewer": "qa",
+                "assignee": "agent:manager",
+                "blocker": "waiting_customer",
+                "due_date": "2026-07-10",
+                "status": "triage"
+            })
+        );
+        assert_eq!(
+            ingested.activity.metadata["work_surface"]["human_state"],
+            ingested.work_item.metadata["work_surface"]["human_state"]
+        );
+    }
+}
+
+#[tokio::test]
+async fn generic_work_surface_event_preserves_explicit_source_url_only() {
+    let app = test_app().await;
+    let ingested: WorkSurfaceIngestion = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/work-surface-events",
+            json!({
+                "surface": "custom-crm",
+                "event_type": "ticket.updated",
+                "external_id": "crm-1",
+                "title": "Generic CRM intake",
+                "metadata": {
+                    "url": "https://example.test/not-the-source-url",
+                    "owner": "ops",
+                    "state": "triage"
+                }
+            }),
+            &[
+                ("x-mandoforge-subject", "surface-ingestor"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+
+    assert_eq!(ingested.work_item.source, "custom-crm");
+    assert_eq!(ingested.work_item.source_url, None);
+    assert_eq!(
+        ingested.work_item.metadata["work_surface"]["adapter"],
+        json!("generic.work_surface")
+    );
+    assert_eq!(
+        ingested.work_item.metadata["work_surface"]["human_state"],
+        json!({})
+    );
+
+    let explicit: WorkSurfaceIngestion = request_json(
+        app,
+        json_request_with_headers(
+            "POST",
+            "/api/work-surface-events",
+            json!({
+                "surface": "custom-crm",
+                "event_type": "ticket.updated",
+                "external_id": "crm-2",
+                "title": "Generic CRM explicit source",
+                "source_url": "https://example.test/explicit-source",
+                "metadata": {
+                    "url": "https://example.test/not-the-source-url",
+                    "owner": "ops",
+                    "state": "triage"
+                }
+            }),
+            &[
+                ("x-mandoforge-subject", "surface-ingestor"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+
+    assert_eq!(
+        explicit.work_item.source_url.as_deref(),
+        Some("https://example.test/explicit-source")
+    );
+    assert_eq!(
+        explicit.work_item.metadata["work_surface"]["human_state"],
+        json!({})
+    );
+}
+
+#[tokio::test]
 async fn work_items_reject_mismatched_collaboration_scope() {
     let app = test_app().await;
     let admin_headers = [

@@ -74,6 +74,10 @@ The first Collaboration Layer slice is now in place:
   WorkItems without starting runtime execution, preserving surface identity,
   event type, external id, source URL, actor, timestamp, metadata, Activity Feed
   evidence, and audit evidence.
+- The same intake path normalizes Feishu, Slack, GitHub, Jira, Linear, and
+  Email events into canonical surface adapters and preserves owner, reviewer,
+  assignee, blocker, due date, source URL, and status metadata for operator
+  review.
 - `/api/work-items` creates and lists first-class WorkItems.
 - WorkItem creation persists source, priority, status, scope, and metadata.
 - `/api/work-items/:id/assignments` routes WorkItems to users, agents, squads,
@@ -289,9 +293,11 @@ Acceptance:
 The Full Agent OS narrative should be implemented through separate focused
 plans:
 
-1. Work Surface connectors: attach Feishu, Slack, GitHub, Jira, Linear, and
-   Email adapters to `/api/work-surface-events`; the shared WorkItem ingestion
-   contract is already in place.
+1. Work Surface connectors: add platform webhook authentication, cursor
+   replay, and richer payload extraction for Feishu, Slack, GitHub, Jira,
+   Linear, and Email. The shared `/api/work-surface-events` intake already
+   normalizes those surfaces into canonical WorkItem adapter metadata without
+   starting runtime execution.
 2. Runtime adapter consolidation: make Environment runtime binding the only
    product entrypoint for managed runtime execution while keeping `agent_cli.exec`
    and `codex.exec` as compatibility facades.

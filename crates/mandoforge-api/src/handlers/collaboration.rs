@@ -131,15 +131,26 @@ async fn ingest_work_surface_event(
         resource_id: None,
     };
     state.authorizer.authorize(&principal, &request).await?;
-    let surface = required_work_surface_text(input.surface, "surface")?;
+    let adapter = work_surface_adapter(input.surface)?;
+    let surface = adapter.surface;
     let event_type = required_work_surface_text(input.event_type, "event_type")?;
+    let source_url = if adapter.known {
+        input
+            .source_url
+            .or_else(|| work_surface_source_url(&input.metadata))
+    } else {
+        input.source_url
+    };
     let metadata = work_surface_metadata(
         input.metadata,
         &surface,
+        adapter.name,
+        adapter.known,
         &event_type,
         input.external_id,
         input.occurred_at,
         input.actor.clone(),
+        input.assignee.as_deref(),
     );
     validate_work_item_semantic_scopes(&metadata)?;
     let work_item = state
@@ -150,7 +161,7 @@ async fn ingest_work_surface_event(
             title: input.title,
             description: input.description,
             source: surface.clone(),
-            source_url: input.source_url,
+            source_url,
             status: "open".to_string(),
             priority: input.priority,
             assignee: input.assignee,
@@ -211,20 +222,60 @@ fn required_work_surface_text(value: String, field: &str) -> Result<String, AppE
     }
 }
 
+struct WorkSurfaceAdapter {
+    surface: String,
+    name: &'static str,
+    known: bool,
+}
+
+fn work_surface_adapter(value: String) -> Result<WorkSurfaceAdapter, AppError> {
+    let surface = required_work_surface_text(value, "surface")?;
+    let normalized = surface.to_ascii_lowercase();
+    let canonical = match normalized.as_str() {
+        "lark" | "feishu" => ("feishu", "feishu.work_surface"),
+        "slack" => ("slack", "slack.work_surface"),
+        "gh" | "github" => ("github", "github.work_surface"),
+        "jira" => ("jira", "jira.work_surface"),
+        "linear" => ("linear", "linear.work_surface"),
+        "mail" | "email" => ("email", "email.work_surface"),
+        _ => {
+            return Ok(WorkSurfaceAdapter {
+                surface,
+                name: "generic.work_surface",
+                known: false,
+            });
+        }
+    };
+    Ok(WorkSurfaceAdapter {
+        surface: canonical.0.to_string(),
+        name: canonical.1,
+        known: true,
+    })
+}
+
 fn work_surface_metadata(
     metadata: Value,
     surface: &str,
+    adapter: &str,
+    known_adapter: bool,
     event_type: &str,
     external_id: Option<String>,
     occurred_at: Option<String>,
     actor: Option<String>,
+    assignee: Option<&str>,
 ) -> Value {
     let work_surface = json!({
         "surface": surface,
+        "adapter": adapter,
         "event_type": event_type,
         "external_id": external_id,
         "occurred_at": occurred_at,
-        "actor": actor
+        "actor": actor,
+        "human_state": if known_adapter {
+            work_surface_human_state(&metadata, assignee)
+        } else {
+            json!({})
+        }
     });
     match metadata {
         Value::Object(mut object) => {
@@ -238,6 +289,47 @@ fn work_surface_metadata(
             Value::Object(object)
         }
     }
+}
+
+fn work_surface_source_url(metadata: &Value) -> Option<String> {
+    work_surface_first_string(
+        metadata,
+        &["source_url", "url", "html_url", "permalink", "web_url"],
+    )
+}
+
+fn work_surface_human_state(metadata: &Value, assignee: Option<&str>) -> Value {
+    let mut state = Map::new();
+    for (field, keys) in [
+        ("owner", &["owner", "author", "sender", "user"][..]),
+        ("reviewer", &["reviewer", "requested_reviewer"][..]),
+        (
+            "assignee",
+            &["assignee", "assignee_login", "responsible"][..],
+        ),
+        ("blocker", &["blocker", "blocked_by"][..]),
+        ("due_date", &["due_date", "due", "deadline"][..]),
+        ("status", &["status", "state"][..]),
+    ] {
+        if let Some(value) = work_surface_first_value(metadata, keys) {
+            state.insert(field.to_string(), value);
+        }
+    }
+    if !state.contains_key("assignee")
+        && let Some(assignee) = assignee
+    {
+        state.insert("assignee".to_string(), json!(assignee));
+    }
+    Value::Object(state)
+}
+
+fn work_surface_first_string(metadata: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| metadata.get(*key)?.as_str().map(str::to_string))
+}
+
+fn work_surface_first_value(metadata: &Value, keys: &[&str]) -> Option<Value> {
+    keys.iter().find_map(|key| metadata.get(*key).cloned())
 }
 
 async fn list_agent_teammates(
