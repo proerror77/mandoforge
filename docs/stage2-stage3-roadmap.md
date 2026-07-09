@@ -450,13 +450,17 @@ plans:
    transaction profile, execution mode, and existing ontology release gates.
 6. Pack / Release / Evidence: `/api/capability-discovery` now lists
    WorkItem, ManagerPlan, AgentHandoff, WorkflowPack, DomainPack, AgentVersion,
-   EnvironmentProfile, ManagedSession, ContextPacket, ArtifactStore, AuditLogger,
-   RemoteComputer, KAgent, TaskGrant, PolicyEngine, Approval, ToolRouter,
-   OntologyActionContract, ToolSpec, EvalGate, Release, and Rollback as
+   EnvironmentProfile, ManagedSession, RuntimeTurn, ContextPacket,
+   ArtifactStore, AuditLogger, RemoteComputer, KAgent, TaskGrant, PolicyEngine,
+   Approval, ToolRouter, OntologyActionContract, ToolSpec, EvalGate, Release,
+   and Rollback as
    auditable product capabilities with their existing routes, lifecycle actions,
    evidence events, and authority boundaries. ContextPacket is a scoped context
-   construction/readback surface, not execution authority. ArtifactStore and
-   AuditLogger are evidence/readback surfaces, not execution or
+   construction/readback surface, not execution authority. RuntimeTurn is the
+   session-scoped adapter-output normalization surface for runtime events,
+   tool-call evidence, usage, final artifacts, and audit readback, not
+   execution authority or provider-stdout truth. ArtifactStore and AuditLogger
+   are evidence/readback surfaces, not execution or
    business-authorization shortcuts; PolicyEngine can gate or deny work but does
    not issue TaskGrant scope or replace Tool Router and audit checks. KAgent is
    the Environment Scheduling worker/dispatch surface, not business authority.
