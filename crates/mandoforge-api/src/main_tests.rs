@@ -4476,7 +4476,7 @@ async fn reads_agent_versions_for_agent() {
     assert_eq!(versions[0].tool_names, created.tools);
 
     let version: AgentVersion = request_json(
-        app,
+        app.clone(),
         Request::builder()
             .uri(format!("/api/agents/{}/versions/1", created.id))
             .body(Body::empty())
@@ -4485,6 +4485,28 @@ async fn reads_agent_versions_for_agent() {
     .await;
     assert_eq!(version.id, versions[0].id);
     assert_eq!(version.system_prompt, created.system_prompt);
+
+    let readback: Value = request_json(
+        app,
+        Request::builder()
+            .uri(format!(
+                "/api/agents/{}/versions/1/capability-readback",
+                created.id
+            ))
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(readback["product_object"], json!("AgentVersion"));
+    assert_eq!(readback["version"]["id"], json!(version.id));
+    assert_eq!(readback["tool_contract"]["tool_count"], json!(2));
+    assert_eq!(readback["eval_evidence"]["run_count"], json!(0));
+    assert!(
+        readback["authority_boundary"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("read-only")
+    );
 }
 
 #[tokio::test]
@@ -9689,6 +9711,22 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
                 .as_str()
                 .unwrap_or_default()
                 .contains("validity only")
+    }));
+    assert!(product_capabilities.iter().any(|capability| {
+        capability["key"] == json!("agent_version")
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(
+                    "GET /api/agents/{id}/versions/{version}/capability-readback"
+                ))
+    }));
+    assert!(product_capabilities.iter().any(|capability| {
+        capability["key"] == json!("eval_gate")
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("GET /api/eval/runs/{id}/capability-readback"))
     }));
     assert!(product_capabilities.iter().any(|capability| {
         capability["key"] == json!("release")
@@ -39858,6 +39896,46 @@ async fn admin_can_create_eval_dataset_cases_and_version_bound_run() {
     assert_eq!(release.promoted_by.as_deref(), Some("admin-1"));
     assert_eq!(release.requested_by.as_deref(), Some("admin-1"));
     assert_eq!(release.decision_by.as_deref(), Some("admin-1"));
+
+    let agent_version_readback: Value = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!(
+                "/api/agents/{}/versions/1/capability-readback",
+                agent.id
+            ))
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(
+        agent_version_readback["product_object"],
+        json!("AgentVersion")
+    );
+    assert_eq!(
+        agent_version_readback["eval_evidence"]["run_count"],
+        json!(3)
+    );
+    assert_eq!(
+        agent_version_readback["eval_evidence"]["best_score"],
+        json!(1.0)
+    );
+    assert!(
+        agent_version_readback["eval_evidence"]["run_ids"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(run.id))
+    );
+    assert_eq!(
+        agent_version_readback["release_evidence"]["release_count"],
+        json!(1)
+    );
+    assert_eq!(
+        agent_version_readback["release_evidence"]["releases_by_status"]["promoted"],
+        json!(1)
+    );
 
     let requested_release: AgentRelease = request_json(
         app.clone(),

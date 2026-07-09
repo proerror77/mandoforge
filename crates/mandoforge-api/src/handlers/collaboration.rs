@@ -1397,6 +1397,7 @@ fn agent_os_product_capabilities() -> Vec<Value> {
             "api_routes": [
                 "GET /api/agents/{id}/versions",
                 "GET /api/agents/{id}/versions/{version}",
+                "GET /api/agents/{id}/versions/{version}/capability-readback",
                 "GET /api/agents/{id}/releases",
                 "POST /api/agents/{id}/release-requests",
                 "POST /api/agents/{id}/releases/{release_id}/approve",
@@ -1474,6 +1475,7 @@ fn agent_os_product_capabilities() -> Vec<Value> {
                 "POST /api/eval/suites/stage2-regression",
                 "GET /api/eval/runs",
                 "POST /api/eval/runs/{id}/gate",
+                "GET /api/eval/runs/{id}/capability-readback",
                 "GET /api/eval/runs/{id}/drift"
             ],
             "lifecycle_actions": ["bootstrap_suite", "run_eval", "gate", "inspect_drift"],

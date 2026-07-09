@@ -1,10 +1,12 @@
+use std::collections::BTreeMap;
+
 use axum::{
     Json, Router,
     extract::{Path, State},
     http::HeaderMap,
     routing::get,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
@@ -21,6 +23,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/api/agents/{id}/versions/{version}",
             get(get_agent_version),
+        )
+        .route(
+            "/api/agents/{id}/versions/{version}/capability-readback",
+            get(get_agent_version_capability_readback),
         )
         .route(
             "/api/agent-runtime-profiles",
@@ -92,6 +98,83 @@ async fn get_agent_version(
 ) -> Result<Json<AgentVersion>, AppError> {
     authorize_request(&state, &headers, Permission::AgentsRead, "agent", Some(id)).await?;
     Ok(Json(state.get_agent_version(id, version).await?))
+}
+
+async fn get_agent_version_capability_readback(
+    State(state): State<AppState>,
+    Path((id, version)): Path<(Uuid, i32)>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, AppError> {
+    authorize_request(&state, &headers, Permission::AgentsRead, "agent", Some(id)).await?;
+    let agent = state.get_agent(id).await?;
+    let agent_version = state.get_agent_version(id, version).await?;
+    let eval_runs: Vec<_> = state
+        .list_eval_runs(None)
+        .await?
+        .into_iter()
+        .filter(|run| run.agent_id == id && run.agent_version_id == agent_version.id)
+        .collect();
+    let releases: Vec<_> = state
+        .list_agent_releases(id)
+        .await?
+        .into_iter()
+        .filter(|release| release.agent_version_id == agent_version.id)
+        .collect();
+    let best_eval_score = eval_runs
+        .iter()
+        .filter_map(|run| run.score)
+        .max_by(f64::total_cmp);
+    let latest_eval_run_id = eval_runs.first().map(|run| run.id);
+    Ok(Json(json!({
+        "product_object": "AgentVersion",
+        "agent": {
+            "id": agent.id,
+            "name": agent.name,
+            "kind": agent.kind,
+            "release_state": agent.release_state,
+            "runtime_profile_id": agent.runtime_profile_id
+        },
+        "version": {
+            "id": agent_version.id,
+            "agent_id": agent_version.agent_id,
+            "version": agent_version.version,
+            "model": agent_version.model,
+            "created_at": agent_version.created_at
+        },
+        "runtime_contract": {
+            "runtime_config": agent_version.runtime_config,
+            "semantic_scopes": agent_version.semantic_scopes,
+            "mcp_server_ids": agent_version.mcp_server_ids,
+            "skill_ids": agent_version.skill_ids,
+            "workflow_pack_ids": agent_version.workflow_pack_ids
+        },
+        "tool_contract": {
+            "tools": agent_version.tools,
+            "tool_names": agent_version.tool_names,
+            "tool_count": agent_version.tool_names.len()
+        },
+        "policy_contract": {
+            "approval_policy": agent_version.approval_policy
+        },
+        "eval_evidence": {
+            "run_count": eval_runs.len(),
+            "latest_run_id": latest_eval_run_id,
+            "best_score": best_eval_score,
+            "run_ids": eval_runs.iter().map(|run| run.id).collect::<Vec<_>>(),
+            "runs_by_status": count_values(eval_runs.iter().map(|run| run.status.as_str()))
+        },
+        "release_evidence": {
+            "release_count": releases.len(),
+            "release_ids": releases.iter().map(|release| release.id).collect::<Vec<_>>(),
+            "releases_by_status": count_values(releases.iter().map(|release| release.status.as_str()))
+        },
+        "evidence_sources": [
+            "agent_version",
+            "eval_runs",
+            "agent_releases"
+        ],
+        "authority_boundary": "read-only AgentVersion capability readback; versions define runtime, tool, and policy contracts while release, approval, deployment validation, and rollback remain separate governance gates"
+    })))
 }
 
 async fn list_agent_runtime_profiles(
@@ -434,4 +517,11 @@ async fn archive_environment(
         ))
         .await?;
     Ok(Json(environment))
+}
+
+fn count_values<'a>(values: impl Iterator<Item = &'a str>) -> BTreeMap<String, usize> {
+    values.fold(BTreeMap::new(), |mut counts, value| {
+        *counts.entry(value.to_string()).or_default() += 1;
+        counts
+    })
 }
