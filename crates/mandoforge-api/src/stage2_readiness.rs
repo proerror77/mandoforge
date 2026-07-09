@@ -577,7 +577,10 @@ fn build_stage2_evidence_requirements(_open_gaps: &[String]) -> Vec<Stage2Eviden
             evidence_job_manifests: vec![
                 "deploy/stage2-evidence/product-surfaces-production-job.example.yaml",
             ],
-            readiness_endpoints: vec!["/api/enterprise-product/readiness"],
+            readiness_endpoints: vec![
+                "/api/enterprise-product/readiness",
+                "/api/capability-discovery",
+            ],
             validation_endpoints: vec!["./scripts/product-surfaces-production-gate.sh"],
             required_flags: vec![],
             required_artifacts: vec!["product-surfaces/summary.json"],

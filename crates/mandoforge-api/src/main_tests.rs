@@ -2370,6 +2370,11 @@ Stage 2 is not complete.
             .validation_endpoints
             .contains(&"./scripts/product-surfaces-production-gate.sh".to_string())
     );
+    assert!(
+        product_surfaces
+            .readiness_endpoints
+            .contains(&"/api/capability-discovery".to_string())
+    );
 
     let deployment_safety = readiness
         .evidence_requirements
@@ -3287,6 +3292,11 @@ fn enterprise_product_readiness_reports_customer_grade_blockers() {
         product_surfaces
             .readiness_endpoints
             .contains(&"/api/enterprise-product/readiness".to_string())
+    );
+    assert!(
+        product_surfaces
+            .readiness_endpoints
+            .contains(&"/api/capability-discovery".to_string())
     );
     assert!(
         product_surfaces

@@ -407,6 +407,7 @@ fn build_enterprise_product_completion_lanes(
             readiness_endpoints: vec![
                 "/api/enterprise-product/readiness",
                 "/api/stage2/readiness",
+                "/api/capability-discovery",
                 "/api/semantic-workbench",
             ],
             evidence_scripts: vec![
