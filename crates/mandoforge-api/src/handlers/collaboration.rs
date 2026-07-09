@@ -1474,6 +1474,22 @@ fn agent_os_product_capabilities() -> Vec<Value> {
             "authority_boundary": "WorkItemAssignment routes Collaboration Layer ownership to users, agents, squads, or teams and records activity/audit evidence; it does not start runtime execution, create TaskGrant scope, approve actions, bypass Manager Runtime, Policy, Tool Router, or Audit, or imply that the assignee may execute tools."
         }),
         json!({
+            "key": "work_item_review",
+            "product_object": "WorkItemReview",
+            "status": "available",
+            "api_routes": [
+                "GET /api/work-items/{id}/reviews",
+                "POST /api/work-items/{id}/reviews",
+                "GET /api/work-items/{id}/activity",
+                "GET /api/audit-logs"
+            ],
+            "lifecycle_actions": ["list", "request_review", "record_decision", "record_activity", "record_audit"],
+            "evidence_events": [
+                "work_item.review_created"
+            ],
+            "authority_boundary": "WorkItemReview records Collaboration Layer review requests and decisions with activity/audit evidence; it is not an Approval, does not authorize runtime execution, create TaskGrant scope, bypass Manager Runtime, Policy, Tool Router, or Audit, or promote a ManagerPlan by itself."
+        }),
+        json!({
             "key": "work_surface_connector",
             "product_object": "WorkSurfaceConnector",
             "status": "available",

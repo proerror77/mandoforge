@@ -117,22 +117,29 @@ The first Collaboration Layer slice is now in place:
   runtime execution.
 - `/api/work-items/:id/reviews` records user, agent, squad, or team review
   decisions.
+- WorkItemReview now has explicit capability discovery with activity and audit
+  evidence for review requests and decisions without becoming an Approval gate.
 - `/api/work-items/:id/activity` exposes the human-readable Activity Feed for
   intake, routing, and review.
 - `/api/capability-discovery` now exposes an Agent OS product capability catalog
-  for WorkItem, WorkItemAssignment, ManagerPlan, AgentHandoff, WorkflowPack,
-  DomainPack, Agent, AgentVersion, Environment, EnvironmentProfile,
-  ManagedSession, SessionEvent, SessionLoopJob, SessionThread, RuntimeTurn,
-  ContextPacket, ArtifactStore, AuditLogger, RemoteComputer, KAgent,
-  TaskGrant, PolicyEngine, Approval, ToolRouter, OntologyActionContract,
-  ToolSpec, EvalGate, Release, and Rollback, including the existing API
-  surfaces, lifecycle actions, audit/evidence events, and authority boundaries
-  for each capability.
+  for WorkItem, WorkItemAssignment, WorkItemReview, ManagerPlan, AgentHandoff,
+  WorkflowPack, DomainPack, Agent, AgentVersion, Environment,
+  EnvironmentProfile, ManagedSession, SessionEvent, SessionLoopJob,
+  SessionThread, RuntimeTurn, ContextPacket, ArtifactStore, AuditLogger,
+  RemoteComputer, KAgent, TaskGrant, PolicyEngine, Approval, ToolRouter,
+  OntologyActionContract, ToolSpec, EvalGate, Release, and Rollback, including
+  the existing API surfaces, lifecycle actions, audit/evidence events, and
+  authority boundaries for each capability.
 - The WorkItemAssignment entry exposes existing assignment list/create,
   Activity Feed, and audit surfaces while preserving the boundary that
   assignment routes ownership but cannot start runtime execution, issue
   TaskGrant scope, approve actions, bypass Manager Runtime, Policy, Tool
   Router, or Audit, or imply that the assignee may execute tools.
+- The WorkItemReview entry exposes existing review list/create, Activity Feed,
+  and audit surfaces while preserving the boundary that reviews record
+  Collaboration Layer decisions but are not Approval gates, cannot authorize
+  runtime execution, issue TaskGrant scope, or promote a ManagerPlan by
+  themselves.
 - The Agent entry exposes existing managed runtime identity, version, agent
   card, runtime-profile binding, tool/skill/workflow-pack, and semantic-scope
   records while preserving the boundary that Agent cannot execute work, release
@@ -492,17 +499,18 @@ plans:
    the release evidence includes the action object id/type/key, contract model,
    transaction profile, execution mode, and existing ontology release gates.
 6. Pack / Release / Evidence: `/api/capability-discovery` now lists
-   WorkItem, WorkItemAssignment, ManagerPlan, AgentHandoff, WorkflowPack,
-   DomainPack, Agent, AgentVersion, Environment, EnvironmentProfile,
-   ManagedSession, SessionEvent, SessionLoopJob, SessionThread, RuntimeTurn,
-   ContextPacket, ArtifactStore, AuditLogger, RemoteComputer, KAgent,
-   TaskGrant, PolicyEngine, Approval, ToolRouter, OntologyActionContract,
-   ToolSpec, EvalGate, Release, and Rollback as
+   WorkItem, WorkItemAssignment, WorkItemReview, ManagerPlan, AgentHandoff,
+   WorkflowPack, DomainPack, Agent, AgentVersion, Environment,
+   EnvironmentProfile, ManagedSession, SessionEvent, SessionLoopJob,
+   SessionThread, RuntimeTurn, ContextPacket, ArtifactStore, AuditLogger,
+   RemoteComputer, KAgent, TaskGrant, PolicyEngine, Approval, ToolRouter,
+   OntologyActionContract, ToolSpec, EvalGate, Release, and Rollback as
    auditable product capabilities with their existing routes, lifecycle actions,
    evidence events, and authority boundaries. ContextPacket is a scoped context
    construction/readback surface, not execution authority. WorkItemAssignment
    routes ownership and records collaboration evidence, not execution authority.
-   Agent is the managed
+   WorkItemReview records review decisions but is not Approval or execution
+   authority. Agent is the managed
    runtime identity and contract surface, not execution or release authority.
    Environment is the
    placement and binding surface for runtime profiles, worker queues, and

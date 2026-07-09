@@ -9816,6 +9816,7 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
     for key in [
         "work_item",
         "work_item_assignment",
+        "work_item_review",
         "manager_plan",
         "agent_handoff",
         "workflow_pack",
@@ -9893,6 +9894,33 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
                 .as_str()
                 .unwrap_or_default()
                 .contains("assignee may execute tools")
+    }));
+    assert!(product_capabilities.iter().any(|capability| {
+        capability["key"] == json!("work_item_review")
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("POST /api/work-items/{id}/reviews"))
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("GET /api/work-items/{id}/activity"))
+            && capability["evidence_events"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("work_item.review_created"))
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("review requests and decisions")
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not an Approval")
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("promote a ManagerPlan by itself")
     }));
     assert!(product_capabilities.iter().any(|capability| {
         capability["key"] == json!("manager_plan")
