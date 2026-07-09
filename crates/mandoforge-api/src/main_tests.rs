@@ -9816,6 +9816,7 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
     for key in [
         "work_item",
         "manager_plan",
+        "agent_handoff",
         "workflow_pack",
         "domain_pack",
         "work_surface_connector",
@@ -9865,6 +9866,29 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
                 .as_str()
                 .unwrap_or_default()
                 .contains("cannot bypass TaskGrant")
+    }));
+    assert!(product_capabilities.iter().any(|capability| {
+        capability["key"] == json!("agent_handoff")
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("POST /api/agent-handoffs/{id}/assignment"))
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("GET /api/sessions/{id}/threads"))
+            && capability["evidence_events"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("agent_handoff.assigned"))
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("does not execute tools")
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("TaskGrant")
     }));
     assert!(product_capabilities.iter().any(|capability| {
         capability["key"] == json!("workflow_pack")

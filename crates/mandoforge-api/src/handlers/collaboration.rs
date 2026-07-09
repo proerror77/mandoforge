@@ -1497,6 +1497,38 @@ fn agent_os_product_capabilities() -> Vec<Value> {
             "authority_boundary": "ManagerPlan is the Manager Runtime planning object; materialization still requires review or approval and cannot bypass TaskGrant, Policy, Approval, Tool Router, session events, or audit."
         }),
         json!({
+            "key": "agent_handoff",
+            "product_object": "AgentHandoff",
+            "status": "available",
+            "api_routes": [
+                "GET /api/agent-handoffs",
+                "GET /api/agent-handoffs/{id}",
+                "GET /api/sessions/{id}/agent-handoffs",
+                "POST /api/sessions/{id}/agent-handoffs",
+                "POST /api/agent-handoffs/{id}/accept",
+                "POST /api/agent-handoffs/{id}/reject",
+                "POST /api/agent-handoffs/{id}/fail",
+                "POST /api/agent-handoffs/{id}/complete",
+                "POST /api/agent-handoffs/{id}/assignment",
+                "GET /api/sessions/{id}/agent-handoff-assignments",
+                "POST /api/agent-handoff-assignments/{id}/remote-computer-assignment",
+                "GET /api/sessions/{id}/threads",
+                "GET /api/session-threads",
+                "GET /api/session-threads/{id}"
+            ],
+            "lifecycle_actions": ["request", "accept", "assign", "create_child_session_thread", "attach_remote_computer_assignment", "complete", "reject", "fail"],
+            "evidence_events": [
+                "agent_handoff.requested",
+                "agent_handoff.accepted",
+                "agent_handoff.assigned",
+                "agent_handoff.assignment_received",
+                "thread.created",
+                "agent_handoff.remote_computer_assignment_attached",
+                "agent_handoff.completed"
+            ],
+            "authority_boundary": "AgentHandoff coordinates Manager Runtime to specialist work and child SessionThreads; it does not execute tools or bypass review, approval, TaskGrant, Policy, Tool Router, events, or audit."
+        }),
+        json!({
             "key": "workflow_pack",
             "product_object": "WorkflowPack",
             "status": "available",
