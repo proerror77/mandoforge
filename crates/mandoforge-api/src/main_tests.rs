@@ -15083,6 +15083,69 @@ async fn create_ontology_action_contract_object_for_test(
     operation_id: &str,
     side_effect_class: &str,
 ) -> SemanticObject {
+    create_ontology_action_contract_object_with_content_for_test(
+        state,
+        semantic_scopes,
+        "ontology_action_type",
+        connector_id,
+        operation_id,
+        json!({
+            "definition": {
+                "connector_id": connector_id,
+                "operation_id": operation_id,
+                "side_effect_class": side_effect_class,
+                "approval": {
+                    "approval_required": true,
+                    "approval_commit_token_required": true,
+                    "payload_digest_required": true
+                }
+            }
+        }),
+    )
+    .await
+}
+
+async fn create_rich_ontology_action_contract_object_for_test(
+    state: &AppState,
+    semantic_scopes: Value,
+    connector_id: &str,
+    operation_id: &str,
+    side_effect_class: &str,
+) -> SemanticObject {
+    create_ontology_action_contract_object_with_content_for_test(
+        state,
+        semantic_scopes,
+        "ontology_action_contract",
+        connector_id,
+        operation_id,
+        json!({
+            "action_contract": {
+                "business_object": {"type": "Order", "key_field": "order_id"},
+                "rules": [{"id": "order_exists", "expression": "order_id != null"}],
+                "relations": [{"from": "Order", "to": "Customer", "kind": "belongs_to"}],
+                "metrics": [{"name": "lookup_count", "unit": "request"}],
+                "permission_contract": {"scope": "read", "requires_task_grant": true},
+                "tool_binding": {
+                    "connector_id": connector_id,
+                    "operation_id": operation_id,
+                    "side_effect_class": side_effect_class
+                },
+                "validation_rules": [{"field": "order_id", "required": true}],
+                "risk_class": {"level": "low"}
+            }
+        }),
+    )
+    .await
+}
+
+async fn create_ontology_action_contract_object_with_content_for_test(
+    state: &AppState,
+    semantic_scopes: Value,
+    object_type: &str,
+    connector_id: &str,
+    operation_id: &str,
+    content: Value,
+) -> SemanticObject {
     let source = state
         .create_semantic_source(CreateSemanticSource {
             source_type: "workflow_pack".to_string(),
@@ -15101,22 +15164,11 @@ async fn create_ontology_action_contract_object_for_test(
     state
         .create_semantic_object(CreateSemanticObject {
             source_id: Some(source.id),
-            object_type: "ontology_action_type".to_string(),
+            object_type: object_type.to_string(),
             object_key: format!("{connector_id}.action.{operation_id}"),
             title: format!("{operation_id} action contract"),
             summary: format!("{operation_id} writes through connector {connector_id}."),
-            content: json!({
-                "definition": {
-                    "connector_id": connector_id,
-                    "operation_id": operation_id,
-                    "side_effect_class": side_effect_class,
-                    "approval": {
-                        "approval_required": true,
-                        "approval_commit_token_required": true,
-                        "payload_digest_required": true
-                    }
-                }
-            }),
+            content,
             semantic_scopes,
             source_uri: Some(format!("repo://packs/test/actions/{operation_id}.yaml")),
             provenance: json!({"source": "test_action_contract"}),
@@ -15507,7 +15559,7 @@ async fn low_risk_ontology_valid_mcp_action_executes_without_approval_but_not_wi
         "lane_scope": "support",
         "memory_scope": "ontology-actions"
     });
-    let action_object = create_ontology_action_contract_object_for_test(
+    let action_object = create_rich_ontology_action_contract_object_for_test(
         &state,
         semantic_scopes.clone(),
         "docs",
@@ -15565,7 +15617,7 @@ async fn low_risk_ontology_valid_mcp_action_executes_without_approval_but_not_wi
                     "semantic_scopes": semantic_scopes.clone(),
                     "memory_scope": {
                         "mode": "snapshot_only",
-                        "allowed_object_types": ["ontology_action_type"],
+                        "allowed_object_types": ["ontology_action_type", "ontology_action_contract"],
                         "minimum_trust_level": "source_attested",
                         "max_objects": 5
                     },
@@ -15683,6 +15735,23 @@ async fn low_risk_ontology_valid_mcp_action_executes_without_approval_but_not_wi
     assert_eq!(
         completed_call.policy_decision["ontology_action_contract_gate"]["action_object_id"],
         json!(action_object.id)
+    );
+    assert_eq!(
+        completed_call.policy_decision["ontology_action_contract_gate"]["action_object_type"],
+        json!("ontology_action_contract")
+    );
+    assert_eq!(
+        completed_call.policy_decision["ontology_action_contract_gate"]["contract_model"]["business_object"]
+            ["type"],
+        json!("Order")
+    );
+    assert_eq!(
+        completed_call.policy_decision["ontology_action_contract_gate"]["contract_model"]["has_tool_binding"],
+        json!(true)
+    );
+    assert_eq!(
+        completed_call.policy_decision["ontology_action_contract_gate"]["contract_model"]["validation_rule_count"],
+        json!(1)
     );
 
     let grant = state

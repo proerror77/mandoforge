@@ -1443,7 +1443,7 @@ pub(crate) async fn evaluate_ontology_action_contract_gate(
     for packet_object in packet
         .retrieved_objects
         .iter()
-        .filter(|object| object.object_type == "ontology_action_type")
+        .filter(|object| ontology_action_contract_object_type(&object.object_type))
     {
         evaluated_action_count += 1;
         let object = state.get_semantic_object(packet_object.id).await?;
@@ -1459,9 +1459,11 @@ pub(crate) async fn evaluate_ontology_action_contract_gate(
                 "context_packet_version": packet.version,
                 "action_object_id": object.id,
                 "action_object_key": object.object_key,
+                "action_object_type": object.object_type,
                 "connector_id": target.connector_id,
                 "operation_id": target.operation,
                 "side_effect_class": target.side_effect_class,
+                "contract_model": ontology_action_contract_model_evidence(contract, &object.object_type),
                 "evaluated_action_count": evaluated_action_count,
                 "blocked_action_count": 0,
             })));
@@ -1482,6 +1484,13 @@ pub(crate) async fn evaluate_ontology_action_contract_gate(
             "reasons": ["missing_matching_ontology_action_type"],
         }],
     })))
+}
+
+pub(crate) fn ontology_action_contract_object_type(object_type: &str) -> bool {
+    matches!(
+        object_type,
+        "ontology_action_type" | "ontology_action_contract"
+    )
 }
 
 pub(crate) fn task_grant_requires_ontology_action_contract(
@@ -1546,10 +1555,19 @@ pub(crate) fn ontology_action_contract_matches_target(
     contract: &Value,
     target: &NativeConnectorCallTarget,
 ) -> bool {
-    ontology_contract_string(contract, &["connector_id", "connector"]) == Some(&target.connector_id)
+    ontology_contract_string(contract, &["connector_id", "connector"])
+        .or_else(|| ontology_contract_path_string(contract, &["tool_binding", "connector_id"]))
+        .or_else(|| ontology_contract_path_string(contract, &["tool_binding", "connector"]))
+        == Some(&target.connector_id)
         && ontology_contract_string(contract, &["operation_id", "operation", "tool", "action"])
+            .or_else(|| ontology_contract_path_string(contract, &["tool_binding", "operation_id"]))
+            .or_else(|| ontology_contract_path_string(contract, &["tool_binding", "operation"]))
+            .or_else(|| ontology_contract_path_string(contract, &["tool_binding", "tool"]))
             == Some(&target.operation)
         && ontology_contract_string(contract, &["side_effect_class"])
+            .or_else(|| {
+                ontology_contract_path_string(contract, &["tool_binding", "side_effect_class"])
+            })
             .is_none_or(|side_effect| side_effect == target.side_effect_class || side_effect == "*")
 }
 
@@ -1558,6 +1576,42 @@ pub(crate) fn ontology_contract_string<'a>(contract: &'a Value, keys: &[&str]) -
         .find_map(|key| contract.get(*key).and_then(Value::as_str))
         .map(str::trim)
         .filter(|value| !value.is_empty())
+}
+
+pub(crate) fn ontology_contract_path_string<'a>(
+    contract: &'a Value,
+    path: &[&str],
+) -> Option<&'a str> {
+    let mut value = contract;
+    for key in path {
+        value = value.get(*key)?;
+    }
+    value
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+pub(crate) fn ontology_action_contract_model_evidence(
+    contract: &Value,
+    object_type: &str,
+) -> Value {
+    json!({
+        "object_type": object_type,
+        "business_object": contract.get("business_object").cloned().unwrap_or(Value::Null),
+        "rule_count": contract.get("rules").and_then(Value::as_array).map_or(0, Vec::len),
+        "relation_count": contract.get("relations").and_then(Value::as_array).map_or(0, Vec::len),
+        "metric_count": contract.get("metrics").and_then(Value::as_array).map_or(0, Vec::len),
+        "has_permission_contract": contract.get("permission_contract").is_some(),
+        "has_tool_binding": contract.get("tool_binding").is_some(),
+        "validation_rule_count": contract
+            .get("validation_rules")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len),
+        "risk_class": ontology_contract_string(contract, &["risk_class"])
+            .or_else(|| ontology_contract_path_string(contract, &["risk_class", "level"]))
+            .unwrap_or("unspecified"),
+    })
 }
 
 trait SemanticContextGateObject {

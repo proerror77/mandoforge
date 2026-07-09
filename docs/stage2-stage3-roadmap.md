@@ -119,6 +119,10 @@ The first Collaboration Layer slice is now in place:
 - WorkItems with `metadata.semantic_scopes` are projected into `semantic_objects`
   as `work_item:*` records so context packets can retrieve Collaboration Layer
   work as runtime context.
+- Ontology Action Contract gates accept both legacy `ontology_action_type`
+  objects and richer `ontology_action_contract` objects with explicit
+  BusinessObject, Rule, Relation, Metric, PermissionContract, ToolBinding,
+  ValidationRule, and RiskClass evidence in the policy decision.
 - WorkItem intake, routing, review, activity, Agent Teammate/Squad, and Manager
   Plan binding, and WorkItem semantic projection write `work_item.created`,
   `work_item.assignment_created`, `work_item.review_created`,
@@ -329,7 +333,10 @@ plans:
 5. Ontology Action Contract object model: deepen BusinessObject, Rule,
    Relation, Metric, ActionContract, PermissionContract, ToolBinding,
    ValidationRule, and RiskClass representation beyond the current checked
-   `ontology_action_type` contract gate.
+   `ontology_action_type` contract gate. The gate already accepts richer
+   `ontology_action_contract` semantic objects with nested ToolBinding and
+   model evidence; product APIs and release packaging for those contracts remain
+   open.
 6. Pack / Release / Evidence: make WorkflowPack, DomainPack, AgentVersion,
    EnvironmentProfile, OntologyActionContract, ToolSpec, EvalGate, Release, and
    Rollback auditable as product capabilities.
