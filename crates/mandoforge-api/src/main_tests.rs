@@ -9814,6 +9814,7 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
 
     let product_capabilities = discovery["product_capabilities"].as_array().unwrap();
     for key in [
+        "work_item",
         "manager_plan",
         "workflow_pack",
         "domain_pack",
@@ -9833,6 +9834,21 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
             "missing product capability {key}"
         );
     }
+    assert!(product_capabilities.iter().any(|capability| {
+        capability["key"] == json!("work_item")
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("GET /api/work-items/{id}/activity"))
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("POST /api/work-items/{id}/reviews"))
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("do not start runtime execution")
+    }));
     assert!(product_capabilities.iter().any(|capability| {
         capability["key"] == json!("manager_plan")
             && capability["api_routes"]

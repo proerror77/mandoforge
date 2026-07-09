@@ -1432,6 +1432,32 @@ async fn get_capability_discovery(
 fn agent_os_product_capabilities() -> Vec<Value> {
     vec![
         json!({
+            "key": "work_item",
+            "product_object": "WorkItem",
+            "status": "available",
+            "api_routes": [
+                "GET /api/work-items",
+                "POST /api/work-items",
+                "GET /api/work-items/{id}/assignments",
+                "POST /api/work-items/{id}/assignments",
+                "GET /api/work-items/{id}/reviews",
+                "POST /api/work-items/{id}/reviews",
+                "GET /api/work-items/{id}/activity",
+                "GET /api/agent-teammates",
+                "GET /api/squads"
+            ],
+            "lifecycle_actions": ["create", "assign", "review", "record_activity", "project_semantic_context"],
+            "evidence_events": [
+                "work_item.created",
+                "work_item.assignment_created",
+                "work_item.review_created",
+                "work_item.semantic_object_projected",
+                "agent_teammate.created",
+                "squad.created"
+            ],
+            "authority_boundary": "WorkItems coordinate Collaboration Layer work and semantic context; they do not start runtime execution or bypass Manager Runtime, Policy, Approval, TaskGrant, Tool Router, or Audit."
+        }),
+        json!({
             "key": "work_surface_connector",
             "product_object": "WorkSurfaceConnector",
             "status": "available",
