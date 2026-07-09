@@ -378,9 +378,9 @@ subagents may be planned behind one run, but preserves MandoForge's enterprise
 boundary: stable identity, approval, memory scope, connector scope, audit,
 artifacts, and UI observability stay outside the delegated runtime.
 
-## Semantic Layer
+## Ontology Action Contract Layer
 
-The semantic layer gives agents stable business context:
+The Ontology Action Contract Layer gives agents stable business context:
 
 - Semantic sources.
 - Semantic objects.

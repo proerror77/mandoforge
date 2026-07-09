@@ -101,7 +101,7 @@ MandoForge is the common layer for those capabilities. Domain agents sit above i
 - It is not a thin OpenAI API wrapper.
 - It is not a complete production platform yet.
 
-The current repo is best understood as a **Rust-native Agent OS kernel prototype**. The Managed Runtime Layer is in place for the repo-controlled pilot; the Collaboration, Manager Agent, and Semantic layers are the next productization surface.
+The current repo is best understood as a **Rust-native Agent OS kernel prototype**. The Managed Runtime Layer is in place for the repo-controlled pilot; the Collaboration, Manager Agent, and Ontology Action Contract layers are the next productization surface.
 
 ## Core Runtime Loop
 
