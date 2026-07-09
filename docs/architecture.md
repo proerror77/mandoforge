@@ -5,42 +5,39 @@ agent app, and it is not an enterprise production-evidence checklist.
 
 ## Product Stack
 
+MandoForge is organized around Manager Runtime and Managed Runtime, not around a
+single backend, data platform, or sandbox substrate.
+
 ```text
-Existing Work Surfaces
-  Slack / Feishu / GitHub / Jira / Linear / Email
-        |
-Desktop Shell / Product Console
-  Tauri tray / WebView / OS notifications
-  Embedded or external loopback API mode
+Work Surfaces
+  Feishu / Slack / GitHub / Jira / Linear / Email / Browser
         |
 Collaboration Layer
-  WorkItem / Project / Assignment / Review
-  Agent Teammate / Squad / Activity Feed
+  WorkItem / Project / Assignment / Review / Activity Feed / Squad
         |
-Manager Agent / Work Coordination Layer
-  Task decomposition / routing / escalation / review
+Manager Agent Layer
+  Intake / Plan / Decompose / Route / Delegate / Escalate / Review
         |
 Managed Runtime Layer
-  Session / Event Log / Tool Router / Policy
-  Approval / Audit / Artifact / Eval
+  Agent / Environment / Session / Events / Threads / Runtime Turns
         |
-Semantic Layer / Ontology Service
-  Business Objects / Metrics / Relations
-  Actions / Permissions / Tool Bindings
-  Retrieval Context / Data Contracts
+Governance Layer
+  Policy / Approval / RBAC / TaskGrant / Audit / Eval / Release / Rollback
         |
-Enterprise Data Foundation
-  Warehouse / Lakehouse / Postgres / Vector
-  Graph / Docs / APIs / Event Streams
+Ontology Action Contract Layer
+  Business Object / Rule / Relation / Metric / Action / Tool Binding / Validation
+        |
+Environment Scheduling Layer
+  Environment Work Queue / K Agent / Worker Lease / Sandbox Lifecycle / CLI Dispatch
+        |
+Execution Substrate
+  Codex / Claude Code / CMA / MCP / SQL / Shell / Remote Computer / APIs
 ```
 
 The optional desktop shell is a local product surface for operators. It owns
 tray integration, native notification forwarding, autostart controls, and
 loopback WebView startup, but it does not own the Agent OS runtime or policy
-boundary. The current repository is strongest in the Managed Runtime Layer.
-Claude Managed Agents is a useful reference for that layer only: Agent,
-Environment, Session, Events, and Threads. It does not define the whole Agent
-OS.
+boundary.
 
 The workflow-level target architecture is defined in
 [Managed Agent Workflow Architecture](managed-agent-workflow-architecture.md).
@@ -50,13 +47,22 @@ observability.
 
 Core ownership:
 
-- MandoForge Agent Runtime owns sessions, event logs, policy, approval, audit,
-  artifacts, threads, cursor/resume, streaming, and worker leases.
-- Codex CLI, Claude Code CLI, Codex App Server, and future agent runtimes are
-  runtime adapters called by MandoForge.
-- Manager Agents are managed agents running on MandoForge. They coordinate work
-  through WorkItems, Assignments, Reviews, and child threads; they do not own a
-  separate runtime orchestrator.
+- Manager Agents coordinate WorkItems, Assignments, Reviews, ManagerPlans, and
+  child specialist threads. They do not own a second runtime orchestrator.
+- MandoForge Managed Runtime owns sessions, event logs, threads, runtime turns,
+  tool calls, approvals, artifacts, cursor/resume, streaming, and worker leases.
+- Governance owns Policy, RBAC, TaskGrant, Approval, ApprovalCommitToken, Audit,
+  Eval, Release, and Rollback.
+- Ontology Action Contract defines business objects, rules, action validity,
+  permission contracts, tool bindings, and validation rules. It does not grant
+  execution authority by itself.
+- Environment Scheduling owns environment work queues, K Agent claims, worker
+  leases, sandbox lifecycle, CLI dispatch, heartbeat, cleanup, and artifact
+  sync. K Agent does not own ManagerPlan, Policy, Approval, TaskGrant, Ontology
+  validity, WorkflowPack release, or audit truth.
+- Codex CLI, Claude Code CLI, Claude Managed Agents, Codex App Server, Remote
+  Computer, MCP, SQL, shell, and native APIs are execution substrates or runtime
+  adapters called by MandoForge.
 
 ## Core Boundary
 
