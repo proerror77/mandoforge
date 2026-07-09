@@ -34418,6 +34418,7 @@ async fn work_surface_event_verifies_webhook_signature_and_replays_by_cursor() {
             "configured": true,
             "verified": true,
             "signature_present": true,
+            "signature_header": "x-mandoforge-work-surface-signature",
             "secret_ref": "MANDOFORGE_WORK_SURFACE_GITHUB_WEBHOOK_SECRET"
         })
     );
@@ -34479,6 +34480,117 @@ async fn work_surface_event_verifies_webhook_signature_and_replays_by_cursor() {
                 == json!("github:issues:42:1700000000"))
             .count(),
         1
+    );
+}
+
+#[tokio::test]
+async fn work_surface_event_accepts_github_native_webhook_signature() {
+    let _env_guard = env_lock().lock().expect("env lock");
+    let _secret = EnvVarGuard::set(
+        "MANDOFORGE_WORK_SURFACE_GITHUB_WEBHOOK_SECRET",
+        "surface-secret",
+    );
+    let app = test_app().await;
+    let payload = json!({
+        "surface": "github",
+        "event_type": "issue.updated",
+        "external_id": "issue-43",
+        "title": "GitHub native webhook intake",
+        "metadata": {
+            "repository": {"full_name": "mandonothing/ops"},
+            "issue": {"number": 43}
+        }
+    });
+    let body = payload.to_string();
+    let signature = work_surface_test_signature("surface-secret", body.as_bytes());
+
+    let ingested: WorkSurfaceIngestion = request_json(
+        app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/work-surface-events")
+            .header("x-mandoforge-subject", "github-webhook")
+            .header("x-mandoforge-roles", "admin")
+            .header("x-hub-signature-256", signature.as_str())
+            .header("x-github-delivery", "github-delivery-43")
+            .body(Body::from(body))
+            .expect("valid request"),
+    )
+    .await;
+
+    assert_eq!(ingested.work_item.source, "github");
+    assert_eq!(
+        ingested.work_item.metadata["work_surface"]["delivery_id"],
+        json!("github-delivery-43")
+    );
+    assert_eq!(
+        ingested.work_item.metadata["work_surface"]["authentication"],
+        json!({
+            "mode": "github_hmac_sha256",
+            "configured": true,
+            "verified": true,
+            "signature_present": true,
+            "signature_header": "x-hub-signature-256",
+            "secret_ref": "MANDOFORGE_WORK_SURFACE_GITHUB_WEBHOOK_SECRET"
+        })
+    );
+}
+
+#[tokio::test]
+async fn work_surface_event_accepts_slack_native_webhook_signature() {
+    let _env_guard = env_lock().lock().expect("env lock");
+    let _secret = EnvVarGuard::set(
+        "MANDOFORGE_WORK_SURFACE_SLACK_WEBHOOK_SECRET",
+        "surface-secret",
+    );
+    let app = test_app().await;
+    let payload = json!({
+        "surface": "slack",
+        "event_type": "message.created",
+        "external_id": "slack-2",
+        "title": "Slack native webhook intake",
+        "metadata": {
+            "event_id": "Ev789",
+            "event": {
+                "channel": "C123",
+                "ts": "1700000000.000200"
+            }
+        }
+    });
+    let body = payload.to_string();
+    let timestamp = Utc::now().timestamp().to_string();
+    let signature =
+        work_surface_slack_test_signature("surface-secret", &timestamp, body.as_bytes());
+
+    let ingested: WorkSurfaceIngestion = request_json(
+        app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/work-surface-events")
+            .header("x-mandoforge-subject", "slack-webhook")
+            .header("x-mandoforge-roles", "admin")
+            .header("x-slack-request-timestamp", timestamp)
+            .header("x-slack-signature", signature.as_str())
+            .body(Body::from(body))
+            .expect("valid request"),
+    )
+    .await;
+
+    assert_eq!(ingested.work_item.source, "slack");
+    assert_eq!(
+        ingested.work_item.metadata["work_surface"]["delivery_id"],
+        json!("Ev789")
+    );
+    assert_eq!(
+        ingested.work_item.metadata["work_surface"]["authentication"],
+        json!({
+            "mode": "slack_hmac_sha256",
+            "configured": true,
+            "verified": true,
+            "signature_present": true,
+            "signature_header": "x-slack-signature",
+            "secret_ref": "MANDOFORGE_WORK_SURFACE_SLACK_WEBHOOK_SECRET"
+        })
     );
 }
 
@@ -34578,6 +34690,16 @@ fn work_surface_test_signature(secret: &str, body: &[u8]) -> String {
         Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("valid hmac secret for test");
     mac.update(body);
     format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
+}
+
+fn work_surface_slack_test_signature(secret: &str, timestamp: &str, body: &[u8]) -> String {
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("valid hmac secret for test");
+    mac.update(b"v0:");
+    mac.update(timestamp.as_bytes());
+    mac.update(b":");
+    mac.update(body);
+    format!("v0={}", hex::encode(mac.finalize().into_bytes()))
 }
 
 #[tokio::test]

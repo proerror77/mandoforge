@@ -314,9 +314,10 @@ plans:
    normalizes Feishu, Slack, GitHub, Jira, Linear, and Email into canonical
    WorkItem adapter metadata without starting runtime execution, verifies
    configured webhook HMAC signatures, records cursor/delivery replay evidence,
-   and extracts richer platform object metadata. Platform-specific OAuth/token
-   lifecycle, live API readback, rate-limit handling, and connector-specific
-   signature variants remain open.
+   extracts richer platform object metadata, and accepts GitHub and Slack native
+   webhook signature headers as connector-specific verification variants.
+   Platform-specific OAuth/token lifecycle, live API readback, rate-limit
+   handling, and remaining connector-specific signature variants remain open.
 2. Runtime adapter consolidation: make Environment runtime binding the only
    product entrypoint for managed runtime execution while keeping `agent_cli.exec`
    and `codex.exec` as compatibility facades.

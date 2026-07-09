@@ -583,7 +583,7 @@ fn verify_work_surface_webhook_auth(
     body: &[u8],
     surface: &str,
 ) -> Result<Value, AppError> {
-    let signature_present = header_value(headers, "x-mandoforge-work-surface-signature").is_some();
+    let signature_present = work_surface_signature_present(headers, surface);
     let Some((secret_ref, secret)) = work_surface_webhook_secret(surface) else {
         return Ok(json!({
             "mode": "mandoforge_rbac",
@@ -592,12 +592,13 @@ fn verify_work_surface_webhook_auth(
             "signature_present": signature_present
         }));
     };
-    verify_work_surface_signature(headers, body, &secret)?;
+    let verification = verify_work_surface_signature(headers, body, &secret, surface)?;
     Ok(json!({
-        "mode": "hmac_sha256",
+        "mode": verification.mode,
         "configured": true,
         "verified": true,
         "signature_present": true,
+        "signature_header": verification.header,
         "secret_ref": secret_ref
     }))
 }
@@ -627,21 +628,95 @@ fn work_surface_webhook_secret(surface: &str) -> Option<(String, String)> {
     })
 }
 
+struct WorkSurfaceSignatureVerification {
+    mode: &'static str,
+    header: &'static str,
+}
+
+fn work_surface_signature_present(headers: &HeaderMap, surface: &str) -> bool {
+    header_value(headers, "x-mandoforge-work-surface-signature").is_some()
+        || (surface == "github" && header_value(headers, "x-hub-signature-256").is_some())
+        || (surface == "slack" && header_value(headers, "x-slack-signature").is_some())
+}
+
 fn verify_work_surface_signature(
     headers: &HeaderMap,
     body: &[u8],
     secret: &str,
+    surface: &str,
+) -> Result<WorkSurfaceSignatureVerification, AppError> {
+    if let Some(signature) = header_value(headers, "x-mandoforge-work-surface-signature") {
+        verify_hmac_sha256_signature(signature, body, secret, "sha256=")?;
+        return Ok(WorkSurfaceSignatureVerification {
+            mode: "hmac_sha256",
+            header: "x-mandoforge-work-surface-signature",
+        });
+    }
+    if surface == "github"
+        && let Some(signature) = header_value(headers, "x-hub-signature-256")
+    {
+        verify_hmac_sha256_signature(signature, body, secret, "sha256=")?;
+        return Ok(WorkSurfaceSignatureVerification {
+            mode: "github_hmac_sha256",
+            header: "x-hub-signature-256",
+        });
+    }
+    if surface == "slack"
+        && let Some(signature) = header_value(headers, "x-slack-signature")
+    {
+        verify_slack_signature(headers, body, secret, signature)?;
+        return Ok(WorkSurfaceSignatureVerification {
+            mode: "slack_hmac_sha256",
+            header: "x-slack-signature",
+        });
+    }
+    Err(AppError::unauthorized(
+        "missing work surface webhook signature",
+    ))
+}
+
+fn verify_hmac_sha256_signature(
+    signature: &str,
+    body: &[u8],
+    secret: &str,
+    prefix: &str,
 ) -> Result<(), AppError> {
-    let signature = header_value(headers, "x-mandoforge-work-surface-signature")
-        .ok_or_else(|| AppError::unauthorized("missing x-mandoforge-work-surface-signature"))?;
+    let signature = signature.strip_prefix(prefix).unwrap_or(signature).trim();
+    let signature_bytes =
+        hex::decode(signature).map_err(|_| AppError::unauthorized("non-hex signature"))?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+        .map_err(|_| AppError::internal("hmac key error"))?;
+    mac.update(body);
+    mac.verify_slice(&signature_bytes)
+        .map_err(|_| AppError::unauthorized("signature mismatch"))
+}
+
+fn verify_slack_signature(
+    headers: &HeaderMap,
+    body: &[u8],
+    secret: &str,
+    signature: &str,
+) -> Result<(), AppError> {
+    let timestamp = header_value(headers, "x-slack-request-timestamp")
+        .ok_or_else(|| AppError::unauthorized("missing x-slack-request-timestamp"))?;
+    let request_timestamp = timestamp
+        .parse::<i64>()
+        .map_err(|_| AppError::unauthorized("invalid x-slack-request-timestamp"))?;
+    let now = Utc::now().timestamp();
+    if (now - request_timestamp).abs() > 60 * 5 {
+        return Err(AppError::unauthorized("stale x-slack-request-timestamp"));
+    }
     let signature = signature
-        .strip_prefix("sha256=")
-        .unwrap_or(signature)
+        .strip_prefix("v0=")
+        .ok_or_else(|| AppError::unauthorized("malformed x-slack-signature"))?
         .trim();
     let signature_bytes =
         hex::decode(signature).map_err(|_| AppError::unauthorized("non-hex signature"))?;
     let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
         .map_err(|_| AppError::internal("hmac key error"))?;
+    mac.update(b"v0:");
+    mac.update(timestamp.as_bytes());
+    mac.update(b":");
     mac.update(body);
     mac.verify_slice(&signature_bytes)
         .map_err(|_| AppError::unauthorized("signature mismatch"))
