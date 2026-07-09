@@ -22,7 +22,7 @@ use crate::remote_computer_runner::{
 };
 use crate::shell_runner::{shell_command, shell_runner};
 use crate::{
-    AppError, AppState, Approval, Artifact, CreateRemoteComputer,
+    AgentRuntimeProfile, AppError, AppState, Approval, Artifact, CreateRemoteComputer,
     CreateRemoteComputerJobAssignment, CreateRemoteComputerLease, Environment, RemoteComputer,
     RemoteComputerJobAssignment, RemoteComputerLease, ToolCall, new_audit_log,
     record_remote_computer_job_assignment_event, resolve_mcp_runtime_secret_refs,
@@ -2267,6 +2267,13 @@ async fn execute_approved_remote_computer_codex(
             "codex sandbox mode requires approval",
         ));
     }
+    let runtime_selection = codex_runtime_selection(state, approval.session_id, &request).await?;
+    if runtime_selection.strategy != CodexExecutionStrategy::Cli {
+        return Err(AppError::bad_request(
+            "remote computer codex.exec requires a codex_cli environment runtime profile",
+        ));
+    }
+    let runtime_binding = codex_runtime_selection_metadata(&runtime_selection);
     let target = remote_computer_pod_exec_target(state, approval.session_id, assignment).await?;
     let command = remote_codex_exec_command(&request, &target.workspace_path);
     state
@@ -2285,6 +2292,7 @@ async fn execute_approved_remote_computer_codex(
                 "namespace": target.remote_computer.namespace,
                 "pod_name": target.pod_name,
                 "workspace": target.workspace_path,
+                "runtime_binding": runtime_binding,
             }),
         )
         .await?;
@@ -2348,6 +2356,7 @@ async fn execute_approved_remote_computer_codex(
                 "runner": "remote_computer_pod_exec",
                 "remote_computer_id": target.remote_computer.id,
                 "assignment_id": assignment.id,
+                "runtime_binding": runtime_binding,
             }),
             created_at: Utc::now(),
         };
@@ -2387,6 +2396,7 @@ async fn execute_approved_remote_computer_codex(
                 "stderr_bytes": stderr.original_bytes,
                 "status": status,
                 "execution_enabled": true,
+                "runtime_binding": runtime_binding,
             }),
         )
         .await?;
@@ -2411,6 +2421,7 @@ async fn execute_approved_remote_computer_codex(
                 "remote_computer_id": target.remote_computer.id,
                 "assignment_id": assignment.id,
                 "lease_id": assignment.lease_id,
+                "runtime_binding": runtime_binding,
             }),
         )
         .await?;
@@ -2432,6 +2443,7 @@ async fn execute_approved_remote_computer_codex(
         "final_message": final_output.text,
         "final_message_bytes": final_output.original_bytes,
         "final_message_truncated": final_output.truncated,
+        "runtime_binding": runtime_binding,
     });
     if !exec_succeeded {
         let error_payload = json!({
@@ -2469,6 +2481,7 @@ async fn execute_approved_remote_computer_codex(
                     "stdout_chars": stdout.text.chars().count(),
                     "stderr_chars": stderr.text.chars().count(),
                     "final_message_chars": final_output.text.chars().count(),
+                    "runtime_binding": runtime_binding,
                     "resumed_after_approval": true
                 }),
             ))
@@ -2506,6 +2519,7 @@ async fn execute_approved_remote_computer_codex(
                 "stdout_chars": stdout.text.chars().count(),
                 "stderr_chars": stderr.text.chars().count(),
                 "final_message_chars": final_output.text.chars().count(),
+                "runtime_binding": runtime_binding,
                 "resumed_after_approval": true
             }),
         ))
@@ -2827,7 +2841,11 @@ async fn execute_approved_codex(
                     "tool.completed",
                     "tool_call",
                     Some(tool_call.id),
-                    json!({"tool": tool_call.tool_name, "resumed_after_approval": true}),
+                    json!({
+                        "tool": tool_call.tool_name,
+                        "runtime_binding": result.get("runtime_binding").cloned().unwrap_or(Value::Null),
+                        "resumed_after_approval": true
+                    }),
                 ))
                 .await?;
             Ok(())
@@ -3024,15 +3042,20 @@ async fn run_codex(
             "codex sandbox mode requires approval",
         ));
     }
-    match codex_execution_strategy(&request)? {
-        CodexExecutionStrategy::Cli => run_codex_cli(state, session_id, request).await,
-        CodexExecutionStrategy::AppServer => run_codex_app_server(state, session_id, request).await,
+    let runtime_selection = codex_runtime_selection(state, session_id, &request).await?;
+    match runtime_selection.strategy {
+        CodexExecutionStrategy::Cli => {
+            run_codex_cli(state, session_id, request, &runtime_selection).await
+        }
+        CodexExecutionStrategy::AppServer => {
+            run_codex_app_server(state, session_id, request, &runtime_selection).await
+        }
         CodexExecutionStrategy::Auto => {
             if state.codex_app_server_config.is_none() {
-                return run_codex_cli(state, session_id, request).await;
+                return run_codex_cli(state, session_id, request, &runtime_selection).await;
             }
             let fallback_request = request.clone();
-            match run_codex_app_server(state, session_id, request).await {
+            match run_codex_app_server(state, session_id, request, &runtime_selection).await {
                 Ok(result) => Ok(result),
                 Err(error) => {
                     state
@@ -3048,7 +3071,7 @@ async fn run_codex(
                             }),
                         )
                         .await?;
-                    run_codex_cli(state, session_id, fallback_request).await
+                    run_codex_cli(state, session_id, fallback_request, &runtime_selection).await
                 }
             }
         }
@@ -3060,6 +3083,93 @@ enum CodexExecutionStrategy {
     Auto,
     Cli,
     AppServer,
+}
+
+#[derive(Debug, Clone)]
+struct CodexRuntimeSelection {
+    strategy: CodexExecutionStrategy,
+    binding_source: &'static str,
+    runtime_profile_id: Option<Uuid>,
+    runtime_profile_name: Option<String>,
+    runtime_type: Option<String>,
+}
+
+async fn codex_runtime_selection(
+    state: &AppState,
+    session_id: Uuid,
+    request: &CodexRequest,
+) -> Result<CodexRuntimeSelection, AppError> {
+    let requested_strategy = codex_execution_strategy(request)?;
+    if let Some(profile) = bound_environment_runtime_profile(state, session_id).await? {
+        let bound_strategy = codex_strategy_for_runtime_profile(&profile)?;
+        if request.execution_strategy.is_some() && requested_strategy != bound_strategy {
+            return Err(AppError::bad_request(format!(
+                "codex.exec execution_strategy must match session environment runtime profile: requested {}, bound {}",
+                requested_strategy.as_str(),
+                profile.runtime_type
+            )));
+        }
+        return Ok(CodexRuntimeSelection {
+            strategy: bound_strategy,
+            binding_source: "environment",
+            runtime_profile_id: Some(profile.id),
+            runtime_profile_name: Some(profile.name),
+            runtime_type: Some(profile.runtime_type),
+        });
+    }
+    Ok(CodexRuntimeSelection {
+        strategy: requested_strategy,
+        binding_source: "request_or_env",
+        runtime_profile_id: None,
+        runtime_profile_name: None,
+        runtime_type: None,
+    })
+}
+
+async fn bound_environment_runtime_profile(
+    state: &AppState,
+    session_id: Uuid,
+) -> Result<Option<AgentRuntimeProfile>, AppError> {
+    let session = state.get_session(session_id).await?;
+    let Some(environment_id) = session.environment_id else {
+        return Ok(None);
+    };
+    let environment = state.get_environment(environment_id).await?;
+    let Some(profile_id) = environment.runtime_profile_id else {
+        return Ok(None);
+    };
+    state.get_agent_runtime_profile(profile_id).await.map(Some)
+}
+
+fn codex_strategy_for_runtime_profile(
+    profile: &AgentRuntimeProfile,
+) -> Result<CodexExecutionStrategy, AppError> {
+    match profile.runtime_type.as_str() {
+        "codex_cli" => Ok(CodexExecutionStrategy::Cli),
+        "codex_app_server" => Ok(CodexExecutionStrategy::AppServer),
+        runtime_type => Err(AppError::bad_request(format!(
+            "codex.exec requires a codex runtime profile, found session environment runtime type {runtime_type}"
+        ))),
+    }
+}
+
+impl CodexExecutionStrategy {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Cli => "cli",
+            Self::AppServer => "app-server",
+        }
+    }
+}
+
+fn codex_runtime_selection_metadata(selection: &CodexRuntimeSelection) -> Value {
+    json!({
+        "runtime_binding_source": selection.binding_source,
+        "runtime_profile_id": selection.runtime_profile_id,
+        "runtime_profile_name": selection.runtime_profile_name,
+        "runtime_type": selection.runtime_type,
+    })
 }
 
 fn codex_execution_strategy(request: &CodexRequest) -> Result<CodexExecutionStrategy, AppError> {
@@ -3229,6 +3339,7 @@ async fn run_codex_app_server(
     state: &AppState,
     session_id: Uuid,
     request: CodexRequest,
+    runtime_selection: &CodexRuntimeSelection,
 ) -> Result<Value, AppError> {
     let config = state
         .codex_app_server_config
@@ -3236,6 +3347,7 @@ async fn run_codex_app_server(
         .ok_or_else(|| AppError::bad_request("Codex App Server is not configured"))?;
     let workspace = state.workspace_root.join(session_id.to_string());
     tokio::fs::create_dir_all(&workspace).await?;
+    let runtime_binding = codex_runtime_selection_metadata(runtime_selection);
     state
         .append_event(
             "tool",
@@ -3247,6 +3359,7 @@ async fn run_codex_app_server(
                 "sandbox_mode": &request.sandbox_mode,
                 "workspace": workspace,
                 "runner": "app-server",
+                "runtime_binding": runtime_binding,
             }),
         )
         .await?;
@@ -3257,6 +3370,7 @@ async fn run_codex_app_server(
             "workspace": workspace,
             "sandbox_mode": &request.sandbox_mode,
             "source": "approved_codex_exec",
+            "runtime_binding": runtime_binding,
         }),
     };
     let thread = state
@@ -3281,6 +3395,7 @@ async fn run_codex_app_server(
             "workspace": workspace,
             "sandbox_mode": &request.sandbox_mode,
             "source": "approved_codex_exec",
+            "runtime_binding": runtime_binding,
         }),
     };
     let turn = state
@@ -3343,6 +3458,7 @@ async fn run_codex_app_server(
                 "poll_attempts": poll_result.attempts,
                 "result": final_turn.result,
                 "fallback_used": false,
+                "runtime_binding": runtime_binding,
             }),
         )
         .await?;
@@ -3375,6 +3491,7 @@ async fn run_codex_app_server(
         "poll_attempts": poll_result.attempts,
         "result": final_turn.result,
         "fallback_used": false,
+        "runtime_binding": runtime_binding,
     }))
 }
 
@@ -5039,10 +5156,12 @@ async fn run_codex_cli(
     state: &AppState,
     session_id: Uuid,
     request: CodexRequest,
+    runtime_selection: &CodexRuntimeSelection,
 ) -> Result<Value, AppError> {
     let workspace = state.workspace_root.join(session_id.to_string());
     tokio::fs::create_dir_all(&workspace).await?;
     let last_message = workspace.join("last_message.md");
+    let runtime_binding = codex_runtime_selection_metadata(runtime_selection);
 
     state
         .append_event(
@@ -5050,7 +5169,7 @@ async fn run_codex_cli(
             None,
             session_id,
             "codex.task.started",
-            json!({"task": &request.task, "sandbox_mode": &request.sandbox_mode, "workspace": workspace, "runner": "cli"}),
+            json!({"task": &request.task, "sandbox_mode": &request.sandbox_mode, "workspace": workspace, "runner": "cli", "runtime_binding": runtime_binding}),
         )
         .await?;
 
@@ -5138,7 +5257,8 @@ async fn run_codex_cli(
                 "final_message": final_output.text,
                 "final_message_bytes": final_output.original_bytes,
                 "final_message_truncated": final_output.truncated,
-                "runner": "cli"
+                "runner": "cli",
+                "runtime_binding": runtime_binding
             }),
         )
         .await?;
@@ -5159,7 +5279,8 @@ async fn run_codex_cli(
         "stderr_truncated": stderr.truncated,
         "final_message": final_output.text,
         "final_message_bytes": final_output.original_bytes,
-        "final_message_truncated": final_output.truncated
+        "final_message_truncated": final_output.truncated,
+        "runtime_binding": runtime_binding
     }))
 }
 

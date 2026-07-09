@@ -23258,6 +23258,153 @@ async fn approved_codex_exec_can_use_app_server_strategy() {
 }
 
 #[tokio::test]
+async fn environment_runtime_profile_is_canonical_for_codex_exec() {
+    let codex_client = Arc::new(RecordingCodexAppServerClient::default());
+    let app = test_app_with_codex_app_server(codex_client.clone()).await;
+    let profile: AgentRuntimeProfile = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/agent-runtime-profiles",
+            json!({
+                "name": "environment-codex-app-server",
+                "runtime_type": "codex_app_server",
+                "command": "codex-app-server",
+                "timeout_seconds": 30,
+                "remote_computer_required": false
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let environment: Environment = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/environments",
+            json!({
+                "name": "Codex Environment Runtime",
+                "environment_type": "self_hosted",
+                "runtime_profile_id": profile.id,
+                "worker_queue_binding": {"queue": "managed-agent-runtime"},
+                "release_state": "active",
+                "status": "enabled"
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let agents: Vec<Agent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/agents")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let session: Session = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/sessions",
+            json!({
+                "agent_id": agents[0].id,
+                "environment_id": environment.id,
+                "title": "codex environment runtime"
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+
+    let approval_required: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/tools/codex.exec/execute",
+            json!({
+                "session_id": session.id,
+                "args": {
+                    "task": "Inspect the workspace through environment binding",
+                    "sandbox_mode": "workspace-write"
+                }
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let approval_id = approval_required["approval_id"]
+        .as_str()
+        .expect("approval id");
+    let _approved: Approval = request_json(
+        app.clone(),
+        approve_request(format!("/api/approvals/{approval_id}/approve")),
+    )
+    .await;
+
+    let tool_calls: Vec<ToolCall> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/sessions/{}/tool-calls", session.id))
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let result = tool_calls
+        .iter()
+        .find(|call| call.tool_name == "codex.exec")
+        .and_then(|call| call.result.as_ref())
+        .expect("codex result");
+    assert_eq!(result["runner"], json!("app-server"));
+    assert_eq!(
+        result["runtime_binding"],
+        json!({
+            "runtime_binding_source": "environment",
+            "runtime_profile_id": profile.id,
+            "runtime_profile_name": "environment-codex-app-server",
+            "runtime_type": "codex_app_server"
+        })
+    );
+
+    let events: Vec<SessionEvent> = request_json(
+        app,
+        Request::builder()
+            .uri(format!("/api/sessions/{}/events", session.id))
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(events.iter().any(|event| {
+        event.event_type == "codex.task.completed"
+            && event.payload["runner"] == json!("app-server")
+            && event.payload["runtime_binding"]["runtime_binding_source"] == json!("environment")
+            && event.payload["runtime_binding"]["runtime_profile_id"] == json!(profile.id)
+    }));
+    assert_eq!(
+        codex_client.calls.lock().await.as_slice(),
+        ["thread", "turn:thread-1", "poll:turn-1"]
+    );
+}
+
+#[tokio::test]
 async fn queue_backed_worker_runs_codex_app_server_polling() {
     let _env_guard = env_lock().lock().expect("env lock");
     let _insecure_auth = EnvVarGuard::set("MANDOFORGE_INSECURE_DEV_AUTH", "1");
@@ -23294,6 +23441,45 @@ async fn queue_backed_worker_runs_codex_app_server_polling() {
     };
     state.seed_demo_agent().await.expect("seed demo agent");
     let app = build_router(state);
+    let profile: AgentRuntimeProfile = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/agent-runtime-profiles",
+            json!({
+                "name": "queued-environment-codex-app-server",
+                "runtime_type": "codex_app_server",
+                "command": "codex-app-server",
+                "timeout_seconds": 30,
+                "remote_computer_required": false
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let environment: Environment = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/environments",
+            json!({
+                "name": "Queued Codex Runtime Environment",
+                "environment_type": "self_hosted",
+                "runtime_profile_id": profile.id,
+                "worker_queue_binding": {"queue": "managed-agent-runtime"},
+                "release_state": "active",
+                "status": "enabled"
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
     let agents: Vec<Agent> = request_json(
         app.clone(),
         Request::builder()
@@ -23309,7 +23495,11 @@ async fn queue_backed_worker_runs_codex_app_server_polling() {
         json_request_with_headers(
             "POST",
             "/api/sessions",
-            json!({"agent_id": agents[0].id, "title": "queued codex app server"}),
+            json!({
+                "agent_id": agents[0].id,
+                "environment_id": environment.id,
+                "title": "queued codex app server"
+            }),
             &[
                 ("x-mandoforge-subject", "admin-1"),
                 ("x-mandoforge-roles", "admin"),
@@ -23328,7 +23518,6 @@ async fn queue_backed_worker_runs_codex_app_server_polling() {
                 "args": {
                     "task": "Inspect the workspace through the app server",
                     "sandbox_mode": "workspace-write",
-                    "execution_strategy": "app-server",
                     "poll_attempts": 2,
                     "poll_interval_ms": 0
                 }
@@ -23436,6 +23625,15 @@ async fn queue_backed_worker_runs_codex_app_server_polling() {
     assert_eq!(result["runner"], "app-server");
     assert_eq!(result["terminal"], true);
     assert_eq!(result["poll_attempts"], 1);
+    assert_eq!(
+        result["runtime_binding"],
+        json!({
+            "runtime_binding_source": "environment",
+            "runtime_profile_id": profile.id,
+            "runtime_profile_name": "queued-environment-codex-app-server",
+            "runtime_type": "codex_app_server"
+        })
+    );
 
     let events: Vec<SessionEvent> = request_json(
         app.clone(),
@@ -23459,7 +23657,23 @@ async fn queue_backed_worker_runs_codex_app_server_polling() {
         .expect("codex execution job K Agent claim evidence");
     assert_eq!(
         k_agent_claimed.payload["dispatch_evidence"]["source"],
-        json!("tool_call.args")
+        json!("environment")
+    );
+    assert_eq!(
+        k_agent_claimed.payload["dispatch_evidence"]["runtime_profile_id"],
+        json!(profile.id)
+    );
+    assert_eq!(
+        k_agent_claimed.payload["dispatch_evidence"]["runtime_profile_name"],
+        json!("queued-environment-codex-app-server")
+    );
+    assert_eq!(
+        k_agent_claimed.payload["dispatch_evidence"]["runtime_type"],
+        json!("codex_app_server")
+    );
+    assert_eq!(
+        k_agent_claimed.payload["dispatch_evidence"]["resolved_execution_strategy"],
+        json!("app-server")
     );
     assert_eq!(
         k_agent_claimed.payload["dispatch_evidence"]["sandbox_mode"],
@@ -23467,7 +23681,7 @@ async fn queue_backed_worker_runs_codex_app_server_polling() {
     );
     assert_eq!(
         k_agent_claimed.payload["dispatch_evidence"]["execution_strategy"],
-        json!("app-server")
+        Value::Null
     );
     assert!(events.iter().any(|event| {
         event.event_type == "codex.task.event"

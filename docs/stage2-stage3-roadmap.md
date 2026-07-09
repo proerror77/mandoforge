@@ -319,8 +319,12 @@ plans:
    Platform-specific OAuth/token lifecycle, live API readback, rate-limit
    handling, and remaining connector-specific signature variants remain open.
 2. Runtime adapter consolidation: make Environment runtime binding the only
-   product entrypoint for managed runtime execution while keeping `agent_cli.exec`
-   and `codex.exec` as compatibility facades.
+   product entrypoint for managed runtime execution. `agent_cli.exec` and
+   `codex.exec` remain compatibility facades, but session-bound Environment
+   runtime profiles are now authoritative for `agent_cli` profile selection and
+   `codex_cli` / `codex_app_server` strategy selection, with binding evidence in
+   results, events, audit, and K Agent dispatch records. Removing the legacy
+   unbound compatibility path remains open.
 3. Environment Scheduling + K Agent: complete the Environment Work Queue,
    sandbox dispatch, and full runtime event/artifact return contract.
    Session-loop K Agent claim, lease, heartbeat, completion, and failure

@@ -736,6 +736,31 @@ async fn execution_job_dispatch_evidence(
     if let Some(evidence) = evidence.as_object_mut() {
         match job.tool_name.as_str() {
             "codex.exec" => {
+                if let Some(runtime_binding) =
+                    codex_execution_job_runtime_binding(state, job).await?
+                {
+                    evidence.insert("source".to_string(), json!("environment"));
+                    evidence.insert(
+                        "runtime_profile_id".to_string(),
+                        json!(runtime_binding.profile_id),
+                    );
+                    evidence.insert(
+                        "runtime_profile_name".to_string(),
+                        json!(runtime_binding.profile_name),
+                    );
+                    evidence.insert(
+                        "runtime_type".to_string(),
+                        json!(runtime_binding.runtime_type),
+                    );
+                    evidence.insert(
+                        "execution_strategy_source".to_string(),
+                        json!("environment.runtime_profile"),
+                    );
+                    evidence.insert(
+                        "resolved_execution_strategy".to_string(),
+                        json!(runtime_binding.execution_strategy),
+                    );
+                }
                 evidence.insert(
                     "sandbox_mode".to_string(),
                     tool_args
@@ -775,6 +800,42 @@ async fn execution_job_dispatch_evidence(
     }
 
     Ok(evidence)
+}
+
+struct CodexExecutionJobRuntimeBinding {
+    profile_id: Uuid,
+    profile_name: String,
+    runtime_type: String,
+    execution_strategy: &'static str,
+}
+
+async fn codex_execution_job_runtime_binding(
+    state: &AppState,
+    job: &crate::execution_queue::ExecutionJob,
+) -> Result<Option<CodexExecutionJobRuntimeBinding>, AppError> {
+    let environment_id = match job.environment_id {
+        Some(environment_id) => Some(environment_id),
+        None => state.get_session(job.session_id).await?.environment_id,
+    };
+    let Some(environment_id) = environment_id else {
+        return Ok(None);
+    };
+    let environment = state.get_environment(environment_id).await?;
+    let Some(profile_id) = environment.runtime_profile_id else {
+        return Ok(None);
+    };
+    let profile = state.get_agent_runtime_profile(profile_id).await?;
+    let execution_strategy = match profile.runtime_type.as_str() {
+        "codex_cli" => "cli",
+        "codex_app_server" => "app-server",
+        _ => "unsupported",
+    };
+    Ok(Some(CodexExecutionJobRuntimeBinding {
+        profile_id: profile.id,
+        profile_name: profile.name,
+        runtime_type: profile.runtime_type,
+        execution_strategy,
+    }))
 }
 
 fn merge_k_agent_execution_job_payload(mut base: Value, extra: Value) -> Value {
