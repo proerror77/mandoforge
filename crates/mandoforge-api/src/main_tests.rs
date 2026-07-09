@@ -9804,6 +9804,7 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
 
     let product_capabilities = discovery["product_capabilities"].as_array().unwrap();
     for key in [
+        "manager_plan",
         "workflow_pack",
         "domain_pack",
         "work_surface_connector",
@@ -9822,6 +9823,23 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
             "missing product capability {key}"
         );
     }
+    assert!(product_capabilities.iter().any(|capability| {
+        capability["key"] == json!("manager_plan")
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(
+                    "POST /api/manager-plans/{id}/materialize-workflow-run"
+                ))
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Manager Runtime planning object")
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("cannot bypass TaskGrant")
+    }));
     assert!(product_capabilities.iter().any(|capability| {
         capability["key"] == json!("workflow_pack")
             && capability["api_routes"]

@@ -412,7 +412,7 @@ plans:
    the release evidence includes the action object id/type/key, contract model,
    transaction profile, execution mode, and existing ontology release gates.
 6. Pack / Release / Evidence: `/api/capability-discovery` now lists
-   WorkflowPack, DomainPack, AgentVersion, EnvironmentProfile,
+   ManagerPlan, WorkflowPack, DomainPack, AgentVersion, EnvironmentProfile,
    OntologyActionContract, ToolSpec, EvalGate, Release, and Rollback as
    auditable product capabilities with their existing routes, lifecycle
    actions, evidence events, and authority boundaries. WorkflowPack and

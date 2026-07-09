@@ -1447,6 +1447,30 @@ fn agent_os_product_capabilities() -> Vec<Value> {
             "authority_boundary": "Work Surface connectors create governed WorkItems and evidence readbacks only; they do not start runtime execution or bypass Manager Runtime, Policy, Approval, or Audit."
         }),
         json!({
+            "key": "manager_plan",
+            "product_object": "ManagerPlan",
+            "status": "available",
+            "api_routes": [
+                "GET /api/manager-plans",
+                "GET /api/manager-plans/{id}",
+                "POST /api/sessions/{id}/manager-plans",
+                "POST /api/work-items/{id}/manager-plans",
+                "POST /api/manager-plans/{id}/review",
+                "POST /api/manager-plans/{id}/materialize-handoff",
+                "POST /api/manager-plans/{id}/materialize-workflow-run"
+            ],
+            "lifecycle_actions": ["create", "review", "materialize_handoff", "materialize_workflow_run", "reuse_materialized_workflow_run"],
+            "evidence_events": [
+                "manager_plan.created",
+                "manager_plan.reviewed",
+                "manager_plan.workflow_run_materialized",
+                "agent_handoff.requested",
+                "agent_handoff.accepted",
+                "agent_handoff.assigned"
+            ],
+            "authority_boundary": "ManagerPlan is the Manager Runtime planning object; materialization still requires review or approval and cannot bypass TaskGrant, Policy, Approval, Tool Router, session events, or audit."
+        }),
+        json!({
             "key": "workflow_pack",
             "product_object": "WorkflowPack",
             "status": "available",
