@@ -1395,6 +1395,171 @@ pub(crate) async fn evaluate_semantic_context_gate(
     })))
 }
 
+pub(crate) async fn evaluate_ontology_action_contract_gate(
+    state: &AppState,
+    task_grant: Option<&TaskGrant>,
+    tool_name: &str,
+    args: &Value,
+) -> Result<Option<Value>, AppError> {
+    let Some(grant) = task_grant else {
+        return Ok(None);
+    };
+    let Some(target) = ontology_action_contract_target(tool_name, args)? else {
+        if !task_grant_requires_ontology_action_contract(grant, tool_name) {
+            return Ok(None);
+        }
+        return Ok(Some(json!({
+            "status": "blocked",
+            "boundary": "ontology_action_contract",
+            "task_grant_id": grant.id,
+            "context_packet_id": grant.context_packet_id,
+            "blocked_action_count": 1,
+            "blockers": [{
+                "reasons": ["unsupported_action_target"],
+                "tool": tool_name,
+            }],
+        })));
+    };
+    if !task_grant_requires_ontology_action_contract(grant, tool_name) {
+        return Ok(None);
+    }
+    let Some(context_packet_id) = grant.context_packet_id else {
+        return Ok(Some(json!({
+            "status": "blocked",
+            "boundary": "ontology_action_contract",
+            "task_grant_id": grant.id,
+            "context_packet_id": Value::Null,
+            "connector_id": target.connector_id,
+            "operation_id": target.operation,
+            "side_effect_class": target.side_effect_class,
+            "blocked_action_count": 1,
+            "blockers": [{
+                "reasons": ["missing_context_packet"],
+            }],
+        })));
+    };
+    let packet = state.get_context_packet(context_packet_id).await?;
+    let mut evaluated_action_count = 0usize;
+    for packet_object in packet
+        .retrieved_objects
+        .iter()
+        .filter(|object| object.object_type == "ontology_action_type")
+    {
+        evaluated_action_count += 1;
+        let object = state.get_semantic_object(packet_object.id).await?;
+        let Some(contract) = ontology_action_contract_payload(&object.content) else {
+            continue;
+        };
+        if ontology_action_contract_matches_target(contract, &target) {
+            return Ok(Some(json!({
+                "status": "passed",
+                "boundary": "ontology_action_contract",
+                "task_grant_id": grant.id,
+                "context_packet_id": packet.id,
+                "context_packet_version": packet.version,
+                "action_object_id": object.id,
+                "action_object_key": object.object_key,
+                "connector_id": target.connector_id,
+                "operation_id": target.operation,
+                "side_effect_class": target.side_effect_class,
+                "evaluated_action_count": evaluated_action_count,
+                "blocked_action_count": 0,
+            })));
+        }
+    }
+    Ok(Some(json!({
+        "status": "blocked",
+        "boundary": "ontology_action_contract",
+        "task_grant_id": grant.id,
+        "context_packet_id": packet.id,
+        "context_packet_version": packet.version,
+        "connector_id": target.connector_id,
+        "operation_id": target.operation,
+        "side_effect_class": target.side_effect_class,
+        "evaluated_action_count": evaluated_action_count,
+        "blocked_action_count": 1,
+        "blockers": [{
+            "reasons": ["missing_matching_ontology_action_type"],
+        }],
+    })))
+}
+
+pub(crate) fn task_grant_requires_ontology_action_contract(
+    grant: &TaskGrant,
+    tool_name: &str,
+) -> bool {
+    if tool_name == "native.connector.call" {
+        return true;
+    }
+    grant
+        .external_effects
+        .get("ontology_action_contract_required")
+        .and_then(Value::as_bool)
+        == Some(true)
+        || grant
+            .connector_scope
+            .get("ontology_action_contract_required")
+            .and_then(Value::as_bool)
+            == Some(true)
+}
+
+pub(crate) fn ontology_action_contract_target(
+    tool_name: &str,
+    args: &Value,
+) -> Result<Option<NativeConnectorCallTarget>, AppError> {
+    if tool_name == "mcp.call" {
+        let request: McpCallRequest = serde_json::from_value(args.clone())?;
+        let side_effect_class = request
+            .args
+            .get("side_effect_class")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("read")
+            .to_string();
+        return Ok(Some(NativeConnectorCallTarget {
+            connector_id: request.server.trim().to_string(),
+            operation: request.tool.trim().to_string(),
+            side_effect_class,
+        }));
+    }
+    if native_connector_invocation_requested(tool_name, args) {
+        return native_connector_call_target(args).map(Some);
+    }
+    Ok(None)
+}
+
+pub(crate) fn ontology_action_contract_payload(content: &Value) -> Option<&Value> {
+    content
+        .get("definition")
+        .or_else(|| content.get("action_contract"))
+        .or_else(|| {
+            if content.get("connector_id").is_some() && content.get("operation_id").is_some() {
+                Some(content)
+            } else {
+                None
+            }
+        })
+}
+
+pub(crate) fn ontology_action_contract_matches_target(
+    contract: &Value,
+    target: &NativeConnectorCallTarget,
+) -> bool {
+    ontology_contract_string(contract, &["connector_id", "connector"]) == Some(&target.connector_id)
+        && ontology_contract_string(contract, &["operation_id", "operation", "tool", "action"])
+            == Some(&target.operation)
+        && ontology_contract_string(contract, &["side_effect_class"])
+            .is_none_or(|side_effect| side_effect == target.side_effect_class || side_effect == "*")
+}
+
+pub(crate) fn ontology_contract_string<'a>(contract: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| contract.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
 trait SemanticContextGateObject {
     fn semantic_id(&self) -> Uuid;
     fn semantic_object_type(&self) -> &str;
@@ -1532,6 +1697,20 @@ pub(crate) fn semantic_context_gate_block_reason(gate: &Value) -> String {
         .unwrap_or(0);
     format!(
         "high-risk tool blocked by semantic context gate: {count} stale or untrusted semantic object(s)"
+    )
+}
+
+pub(crate) fn ontology_action_contract_gate_block_reason(gate: &Value) -> String {
+    let connector_id = gate
+        .get("connector_id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown_connector");
+    let operation_id = gate
+        .get("operation_id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown_operation");
+    format!(
+        "tool blocked by ontology action contract gate: no valid action contract for {connector_id}.{operation_id}"
     )
 }
 
@@ -2869,6 +3048,17 @@ pub(crate) async fn execute_tool_invocation(
         .and_then(|gate| gate.get("status"))
         .and_then(Value::as_str)
         == Some("blocked");
+    let ontology_action_contract_gate = if policy_decision.decision == "denied" {
+        None
+    } else {
+        evaluate_ontology_action_contract_gate(state, task_grant.as_ref(), name, &input.args)
+            .await?
+    };
+    let ontology_action_contract_gate_blocked = ontology_action_contract_gate
+        .as_ref()
+        .and_then(|gate| gate.get("status"))
+        .and_then(Value::as_str)
+        == Some("blocked");
     let mut policy_decision_payload = json!({
         "decision": policy_decision.decision,
         "reason": policy_decision.reason.clone(),
@@ -2877,6 +3067,9 @@ pub(crate) async fn execute_tool_invocation(
     });
     if let Some(gate) = semantic_context_gate.clone() {
         policy_decision_payload["semantic_context_gate"] = gate;
+    }
+    if let Some(gate) = ontology_action_contract_gate.clone() {
+        policy_decision_payload["ontology_action_contract_gate"] = gate;
     }
     if let Some(binding) = commit_binding.as_ref() {
         policy_decision_payload["approval_commit_binding"] = json!({
@@ -2923,7 +3116,7 @@ pub(crate) async fn execute_tool_invocation(
                 .as_ref()
                 .map(|binding| binding.target_binding.clone())
                 .unwrap_or_else(empty_json_object),
-            status: if semantic_context_gate_blocked {
+            status: if semantic_context_gate_blocked || ontology_action_contract_gate_blocked {
                 "denied"
             } else {
                 match policy_decision.decision {
@@ -2938,7 +3131,10 @@ pub(crate) async fn execute_tool_invocation(
             policy_decision: policy_decision_payload,
             result: None,
             error: None,
-            started_at: if policy_decision.decision == "allowed" && !semantic_context_gate_blocked {
+            started_at: if policy_decision.decision == "allowed"
+                && !semantic_context_gate_blocked
+                && !ontology_action_contract_gate_blocked
+            {
                 Some(Utc::now())
             } else {
                 None
@@ -2983,6 +3179,47 @@ pub(crate) async fn execute_tool_invocation(
                     "risk_level": policy_decision.risk_level.clone(),
                     "status": "denied",
                     "semantic_context_gate": gate,
+                }),
+            ))
+            .await?;
+        return Err(AppError::forbidden(reason));
+    }
+
+    if let Some(gate) = ontology_action_contract_gate
+        .as_ref()
+        .filter(|gate| gate.get("status").and_then(Value::as_str) == Some("blocked"))
+    {
+        let reason = ontology_action_contract_gate_block_reason(gate);
+        let result = json!({
+            "status": "denied",
+            "reason": reason,
+            "ontology_action_contract_gate": gate,
+        });
+        state
+            .append_event(
+                "system",
+                Some(tool_call.id),
+                input.session_id,
+                "ontology_action_contract.gate_failed",
+                json!({"tool_call_id": tool_call.id, "tool": name, "content": result}),
+            )
+            .await?;
+        state
+            .update_tool_call_status(tool_call.id, "denied", Some(result.clone()), None)
+            .await?;
+        state
+            .append_audit_log(new_audit_log(
+                Some(input.session_id),
+                "system",
+                Some(tool_call.id),
+                "ontology_action_contract.gate_failed",
+                "tool_call",
+                Some(tool_call.id),
+                json!({
+                    "tool": name,
+                    "risk_level": policy_decision.risk_level.clone(),
+                    "status": "denied",
+                    "ontology_action_contract_gate": gate,
                 }),
             ))
             .await?;

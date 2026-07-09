@@ -14301,6 +14301,343 @@ async fn workflow_tool_execution_enforces_task_grant_scope() {
     }));
 }
 
+async fn create_ontology_action_contract_object_for_test(
+    state: &AppState,
+    semantic_scopes: Value,
+    connector_id: &str,
+    operation_id: &str,
+    side_effect_class: &str,
+) -> SemanticObject {
+    let source = state
+        .create_semantic_source(CreateSemanticSource {
+            source_type: "workflow_pack".to_string(),
+            source_uri: format!("repo://packs/test/actions/{operation_id}.yaml"),
+            display_name: format!("{operation_id} action contract"),
+            owner_type: None,
+            owner_id: None,
+            metadata: empty_json_object(),
+            provenance: json!({"source": "test_action_contract"}),
+            freshness: json!({"state": "workspace_current"}),
+            status: default_semantic_source_status(),
+            last_ingested_at: None,
+        })
+        .await
+        .expect("create action contract source");
+    state
+        .create_semantic_object(CreateSemanticObject {
+            source_id: Some(source.id),
+            object_type: "ontology_action_type".to_string(),
+            object_key: format!("{connector_id}.action.{operation_id}"),
+            title: format!("{operation_id} action contract"),
+            summary: format!("{operation_id} writes through connector {connector_id}."),
+            content: json!({
+                "definition": {
+                    "connector_id": connector_id,
+                    "operation_id": operation_id,
+                    "side_effect_class": side_effect_class,
+                    "approval": {
+                        "approval_required": true,
+                        "approval_commit_token_required": true,
+                        "payload_digest_required": true
+                    }
+                }
+            }),
+            semantic_scopes,
+            source_uri: Some(format!("repo://packs/test/actions/{operation_id}.yaml")),
+            provenance: json!({"source": "test_action_contract"}),
+            trust_level: "source_attested".to_string(),
+            freshness: "current".to_string(),
+            status: "active".to_string(),
+        })
+        .await
+        .expect("create action contract object")
+}
+
+async fn bind_latest_context_packet_to_task_grant_for_test(
+    state: &AppState,
+    session_id: Uuid,
+    task_grant_id: Uuid,
+) -> ContextPacket {
+    let packet = generate_and_persist_context_packet(state, session_id)
+        .await
+        .expect("generate context packet");
+    state
+        .update_task_grant_context_packet(task_grant_id, packet.id)
+        .await
+        .expect("bind context packet to task grant");
+    packet
+}
+
+#[tokio::test]
+async fn workflow_tool_execution_enforces_ontology_action_contract_gate() {
+    let state = test_state_with_worker(Arc::new(QueueBackedExecutionWorker));
+    let app = build_router(state.clone());
+    let admin_headers = [
+        ("x-mandoforge-subject", "admin-1"),
+        ("x-mandoforge-roles", "admin"),
+    ];
+    let operator_headers = [
+        ("x-mandoforge-subject", "operator-1"),
+        ("x-mandoforge-roles", "operator"),
+    ];
+    let semantic_scopes = json!({
+        "domain_scope": "commerce",
+        "workflow_scope": "refunds",
+        "lane_scope": "support",
+        "memory_scope": "ontology-actions"
+    });
+
+    let source: SemanticSource = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/semantic-sources",
+            json!({
+                "source_type": "workflow_pack",
+                "source_uri": "repo://packs/commerce/actions/refund-order.yaml",
+                "display_name": "Commerce action contracts",
+                "metadata": {},
+                "freshness": {"state": "workspace_current"}
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let action_object: SemanticObject = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/semantic-objects",
+            json!({
+                "source_id": source.id,
+                "object_type": "ontology_action_type",
+                "object_key": "commerce.action.refund_order",
+                "title": "Refund order action contract",
+                "summary": "Refund order writes through the commerce connector.",
+                "content": {
+                    "definition": {
+                        "connector_id": "commerce",
+                        "operation_id": "refund_order",
+                        "side_effect_class": "payment",
+                        "approval": {
+                            "approval_required": true,
+                            "approval_commit_token_required": true,
+                            "payload_digest_required": true
+                        }
+                    }
+                },
+                "semantic_scopes": semantic_scopes,
+                "provenance": {"source": "test_action_contract"},
+                "trust_level": "source_attested",
+                "freshness": "current"
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let agent: Agent = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/agents",
+            json!({
+                "name": "Ontology Contract Agent",
+                "kind": "orchestrator",
+                "agent_role": "manager",
+                "provider": "openai-compatible",
+                "model": "gpt-5.5-mini",
+                "tools": ["native.connector.call"],
+                "tool_policy": {
+                    "approval_required": [
+                        {"tool": "native.connector.call", "risk": "critical"}
+                    ]
+                },
+                "semantic_scopes": semantic_scopes,
+                "release_state": "active"
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let definition: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-definitions",
+            json!({
+                "name": "Ontology gated refund workflow",
+                "entrypoint": "ontology-gated-refund",
+                "default_agent_id": agent.id,
+                "handoff_rules": {
+                    "root_task_grant": {
+                        "semantic_scopes": semantic_scopes,
+                        "memory_scope": {
+                            "mode": "snapshot_only",
+                            "allowed_object_types": ["ontology_action_type"],
+                            "minimum_trust_level": "source_attested",
+                            "max_objects": 5
+                        },
+                        "tool_scope": {
+                            "read": [],
+                            "write": [],
+                            "external_write": ["native.connector.call"]
+                        },
+                        "connector_scope": {
+                            "mode": "commit_write",
+                            "allowed_connector_ids": ["commerce"],
+                            "allowed_tool_names": ["refund_order"],
+                            "tenant_scope": {"workspace_id": "commerce-prod"},
+                            "side_effect_classes": ["payment"]
+                        },
+                        "external_effects": {
+                            "publish": false,
+                            "payment": true,
+                            "external_message": false,
+                            "account_mutation": false,
+                            "ad_spend_mutation": false,
+                            "ontology_action_contract_required": true
+                        }
+                    }
+                },
+                "release_state": "released"
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    let run: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-runs",
+            json!({"workflow_definition_id": definition["id"]}),
+            &operator_headers,
+        ),
+    )
+    .await;
+    let session_id = run["primary_session_id"].as_str().expect("session id");
+    let root_task_grant_id =
+        Uuid::parse_str(run["root_task_grant_id"].as_str().expect("root grant id"))
+            .expect("root grant uuid");
+
+    let (status, denied) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/tools/native.connector.call/execute",
+            json!({
+                "session_id": session_id,
+                "task_grant_id": root_task_grant_id,
+                "args": {
+                    "connector_id": "commerce",
+                    "operation": "refund_order",
+                    "side_effect_class": "payment",
+                    "payload": {"order_id": "order-1", "amount": 12}
+                }
+            }),
+            &operator_headers,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(
+        denied["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("ontology action contract gate")
+    );
+    let denied_call = state
+        .list_tool_calls(Some(Uuid::parse_str(session_id).expect("session uuid")))
+        .await
+        .expect("tool calls")
+        .into_iter()
+        .find(|call| call.tool_name == "native.connector.call")
+        .expect("denied native connector call");
+    assert_eq!(denied_call.status, "denied");
+    assert_eq!(
+        denied_call.policy_decision["ontology_action_contract_gate"]["boundary"],
+        json!("ontology_action_contract")
+    );
+    assert_eq!(
+        denied_call.policy_decision["ontology_action_contract_gate"]["blockers"][0]["reasons"],
+        json!(["missing_context_packet"])
+    );
+
+    let packet: ContextPacket = request_json(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/sessions/{session_id}/context-packet"))
+            .header("x-mandoforge-subject", "operator-1")
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(
+        packet
+            .retrieved_objects
+            .iter()
+            .any(|object| object.id == action_object.id)
+    );
+    state
+        .update_task_grant_context_packet(root_task_grant_id, packet.id)
+        .await
+        .expect("bind context packet to grant");
+
+    let approval_required: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/tools/native.connector.call/execute",
+            json!({
+                "session_id": session_id,
+                "task_grant_id": root_task_grant_id,
+                "args": {
+                    "connector_id": "commerce",
+                    "operation": "refund_order",
+                    "side_effect_class": "payment",
+                    "payload": {"order_id": "order-2", "amount": 24}
+                }
+            }),
+            &operator_headers,
+        ),
+    )
+    .await;
+    assert_eq!(approval_required["status"], json!("approval_required"));
+    let waiting_call = state
+        .list_tool_calls(Some(Uuid::parse_str(session_id).expect("session uuid")))
+        .await
+        .expect("tool calls")
+        .into_iter()
+        .find(|call| {
+            call.tool_name == "native.connector.call"
+                && call.status == "waiting_approval"
+                && call.policy_decision["ontology_action_contract_gate"]["status"]
+                    == json!("passed")
+        })
+        .expect("ontology-approved native connector call");
+    assert_eq!(
+        waiting_call.policy_decision["ontology_action_contract_gate"]["action_object_id"],
+        json!(action_object.id)
+    );
+
+    let events: Vec<SessionEvent> = request_json(
+        app,
+        Request::builder()
+            .uri(format!("/api/sessions/{session_id}/events"))
+            .header("x-mandoforge-subject", "operator-1")
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(events.iter().any(|event| {
+        event.event_type == "ontology_action_contract.gate_failed"
+            && event.payload["tool"] == json!("native.connector.call")
+    }));
+}
+
 #[tokio::test]
 async fn workflow_session_loop_uses_root_task_grant_for_tool_calls() {
     let app = test_app().await;
@@ -27280,6 +27617,12 @@ async fn native_connector_commit_write_enforces_side_effect_scope_and_exact_bind
         )
         .await
         .expect("create provider access");
+    let semantic_scopes = json!({
+        "domain_scope": "ads",
+        "workflow_scope": "ad-spend",
+        "lane_scope": "growth",
+        "memory_scope": "ontology-actions"
+    });
     let agent = state
         .create_agent(CreateAgent {
             name: "Native Connector Agent".to_string(),
@@ -27302,7 +27645,7 @@ async fn native_connector_commit_write_enforces_side_effect_scope_and_exact_bind
             skill_ids: vec![],
             workflow_pack_ids: vec![],
             remote_computer_profile: json!({}),
-            semantic_scopes: json!({}),
+            semantic_scopes: semantic_scopes.clone(),
             release_state: "draft".to_string(),
         })
         .await
@@ -27323,6 +27666,13 @@ async fn native_connector_commit_write_enforces_side_effect_scope_and_exact_bind
             step_graph: empty_json_object(),
             handoff_rules: json!({
                 "root_task_grant": {
+                    "semantic_scopes": semantic_scopes.clone(),
+                    "memory_scope": {
+                        "mode": "snapshot_only",
+                        "allowed_object_types": ["ontology_action_type"],
+                        "minimum_trust_level": "source_attested",
+                        "max_objects": 5
+                    },
                     "tool_scope": {
                         "read": [],
                         "write": [],
@@ -27359,6 +27709,14 @@ async fn native_connector_commit_write_enforces_side_effect_scope_and_exact_bind
         .await
         .expect("workflow definition");
     let app = build_router(state.clone());
+    let action_object = create_ontology_action_contract_object_for_test(
+        &state,
+        semantic_scopes.clone(),
+        "ad-platform",
+        "launch_campaign",
+        "ad_spend_mutation",
+    )
+    .await;
     let run: WorkflowRun = request_json(
         app.clone(),
         json_request_with_headers(
@@ -27370,6 +27728,18 @@ async fn native_connector_commit_write_enforces_side_effect_scope_and_exact_bind
     )
     .await;
     let root_task_grant_id = run.root_task_grant_id.expect("root grant");
+    let packet = bind_latest_context_packet_to_task_grant_for_test(
+        &state,
+        run.primary_session_id,
+        root_task_grant_id,
+    )
+    .await;
+    assert!(
+        packet
+            .retrieved_objects
+            .iter()
+            .any(|object| object.id == action_object.id)
+    );
 
     let (status, denied) = request_value(
         app.clone(),
@@ -27631,6 +28001,7 @@ async fn ecommerce_native_connector_live_adapter_executes_after_approval_commit(
         )
         .await
         .expect("create provider access");
+    let semantic_scopes = json!({"domain_scope": "ecommerce", "workflow_scope": "tmall"});
     let agent = state
         .create_agent(CreateAgent {
             name: "Ecommerce Live Adapter Agent".to_string(),
@@ -27654,7 +28025,7 @@ async fn ecommerce_native_connector_live_adapter_executes_after_approval_commit(
             skill_ids: vec![],
             workflow_pack_ids: vec!["ecommerce-tmall".to_string()],
             remote_computer_profile: json!({}),
-            semantic_scopes: json!({"domain_scope": "ecommerce", "workflow_scope": "tmall"}),
+            semantic_scopes: semantic_scopes.clone(),
             release_state: "draft".to_string(),
         })
         .await
@@ -27675,6 +28046,13 @@ async fn ecommerce_native_connector_live_adapter_executes_after_approval_commit(
             step_graph: empty_json_object(),
             handoff_rules: json!({
                 "root_task_grant": {
+                    "semantic_scopes": semantic_scopes.clone(),
+                    "memory_scope": {
+                        "mode": "snapshot_only",
+                        "allowed_object_types": ["ontology_action_type"],
+                        "minimum_trust_level": "source_attested",
+                        "max_objects": 5
+                    },
                     "tool_scope": {
                         "read": [],
                         "write": [],
@@ -27711,6 +28089,14 @@ async fn ecommerce_native_connector_live_adapter_executes_after_approval_commit(
         .await
         .expect("workflow definition");
     let app = build_router(state.clone());
+    let action_object = create_ontology_action_contract_object_for_test(
+        &state,
+        semantic_scopes.clone(),
+        "tmall-top",
+        "refund-agree",
+        "marketplace_refund_write",
+    )
+    .await;
     let run: WorkflowRun = request_json(
         app.clone(),
         json_request_with_headers(
@@ -27722,6 +28108,18 @@ async fn ecommerce_native_connector_live_adapter_executes_after_approval_commit(
     )
     .await;
     let root_task_grant_id = run.root_task_grant_id.expect("root grant");
+    let packet = bind_latest_context_packet_to_task_grant_for_test(
+        &state,
+        run.primary_session_id,
+        root_task_grant_id,
+    )
+    .await;
+    assert!(
+        packet
+            .retrieved_objects
+            .iter()
+            .any(|object| object.id == action_object.id)
+    );
 
     let approval_required: Value = request_json(
         app.clone(),
