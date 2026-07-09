@@ -23143,6 +23143,7 @@ async fn codex_app_server_routes_require_admin_and_call_adapter() {
 
 #[tokio::test]
 async fn approved_codex_exec_can_use_app_server_strategy() {
+    let _insecure_auth = EnvVarGuard::set("MANDOFORGE_INSECURE_DEV_AUTH", "1");
     let codex_client = Arc::new(RecordingCodexAppServerClient::default());
     let state = AppState {
         store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
@@ -23176,6 +23177,44 @@ async fn approved_codex_exec_can_use_app_server_strategy() {
     };
     state.seed_demo_agent().await.expect("seed demo agent");
     let app = build_router(state);
+    let profile: AgentRuntimeProfile = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/agent-runtime-profiles",
+            json!({
+                "name": "approved-codex-app-server",
+                "runtime_type": "codex_app_server",
+                "command": "codex-app-server",
+                "timeout_seconds": 30,
+                "remote_computer_required": false
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let environment: Environment = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/environments",
+            json!({
+                "name": "Approved Codex App Server Environment",
+                "environment_type": "self_hosted",
+                "runtime_profile_id": profile.id,
+                "release_state": "active",
+                "status": "enabled"
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
     let agents: Vec<Agent> = request_json(
         app.clone(),
         Request::builder()
@@ -23195,8 +23234,12 @@ async fn approved_codex_exec_can_use_app_server_strategy() {
             .header("x-mandoforge-subject", "admin-1")
             .header("x-mandoforge-roles", "admin")
             .body(Body::from(
-                json!({"agent_id": agents[0].id, "title": "codex app server execution"})
-                    .to_string(),
+                json!({
+                    "agent_id": agents[0].id,
+                    "environment_id": environment.id,
+                    "title": "codex app server execution"
+                })
+                .to_string(),
             ))
             .expect("valid request"),
     )
@@ -23277,6 +23320,92 @@ async fn approved_codex_exec_can_use_app_server_strategy() {
     assert_eq!(
         codex_client.calls.lock().await.as_slice(),
         ["thread", "turn:thread-1", "poll:turn-1"]
+    );
+}
+
+#[tokio::test]
+async fn codex_exec_requires_environment_runtime_profile() {
+    let codex_client = Arc::new(RecordingCodexAppServerClient::default());
+    let app = test_app_with_codex_app_server(codex_client.clone()).await;
+    let agents: Vec<Agent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/agents")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let session: Session = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/sessions",
+            json!({
+                "agent_id": agents[0].id,
+                "title": "unbound codex execution"
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let approval_required: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/tools/codex.exec/execute",
+            json!({
+                "session_id": session.id,
+                "args": {
+                    "task": "Must not execute without Environment binding",
+                    "sandbox_mode": "workspace-write",
+                    "execution_strategy": "app-server"
+                }
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let approval_id = approval_required["approval_id"]
+        .as_str()
+        .expect("approval id");
+    let _: Approval = request_json(
+        app.clone(),
+        approve_request(format!("/api/approvals/{approval_id}/approve")),
+    )
+    .await;
+    let tool_calls: Vec<ToolCall> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/sessions/{}/tool-calls", session.id))
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let codex_call = tool_calls
+        .iter()
+        .find(|call| call.tool_name == "codex.exec")
+        .expect("codex tool call");
+    assert_eq!(codex_call.status, "failed");
+    assert!(
+        codex_call
+            .error
+            .as_ref()
+            .and_then(|error| error["error"].as_str())
+            .is_some_and(|error| error.contains("environment runtime profile"))
+    );
+    assert!(
+        codex_client.calls.lock().await.is_empty(),
+        "unbound codex.exec must not call the adapter"
     );
 }
 
@@ -23906,6 +24035,7 @@ async fn queue_backed_worker_runs_codex_app_server_polling() {
 
 #[tokio::test]
 async fn queue_backed_worker_retries_codex_app_server_across_leases() {
+    let _insecure_auth = EnvVarGuard::set("MANDOFORGE_INSECURE_DEV_AUTH", "1");
     let codex_client = Arc::new(RecordingCodexAppServerClient::with_poll_statuses(vec![
         "running",
         "completed",
@@ -23942,6 +24072,44 @@ async fn queue_backed_worker_retries_codex_app_server_across_leases() {
     };
     state.seed_demo_agent().await.expect("seed demo agent");
     let app = build_router(state);
+    let profile: AgentRuntimeProfile = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/agent-runtime-profiles",
+            json!({
+                "name": "retry-codex-app-server",
+                "runtime_type": "codex_app_server",
+                "command": "codex-app-server",
+                "timeout_seconds": 30,
+                "remote_computer_required": false
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let environment: Environment = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/environments",
+            json!({
+                "name": "Retry Codex App Server Environment",
+                "environment_type": "self_hosted",
+                "runtime_profile_id": profile.id,
+                "release_state": "active",
+                "status": "enabled"
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
     let agents: Vec<Agent> = request_json(
         app.clone(),
         Request::builder()
@@ -23955,7 +24123,11 @@ async fn queue_backed_worker_retries_codex_app_server_across_leases() {
         json_request(
             "POST",
             "/api/sessions",
-            json!({"agent_id": agents[0].id, "title": "retry codex app server"}),
+            json!({
+                "agent_id": agents[0].id,
+                "environment_id": environment.id,
+                "title": "retry codex app server"
+            }),
         ),
     )
     .await;
@@ -24050,8 +24222,7 @@ async fn queue_backed_worker_retries_codex_app_server_across_leases() {
 }
 
 #[tokio::test]
-async fn queue_backed_worker_runs_allowlisted_agent_cli_profile() {
-    let _env_guard = env_lock().lock().expect("env lock");
+async fn queue_backed_worker_runs_environment_agent_cli_profile() {
     let shim_dir = test_workspace_root().join("agent-cli-shims");
     fs::create_dir_all(&shim_dir).expect("create shim dir");
     let shim_path = shim_dir.join(format!("fake-agent-cli-{}.sh", Uuid::new_v4()));
@@ -24064,14 +24235,46 @@ async fn queue_backed_worker_runs_allowlisted_agent_cli_profile() {
     fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o755))
         .expect("chmod fake agent CLI");
 
-    unsafe {
-        std::env::set_var("MANDOFORGE_ALLOW_REQUESTED_AGENT_CLI_PROFILE", "1");
-        std::env::set_var("MANDOFORGE_AGENT_CLI_ALLOWED_PROFILES", "fake-coder");
-        std::env::set_var("MANDOFORGE_AGENT_CLI_FAKE_CODER_COMMAND", &shim_path);
-        std::env::set_var("MANDOFORGE_AGENT_CLI_FAKE_CODER_ARGS", "--mode worker");
-    }
-
     let app = test_app_with_worker(Arc::new(QueueBackedExecutionWorker)).await;
+    let profile: AgentRuntimeProfile = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/agent-runtime-profiles",
+            json!({
+                "name": "fake-coder",
+                "runtime_type": "agent_cli",
+                "command": shim_path.to_string_lossy(),
+                "default_args": ["--mode", "worker"],
+                "timeout_seconds": 30,
+                "remote_computer_required": false
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let environment: Environment = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/environments",
+            json!({
+                "name": "Fake Coder Environment",
+                "environment_type": "self_hosted",
+                "runtime_profile_id": profile.id,
+                "release_state": "active",
+                "status": "enabled"
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
     let agents: Vec<Agent> = request_json(
         app.clone(),
         Request::builder()
@@ -24085,7 +24288,11 @@ async fn queue_backed_worker_runs_allowlisted_agent_cli_profile() {
         json_request(
             "POST",
             "/api/sessions",
-            json!({"agent_id": agents[0].id, "title": "queued agent CLI worker"}),
+            json!({
+                "agent_id": agents[0].id,
+                "environment_id": environment.id,
+                "title": "queued agent CLI worker"
+            }),
         ),
     )
     .await;
@@ -24187,18 +24394,10 @@ async fn queue_backed_worker_runs_allowlisted_agent_cli_profile() {
             && event.payload["runner"] == "agent-cli"
             && event.payload["profile"] == "fake-coder"
     }));
-
-    unsafe {
-        std::env::remove_var("MANDOFORGE_ALLOW_REQUESTED_AGENT_CLI_PROFILE");
-        std::env::remove_var("MANDOFORGE_AGENT_CLI_ALLOWED_PROFILES");
-        std::env::remove_var("MANDOFORGE_AGENT_CLI_FAKE_CODER_COMMAND");
-        std::env::remove_var("MANDOFORGE_AGENT_CLI_FAKE_CODER_ARGS");
-    }
 }
 
 #[tokio::test]
 async fn queue_backed_worker_marks_nonzero_agent_cli_as_failed() {
-    let _env_guard = env_lock().lock().expect("env lock");
     let shim_dir = test_workspace_root().join("agent-cli-shims");
     fs::create_dir_all(&shim_dir).expect("create shim dir");
     let shim_path = shim_dir.join(format!("failing-agent-cli-{}.sh", Uuid::new_v4()));
@@ -24211,14 +24410,45 @@ async fn queue_backed_worker_marks_nonzero_agent_cli_as_failed() {
     fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o755))
         .expect("chmod failing agent CLI");
 
-    unsafe {
-        std::env::set_var("MANDOFORGE_ALLOW_REQUESTED_AGENT_CLI_PROFILE", "1");
-        std::env::set_var("MANDOFORGE_AGENT_CLI_ALLOWED_PROFILES", "failing-coder");
-        std::env::set_var("MANDOFORGE_AGENT_CLI_FAILING_CODER_COMMAND", &shim_path);
-        std::env::remove_var("MANDOFORGE_AGENT_CLI_FAILING_CODER_ARGS");
-    }
-
     let app = test_app_with_worker(Arc::new(QueueBackedExecutionWorker)).await;
+    let profile: AgentRuntimeProfile = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/agent-runtime-profiles",
+            json!({
+                "name": "failing-coder",
+                "runtime_type": "agent_cli",
+                "command": shim_path.to_string_lossy(),
+                "timeout_seconds": 30,
+                "remote_computer_required": false
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let environment: Environment = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/environments",
+            json!({
+                "name": "Failing Coder Environment",
+                "environment_type": "self_hosted",
+                "runtime_profile_id": profile.id,
+                "release_state": "active",
+                "status": "enabled"
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
     let agents: Vec<Agent> = request_json(
         app.clone(),
         Request::builder()
@@ -24232,7 +24462,11 @@ async fn queue_backed_worker_marks_nonzero_agent_cli_as_failed() {
         json_request(
             "POST",
             "/api/sessions",
-            json!({"agent_id": agents[0].id, "title": "failing queued agent CLI worker"}),
+            json!({
+                "agent_id": agents[0].id,
+                "environment_id": environment.id,
+                "title": "failing queued agent CLI worker"
+            }),
         ),
     )
     .await;
@@ -24400,15 +24634,8 @@ async fn queue_backed_worker_marks_nonzero_agent_cli_as_failed() {
     assert!(audit_logs.iter().any(|log| {
         log.action == "tool.failed"
             && log.details["tool"] == "agent_cli.exec"
-            && log.details["runtime_binding_source"] == "requested"
+            && log.details["runtime_binding_source"] == "environment"
     }));
-
-    unsafe {
-        std::env::remove_var("MANDOFORGE_ALLOW_REQUESTED_AGENT_CLI_PROFILE");
-        std::env::remove_var("MANDOFORGE_AGENT_CLI_ALLOWED_PROFILES");
-        std::env::remove_var("MANDOFORGE_AGENT_CLI_FAILING_CODER_COMMAND");
-        std::env::remove_var("MANDOFORGE_AGENT_CLI_FAILING_CODER_ARGS");
-    }
 }
 
 #[tokio::test]

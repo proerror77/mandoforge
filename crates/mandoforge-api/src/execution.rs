@@ -3117,13 +3117,9 @@ async fn codex_runtime_selection(
             runtime_type: Some(profile.runtime_type),
         });
     }
-    Ok(CodexRuntimeSelection {
-        strategy: requested_strategy,
-        binding_source: "request_or_env",
-        runtime_profile_id: None,
-        runtime_profile_name: None,
-        runtime_type: None,
-    })
+    Err(AppError::bad_request(
+        "codex.exec requires a session-bound environment runtime profile",
+    ))
 }
 
 async fn bound_environment_runtime_profile(
@@ -3922,7 +3918,44 @@ pub(crate) async fn run_agent_cli(
     let profile = normalize_agent_cli_profile(&request.profile)?;
     let config = agent_cli_profile_config(state, &profile).await?;
     let bound_profile = enforce_bound_agent_cli_profile(state, session_id, &profile).await?;
-    let runtime_binding_source = bound_profile.source;
+    run_agent_cli_with_config(
+        state,
+        session_id,
+        request,
+        profile,
+        config,
+        bound_profile.source,
+    )
+    .await
+}
+
+pub(crate) async fn run_agent_cli_runtime_adapter(
+    state: &AppState,
+    session_id: Uuid,
+    request: AgentCliRequest,
+    runtime_binding_source: &'static str,
+) -> Result<Value, AppError> {
+    let profile = normalize_agent_cli_profile(&request.profile)?;
+    let config = agent_cli_profile_config(state, &profile).await?;
+    run_agent_cli_with_config(
+        state,
+        session_id,
+        request,
+        profile,
+        config,
+        runtime_binding_source,
+    )
+    .await
+}
+
+async fn run_agent_cli_with_config(
+    state: &AppState,
+    session_id: Uuid,
+    request: AgentCliRequest,
+    profile: String,
+    config: AgentCliProfileConfig,
+    runtime_binding_source: &'static str,
+) -> Result<Value, AppError> {
     let runtime_type = config.runtime_type.clone();
     if config.remote_computer_required {
         return Err(AppError::bad_request(format!(
@@ -4096,12 +4129,6 @@ async fn enforce_bound_agent_cli_profile(
     requested_profile: &str,
 ) -> Result<BoundAgentCliProfile, AppError> {
     let Some(bound_profile) = bound_agent_cli_profile(state, session_id).await? else {
-        if env_flag("MANDOFORGE_ALLOW_REQUESTED_AGENT_CLI_PROFILE") {
-            return Ok(BoundAgentCliProfile {
-                name: requested_profile.to_string(),
-                source: "requested",
-            });
-        }
         return Err(AppError::bad_request(
             "agent_cli.exec requires a session-bound runtime profile",
         ));

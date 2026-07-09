@@ -578,7 +578,7 @@ pub(crate) async fn run_agent_cli_delegated_runtime(
     session_id: Uuid,
     adapter: &str,
 ) -> Result<Value, AppError> {
-    let result = run_agent_cli(
+    let result = run_agent_cli_runtime_adapter(
         state,
         session_id,
         AgentCliRequest {
@@ -591,6 +591,7 @@ pub(crate) async fn run_agent_cli_delegated_runtime(
                 .and_then(|contract| contract.get("timeout_seconds"))
                 .and_then(Value::as_u64),
         },
+        "delegated_runtime",
     )
     .await?;
     Ok(json!({

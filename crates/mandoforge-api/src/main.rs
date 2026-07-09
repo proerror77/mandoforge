@@ -187,7 +187,8 @@ pub(crate) use eval_runtime::*;
 use execution::run_execution_job;
 use execution::{
     AgentCliRequest, ExecutionWorker, ExecutionWorkerOutcome, InlineExecutionWorker,
-    QueueBackedExecutionWorker, run_agent_cli, run_started_execution_job, truncate_output,
+    QueueBackedExecutionWorker, run_agent_cli_runtime_adapter, run_started_execution_job,
+    truncate_output,
 };
 #[cfg(test)]
 use execution::{codex_jsonl_event_type, parse_codex_jsonl};
