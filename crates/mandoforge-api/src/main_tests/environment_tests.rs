@@ -460,6 +460,7 @@ async fn worker_environment_header_filters_session_loop_and_execution_jobs() {
             .header("x-mandoforge-subject", "worker-a")
             .header("x-mandoforge-roles", "admin")
             .header("x-mandoforge-environment-id", environment_a.id.to_string())
+            .header("x-mandoforge-worker-pool", "worker-a")
             .body(Body::empty())
             .expect("valid request"),
     )
@@ -482,10 +483,61 @@ async fn worker_environment_header_filters_session_loop_and_execution_jobs() {
             && event.payload["session_loop_job_id"] == json!(loop_job_a.id)
             && event.payload["environment_id"] == json!(environment_a.id)
             && event.payload["worker_id"] == json!("k-agent-worker-a")
+            && event.payload["worker_pool"] == json!("worker-a")
             && event.payload["lease_expires_at"].as_str().is_some()
             && event.payload["dispatch_surface"] == json!("session_loop_job")
             && event.payload["authority_boundary"] == json!("environment_scheduling_only")
     }));
+    let completed_event = events_a
+        .iter()
+        .find(|event| event.event_type == "k_agent.completed")
+        .expect("k_agent.completed event");
+    assert_eq!(
+        completed_event.payload["session_loop_job_id"],
+        json!(loop_job_a.id)
+    );
+    assert_eq!(
+        completed_event.payload["environment_id"],
+        json!(environment_a.id)
+    );
+    assert_eq!(
+        completed_event.payload["worker_id"],
+        json!("k-agent-worker-a")
+    );
+    assert_eq!(completed_event.payload["worker_pool"], json!("worker-a"));
+    assert_eq!(
+        completed_event.payload["attempt_count"],
+        json!(completed_loop_a.attempt_count)
+    );
+    assert_eq!(
+        completed_event.payload["pending_event_seq_start"],
+        json!(completed_loop_a.pending_event_seq_start)
+    );
+    assert_eq!(
+        completed_event.payload["pending_event_seq_end"],
+        json!(completed_loop_a.pending_event_seq_end)
+    );
+    assert_eq!(
+        completed_event.payload["processed_event_seq"],
+        json!(completed_loop_a.processed_event_seq)
+    );
+    assert_eq!(completed_event.payload["job_status"], json!("completed"));
+    assert_eq!(
+        completed_event.payload["session_status"],
+        json!("requires_action")
+    );
+    assert_eq!(
+        completed_event.payload["dispatch_surface"],
+        json!("session_loop_job")
+    );
+    assert_eq!(
+        completed_event.payload["authority_boundary"],
+        json!("environment_scheduling_only")
+    );
+    assert_eq!(
+        completed_event.payload["return_contract"],
+        json!("session_loop_job_return_evidence")
+    );
 
     let loop_job_b = session_loop_jobs_for_session(app.clone(), session_b.id)
         .await
@@ -656,6 +708,204 @@ async fn worker_environment_header_filters_session_loop_and_execution_jobs() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(error["error"], json!("job not claimable for worker pool"));
+}
+
+#[tokio::test]
+async fn k_agent_failed_event_preserves_session_loop_cursor_on_runtime_failure() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let app = build_router(state.clone());
+
+    let provider: ProviderRecord = request_json(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri("/api/providers")
+            .header("content-type", "application/json")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::from(
+                json!({
+                    "provider_type": "mock",
+                    "name": "openai-compatible",
+                    "default_model": "gpt-5.5-mini",
+                    "config": {}
+                })
+                .to_string(),
+            ))
+            .expect("valid request"),
+    )
+    .await;
+    let disabled: ProviderRecord = request_json(
+        app.clone(),
+        Request::builder()
+            .method("PATCH")
+            .uri(format!("/api/providers/{}/status", provider.id))
+            .header("content-type", "application/json")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::from(
+                json!({
+                    "status": "disabled",
+                    "emergency": true,
+                    "reason": "force session-loop K Agent failure evidence"
+                })
+                .to_string(),
+            ))
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(disabled.status, "disabled");
+
+    let agents = state.list_agents().await.expect("list seeded agents");
+    let agent = agents.first().expect("seeded agent");
+    let environment: Environment = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/environments",
+            json!({
+                "name": "K Agent Failure Return",
+                "environment_type": "local",
+                "worker_queue_binding": {"queue": "managed-agent"},
+                "release_state": "active",
+                "status": "enabled"
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let session: Session = request_json(
+        app.clone(),
+        json_request(
+            "POST",
+            "/api/sessions",
+            json!({
+                "agent_id": agent.id,
+                "environment_id": environment.id,
+                "title": "failed K Agent return evidence"
+            }),
+        ),
+    )
+    .await;
+    let _: Vec<SessionEvent> = request_json(
+        app.clone(),
+        json_request(
+            "POST",
+            &format!("/api/sessions/{}/events", session.id),
+            json!({
+                "events": [{
+                    "type": "user.message",
+                    "payload": {"message": "trigger disabled provider"}
+                }]
+            }),
+        ),
+    )
+    .await;
+
+    let loop_job = session_loop_jobs_for_session(app.clone(), session.id)
+        .await
+        .into_iter()
+        .find(|job| job.status == SessionLoopJobStatus::Queued)
+        .expect("queued session loop job");
+    let (status, error) = request_value(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/session-loop-jobs/{}/run", loop_job.id))
+            .header("x-mandoforge-worker-id", "k-agent-failure-worker")
+            .header("x-mandoforge-subject", "worker-a")
+            .header("x-mandoforge-roles", "admin")
+            .header("x-mandoforge-environment-id", environment.id.to_string())
+            .header("x-mandoforge-worker-pool", "managed-agent")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("provider openai-compatible is not active")
+    );
+
+    let failed_loop_job = session_loop_jobs_for_session(app.clone(), session.id)
+        .await
+        .into_iter()
+        .find(|job| job.id == loop_job.id)
+        .expect("failed session loop job");
+    assert_eq!(failed_loop_job.status, SessionLoopJobStatus::Failed);
+    assert_eq!(
+        failed_loop_job.processed_event_seq,
+        loop_job.processed_event_seq
+    );
+
+    let events: Vec<SessionEvent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/sessions/{}/events", session.id))
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let failed_event = events
+        .iter()
+        .find(|event| event.event_type == "k_agent.failed")
+        .expect("k_agent.failed event");
+    assert_eq!(
+        failed_event.payload["session_loop_job_id"],
+        json!(loop_job.id)
+    );
+    assert_eq!(
+        failed_event.payload["environment_id"],
+        json!(environment.id)
+    );
+    assert_eq!(
+        failed_event.payload["worker_id"],
+        json!("k-agent-failure-worker")
+    );
+    assert_eq!(failed_event.payload["worker_pool"], json!("managed-agent"));
+    assert_eq!(
+        failed_event.payload["attempt_count"],
+        json!(failed_loop_job.attempt_count)
+    );
+    assert_eq!(
+        failed_event.payload["pending_event_seq_start"],
+        json!(loop_job.pending_event_seq_start)
+    );
+    assert_eq!(
+        failed_event.payload["pending_event_seq_end"],
+        json!(loop_job.pending_event_seq_end)
+    );
+    assert_eq!(
+        failed_event.payload["processed_event_seq"],
+        json!(loop_job.processed_event_seq)
+    );
+    assert_eq!(failed_event.payload["job_status"], json!("failed"));
+    assert_eq!(failed_event.payload["session_status"], json!("failed"));
+    assert!(
+        failed_event.payload["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("provider openai-compatible is not active")
+    );
+    assert_eq!(failed_event.payload["terminal_session"], json!(false));
+    assert_eq!(
+        failed_event.payload["dispatch_surface"],
+        json!("session_loop_job")
+    );
+    assert_eq!(
+        failed_event.payload["authority_boundary"],
+        json!("environment_scheduling_only")
+    );
+    assert_eq!(
+        failed_event.payload["return_contract"],
+        json!("session_loop_job_return_evidence")
+    );
 }
 
 #[tokio::test]

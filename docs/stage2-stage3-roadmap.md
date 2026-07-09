@@ -55,6 +55,10 @@ The Managed Runtime Layer has a strong baseline:
 - `k_agent.heartbeat` session events for running session-loop jobs, extending
   the active worker lease while preserving the same Environment Scheduling
   authority boundary.
+- `k_agent.completed` and `k_agent.failed` session events for session-loop K
+  Agent return evidence, preserving the worker identity, worker pool, cursor
+  window, processed sequence, job/session status, and Environment Scheduling
+  authority boundary.
 - Runtime adapter normalization for Codex CLI, Claude Code CLI, and Codex App
   Server turn output.
 - Durable session threads for manager-to-specialist handoff.
@@ -277,9 +281,10 @@ plans:
    product entrypoint for managed runtime execution while keeping `agent_cli.exec`
    and `codex.exec` as compatibility facades.
 3. Environment Scheduling + K Agent: complete the Environment Work Queue,
-   sandbox dispatch, and runtime event return contract. Session-loop K Agent
-   claim, lease, and heartbeat evidence are already recorded as
-   `k_agent.claimed` and `k_agent.heartbeat`.
+   sandbox dispatch, and full runtime event/artifact return contract.
+   Session-loop K Agent claim, lease, heartbeat, completion, and failure
+   evidence are already recorded as `k_agent.claimed`, `k_agent.heartbeat`,
+   `k_agent.completed`, and `k_agent.failed`.
 4. Manager Runtime materialization: expand the reviewed ManagerPlan
    materialization policy with idempotency, approval-token support for
    high-risk plans, and richer WorkflowRun selection. The current baseline

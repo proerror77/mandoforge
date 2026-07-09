@@ -319,6 +319,18 @@ async fn run_session_loop_job_route(
             let completed = state
                 .complete_session_loop_job(running.id, worker_id)
                 .await?;
+            append_k_agent_session_loop_return_event(
+                &state,
+                &completed,
+                "k_agent.completed",
+                worker_id,
+                worker_pool.as_deref(),
+                json!({
+                    "job_status": completed.status.as_str(),
+                    "session_status": session.status.as_str(),
+                }),
+            )
+            .await?;
             state
                 .append_event(
                     "worker",
@@ -345,14 +357,16 @@ async fn run_session_loop_job_route(
                 .await?;
             let session_is_terminal =
                 error.message == "session is terminal and cannot run session loop work";
+            let mut session_status = None;
             if !session_is_terminal {
-                set_managed_session_status(
+                let failed_session = set_managed_session_status(
                     &state,
                     failed.session_id,
                     SessionStatus::Failed,
                     "session loop failed",
                 )
                 .await?;
+                session_status = Some(failed_session.status.as_str().to_string());
                 state
                     .append_event(
                         "system",
@@ -367,6 +381,20 @@ async fn run_session_loop_job_route(
                     )
                     .await?;
             }
+            append_k_agent_session_loop_return_event(
+                &state,
+                &failed,
+                "k_agent.failed",
+                worker_id,
+                worker_pool.as_deref(),
+                json!({
+                    "job_status": failed.status.as_str(),
+                    "session_status": session_status,
+                    "error": error.message.clone(),
+                    "terminal_session": session_is_terminal,
+                }),
+            )
+            .await?;
             state
                 .append_event(
                     "worker",
@@ -387,6 +415,39 @@ async fn run_session_loop_job_route(
             Err(error)
         }
     }
+}
+
+async fn append_k_agent_session_loop_return_event(
+    state: &AppState,
+    job: &SessionLoopJob,
+    event_type: &str,
+    worker_id: &str,
+    worker_pool: Option<&str>,
+    extra_payload: Value,
+) -> Result<(), AppError> {
+    let mut payload = json!({
+        "session_loop_job_id": job.id,
+        "environment_id": job.environment_id,
+        "worker_id": worker_id,
+        "worker_pool": worker_pool,
+        "attempt_count": job.attempt_count,
+        "pending_event_seq_start": job.pending_event_seq_start,
+        "pending_event_seq_end": job.pending_event_seq_end,
+        "processed_event_seq": job.processed_event_seq,
+        "dispatch_surface": "session_loop_job",
+        "authority_boundary": "environment_scheduling_only",
+        "return_contract": "session_loop_job_return_evidence",
+    });
+    if let (Some(payload), Value::Object(extra_payload)) = (payload.as_object_mut(), extra_payload)
+    {
+        for (key, value) in extra_payload {
+            payload.insert(key, value);
+        }
+    }
+    state
+        .append_event("worker", Some(job.id), job.session_id, event_type, payload)
+        .await
+        .map(|_| ())
 }
 
 async fn cancel_execution_job_route(
