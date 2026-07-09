@@ -9820,6 +9820,7 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
         "workflow_pack",
         "domain_pack",
         "work_surface_connector",
+        "agent",
         "agent_version",
         "environment",
         "environment_profile",
@@ -9933,6 +9934,29 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
                 .as_str()
                 .unwrap_or_default()
                 .contains("validity only")
+    }));
+    assert!(product_capabilities.iter().any(|capability| {
+        capability["key"] == json!("agent")
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("GET /api/agents"))
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("POST /api/agents"))
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("managed runtime identity")
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("does not execute work")
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("release itself to production")
     }));
     assert!(product_capabilities.iter().any(|capability| {
         capability["key"] == json!("agent_version")

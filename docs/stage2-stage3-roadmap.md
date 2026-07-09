@@ -45,6 +45,8 @@ data-platform boundary.
 
 The Managed Runtime Layer has a strong baseline:
 
+- First-class Agent records for managed runtime identity, role, model, tool,
+  skill, WorkflowPack, semantic-scope, and runtime-profile binding.
 - First-class Environment resources.
 - Sessions bound to agents and environments.
 - `/api/sessions/:id/events` as the event-driven session input path.
@@ -111,13 +113,18 @@ The first Collaboration Layer slice is now in place:
 - `/api/work-items/:id/activity` exposes the human-readable Activity Feed for
   intake, routing, and review.
 - `/api/capability-discovery` now exposes an Agent OS product capability catalog
-  for WorkItem, ManagerPlan, AgentHandoff, WorkflowPack, DomainPack,
+  for WorkItem, ManagerPlan, AgentHandoff, WorkflowPack, DomainPack, Agent,
   AgentVersion, Environment, EnvironmentProfile, ManagedSession, SessionThread,
   RuntimeTurn, ContextPacket, ArtifactStore, AuditLogger, RemoteComputer,
   KAgent, TaskGrant, PolicyEngine, Approval, ToolRouter,
   OntologyActionContract, ToolSpec, EvalGate, Release, and Rollback, including
   the existing API surfaces, lifecycle actions, audit/evidence events, and
   authority boundaries for each capability.
+- The Agent entry exposes existing managed runtime identity, version, agent
+  card, runtime-profile binding, tool/skill/workflow-pack, and semantic-scope
+  records while preserving the boundary that Agent cannot execute work, release
+  itself, issue TaskGrant scope, approve actions, bypass Policy or Tool Router,
+  or replace session events and audit evidence.
 - The Environment entry exposes existing placement and binding records for
   runtime profiles, worker queues, RemoteComputer profiles, state mounts,
   network policy, vault requirements, and MCP requirements while preserving the
@@ -462,14 +469,16 @@ plans:
    the release evidence includes the action object id/type/key, contract model,
    transaction profile, execution mode, and existing ontology release gates.
 6. Pack / Release / Evidence: `/api/capability-discovery` now lists
-   WorkItem, ManagerPlan, AgentHandoff, WorkflowPack, DomainPack, AgentVersion,
-   Environment, EnvironmentProfile, ManagedSession, SessionThread, RuntimeTurn,
-   ContextPacket, ArtifactStore, AuditLogger, RemoteComputer, KAgent,
-   TaskGrant, PolicyEngine, Approval, ToolRouter, OntologyActionContract,
-   ToolSpec, EvalGate, Release, and Rollback as
+   WorkItem, ManagerPlan, AgentHandoff, WorkflowPack, DomainPack, Agent,
+   AgentVersion, Environment, EnvironmentProfile, ManagedSession,
+   SessionThread, RuntimeTurn, ContextPacket, ArtifactStore, AuditLogger,
+   RemoteComputer, KAgent, TaskGrant, PolicyEngine, Approval, ToolRouter,
+   OntologyActionContract, ToolSpec, EvalGate, Release, and Rollback as
    auditable product capabilities with their existing routes, lifecycle actions,
    evidence events, and authority boundaries. ContextPacket is a scoped context
-   construction/readback surface, not execution authority. Environment is the
+   construction/readback surface, not execution authority. Agent is the managed
+   runtime identity and contract surface, not execution or release authority.
+   Environment is the
    placement and binding surface for runtime profiles, worker queues, and
    substrate requirements, not execution authority. SessionThread is the
    readback and isolation surface for primary/specialist runtime lanes, not a

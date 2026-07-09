@@ -1570,6 +1570,21 @@ fn agent_os_product_capabilities() -> Vec<Value> {
             "authority_boundary": "Domain behavior is installed through WorkflowPack governance and cannot bypass runtime policy, approval, event logging, or audit."
         }),
         json!({
+            "key": "agent",
+            "product_object": "Agent",
+            "status": "available",
+            "api_routes": [
+                "GET /api/agents",
+                "POST /api/agents",
+                "GET /api/agents/{id}/versions",
+                "GET /api/agents/{id}/versions/{version}",
+                "GET /api/agents/{id}/versions/{version}/capability-readback"
+            ],
+            "lifecycle_actions": ["create", "list_visible", "version", "read_version", "render_agent_card"],
+            "evidence_events": [],
+            "authority_boundary": "Agent defines the managed runtime identity, role, model, tools, skills, workflow packs, semantic scopes, and runtime profile binding; it does not execute work, release itself to production, create TaskGrant scope, approve actions, bypass Policy or Tool Router, or replace session events and audit evidence."
+        }),
+        json!({
             "key": "agent_version",
             "product_object": "AgentVersion",
             "status": "available",
