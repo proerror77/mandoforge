@@ -1284,6 +1284,7 @@ async fn get_capability_discovery(
             "pending_memory_review_count": pending_memory,
         },
         "agent_cards": agent_cards,
+        "product_capabilities": agent_os_product_capabilities(),
         "suggested_prompts": [
             {
                 "target_view": "manager",
@@ -1344,4 +1345,182 @@ async fn get_capability_discovery(
             }
         ],
     })))
+}
+
+fn agent_os_product_capabilities() -> Vec<Value> {
+    vec![
+        json!({
+            "key": "workflow_pack",
+            "product_object": "WorkflowPack",
+            "status": "available",
+            "api_routes": [
+                "GET /api/workflow-packs/marketplace",
+                "POST /api/workflow-packs/install",
+                "POST /api/workflow-packs/installations/{id}/stage",
+                "POST /api/workflow-packs/installations/{id}/release",
+                "POST /api/workflow-packs/installations/{id}/rollback",
+                "POST /api/workflow-packs/installations/{id}/archive"
+            ],
+            "lifecycle_actions": ["validate", "install", "configure", "stage", "release", "rollback", "archive"],
+            "evidence_events": [
+                "workflow_pack.installed",
+                "workflow_pack.staged",
+                "workflow_pack.bindings_materialized",
+                "workflow_pack.released",
+                "workflow_pack.rolled_back",
+                "workflow_pack.archived"
+            ],
+            "authority_boundary": "Admin-gated product capability; release and rollback require explicit gate evidence."
+        }),
+        json!({
+            "key": "domain_pack",
+            "product_object": "DomainPack",
+            "status": "available",
+            "api_routes": [
+                "GET /api/workflow-packs/marketplace",
+                "POST /api/workflow-packs/install",
+                "GET /api/workflow-packs/installations/{id}/runtime-objects"
+            ],
+            "lifecycle_actions": ["validate", "install", "configure", "stage", "release", "rollback", "archive"],
+            "evidence_events": [
+                "workflow_pack.installed",
+                "workflow_pack.staged",
+                "workflow_pack.released",
+                "workflow_pack.rolled_back"
+            ],
+            "authority_boundary": "Domain behavior is installed through WorkflowPack governance and cannot bypass runtime policy, approval, event logging, or audit."
+        }),
+        json!({
+            "key": "agent_version",
+            "product_object": "AgentVersion",
+            "status": "available",
+            "api_routes": [
+                "GET /api/agents/{id}/versions",
+                "GET /api/agents/{id}/versions/{version}",
+                "GET /api/agents/{id}/releases",
+                "POST /api/agents/{id}/release-requests",
+                "POST /api/agents/{id}/releases/{release_id}/approve",
+                "POST /api/agents/{id}/releases/{release_id}/rollback"
+            ],
+            "lifecycle_actions": ["version", "request_release", "approve", "reject", "validate_deployment", "rollback"],
+            "evidence_events": [
+                "agent.created",
+                "agent.release_promotion_requested",
+                "agent.release_promotion_approved",
+                "agent.release_promotion_rejected",
+                "agent.release_rolled_back"
+            ],
+            "authority_boundary": "Agent releases remain governed by release policy, approval, deployment validation, and rollback controllers."
+        }),
+        json!({
+            "key": "environment_profile",
+            "product_object": "EnvironmentProfile",
+            "status": "available",
+            "api_routes": [
+                "GET /api/agent-runtime-profiles",
+                "POST /api/agent-runtime-profiles",
+                "GET /api/agent-runtime-profile-release-gates",
+                "GET /api/agent-runtime-profiles/{id}/release-gate",
+                "GET /api/environments"
+            ],
+            "lifecycle_actions": ["create", "update", "archive", "evaluate_release_gate", "bind_environment"],
+            "evidence_events": [
+                "agent_runtime_profile.created",
+                "agent_runtime_profile.updated",
+                "agent_runtime_profile.archived",
+                "environment.created",
+                "environment.updated"
+            ],
+            "authority_boundary": "Environment profiles select runtime bindings; execution still flows through Managed Runtime, Tool Router, Policy, Approval, and Audit."
+        }),
+        json!({
+            "key": "ontology_action_contract",
+            "product_object": "OntologyActionContract",
+            "status": "available",
+            "api_routes": [
+                "GET /api/ontology/action-contracts",
+                "GET /api/ontology/action-contracts/{id}",
+                "POST /api/ontology/action-contracts/{id}/release-candidate"
+            ],
+            "lifecycle_actions": ["list", "inspect", "package_release_candidate", "promote_release", "rollback_release"],
+            "evidence_events": [
+                "ontology_release.candidate_created",
+                "ontology_release.promoted",
+                "ontology_release.rolled_back"
+            ],
+            "authority_boundary": "Ontology grants business-action validity only; TaskGrant, Policy, Approval, connector scope, and Tool Router remain execution authority."
+        }),
+        json!({
+            "key": "tool_spec",
+            "product_object": "ToolSpec",
+            "status": "available",
+            "api_routes": [
+                "GET /api/ontology/onboarding/runs/{id}/tool-specs",
+                "POST /api/workflow-packs/validate"
+            ],
+            "lifecycle_actions": ["generate", "review", "materialize", "validate_pack_contract"],
+            "evidence_events": [
+                "ontology_onboarding.run_materialized",
+                "workflow_pack.installed",
+                "workflow_pack.staged"
+            ],
+            "authority_boundary": "Tool specs describe governed tool bindings; tool execution still requires TaskGrant, Policy, Approval when needed, and Tool Router enforcement."
+        }),
+        json!({
+            "key": "eval_gate",
+            "product_object": "EvalGate",
+            "status": "available",
+            "api_routes": [
+                "POST /api/eval/suites/stage2-regression",
+                "GET /api/eval/runs",
+                "POST /api/eval/runs/{id}/gate",
+                "GET /api/eval/runs/{id}/drift"
+            ],
+            "lifecycle_actions": ["bootstrap_suite", "run_eval", "gate", "inspect_drift"],
+            "evidence_events": [
+                "eval.suite_bootstrapped",
+                "eval.judge_profile_saved"
+            ],
+            "decision_surfaces": ["POST /api/eval/runs/{id}/gate"],
+            "authority_boundary": "Eval gates produce release evidence and do not execute business actions."
+        }),
+        json!({
+            "key": "release",
+            "product_object": "Release",
+            "status": "available",
+            "api_routes": [
+                "POST /api/workflow-packs/installations/{id}/release",
+                "POST /api/ontology/releases/{id}/promote",
+                "POST /api/agents/{id}/releases/{release_id}/approve",
+                "POST /api/policy/rollout/run-due"
+            ],
+            "lifecycle_actions": ["request", "gate", "approve", "promote", "activate"],
+            "evidence_events": [
+                "workflow_pack.released",
+                "ontology_release.promoted",
+                "agent.release_promotion_approved",
+                "policy.rollout_due_run"
+            ],
+            "authority_boundary": "Release is a governance transition with auditable gate evidence, not an execution shortcut."
+        }),
+        json!({
+            "key": "rollback",
+            "product_object": "Rollback",
+            "status": "available",
+            "api_routes": [
+                "POST /api/workflow-packs/installations/{id}/rollback",
+                "POST /api/ontology/releases/{id}/rollback",
+                "POST /api/agents/{id}/releases/{release_id}/rollback",
+                "POST /api/policy/rollout/rollback"
+            ],
+            "lifecycle_actions": ["validate_target", "rollback", "record_gate_evidence", "audit"],
+            "evidence_events": [
+                "workflow_pack.rolled_back",
+                "ontology_release.rolled_back",
+                "agent.release_rolled_back",
+                "policy.rollback_completed"
+            ],
+            "authority_boundary": "Rollback requires explicit target/gate evidence and records audit; it does not erase historical release evidence."
+        }),
+    ]
 }

@@ -9650,6 +9650,61 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
             .iter()
             .any(|state| state["view"] == "semantic")
     );
+
+    let product_capabilities = discovery["product_capabilities"].as_array().unwrap();
+    for key in [
+        "workflow_pack",
+        "domain_pack",
+        "agent_version",
+        "environment_profile",
+        "ontology_action_contract",
+        "tool_spec",
+        "eval_gate",
+        "release",
+        "rollback",
+    ] {
+        assert!(
+            product_capabilities
+                .iter()
+                .any(|capability| capability["key"] == json!(key)),
+            "missing product capability {key}"
+        );
+    }
+    assert!(product_capabilities.iter().any(|capability| {
+        capability["key"] == json!("workflow_pack")
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(
+                    "POST /api/workflow-packs/installations/{id}/release"
+                ))
+            && capability["evidence_events"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("workflow_pack.rolled_back"))
+    }));
+    assert!(product_capabilities.iter().any(|capability| {
+        capability["key"] == json!("ontology_action_contract")
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("validity only")
+    }));
+    assert!(product_capabilities.iter().any(|capability| {
+        capability["key"] == json!("release")
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("POST /api/policy/rollout/run-due"))
+            && capability["evidence_events"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("policy.rollout_due_run"))
+            && capability["evidence_events"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("agent.release_promotion_approved"))
+    }));
 }
 
 #[tokio::test]
