@@ -125,6 +125,8 @@ pub(crate) struct MaterializedManagerAgentPlanHandoff {
 pub(crate) struct MaterializeManagerAgentPlanWorkflowRun {
     pub(crate) workflow_definition_id: Uuid,
     #[serde(default)]
+    pub(crate) approval_id: Option<Uuid>,
+    #[serde(default)]
     pub(crate) environment_id: Option<Uuid>,
     #[serde(default)]
     pub(crate) title: Option<String>,

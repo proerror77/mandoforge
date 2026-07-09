@@ -9,16 +9,17 @@ use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
 use crate::{
-    AppError, AppState, CreateAgentHandoffAssignment, CreateAgentHandoffEvent,
+    AppError, AppState, Approval, CreateAgentHandoffAssignment, CreateAgentHandoffEvent,
     CreateManagerAgentPlan, CreateWorkflowRunFromDefinition, ManagerAgentPlan,
     MaterializeManagerAgentPlanHandoff, MaterializeManagerAgentPlanWorkflowRun,
     MaterializedManagerAgentPlanHandoff, MaterializedManagerAgentPlanWorkflowRun, Permission,
-    ReviewManagerAgentPlan, WorkflowRun, assign_agent_handoff_event_for_runtime,
-    authorize_collection_request, authorize_request, create_agent_handoff_event_for_session,
-    create_workflow_run_from_definition_with_context, new_audit_log, normalize_handoff_risk_level,
-    normalize_manager_plan_risk, normalize_manager_plan_status,
-    record_agent_handoff_audit_and_event, record_manager_agent_plan_audit_and_event,
-    record_manager_agent_plan_work_item_activity, visible_session_ids_for_principal,
+    ReviewManagerAgentPlan, SessionStatus, WorkflowRun, approval_is_expired,
+    assign_agent_handoff_event_for_runtime, authorize_collection_request, authorize_request,
+    create_agent_handoff_event_for_session, create_workflow_run_from_definition_with_context,
+    new_audit_log, normalize_handoff_risk_level, normalize_manager_plan_risk,
+    normalize_manager_plan_status, record_agent_handoff_audit_and_event,
+    record_manager_agent_plan_audit_and_event, record_manager_agent_plan_work_item_activity,
+    set_managed_session_status, visible_session_ids_for_principal,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -346,14 +347,16 @@ async fn materialize_manager_agent_plan_workflow_run(
             "manager plan must be reviewed or approved before materialization",
         ));
     }
-    if plan.risk_classification == "high" {
-        return Err(AppError::bad_request(
-            "manager plan workflow materialization cannot auto-start high-risk plans",
-        ));
-    }
     let definition = state
         .get_workflow_definition(input.workflow_definition_id)
         .await?;
+    let materialization_approval_id = manager_plan_workflow_materialization_approval_id(
+        &state,
+        &plan,
+        &definition,
+        input.approval_id,
+    )
+    .await?;
     if let Some(run) = find_existing_manager_plan_workflow_run(&state, definition.id, &plan).await?
     {
         authorize_request(
@@ -374,9 +377,16 @@ async fn materialize_manager_agent_plan_workflow_run(
         .title
         .filter(|title| !title.trim().is_empty())
         .unwrap_or_else(|| format!("Manager plan workflow: {}", definition.name));
-    let input_payload = manager_plan_workflow_input_payload(&plan, input.input_payload);
-    let runtime_envelope_request =
-        manager_plan_workflow_runtime_envelope_request(&plan, input.runtime_envelope);
+    let input_payload = manager_plan_workflow_input_payload(
+        &plan,
+        input.input_payload,
+        materialization_approval_id,
+    );
+    let runtime_envelope_request = manager_plan_workflow_runtime_envelope_request(
+        &plan,
+        input.runtime_envelope,
+        materialization_approval_id,
+    );
     let run = create_workflow_run_from_definition_with_context(
         &state,
         &definition,
@@ -404,6 +414,7 @@ async fn materialize_manager_agent_plan_workflow_run(
                 "root_task_grant_id": run.root_task_grant_id,
                 "source_work_item_id": run.source_work_item_id,
                 "risk_classification": plan.risk_classification,
+                "approval_id": materialization_approval_id,
                 "execution_strategy": run.execution_strategy,
                 "runtime_adapter": run.runtime_adapter,
                 "runtime_mode": run.runtime_mode
@@ -431,6 +442,7 @@ async fn materialize_manager_agent_plan_workflow_run(
                 "primary_session_id": run.primary_session_id,
                 "root_task_grant_id": run.root_task_grant_id,
                 "source_work_item_id": run.source_work_item_id,
+                "approval_id": materialization_approval_id,
                 "input_digest": run.input_digest,
                 "execution_strategy": run.execution_strategy,
                 "runtime_adapter": run.runtime_adapter,
@@ -452,6 +464,134 @@ async fn materialize_manager_agent_plan_workflow_run(
         workflow_definition: definition,
         workflow_run: run,
     }))
+}
+
+async fn manager_plan_workflow_materialization_approval_id(
+    state: &AppState,
+    plan: &ManagerAgentPlan,
+    definition: &crate::WorkflowDefinition,
+    approval_id: Option<Uuid>,
+) -> Result<Option<Uuid>, AppError> {
+    if plan.risk_classification != "high" {
+        return Ok(None);
+    }
+    let Some(approval_id) = approval_id else {
+        ensure_pending_manager_plan_workflow_materialization_approval(state, plan, definition)
+            .await?;
+        return Err(AppError::bad_request(
+            "manager plan workflow materialization cannot auto-start high-risk plans",
+        ));
+    };
+    let approval = state.get_approval(approval_id).await?;
+    validate_manager_plan_workflow_materialization_approval(plan, definition, &approval)?;
+    Ok(Some(approval.id))
+}
+
+async fn ensure_pending_manager_plan_workflow_materialization_approval(
+    state: &AppState,
+    plan: &ManagerAgentPlan,
+    definition: &crate::WorkflowDefinition,
+) -> Result<Approval, AppError> {
+    let evidence = manager_plan_workflow_materialization_approval_evidence(plan, definition);
+    if let Some(approval) = state.list_approvals().await?.into_iter().find(|approval| {
+        approval.session_id == plan.session_id
+            && approval.tool_call_id.is_none()
+            && approval.action == "manager_plan.workflow_run_materialized"
+            && approval.risk_level == "high"
+            && approval.status == "pending"
+            && approval.evidence == evidence
+    }) {
+        return Ok(approval);
+    }
+    let created_at = Utc::now();
+    let approval = state
+        .insert_approval(Approval {
+            id: Uuid::new_v4(),
+            session_id: plan.session_id,
+            tool_call_id: None,
+            action: "manager_plan.workflow_run_materialized".to_string(),
+            risk_level: "high".to_string(),
+            reason: "Approve high-risk manager plan workflow materialization".to_string(),
+            evidence,
+            decision_payload: json!({}),
+            status: "pending".to_string(),
+            expires_at: None,
+            created_at,
+            decided_at: None,
+        })
+        .await?;
+    state
+        .append_event(
+            "system",
+            Some(approval.id),
+            plan.session_id,
+            "approval.requested",
+            json!({
+                "approval_id": approval.id,
+                "action": approval.action,
+                "risk_level": approval.risk_level,
+                "reason": approval.reason,
+                "evidence": approval.evidence,
+                "expires_at": approval.expires_at
+            }),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(plan.session_id),
+            "system",
+            Some(plan.id),
+            "approval.requested",
+            "approval",
+            Some(approval.id),
+            json!({
+                "manager_plan_id": plan.id,
+                "workflow_definition_id": definition.id,
+                "action": approval.action,
+                "risk_level": approval.risk_level,
+                "expires_at": approval.expires_at
+            }),
+        ))
+        .await?;
+    set_managed_session_status(
+        state,
+        plan.session_id,
+        SessionStatus::RequiresAction,
+        "manager plan workflow materialization approval required",
+    )
+    .await?;
+    Ok(approval)
+}
+
+fn validate_manager_plan_workflow_materialization_approval(
+    plan: &ManagerAgentPlan,
+    definition: &crate::WorkflowDefinition,
+    approval: &Approval,
+) -> Result<(), AppError> {
+    if approval.session_id != plan.session_id
+        || approval.tool_call_id.is_some()
+        || approval.action != "manager_plan.workflow_run_materialized"
+        || approval.risk_level != "high"
+        || approval.status != "approved"
+        || approval_is_expired(approval)
+        || approval.evidence
+            != manager_plan_workflow_materialization_approval_evidence(plan, definition)
+    {
+        return Err(AppError::forbidden(
+            "approved manager plan workflow materialization approval is required",
+        ));
+    }
+    Ok(())
+}
+
+fn manager_plan_workflow_materialization_approval_evidence(
+    plan: &ManagerAgentPlan,
+    definition: &crate::WorkflowDefinition,
+) -> Value {
+    json!({
+        "manager_plan_id": plan.id,
+        "workflow_definition_id": definition.id
+    })
 }
 
 async fn find_existing_manager_plan_workflow_run(
@@ -504,7 +644,11 @@ async fn workflow_run_has_manager_plan_materialization_event(
         }))
 }
 
-fn manager_plan_workflow_input_payload(plan: &ManagerAgentPlan, input: Value) -> Value {
+fn manager_plan_workflow_input_payload(
+    plan: &ManagerAgentPlan,
+    input: Value,
+    approval_id: Option<Uuid>,
+) -> Value {
     let mut payload = match input {
         Value::Object(map) => map,
         _ => Map::new(),
@@ -519,6 +663,9 @@ fn manager_plan_workflow_input_payload(plan: &ManagerAgentPlan, input: Value) ->
         "risk_classification".to_string(),
         json!(plan.risk_classification),
     );
+    if let Some(approval_id) = approval_id {
+        payload.insert("approval_id".to_string(), json!(approval_id));
+    }
     payload.insert("task_intake".to_string(), plan.task_intake.clone());
     payload.insert("decomposition".to_string(), plan.decomposition.clone());
     payload.insert(
@@ -540,6 +687,7 @@ fn manager_plan_workflow_input_payload(plan: &ManagerAgentPlan, input: Value) ->
 fn manager_plan_workflow_runtime_envelope_request(
     plan: &ManagerAgentPlan,
     runtime_envelope: Value,
+    approval_id: Option<Uuid>,
 ) -> Value {
     let mut envelope = match runtime_envelope {
         Value::Object(map) => map,
@@ -555,5 +703,8 @@ fn manager_plan_workflow_runtime_envelope_request(
         "risk_classification".to_string(),
         json!(plan.risk_classification),
     );
+    if let Some(approval_id) = approval_id {
+        envelope.insert("approval_id".to_string(), json!(approval_id));
+    }
     Value::Object(envelope)
 }

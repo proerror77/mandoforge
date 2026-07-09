@@ -5684,7 +5684,9 @@ async fn manager_plan_materialize_handoff_creates_runtime_assignment() {
 
 #[tokio::test]
 async fn manager_plan_materialize_workflow_run_creates_root_grant_and_start_step() {
-    let app = test_app().await;
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let app = build_router(state.clone());
     let admin_headers = [
         ("x-mandoforge-subject", "admin-1"),
         ("x-mandoforge-roles", "admin"),
@@ -6072,7 +6074,7 @@ async fn manager_plan_materialize_workflow_run_creates_root_grant_and_start_step
     )
     .await;
     let (status, error) = request_value(
-        app,
+        app.clone(),
         json_request_with_headers(
             "POST",
             &format!(
@@ -6088,6 +6090,152 @@ async fn manager_plan_materialize_workflow_run_creates_root_grant_and_start_step
     assert_eq!(
         error["error"],
         "manager plan workflow materialization cannot auto-start high-risk plans"
+    );
+    let approval_evidence = json!({
+        "manager_plan_id": high_risk_reviewed.id,
+        "workflow_definition_id": definition.id
+    });
+    let requested_approvals: Vec<Approval> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/approvals")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let pending_approval = requested_approvals
+        .into_iter()
+        .find(|approval| {
+            approval.status == "pending"
+                && approval.session_id == high_risk_reviewed.session_id
+                && approval.action == "manager_plan.workflow_run_materialized"
+                && approval.evidence == approval_evidence
+        })
+        .expect("high-risk materialization requested approval");
+    let (status, error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!(
+                "/api/manager-plans/{}/materialize-workflow-run",
+                high_risk_reviewed.id
+            ),
+            json!({
+                "workflow_definition_id": definition.id,
+                "approval_id": pending_approval.id
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        error["error"],
+        "approved manager plan workflow materialization approval is required"
+    );
+    let approved_materialization_approval =
+        |session_id: Uuid, tool_call_id: Option<Uuid>, evidence: Value, reason: &str| Approval {
+            id: Uuid::new_v4(),
+            session_id,
+            tool_call_id,
+            action: "manager_plan.workflow_run_materialized".to_string(),
+            risk_level: "high".to_string(),
+            reason: reason.to_string(),
+            evidence,
+            decision_payload: empty_json_object(),
+            status: "approved".to_string(),
+            expires_at: None,
+            created_at: Utc::now(),
+            decided_at: Some(Utc::now()),
+        };
+    for invalid_approval in [
+        approved_materialization_approval(
+            high_risk_reviewed.session_id,
+            None,
+            json!({
+                "manager_plan_id": Uuid::new_v4(),
+                "workflow_definition_id": definition.id
+            }),
+            "Wrong manager plan",
+        ),
+        approved_materialization_approval(
+            high_risk_reviewed.session_id,
+            None,
+            json!({
+                "manager_plan_id": high_risk_reviewed.id,
+                "workflow_definition_id": Uuid::new_v4()
+            }),
+            "Wrong workflow definition",
+        ),
+        approved_materialization_approval(
+            Uuid::new_v4(),
+            None,
+            approval_evidence.clone(),
+            "Wrong session",
+        ),
+        approved_materialization_approval(
+            high_risk_reviewed.session_id,
+            Some(Uuid::new_v4()),
+            approval_evidence.clone(),
+            "Tool-call approval cannot materialize manager plan",
+        ),
+    ] {
+        let invalid_approval = state
+            .insert_approval(invalid_approval)
+            .await
+            .expect("insert invalid approval");
+        let (status, error) = request_value(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!(
+                    "/api/manager-plans/{}/materialize-workflow-run",
+                    high_risk_reviewed.id
+                ),
+                json!({
+                    "workflow_definition_id": definition.id,
+                    "approval_id": invalid_approval.id
+                }),
+                &admin_headers,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            error["error"],
+            "approved manager plan workflow materialization approval is required"
+        );
+    }
+    let approved_approval: Approval = request_json(
+        app.clone(),
+        approve_request(format!("/api/approvals/{}/approve", pending_approval.id)),
+    )
+    .await;
+    let high_risk_materialized: MaterializedManagerAgentPlanWorkflowRun = request_json(
+        app,
+        json_request_with_headers(
+            "POST",
+            &format!(
+                "/api/manager-plans/{}/materialize-workflow-run",
+                high_risk_reviewed.id
+            ),
+            json!({
+                "workflow_definition_id": definition.id,
+                "approval_id": approved_approval.id
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    assert_eq!(
+        high_risk_materialized.workflow_run.input_payload["approval_id"],
+        json!(approved_approval.id)
+    );
+    assert_eq!(
+        high_risk_materialized.workflow_run.runtime_envelope["request_envelope"]["approval_id"],
+        json!(approved_approval.id)
     );
 }
 
