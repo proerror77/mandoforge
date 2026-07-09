@@ -123,6 +123,35 @@ pub(crate) struct CreateWorkItem {
     pub(crate) metadata: Value,
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct IngestWorkSurfaceEvent {
+    pub(crate) surface: String,
+    pub(crate) event_type: String,
+    #[serde(default)]
+    pub(crate) external_id: Option<String>,
+    pub(crate) title: String,
+    #[serde(default)]
+    pub(crate) description: Option<String>,
+    #[serde(default)]
+    pub(crate) source_url: Option<String>,
+    #[serde(default = "default_work_item_priority")]
+    pub(crate) priority: String,
+    #[serde(default)]
+    pub(crate) assignee: Option<String>,
+    #[serde(default)]
+    pub(crate) occurred_at: Option<String>,
+    #[serde(default)]
+    pub(crate) actor: Option<String>,
+    #[serde(default = "crate::empty_json_object")]
+    pub(crate) metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct WorkSurfaceIngestion {
+    pub(crate) work_item: WorkItem,
+    pub(crate) activity: WorkItemActivityEntry,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WorkItemAssignment {
     pub(crate) id: Uuid,

@@ -62,6 +62,10 @@ The Managed Runtime Layer has a strong baseline:
 
 The first Collaboration Layer slice is now in place:
 
+- `/api/work-surface-events` ingests external Work Surface events into
+  WorkItems without starting runtime execution, preserving surface identity,
+  event type, external id, source URL, actor, timestamp, metadata, Activity Feed
+  evidence, and audit evidence.
 - `/api/work-items` creates and lists first-class WorkItems.
 - WorkItem creation persists source, priority, status, scope, and metadata.
 - `/api/work-items/:id/assignments` routes WorkItems to users, agents, squads,
@@ -255,18 +259,21 @@ Acceptance:
 The Full Agent OS narrative should be implemented through separate focused
 plans:
 
-1. Runtime adapter consolidation: make Environment runtime binding the only
+1. Work Surface connectors: attach Feishu, Slack, GitHub, Jira, Linear, and
+   Email adapters to `/api/work-surface-events`; the shared WorkItem ingestion
+   contract is already in place.
+2. Runtime adapter consolidation: make Environment runtime binding the only
    product entrypoint for managed runtime execution while keeping `agent_cli.exec`
    and `codex.exec` as compatibility facades.
-2. Environment Scheduling + K Agent: complete the Environment Work Queue,
+3. Environment Scheduling + K Agent: complete the Environment Work Queue,
    heartbeat, sandbox dispatch, and runtime event return contract. Session-loop
    K Agent claim and lease evidence is already recorded as `k_agent.claimed`.
-3. Manager Runtime materialization: complete the main WorkflowRun-first
+4. Manager Runtime materialization: complete the main WorkflowRun-first
    materialization path for reviewed ManagerPlans. The handoff materialization
    path already connects ManagerPlan, Assignment, SessionThread, and child
    TaskGrant evidence when a parent WorkflowRun grant is active.
-4. Ontology Action Contract enforcement: make action validity a checked input to
+5. Ontology Action Contract enforcement: make action validity a checked input to
    Tool Router without letting ontology bypass TaskGrant, Policy, or Approval.
-5. Pack / Release / Evidence: make WorkflowPack, DomainPack, AgentVersion,
+6. Pack / Release / Evidence: make WorkflowPack, DomainPack, AgentVersion,
    EnvironmentProfile, OntologyActionContract, ToolSpec, EvalGate, Release, and
    Rollback auditable as product capabilities.

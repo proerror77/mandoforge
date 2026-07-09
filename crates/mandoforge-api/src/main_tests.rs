@@ -32554,6 +32554,114 @@ async fn work_items_create_list_and_audit_collaboration_intake() {
 }
 
 #[tokio::test]
+async fn work_surface_event_ingests_work_item_without_runtime_execution() {
+    let app = test_app().await;
+    let payload = json!({
+        "surface": "feishu",
+        "event_type": "message.created",
+        "external_id": "om_123",
+        "title": "Customer asks for refund automation review",
+        "description": "Feishu message should become visible collaboration work.",
+        "source_url": "https://mandonothing.feishu.cn/im/om_123",
+        "priority": "high",
+        "actor": "sonic.shih",
+        "occurred_at": "2026-07-09T09:30:00Z",
+        "metadata": {
+            "channel": "ops-refunds",
+            "semantic_scopes": {
+                "project_scope": "mandoforge",
+                "repo_scope": "mandoforge",
+                "service_scope": "agent-os",
+                "workflow_scope": "refund-review",
+                "policy_scope": "approval-required",
+                "memory_scope": "customer-ops"
+            }
+        }
+    });
+
+    let ingested: WorkSurfaceIngestion = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/work-surface-events",
+            payload.clone(),
+            &[
+                ("x-mandoforge-subject", "surface-ingestor"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(ingested.work_item.source, "feishu");
+    assert_eq!(
+        ingested.work_item.source_url.as_deref(),
+        payload["source_url"].as_str()
+    );
+    assert_eq!(ingested.work_item.priority, "high");
+    assert_eq!(
+        ingested.work_item.metadata["work_surface"]["external_id"],
+        json!("om_123")
+    );
+    assert_eq!(
+        ingested.work_item.metadata["semantic_scopes"]["workflow_scope"],
+        json!("refund-review")
+    );
+    assert_eq!(ingested.activity.event_type, "work_surface.ingested");
+    assert_eq!(
+        ingested.activity.actor_subject.as_deref(),
+        Some("surface-ingestor")
+    );
+
+    let activity: Vec<WorkItemActivityEntry> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!(
+                "/api/work-items/{}/activity",
+                ingested.work_item.id
+            ))
+            .header("x-mandoforge-subject", "surface-ingestor")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(activity.iter().any(|entry| {
+        entry.event_type == "work_surface.ingested"
+            && entry.metadata["work_surface"]["event_type"] == json!("message.created")
+    }));
+
+    let sessions: Vec<Session> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/sessions")
+            .header("x-mandoforge-subject", "surface-ingestor")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(sessions.is_empty());
+
+    let audit_logs: Vec<AuditLog> = request_json(
+        app,
+        Request::builder()
+            .uri("/api/audit-logs")
+            .header("x-mandoforge-subject", "surface-ingestor")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(audit_logs.iter().any(|log| {
+        log.action == "work_surface.ingested"
+            && log.resource_type == "work_item"
+            && log.resource_id == Some(ingested.work_item.id)
+            && log.details["surface"] == json!("feishu")
+            && log.details["event_type"] == json!("message.created")
+    }));
+}
+
+#[tokio::test]
 async fn work_items_reject_mismatched_collaboration_scope() {
     let app = test_app().await;
     let admin_headers = [

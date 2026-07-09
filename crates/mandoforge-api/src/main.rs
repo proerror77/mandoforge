@@ -350,8 +350,8 @@ pub(crate) use types::codex_app_server::{
 };
 pub(crate) use types::collaboration::{
     AgentTeammate, CreateAgentTeammate, CreateSquad, CreateSquadMember, CreateWorkItem,
-    CreateWorkItemAssignment, CreateWorkItemReview, Squad, SquadMember, WorkItem,
-    WorkItemActivityEntry, WorkItemAssignment, WorkItemReview,
+    CreateWorkItemAssignment, CreateWorkItemReview, IngestWorkSurfaceEvent, Squad, SquadMember,
+    WorkItem, WorkItemActivityEntry, WorkItemAssignment, WorkItemReview, WorkSurfaceIngestion,
 };
 pub(crate) use types::context_packet::{
     ContextPacket, ContextPacketAgent, ContextPacketRuntimeProfile, ContextPacketSourceRef,

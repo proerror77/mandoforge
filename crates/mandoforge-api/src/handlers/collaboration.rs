@@ -2,19 +2,19 @@ use axum::{
     Json, Router,
     extract::{Path, State},
     http::HeaderMap,
-    routing::get,
+    routing::{get, post},
 };
 use chrono::Utc;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
 use crate::{
     AgentTeammate, AppError, AppState, AuthorizationRequest, CreateAgentTeammate, CreateSquad,
-    CreateSquadMember, CreateWorkItem, CreateWorkItemAssignment, CreateWorkItemReview, Permission,
-    Squad, SquadMember, WorkItem, WorkItemActivityEntry, WorkItemAssignment, WorkItemReview,
-    authorize_request, capability_failure_modes, capability_primary_action,
-    capability_sample_tasks, new_audit_log, principal_from_request,
-    project_work_item_semantic_object, validate_work_item_semantic_scopes,
+    CreateSquadMember, CreateWorkItem, CreateWorkItemAssignment, CreateWorkItemReview,
+    IngestWorkSurfaceEvent, Permission, Squad, SquadMember, WorkItem, WorkItemActivityEntry,
+    WorkItemAssignment, WorkItemReview, WorkSurfaceIngestion, authorize_request,
+    capability_failure_modes, capability_primary_action, capability_sample_tasks, new_audit_log,
+    principal_from_request, project_work_item_semantic_object, validate_work_item_semantic_scopes,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -23,6 +23,7 @@ pub(crate) fn router() -> Router<AppState> {
             "/api/work-items",
             get(list_work_items).post(create_work_item),
         )
+        .route("/api/work-surface-events", post(ingest_work_surface_event))
         .route(
             "/api/agent-teammates",
             get(list_agent_teammates).post(create_agent_teammate),
@@ -115,6 +116,128 @@ async fn create_work_item(
         .await?;
     project_work_item_semantic_object(&state, &work_item).await?;
     Ok(Json(work_item))
+}
+
+async fn ingest_work_surface_event(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<IngestWorkSurfaceEvent>,
+) -> Result<Json<WorkSurfaceIngestion>, AppError> {
+    let principal = principal_from_request(&state, &headers).await?;
+    let request = AuthorizationRequest {
+        tenant_id: state.current_tenant_id(),
+        permission: Permission::SessionsWrite,
+        resource_type: "work_surface_event".to_string(),
+        resource_id: None,
+    };
+    state.authorizer.authorize(&principal, &request).await?;
+    let surface = required_work_surface_text(input.surface, "surface")?;
+    let event_type = required_work_surface_text(input.event_type, "event_type")?;
+    let metadata = work_surface_metadata(
+        input.metadata,
+        &surface,
+        &event_type,
+        input.external_id,
+        input.occurred_at,
+        input.actor.clone(),
+    );
+    validate_work_item_semantic_scopes(&metadata)?;
+    let work_item = state
+        .create_work_item(CreateWorkItem {
+            organization_id: None,
+            team_id: None,
+            project_id: None,
+            title: input.title,
+            description: input.description,
+            source: surface.clone(),
+            source_url: input.source_url,
+            status: "open".to_string(),
+            priority: input.priority,
+            assignee: input.assignee,
+            metadata,
+        })
+        .await?;
+    let activity_metadata = json!({
+        "surface": surface,
+        "event_type": event_type,
+        "source_url": work_item.source_url,
+        "work_surface": work_item.metadata.get("work_surface").cloned().unwrap_or(Value::Null)
+    });
+    let activity = state
+        .append_work_item_activity_entry(
+            work_item.id,
+            "work_surface.ingested",
+            Some(principal.subject_id.clone()),
+            Some("work_surface"),
+            None,
+            format!("Ingested {} event: {}", surface, work_item.title),
+            activity_metadata.clone(),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "work_surface",
+            None,
+            "work_surface.ingested",
+            "work_item",
+            Some(work_item.id),
+            json!({
+                "subject": principal.subject_id,
+                "surface": surface,
+                "event_type": event_type,
+                "actor": input.actor,
+                "work_item_id": work_item.id,
+                "source_url": work_item.source_url,
+                "metadata": activity_metadata
+            }),
+        ))
+        .await?;
+    project_work_item_semantic_object(&state, &work_item).await?;
+    Ok(Json(WorkSurfaceIngestion {
+        work_item,
+        activity,
+    }))
+}
+
+fn required_work_surface_text(value: String, field: &str) -> Result<String, AppError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        Err(AppError::bad_request(format!(
+            "work surface event {field} is required"
+        )))
+    } else {
+        Ok(trimmed.to_string())
+    }
+}
+
+fn work_surface_metadata(
+    metadata: Value,
+    surface: &str,
+    event_type: &str,
+    external_id: Option<String>,
+    occurred_at: Option<String>,
+    actor: Option<String>,
+) -> Value {
+    let work_surface = json!({
+        "surface": surface,
+        "event_type": event_type,
+        "external_id": external_id,
+        "occurred_at": occurred_at,
+        "actor": actor
+    });
+    match metadata {
+        Value::Object(mut object) => {
+            object.insert("work_surface".to_string(), work_surface);
+            Value::Object(object)
+        }
+        value => {
+            let mut object = Map::new();
+            object.insert("work_surface".to_string(), work_surface);
+            object.insert("surface_payload".to_string(), value);
+            Value::Object(object)
+        }
+    }
 }
 
 async fn list_agent_teammates(
