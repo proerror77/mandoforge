@@ -17,10 +17,10 @@ use crate::{
     AppError, AppState, CreateRemoteComputerJobAssignment, ExecutionJobStatus, Permission,
     RemoteComputerJobAssignment, RemoteComputerRunnerConfig, RemoteComputerRunnerDryRunRequest,
     Role, SessionLoopJob, SessionStatus, StoreBackend, WorkerLoadValidationRun,
-    WorkerReadinessReport, authorize_collection_request, authorize_execution_job_run,
-    authorize_request, authorize_session_loop_job_run, build_worker_readiness,
-    enforce_worker_environment_binding, enforce_worker_pool_binding, environment_worker_pool,
-    execute_worker_load_validation, header_value, new_audit_log,
+    WorkerReadinessReport, append_k_agent_session_loop_return_event, authorize_collection_request,
+    authorize_execution_job_run, authorize_request, authorize_session_loop_job_run,
+    build_worker_readiness, enforce_worker_environment_binding, enforce_worker_pool_binding,
+    environment_worker_pool, execute_worker_load_validation, header_value, new_audit_log,
     reconcile_workflow_steps_after_session_loop_job, record_remote_computer_job_assignment_event,
     remote_computer_pod_execution_requested_from_env, remote_computer_runner_for_config,
     run_execution_job, run_session_loop, session_accepts_worker_execution,
@@ -415,39 +415,6 @@ async fn run_session_loop_job_route(
             Err(error)
         }
     }
-}
-
-async fn append_k_agent_session_loop_return_event(
-    state: &AppState,
-    job: &SessionLoopJob,
-    event_type: &str,
-    worker_id: &str,
-    worker_pool: Option<&str>,
-    extra_payload: Value,
-) -> Result<(), AppError> {
-    let mut payload = json!({
-        "session_loop_job_id": job.id,
-        "environment_id": job.environment_id,
-        "worker_id": worker_id,
-        "worker_pool": worker_pool,
-        "attempt_count": job.attempt_count,
-        "pending_event_seq_start": job.pending_event_seq_start,
-        "pending_event_seq_end": job.pending_event_seq_end,
-        "processed_event_seq": job.processed_event_seq,
-        "dispatch_surface": "session_loop_job",
-        "authority_boundary": "environment_scheduling_only",
-        "return_contract": "session_loop_job_return_evidence",
-    });
-    if let (Some(payload), Value::Object(extra_payload)) = (payload.as_object_mut(), extra_payload)
-    {
-        for (key, value) in extra_payload {
-            payload.insert(key, value);
-        }
-    }
-    state
-        .append_event("worker", Some(job.id), job.session_id, event_type, payload)
-        .await
-        .map(|_| ())
 }
 
 async fn cancel_execution_job_route(

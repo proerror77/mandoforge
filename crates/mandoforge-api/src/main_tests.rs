@@ -33672,6 +33672,39 @@ async fn workflow_step_run_endpoint_claims_and_executes_session_loop() {
         event.event_type == "agent_inbox.claimed"
             && event.payload["context_packet_id"] == executed["context_packet"]["id"]
     }));
+    let k_agent_completed = events
+        .iter()
+        .find(|event| {
+            event.event_type == "k_agent.completed"
+                && event.payload["workflow_step_run_id"] == json!(step_id)
+        })
+        .expect("workflow step run records K Agent completion evidence");
+    assert_eq!(
+        k_agent_completed.payload["session_loop_job_id"],
+        executed["session_loop_job"]["id"]
+    );
+    assert_eq!(
+        k_agent_completed.payload["worker_id"],
+        json!("worker-whiskey-1")
+    );
+    assert_eq!(k_agent_completed.payload["worker_pool"], json!(null));
+    assert_eq!(k_agent_completed.payload["job_status"], json!("completed"));
+    assert_eq!(
+        k_agent_completed.payload["session_status"],
+        json!("requires_action")
+    );
+    assert_eq!(
+        k_agent_completed.payload["dispatch_surface"],
+        json!("session_loop_job")
+    );
+    assert_eq!(
+        k_agent_completed.payload["authority_boundary"],
+        json!("environment_scheduling_only")
+    );
+    assert_eq!(
+        k_agent_completed.payload["return_contract"],
+        json!("session_loop_job_return_evidence")
+    );
     let provider_request = events
         .iter()
         .find(|event| {

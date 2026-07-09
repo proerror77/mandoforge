@@ -16,9 +16,9 @@ use crate::{
     UpdateWorkflowDefinition, UpdateWorkflowStepRun, WorkflowDefinition, WorkflowRun,
     WorkflowRunGraphConsole, WorkflowScheduledStepActivationRun, WorkflowStepRun,
     WorkflowTransition, WorkflowTransitionQuery, activate_due_workflow_steps_for_run,
-    advance_workflow_graph_after_step_update, append_user_message_event,
-    authorize_collection_request, authorize_request, build_agent_inbox_snapshot,
-    build_task_board_snapshot, build_workflow_run_graph_console,
+    advance_workflow_graph_after_step_update, append_k_agent_session_loop_return_event,
+    append_user_message_event, authorize_collection_request, authorize_request,
+    build_agent_inbox_snapshot, build_task_board_snapshot, build_workflow_run_graph_console,
     claim_workflow_step_run as claim_workflow_step_run_inner, collect_session_runtime_refs,
     diff_session_runtime_refs, enforce_worker_environment_binding, enforce_worker_pool_binding,
     enqueue_session_loop, ensure_child_task_grant_within_parent, ensure_primary_session_thread,
@@ -879,6 +879,12 @@ async fn run_workflow_step_run(
         },
     )
     .await?;
+    let worker_pool = headers
+        .get("x-mandoforge-worker-pool")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
     let session_id = claim.step.session_id.unwrap_or(run.primary_session_id);
     let before_refs = collect_session_runtime_refs(&state, session_id).await?;
     record_workflow_step_worker_started(
@@ -924,6 +930,19 @@ async fn run_workflow_step_run(
             let completed = state
                 .complete_session_loop_job(running.id, &worker_id)
                 .await?;
+            append_k_agent_session_loop_return_event(
+                &state,
+                &completed,
+                "k_agent.completed",
+                &worker_id,
+                worker_pool.as_deref(),
+                json!({
+                    "job_status": completed.status.as_str(),
+                    "session_status": session.status.as_str(),
+                    "workflow_step_run_id": claim.step.id,
+                }),
+            )
+            .await?;
             state
                 .append_event(
                     "worker",
@@ -968,11 +987,26 @@ async fn run_workflow_step_run(
             let failed = state
                 .fail_session_loop_job(running.id, &worker_id, &error_message)
                 .await?;
-            set_managed_session_status(
+            let failed_session = set_managed_session_status(
                 &state,
                 failed.session_id,
                 SessionStatus::Failed,
                 "workflow step session loop failed",
+            )
+            .await?;
+            append_k_agent_session_loop_return_event(
+                &state,
+                &failed,
+                "k_agent.failed",
+                &worker_id,
+                worker_pool.as_deref(),
+                json!({
+                    "job_status": failed.status.as_str(),
+                    "session_status": failed_session.status.as_str(),
+                    "error": error_message.clone(),
+                    "terminal_session": error_message == "session is terminal and cannot run session loop work",
+                    "workflow_step_run_id": claim.step.id,
+                }),
             )
             .await?;
             state
