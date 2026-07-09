@@ -24332,6 +24332,25 @@ async fn managed_cli_runtime_profile_can_drive_agent_cli_worker() {
             .expect("valid request"),
     )
     .await;
+    let k_agent_completed = events
+        .iter()
+        .find(|event| {
+            event.event_type == "k_agent.completed"
+                && event.payload["execution_job_id"] == json!(job_id)
+        })
+        .expect("execution job K Agent completion evidence");
+    assert_eq!(
+        k_agent_completed.payload["artifact_return_evidence"]["source"],
+        json!("tool_call.result")
+    );
+    assert_eq!(
+        k_agent_completed.payload["artifact_return_evidence"]["runtime_final_artifact_count"],
+        json!(1)
+    );
+    assert_eq!(
+        k_agent_completed.payload["return_contract"],
+        json!("execution_job_return_evidence")
+    );
     assert!(events.iter().any(|event| {
         event.event_type == "agent_cli.task.completed"
             && event.payload["runtime_type"] == "claude_code"

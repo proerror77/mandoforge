@@ -564,6 +564,8 @@ async fn run_execution_job_route(
             } else {
                 "k_agent.failed"
             };
+            let artifact_return_evidence =
+                execution_job_artifact_return_evidence(&state, &updated).await?;
             append_k_agent_execution_job_event(
                 &state,
                 &updated,
@@ -574,6 +576,7 @@ async fn run_execution_job_route(
                     "job_status": updated.status.as_str(),
                     "retry_queued": updated.status == ExecutionJobStatus::Queued,
                     "last_error": updated.last_error,
+                    "artifact_return_evidence": artifact_return_evidence,
                 }),
             )
             .await?;
@@ -598,6 +601,20 @@ async fn run_execution_job_route(
             Err(error)
         }
     }
+}
+
+async fn execution_job_artifact_return_evidence(
+    state: &AppState,
+    job: &crate::execution_queue::ExecutionJob,
+) -> Result<Value, AppError> {
+    let tool_call = state.get_tool_call(job.tool_call_id).await?;
+    let result = tool_call.result.unwrap_or(Value::Null);
+    Ok(json!({
+        "source": "tool_call.result",
+        "runtime_adapter_event_count": result.get("runtime_adapter_event_count"),
+        "runtime_turn_event_count": result.get("runtime_turn_event_count"),
+        "runtime_final_artifact_count": result.get("runtime_final_artifact_count").cloned().unwrap_or(json!(0)),
+    }))
 }
 
 async fn append_k_agent_execution_job_event(

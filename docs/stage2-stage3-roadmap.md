@@ -327,7 +327,8 @@ plans:
    `k_agent.completed`, and `k_agent.failed`; completion/failure return
    evidence is shared across direct session-loop and workflow-step run
    surfaces. Execution-job K Agent claim and return evidence is also recorded
-   for `/api/execution-jobs/:id/run`; sandbox dispatch and richer artifact
+   for `/api/execution-jobs/:id/run`, including runtime artifact return counts
+   from the completed tool result; sandbox dispatch and artifact ID/lineage
    return evidence remain open.
 4. Manager Runtime materialization: expand the reviewed ManagerPlan
    materialization policy with richer WorkflowRun selection. The current
