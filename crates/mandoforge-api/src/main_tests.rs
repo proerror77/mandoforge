@@ -9817,6 +9817,7 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
         "work_item",
         "work_item_assignment",
         "work_item_review",
+        "work_item_activity",
         "manager_plan",
         "agent_handoff",
         "workflow_pack",
@@ -9921,6 +9922,41 @@ async fn capability_discovery_exposes_agent_cards_prompts_and_onboarding_guidanc
                 .as_str()
                 .unwrap_or_default()
                 .contains("promote a ManagerPlan by itself")
+    }));
+    assert!(product_capabilities.iter().any(|capability| {
+        capability["key"] == json!("work_item_activity")
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("GET /api/work-items/{id}/activity"))
+            && capability["api_routes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("POST /api/work-surface-events"))
+            && capability["evidence_events"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("work_surface.ingested"))
+            && capability["evidence_events"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("work_item.assignment_created"))
+            && capability["evidence_events"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("work_item.review_created"))
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("human-visible Collaboration Layer timeline")
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("does not start runtime execution")
+            && capability["authority_boundary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("replace immutable audit logs")
     }));
     assert!(product_capabilities.iter().any(|capability| {
         capability["key"] == json!("manager_plan")

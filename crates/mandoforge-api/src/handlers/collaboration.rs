@@ -1490,6 +1490,27 @@ fn agent_os_product_capabilities() -> Vec<Value> {
             "authority_boundary": "WorkItemReview records Collaboration Layer review requests and decisions with activity/audit evidence; it is not an Approval, does not authorize runtime execution, create TaskGrant scope, bypass Manager Runtime, Policy, Tool Router, or Audit, or promote a ManagerPlan by itself."
         }),
         json!({
+            "key": "work_item_activity",
+            "product_object": "WorkItemActivityEntry",
+            "status": "available",
+            "api_routes": [
+                "GET /api/work-items/{id}/activity",
+                "POST /api/work-items",
+                "POST /api/work-surface-events",
+                "POST /api/work-items/{id}/assignments",
+                "POST /api/work-items/{id}/reviews"
+            ],
+            "lifecycle_actions": ["list", "record_work_item_creation", "record_work_surface_ingestion", "record_replay", "record_assignment", "record_review"],
+            "evidence_events": [
+                "work_item.created",
+                "work_surface.ingested",
+                "work_surface.replayed",
+                "work_item.assignment_created",
+                "work_item.review_created"
+            ],
+            "authority_boundary": "WorkItemActivityEntry is the human-visible Collaboration Layer timeline for WorkItems; it does not start runtime execution, authorize tools, create TaskGrant scope, approve actions, bypass Manager Runtime, Policy, Tool Router, or Audit, or replace immutable audit logs."
+        }),
+        json!({
             "key": "work_surface_connector",
             "product_object": "WorkSurfaceConnector",
             "status": "available",

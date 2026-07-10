@@ -121,9 +121,14 @@ The first Collaboration Layer slice is now in place:
   evidence for review requests and decisions without becoming an Approval gate.
 - `/api/work-items/:id/activity` exposes the human-readable Activity Feed for
   intake, routing, and review.
+- WorkItemActivityEntry now has explicit capability discovery for the existing
+  WorkItem creation, Work Surface ingestion/replay, assignment, and review
+  activity timeline while preserving the boundary that Activity Feed entries
+  are Collaboration Layer readback, not execution authority, Approval gates,
+  TaskGrant scope, or replacements for immutable audit logs.
 - `/api/capability-discovery` now exposes an Agent OS product capability catalog
-  for WorkItem, WorkItemAssignment, WorkItemReview, ManagerPlan, AgentHandoff,
-  WorkflowPack, DomainPack, Agent, AgentVersion, Environment,
+  for WorkItem, WorkItemAssignment, WorkItemReview, WorkItemActivityEntry,
+  ManagerPlan, AgentHandoff, WorkflowPack, DomainPack, Agent, AgentVersion, Environment,
   EnvironmentProfile, ManagedSession, SessionEvent, SessionLoopJob,
   SessionThread, RuntimeTurn, ContextPacket, ArtifactStore, AuditLogger,
   RemoteComputer, KAgent, TaskGrant, PolicyEngine, Approval, ToolRouter,
