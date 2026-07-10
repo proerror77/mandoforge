@@ -35,7 +35,14 @@ async fn environment_resource_can_bind_session() {
                 "name": "Whiskey Remote",
                 "environment_type": "remote_computer",
                 "runtime_profile_id": profile.id,
-                "remote_computer_profile": {"pool": "whiskey"},
+                "remote_computer_profile": {
+                    "pool": "whiskey",
+                    "profile": "agent-sandbox",
+                    "namespace": "agent-os",
+                    "sandbox_warm_pool": "mandoforge-agent-runtime",
+                    "cache_scope": "mandoforge",
+                    "workspace_seed": "mandoforge"
+                },
                 "worker_queue_binding": {"queue": "managed-agent"},
                 "release_state": "active",
                 "status": "enabled"
@@ -49,6 +56,18 @@ async fn environment_resource_can_bind_session() {
     .await;
     assert_eq!(environment.environment_type, "remote_computer");
     assert_eq!(environment.runtime_profile_id, Some(profile.id));
+    assert_eq!(
+        environment.remote_computer_profile["sandbox_warm_pool"],
+        "mandoforge-agent-runtime"
+    );
+    assert_eq!(
+        environment.remote_computer_profile["cache_scope"],
+        "mandoforge"
+    );
+    assert_eq!(
+        environment.remote_computer_profile["workspace_seed"],
+        "mandoforge"
+    );
 
     let agents: Vec<Agent> = request_json(
         app.clone(),
@@ -95,6 +114,69 @@ async fn environment_resource_can_bind_session() {
     )
     .await;
     assert!(listed.iter().any(|item| item.id == environment.id));
+}
+
+#[tokio::test]
+async fn agent_sandbox_environment_profile_fields_require_strings() {
+    let app = test_app().await;
+    let (status, value) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/environments",
+            json!({
+                "name": "Invalid Agent Sandbox",
+                "environment_type": "remote_computer",
+                "remote_computer_profile": {
+                    "profile": "agent-sandbox",
+                    "sandbox_warm_pool": 42
+                },
+                "worker_queue_binding": {"queue": "managed-agent"},
+                "release_state": "active",
+                "status": "enabled"
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        value["error"],
+        "remote_computer_profile.sandbox_warm_pool must be a string"
+    );
+
+    let (status, value) = request_value(
+        app,
+        json_request_with_headers(
+            "POST",
+            "/api/environments",
+            json!({
+                "name": "Invalid Agent Sandbox Namespace",
+                "environment_type": "remote_computer",
+                "remote_computer_profile": {
+                    "profile": "agent-sandbox",
+                    "namespace": "Agent OS"
+                },
+                "worker_queue_binding": {"queue": "managed-agent"},
+                "release_state": "active",
+                "status": "enabled"
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        value["error"],
+        "remote_computer_profile.namespace must be a Kubernetes DNS name"
+    );
 }
 
 #[tokio::test]

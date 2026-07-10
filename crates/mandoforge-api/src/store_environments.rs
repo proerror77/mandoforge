@@ -456,12 +456,38 @@ fn validate_remote_computer_profile_schema(
     if environment_type != "remote_computer" {
         return Ok(());
     }
-    for key in ["pool", "profile", "namespace", "remote_computer_id"] {
+    for key in [
+        "pool",
+        "profile",
+        "namespace",
+        "remote_computer_id",
+        "sandbox_warm_pool",
+        "cache_scope",
+        "workspace_seed",
+    ] {
         if let Some(value) = profile.get(key)
             && !value.is_string()
         {
             return Err(AppError::bad_request(format!(
                 "remote_computer_profile.{key} must be a string"
+            )));
+        }
+    }
+    for key in ["namespace", "sandbox_warm_pool"] {
+        if let Some(value) = profile.get(key).and_then(Value::as_str)
+            && !valid_kubernetes_name(value)
+        {
+            return Err(AppError::bad_request(format!(
+                "remote_computer_profile.{key} must be a Kubernetes DNS name"
+            )));
+        }
+    }
+    for key in ["cache_scope", "workspace_seed"] {
+        if let Some(value) = profile.get(key).and_then(Value::as_str)
+            && !valid_kubernetes_label_value(value)
+        {
+            return Err(AppError::bad_request(format!(
+                "remote_computer_profile.{key} must be a Kubernetes label value"
             )));
         }
     }
@@ -485,4 +511,42 @@ fn validate_remote_computer_profile_schema(
         }
     }
     Ok(())
+}
+
+fn valid_kubernetes_name(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value.len() <= 253
+        && value.split('.').all(|part| {
+            !part.is_empty()
+                && part.len() <= 63
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+                && part
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && part
+                    .as_bytes()
+                    .last()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+        })
+}
+
+fn valid_kubernetes_label_value(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value.len() <= 63
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        && value
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && value
+            .as_bytes()
+            .last()
+            .is_some_and(u8::is_ascii_alphanumeric)
 }
