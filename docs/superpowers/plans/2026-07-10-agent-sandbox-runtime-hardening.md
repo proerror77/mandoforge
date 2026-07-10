@@ -44,8 +44,10 @@ Kubernetes Agent Sandbox v1beta1, Kustomize, Bash, Docker.
 1. A `SandboxClaim` resolves `status.sandbox.name` (or the documented claim
    annotation fallback), then resolves the Sandbox Pod annotation; generated
    warm-pool Sandbox names work.
-2. Claim requests contain propagated tracking metadata and a bounded lifecycle
-   deadline; create 409 and delete 404/410 converge idempotently.
+2. Claim requests contain tracking metadata and a bounded lifecycle deadline;
+   custom Pod metadata remains empty when the pinned controller allowlist does
+   not accept the MandoForge keys; create 409 and delete 404/410 converge
+   idempotently.
 3. `remote_computers.metadata.runtime_identity` records schema version,
    substrate, namespace, claim/Sandbox/Pod names, and lifecycle deadline.
 4. Delete dispatch is based on persisted identity, even when the process-level
@@ -82,13 +84,15 @@ Kubernetes Agent Sandbox v1beta1, Kustomize, Bash, Docker.
 
 - [ ] Add failing tests for generated Sandbox names, claim annotation fallback,
       controller terminal conditions, create 409, delete 404/410, TTL fields,
-      additional Pod metadata, and legacy/runtime-identity decoding.
+      Claim tracking metadata, controller-compatible additional Pod metadata,
+      and legacy/runtime-identity decoding.
 - [ ] Add the smallest shared `RemoteComputerRuntimeIdentity` model in
       `remote_computer_runtime.rs`; serialize it into existing metadata under a
       versioned key and retain legacy `sandbox_claim_name` fallback parsing.
 - [ ] Change binding discovery to GET the Claim, resolve the Sandbox name, GET
       the Sandbox, resolve its Pod, then use the existing Pod Running poll.
-- [ ] Add claim lifecycle deadline and propagated labels/annotations. Source
+- [ ] Add claim lifecycle deadline and Claim labels/annotations. Propagate only
+      Pod metadata accepted by the pinned controller allowlist. Source
       namespace, warm pool, cache scope, and workspace seed from the bound
       Environment profile with validated global fallbacks.
 - [ ] Persist the complete identity before lease creation and select create and

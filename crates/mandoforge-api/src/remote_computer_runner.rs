@@ -1453,7 +1453,7 @@ fn kubernetes_client_access(config: &RemoteComputerRunnerConfig) -> Option<Kuber
         return Some(KubernetesClientAccess {
             api_url: api_url.trim_end_matches('/').to_string(),
             bearer_token_path: token_path,
-            ca_cert_path: in_cluster_ca_cert_path(config.in_cluster),
+            ca_cert_path: kubernetes_ca_cert_path(config.in_cluster),
         });
     }
     if config.in_cluster {
@@ -1471,15 +1471,26 @@ fn kubernetes_client_access(config: &RemoteComputerRunnerConfig) -> Option<Kuber
                     .trim_end_matches('/')
                     .to_string(),
                 bearer_token_path: token_path,
-                ca_cert_path: in_cluster_ca_cert_path(true),
+                ca_cert_path: kubernetes_ca_cert_path(true),
             });
         }
     }
     None
 }
 
-fn in_cluster_ca_cert_path(in_cluster: bool) -> Option<PathBuf> {
-    in_cluster.then(|| PathBuf::from(IN_CLUSTER_SERVICE_ACCOUNT_CA))
+fn kubernetes_ca_cert_path(in_cluster: bool) -> Option<PathBuf> {
+    kubernetes_ca_cert_path_from_lookup(in_cluster, |key| std::env::var(key).ok())
+}
+
+fn kubernetes_ca_cert_path_from_lookup<F>(in_cluster: bool, lookup: F) -> Option<PathBuf>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_REMOTE_COMPUTER_CA_CERT_PATH")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| in_cluster.then(|| PathBuf::from(IN_CLUSTER_SERVICE_ACCOUNT_CA)))
 }
 
 async fn kubernetes_http_client(
@@ -1725,10 +1736,9 @@ fn build_agent_sandbox_claim_request(
                 "ttlSecondsAfterFinished": ttl_seconds,
                 "shutdownPolicy": "Delete"
             },
-            "additionalPodMetadata": {
-                "labels": labels,
-                "annotations": annotations
-            }
+            // Agent Sandbox validates propagated Pod metadata against a controller allowlist.
+            // Keep MandoForge tracking data on the Claim and in the control-plane database.
+            "additionalPodMetadata": {}
         }
     }))
 }
@@ -2136,7 +2146,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_sandbox_claim_contains_lifecycle_and_propagated_metadata() {
+    fn agent_sandbox_claim_contains_lifecycle_without_unapproved_pod_metadata() {
         let request = RemoteComputerRunnerDryRunRequest {
             operation: Some("live_create".to_string()),
             remote_computer_id: Some(Uuid::from_u128(2)),
@@ -2174,13 +2184,14 @@ mod tests {
         assert_eq!(body["spec"]["lifecycle"]["ttlSecondsAfterFinished"], 1200);
         assert_eq!(body["spec"]["lifecycle"]["shutdownPolicy"], "Delete");
         assert_eq!(
-            body["spec"]["additionalPodMetadata"]["labels"]["mandoforge.io/cache-scope"],
+            body["metadata"]["labels"]["mandoforge.io/cache-scope"],
             "mandoforge"
         );
         assert_eq!(
-            body["spec"]["additionalPodMetadata"]["annotations"]["mandoforge.io/workspace-seed"],
+            body["metadata"]["annotations"]["mandoforge.io/workspace-seed"],
             "mandoforge"
         );
+        assert_eq!(body["spec"]["additionalPodMetadata"], json!({}));
     }
 
     #[test]
@@ -2400,6 +2411,26 @@ mod tests {
             Some(Path::new(IN_CLUSTER_SERVICE_ACCOUNT_CA))
         );
         let _ = std::fs::remove_file(token_path);
+    }
+
+    #[test]
+    fn kubernetes_ca_cert_path_supports_out_of_cluster_tls() {
+        let explicit = kubernetes_ca_cert_path_from_lookup(false, |key| {
+            (key == "MANDOFORGE_REMOTE_COMPUTER_CA_CERT_PATH")
+                .then(|| " /tmp/mandoforge-kubernetes-ca.crt ".to_string())
+        });
+        let in_cluster = kubernetes_ca_cert_path_from_lookup(true, |_| None);
+        let plain_http = kubernetes_ca_cert_path_from_lookup(false, |_| None);
+
+        assert_eq!(
+            explicit.as_deref(),
+            Some(Path::new("/tmp/mandoforge-kubernetes-ca.crt"))
+        );
+        assert_eq!(
+            in_cluster.as_deref(),
+            Some(Path::new(IN_CLUSTER_SERVICE_ACCOUNT_CA))
+        );
+        assert_eq!(plain_http, None);
     }
 
     #[tokio::test]

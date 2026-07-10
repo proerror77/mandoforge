@@ -242,6 +242,11 @@ if ! grep -q "apiVersion: extensions.agents.x-k8s.io/v1beta1" "$agent_sandbox_te
   exit 1
 fi
 
+if ! grep -q "networkPolicyManagement: Unmanaged" "$agent_sandbox_template_render"; then
+  echo "Agent Sandbox template must delegate egress isolation to the reviewed MandoForge policies" >&2
+  exit 1
+fi
+
 if ! grep -q "volumeClaimTemplates:" "$agent_sandbox_template_render" \
   || ! grep -q "name: workspace-data" "$agent_sandbox_template_render"; then
   echo "Agent Sandbox pilot must define the per-sandbox workspace PVC template" >&2
@@ -262,7 +267,8 @@ if grep -q "CARGO_TARGET_DIR" deploy/k8s/agent-sandbox-runtime.yaml \
   || grep -q 'name: agent-state' deploy/k8s/agent-sandbox-runtime.yaml \
   || grep -q 'name: artifact-discovery' deploy/k8s/agent-sandbox-runtime.yaml \
   || grep -q 'value: "/workspace/session"' deploy/k8s/agent-sandbox-runtime.yaml \
-  || ! grep -q '/workspace/sessions' deploy/k8s/agent-sandbox-runtime.yaml; then
+  || ! grep -q 'mountPath: /workspace/sessions' "$agent_sandbox_template_render" \
+  || grep -q 'mountPath: /workspace$' "$agent_sandbox_template_render"; then
   echo "Agent Sandbox mutable target, agent state, sidecar, and workspace paths must remain session-private" >&2
   exit 1
 fi
@@ -274,6 +280,7 @@ if ! grep -q "fsGroup: 1000" "$agent_sandbox_template_render" \
 fi
 
 if ! grep -q "sandboxTemplateRef:" "$agent_sandbox_warm_pool_render" \
+  || ! grep -q "type: Recreate" "$agent_sandbox_warm_pool_render" \
   || ! grep -q "warmPoolRef:" "$agent_sandbox_claim_render"; then
   echo "Agent Sandbox pilot/smoke overlays must wire WarmPool and Claim with current reference fields" >&2
   exit 1

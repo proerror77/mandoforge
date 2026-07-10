@@ -142,8 +142,10 @@ The claim request includes:
 
 - `warmPoolRef.name` selected by the bound Environment.
 - Tenant, project, environment, session, and Remote Computer tracking labels.
-- The same tracking fields under `spec.additionalPodMetadata` so they propagate
-  to the adopted Sandbox Pod.
+- Claim annotations for non-label tracking fields. The pinned `v0.5.1`
+  controller rejects custom `mandoforge.io/*` fields in
+  `spec.additionalPodMetadata`, so that map remains empty and MandoForge DB plus
+  the Claim remain the tracking sources.
 - `spec.lifecycle.shutdownTime` calculated from the configured sandbox TTL.
 - `spec.lifecycle.shutdownPolicy: Delete`.
 

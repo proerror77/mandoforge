@@ -1138,6 +1138,7 @@ async fn claim_remote_computer_warm_pool_lease_for_job(
                         "execution_job_id": job.id,
                         "tool_call_id": job.tool_call_id,
                         "session_workspace_path": remote_session_workspace_path(&computer, job.session_id),
+                        "environment_id": contract.environment_id,
                         "environment_contract": contract.evidence()
                     })),
                 },
@@ -1411,14 +1412,10 @@ async fn provision_remote_computer_pod_for_job(
         // Persist the remote_computer record so the assignment chain can find pod_name.
         // On concurrent provisioning, a unique-constraint violation can occur — in that
         // case the winner's record is already in the DB; re-read it.
-        let persisted_metadata = metadata_with_remote_computer_runtime_identity(
-            &json!({
-                "on_demand": true,
-                "session_id": job.session_id,
-                "session_workspace_path": remote_session_workspace_path_from_base("/workspace", job.session_id),
-                "provisioned_by_worker": worker_id,
-                "environment_contract": contract.evidence()
-            }),
+        let persisted_metadata = on_demand_remote_computer_metadata(
+            job.session_id,
+            worker_id,
+            contract,
             &runtime_identity,
         );
         if let Some(rebind_candidate) = rebind_candidate {
@@ -1518,6 +1515,7 @@ async fn provision_remote_computer_pod_for_job(
                     "execution_job_id": job.id,
                     "tool_call_id": job.tool_call_id,
                     "session_workspace_path": remote_session_workspace_path(&computer, job.session_id),
+                    "environment_id": contract.environment_id,
                     "environment_contract": contract.evidence()
                 })),
             },
@@ -1602,6 +1600,27 @@ async fn provision_remote_computer_pod_for_job(
         ))
         .await?;
     Ok(Some(lease))
+}
+
+fn on_demand_remote_computer_metadata(
+    session_id: Uuid,
+    worker_id: &str,
+    contract: &RemoteComputerEnvironmentContract,
+    runtime_identity: &RemoteComputerRuntimeIdentity,
+) -> Value {
+    metadata_with_remote_computer_runtime_identity(
+        &json!({
+            "on_demand": true,
+            "session_id": session_id,
+            "session_workspace_path": remote_session_workspace_path_from_base("/workspace", session_id),
+            "provisioned_by_worker": worker_id,
+            "sandbox_warm_pool": contract.sandbox_warm_pool,
+            "cache_scope": contract.cache_scope,
+            "workspace_seed": contract.workspace_seed,
+            "environment_contract": contract.evidence()
+        }),
+        runtime_identity,
+    )
 }
 
 async fn cleanup_on_demand_remote_computer_pod_after_failed_provision(
@@ -1852,12 +1871,17 @@ impl RemoteComputerEnvironmentContract {
     }
 
     fn matches_lease(&self, lease: &RemoteComputerLease) -> bool {
-        lease
-            .metadata
-            .get("environment_id")
-            .and_then(Value::as_str)
-            .and_then(|value| Uuid::parse_str(value).ok())
-            .is_none_or(|environment_id| environment_id == self.environment_id)
+        let environment_id = lease.metadata.get("environment_id").or_else(|| {
+            lease
+                .metadata
+                .get("environment_contract")
+                .and_then(|contract| contract.get("environment_id"))
+        });
+        match environment_id {
+            None => true,
+            Some(Value::String(value)) => Uuid::parse_str(value).ok() == Some(self.environment_id),
+            Some(_) => false,
+        }
     }
 
     fn evidence(&self) -> Value {
@@ -5555,6 +5579,82 @@ mod tests {
         assert!(remote_computer_agent_sandbox_requested_for_contract(
             &config, &contract
         ));
+    }
+
+    #[test]
+    fn on_demand_metadata_preserves_environment_matching_fields_for_retry() {
+        let session_id = Uuid::new_v4();
+        let contract = RemoteComputerEnvironmentContract {
+            environment_id: Uuid::new_v4(),
+            environment_name: "Agent Sandbox".to_string(),
+            pool: None,
+            profile: Some("agent-sandbox".to_string()),
+            namespace: Some("agent-os".to_string()),
+            sandbox_warm_pool: Some("mandoforge-agent-runtime".to_string()),
+            cache_scope: Some("mandoforge".to_string()),
+            workspace_seed: Some("project-a".to_string()),
+            remote_computer_id: None,
+            metadata_selector: Vec::new(),
+        };
+        let identity = RemoteComputerRuntimeIdentity::new(
+            RemoteComputerSubstrate::AgentSandbox,
+            "agent-os".to_string(),
+            "agent-as-session".to_string(),
+            "sandbox-pod".to_string(),
+            Some("agent-as-session".to_string()),
+            Some("sandbox-runtime".to_string()),
+            None,
+        );
+
+        let metadata =
+            on_demand_remote_computer_metadata(session_id, "retry-worker", &contract, &identity);
+
+        assert_eq!(metadata["sandbox_warm_pool"], "mandoforge-agent-runtime");
+        assert_eq!(metadata["cache_scope"], "mandoforge");
+        assert_eq!(metadata["workspace_seed"], "project-a");
+        assert_eq!(
+            metadata["environment_contract"]["environment_id"],
+            contract.environment_id.to_string()
+        );
+    }
+
+    #[test]
+    fn lease_environment_contract_prevents_cross_environment_retry_reuse() {
+        let environment_id = Uuid::new_v4();
+        let other_environment_id = Uuid::new_v4();
+        let contract = RemoteComputerEnvironmentContract {
+            environment_id,
+            environment_name: "Agent Sandbox A".to_string(),
+            pool: None,
+            profile: Some("agent-sandbox".to_string()),
+            namespace: Some("agent-os".to_string()),
+            sandbox_warm_pool: Some("mandoforge-agent-runtime".to_string()),
+            cache_scope: Some("mandoforge".to_string()),
+            workspace_seed: Some("project-a".to_string()),
+            remote_computer_id: None,
+            metadata_selector: Vec::new(),
+        };
+        let mut other_contract = contract.clone();
+        other_contract.environment_id = other_environment_id;
+        other_contract.environment_name = "Agent Sandbox B".to_string();
+        let now = Utc::now();
+        let lease = RemoteComputerLease {
+            id: Uuid::new_v4(),
+            remote_computer_id: Uuid::new_v4(),
+            session_id: Some(Uuid::new_v4()),
+            status: "leased".to_string(),
+            worker_id: Some("retry-worker".to_string()),
+            lease_expires_at: Some(now + chrono::Duration::minutes(5)),
+            heartbeat_at: Some(now),
+            metadata: json!({
+                "environment_contract": contract.evidence()
+            }),
+            created_at: now,
+            updated_at: now,
+        };
+
+        assert!(contract.matches_lease(&lease));
+        assert!(!other_contract.matches_lease(&lease));
     }
 
     #[test]

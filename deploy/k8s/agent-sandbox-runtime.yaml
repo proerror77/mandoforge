@@ -21,6 +21,7 @@ metadata:
     app.kubernetes.io/name: mandoforge
     mandoforge.io/runtime-substrate: agent-sandbox
 spec:
+  networkPolicyManagement: Unmanaged
   podTemplate:
     metadata:
       labels:
@@ -65,7 +66,7 @@ spec:
                 - ALL
           volumeMounts:
             - name: workspace-data
-              mountPath: /workspace
+              mountPath: /workspace/sessions
             # ponytail: single-project pilot cache; create one PVC per repo or tenant before shared use.
             - name: project-cache
               mountPath: /cache/project
@@ -106,3 +107,5 @@ spec:
   replicas: 1
   sandboxTemplateRef:
     name: mandoforge-agent-runtime
+  updateStrategy:
+    type: Recreate
