@@ -9,3 +9,6 @@ metadata:
 spec:
   warmPoolRef:
     name: mandoforge-agent-runtime
+  lifecycle:
+    shutdownPolicy: Delete
+    ttlSecondsAfterFinished: 300

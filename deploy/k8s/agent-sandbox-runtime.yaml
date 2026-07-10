@@ -26,31 +26,28 @@ spec:
       labels:
         app: mandoforge-agent-remote-computer
         mandoforge.io/runtime-substrate: agent-sandbox
+        mandoforge.io/runtime-image: dedicated
     spec:
       serviceAccountName: mandoforge-remote-computer
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: RuntimeDefault
       containers:
         - name: remote-computer
-          image: mandoforge-adoption-api:latest
+          image: mandoforge-agent-sandbox-runtime:0.1.1
           imagePullPolicy: IfNotPresent
           command: ["sleep", "infinity"]
           env:
             - name: MANDOFORGE_REMOTE_COMPUTER_MODE
               value: "agent-sandbox"
             - name: MANDOFORGE_WORKSPACE_ROOT
-              value: "/workspace"
-            - name: MANDOFORGE_SESSION_WORKSPACE
-              value: "/workspace/session"
-            - name: MANDOFORGE_AGENT_STATE_ROOT
-              value: "/agent-state"
+              value: "/workspace/sessions"
             - name: CARGO_HOME
               value: "/cache/project/cargo"
-            - name: CARGO_TARGET_DIR
-              value: "/cache/project/cargo-target"
             - name: SCCACHE_DIR
               value: "/cache/project/sccache"
             - name: PNPM_STORE_DIR
@@ -59,7 +56,7 @@ spec:
               value: "/cache/project/uv"
           securityContext:
             allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: false
+            readOnlyRootFilesystem: true
             runAsNonRoot: true
             runAsUser: 1000
             runAsGroup: 1000
@@ -69,14 +66,11 @@ spec:
           volumeMounts:
             - name: workspace-data
               mountPath: /workspace
-            - name: agent-state
-              mountPath: /agent-state
             # ponytail: single-project pilot cache; create one PVC per repo or tenant before shared use.
             - name: project-cache
               mountPath: /cache/project
-            - name: state-contract
-              mountPath: /agent-state/.mandoforge/contract
-              readOnly: true
+            - name: runtime-tmp
+              mountPath: /tmp
           resources:
             requests:
               cpu: 250m
@@ -84,54 +78,13 @@ spec:
             limits:
               cpu: "2"
               memory: 2Gi
-        - name: artifact-discovery
-          image: python:3.12-alpine
-          imagePullPolicy: IfNotPresent
-          command: ["python", "/opt/mandoforge/discover-artifacts.py"]
-          env:
-            - name: MANDOFORGE_ARTIFACT_DISCOVERY_ENABLED
-              value: "false"
-            - name: MANDOFORGE_API_URL
-              value: "http://mandoforge-api:8787"
-            - name: MANDOFORGE_ARTIFACT_DIR
-              value: "/workspace/session/artifacts"
-            - name: MANDOFORGE_ARTIFACT_DISCOVERY_INTERVAL_SECONDS
-              value: "30"
-            - name: MANDOFORGE_ARTIFACT_DISCOVERY_MAX_FILES
-              value: "50"
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            runAsNonRoot: true
-            runAsUser: 65532
-            runAsGroup: 65532
-            capabilities:
-              drop:
-                - ALL
-          volumeMounts:
-            - name: workspace-data
-              mountPath: /workspace
-              readOnly: true
-            - name: artifact-discovery
-              mountPath: /opt/mandoforge
-              readOnly: true
-          resources:
-            requests:
-              cpu: 25m
-              memory: 64Mi
-            limits:
-              cpu: 100m
-              memory: 128Mi
       volumes:
         - name: project-cache
           persistentVolumeClaim:
             claimName: mandoforge-agent-sandbox-mandoforge-cache
-        - name: state-contract
-          configMap:
-            name: mandoforge-remote-computer-state-contract
-        - name: artifact-discovery
-          configMap:
-            name: mandoforge-remote-computer-artifact-discovery
+        - name: runtime-tmp
+          emptyDir:
+            sizeLimit: 1Gi
   volumeClaimTemplates:
     - metadata:
         name: workspace-data
@@ -141,14 +94,6 @@ spec:
         resources:
           requests:
             storage: 20Gi
-    - metadata:
-        name: agent-state
-      spec:
-        accessModes:
-          - ReadWriteOnce
-        resources:
-          requests:
-            storage: 5Gi
 ---
 apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxWarmPool
