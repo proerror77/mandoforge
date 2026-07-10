@@ -1934,7 +1934,19 @@ async fn remote_computer_runner_boundary_is_reserved_and_dry_run_only() {
                     "operation": "exec",
                     "session_id": session.id,
                     "pod_name": "agent-remote-computer-dry-run",
-                    "metadata": {"command": ["sh", "-lc", "pwd"]}
+                    "metadata": {
+                        "sandbox_runtime_request": {
+                            "version": "v1",
+                            "session_id": session.id,
+                            "workspace_path": format!("/workspace/sessions/{}", session.id),
+                            "timeout_seconds": 30,
+                            "environment": {},
+                            "operation": {
+                                "type": "shell",
+                                "command": "pwd && echo SENSITIVE_DRY_RUN_SENTINEL"
+                            }
+                        }
+                    }
                 })
                 .to_string(),
             ))
@@ -1944,7 +1956,25 @@ async fn remote_computer_runner_boundary_is_reserved_and_dry_run_only() {
     assert_eq!(exec_dry_run.status, "reserved");
     assert_eq!(exec_dry_run.operation, "exec");
     assert!(!exec_dry_run.execution_enabled);
-    assert_eq!(exec_dry_run.request["metadata"]["command"][0], "sh");
+    assert_eq!(
+        exec_dry_run.request["metadata"]["sandbox_runtime"]["operation"],
+        "shell"
+    );
+    assert_eq!(
+        exec_dry_run.request["metadata"]["sandbox_runtime"]["redacted"],
+        true
+    );
+    assert!(
+        exec_dry_run.request["metadata"]["sandbox_runtime"]["stdin_bytes"]
+            .as_u64()
+            .is_some_and(|bytes| bytes > 0)
+    );
+    assert!(
+        !exec_dry_run
+            .request
+            .to_string()
+            .contains("SENSITIVE_DRY_RUN_SENTINEL")
+    );
 
     let (exec_mutate_status, exec_mutate_body) = request_value(
         app.clone(),

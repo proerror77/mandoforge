@@ -85,6 +85,7 @@ mod remote_computer_supervision_runtime;
 mod request_auth;
 mod runtime_config;
 mod runtime_support;
+mod sandbox_runtime_protocol;
 mod scheduler_runtime;
 mod secrets;
 mod semantic_memory_governance;
@@ -288,6 +289,10 @@ pub(crate) use runtime_config::{
     telemetry_exporter_from_env, tenant_runtime_mode_from_env,
 };
 pub(crate) use runtime_support::*;
+pub(crate) use sandbox_runtime_protocol::{
+    SANDBOX_RUNTIME_EXECUTABLE, SANDBOX_RUNTIME_SUBCOMMAND, SandboxRuntimeOperation,
+    SandboxRuntimeRequest, normalize_agent_cli_executable,
+};
 pub(crate) use scheduler_runtime::*;
 use secrets::{
     SecretProvider, SecretProviderConfig, SecretProviderKind, SecretRef, SecretValue,

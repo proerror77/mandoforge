@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     path::{Component, Path as FsPath, PathBuf},
     time::Duration,
 };
@@ -25,10 +25,11 @@ use crate::{
     AppError, AppState, Approval, Artifact, CreateRemoteComputer,
     CreateRemoteComputerJobAssignment, CreateRemoteComputerLease, Environment, RemoteComputer,
     RemoteComputerJobAssignment, RemoteComputerLease, RemoteComputerRuntimeIdentity,
-    RemoteComputerSubstrate, ToolCall, delete_remote_computer_runtime_resource,
-    metadata_with_remote_computer_runtime_identity, new_audit_log,
-    record_remote_computer_job_assignment_event, remote_computer_runtime_identity,
-    required_remote_computer_runtime_identity, resolve_mcp_runtime_secret_refs,
+    RemoteComputerSubstrate, SandboxRuntimeOperation, SandboxRuntimeRequest, ToolCall,
+    delete_remote_computer_runtime_resource, metadata_with_remote_computer_runtime_identity,
+    new_audit_log, normalize_agent_cli_executable, record_remote_computer_job_assignment_event,
+    remote_computer_runtime_identity, required_remote_computer_runtime_identity,
+    resolve_mcp_runtime_secret_refs,
 };
 
 const DEFAULT_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
@@ -1963,6 +1964,12 @@ async fn remote_computer_pod_exec_target(
         .clone()
         .ok_or_else(|| AppError::bad_request("Remote computer has no pod_name for Pod exec"))?;
     let workspace_path = remote_session_workspace_path(&remote_computer, session_id);
+    let expected_workspace_path = format!("/workspace/sessions/{session_id}");
+    if workspace_path != expected_workspace_path {
+        return Err(AppError::bad_request(format!(
+            "Remote computer workspace must be session-isolated at {expected_workspace_path}"
+        )));
+    }
     Ok(RemoteComputerPodExecTarget {
         remote_computer,
         pod_name,
@@ -1973,11 +1980,20 @@ async fn remote_computer_pod_exec_target(
 async fn run_remote_computer_pod_exec(
     target: &RemoteComputerPodExecTarget,
     session_id: Uuid,
-    command: String,
+    runtime_request: SandboxRuntimeRequest,
     metadata: Value,
     missing_output_message: &str,
 ) -> Result<Value, AppError> {
-    let config = RemoteComputerRunnerConfig::from_env();
+    runtime_request.validate().map_err(AppError::bad_request)?;
+    let identity = required_remote_computer_runtime_identity(&target.remote_computer)
+        .map_err(AppError::internal)?;
+    let mut config = RemoteComputerRunnerConfig::from_env();
+    config.mode = match identity.substrate {
+        RemoteComputerSubstrate::AgentSandbox => "agent-sandbox",
+        RemoteComputerSubstrate::KubernetesPod => "kubernetes",
+    }
+    .to_string();
+    config.namespace = identity.namespace.clone();
     let runner = remote_computer_runner_for_config(&config);
     let response = runner
         .mutate(
@@ -1989,7 +2005,9 @@ async fn run_remote_computer_pod_exec(
                 pod_name: Some(target.pod_name.clone()),
                 metadata: Some(merge_json_object(
                     json!({
-                        "command": command,
+                        "namespace": identity.namespace,
+                        "runtime_substrate": identity.substrate,
+                        "sandbox_runtime_request": runtime_request,
                         "session_workspace_path": target.workspace_path,
                     }),
                     metadata,
@@ -2097,41 +2115,27 @@ async fn execute_approved_remote_computer_file_write(
         .and_then(Value::as_str)
         .ok_or_else(|| AppError::bad_request("file.write requires content"))?;
     validate_workspace_relative_path(relative_path)?;
-    let remote_computer = state
-        .list_remote_computers()
-        .await?
-        .into_iter()
-        .find(|computer| computer.id == assignment.remote_computer_id)
-        .ok_or_else(|| AppError::not_found("Remote computer not found"))?;
-    let pod_name = remote_computer
-        .pod_name
-        .clone()
-        .ok_or_else(|| AppError::bad_request("Remote computer has no pod_name for Pod exec"))?;
-    let workspace_path = remote_session_workspace_path(&remote_computer, approval.session_id);
-    let command = remote_file_write_command(&workspace_path, relative_path, content);
-    let config = RemoteComputerRunnerConfig::from_env();
-    let runner = remote_computer_runner_for_config(&config);
-    let response = runner
-        .mutate(
-            &config,
-            RemoteComputerRunnerDryRunRequest {
-                operation: Some("live_exec".to_string()),
-                remote_computer_id: Some(remote_computer.id),
-                session_id: Some(approval.session_id),
-                pod_name: Some(pod_name.clone()),
-                metadata: Some(json!({"command": command, "tool_call_id": tool_call.id, "session_workspace_path": workspace_path})),
-            },
-        )
-        .await;
-    let exec_result = response.exec_result.clone().ok_or_else(|| {
-        AppError::bad_request(format!(
-            "Remote Computer file.write did not return output: {}",
-            response.message
-        ))
-    })?;
-    if response.status != "exec_ok" || !response.execution_enabled {
-        return Err(AppError::bad_request(response.message));
-    }
+    let target = remote_computer_pod_exec_target(state, approval.session_id, assignment).await?;
+    let runtime_request = SandboxRuntimeRequest::new(
+        approval.session_id,
+        30,
+        BTreeMap::new(),
+        SandboxRuntimeOperation::FileWrite {
+            path: relative_path.to_string(),
+            content: content.to_string(),
+        },
+    );
+    let exec_result = run_remote_computer_pod_exec(
+        &target,
+        approval.session_id,
+        runtime_request,
+        json!({"tool_call_id": tool_call.id}),
+        "Remote Computer file.write did not return output",
+    )
+    .await?;
+    let remote_computer = target.remote_computer;
+    let pod_name = target.pod_name;
+    let workspace_path = target.workspace_path;
     let status = exec_result.get("status").cloned().unwrap_or(Value::Null);
     if !kubernetes_exec_status_succeeded(&status) {
         return Err(AppError::bad_request(format!(
@@ -2223,7 +2227,22 @@ async fn execute_approved_remote_computer_file_write(
             Some(tool_call.id),
             approval.session_id,
             "tool.result",
-            json!({"tool_call_id": tool_call.id, "tool": tool_call.tool_name, "content": result}),
+            json!({
+                "tool_call_id": tool_call.id,
+                "tool": tool_call.tool_name,
+                "content": {
+                    "approval": "approved",
+                    "path": relative_path,
+                    "content_bytes": content.len(),
+                    "runner": "remote_computer_pod_exec",
+                    "remote_computer_id": remote_computer.id,
+                    "assignment_id": assignment.id,
+                    "status": status,
+                    "stdout_bytes": stdout.original_bytes,
+                    "stderr_bytes": stderr.original_bytes,
+                    "redacted": true
+                }
+            }),
         )
         .await?;
     state
@@ -2368,12 +2387,19 @@ async fn execute_approved_remote_computer_shell(
         .and_then(Value::as_str)
         .ok_or_else(|| AppError::bad_request("shell.exec requires command"))?;
     let target = remote_computer_pod_exec_target(state, approval.session_id, assignment).await?;
-    let remote_command = remote_shell_exec_command(&target.workspace_path, command);
+    let runtime_request = SandboxRuntimeRequest::new(
+        approval.session_id,
+        30,
+        BTreeMap::new(),
+        SandboxRuntimeOperation::Shell {
+            command: command.to_string(),
+        },
+    );
     let exec_result = run_remote_computer_pod_exec(
         &target,
         approval.session_id,
-        remote_command,
-        json!({"tool_call_id": tool_call.id, "requested_command": command}),
+        runtime_request,
+        json!({"tool_call_id": tool_call.id}),
         "Remote Computer Pod exec did not return output",
     )
     .await?;
@@ -2400,7 +2426,6 @@ async fn execute_approved_remote_computer_shell(
     }
     let result = json!({
         "approval": "approved",
-        "command": command,
         "runner": "remote_computer_pod_exec",
         "remote_computer_id": target.remote_computer.id,
         "assignment_id": assignment.id,
@@ -2448,7 +2473,22 @@ async fn execute_approved_remote_computer_shell(
             Some(tool_call.id),
             approval.session_id,
             "tool.result",
-            json!({"tool_call_id": tool_call.id, "tool": tool_call.tool_name, "content": result}),
+            json!({
+                "tool_call_id": tool_call.id,
+                "tool": tool_call.tool_name,
+                "content": {
+                    "approval": "approved",
+                    "runner": "remote_computer_pod_exec",
+                    "remote_computer_id": target.remote_computer.id,
+                    "assignment_id": assignment.id,
+                    "lease_id": assignment.lease_id,
+                    "status": status,
+                    "command_chars": command.chars().count(),
+                    "stdout_bytes": stdout.original_bytes,
+                    "stderr_bytes": stderr.original_bytes,
+                    "redacted": true
+                }
+            }),
         )
         .await?;
     state
@@ -2464,7 +2504,7 @@ async fn execute_approved_remote_computer_shell(
             Some(tool_call.id),
             json!({
                 "tool": tool_call.tool_name,
-                "command": command,
+                "command_chars": command.chars().count(),
                 "runner": "remote_computer_pod_exec",
                 "remote_computer_id": target.remote_computer.id,
                 "assignment_id": assignment.id,
@@ -2493,7 +2533,16 @@ async fn execute_approved_remote_computer_codex(
         ));
     }
     let target = remote_computer_pod_exec_target(state, approval.session_id, assignment).await?;
-    let command = remote_codex_exec_command(&request, &target.workspace_path);
+    let runtime_request = SandboxRuntimeRequest::new(
+        approval.session_id,
+        900,
+        BTreeMap::new(),
+        SandboxRuntimeOperation::Codex {
+            task: request.task.clone(),
+            sandbox_mode: request.sandbox_mode.clone(),
+        },
+    );
+    runtime_request.validate().map_err(AppError::bad_request)?;
     state
         .append_event(
             "tool",
@@ -2501,7 +2550,7 @@ async fn execute_approved_remote_computer_codex(
             approval.session_id,
             "codex.task.started",
             json!({
-                "task": &request.task,
+                "task_chars": request.task.chars().count(),
                 "sandbox_mode": &request.sandbox_mode,
                 "runner": "remote_computer_pod_exec",
                 "remote_computer_id": target.remote_computer.id,
@@ -2516,7 +2565,7 @@ async fn execute_approved_remote_computer_codex(
     let exec_result = run_remote_computer_pod_exec(
         &target,
         approval.session_id,
-        command,
+        runtime_request,
         json!({"tool_call_id": tool_call.id}),
         "Remote Computer Codex exec did not return output",
     )
@@ -2532,13 +2581,21 @@ async fn execute_approved_remote_computer_codex(
         .unwrap_or_default();
     let remote_output = split_remote_codex_output(stdout_full);
     for event in parse_codex_jsonl(&remote_output.jsonl_stdout) {
+        let event_bytes = serde_json::to_vec(&event)
+            .map(|value| value.len())
+            .unwrap_or(0);
         state
             .append_event(
                 "tool",
                 Some(tool_call.id),
                 approval.session_id,
                 "codex.event",
-                json!({"codex_event_type": codex_jsonl_event_type(&event), "event": event, "runner": "remote_computer_pod_exec"}),
+                json!({
+                    "codex_event_type": codex_jsonl_event_type(&event),
+                    "event_bytes": event_bytes,
+                    "runner": "remote_computer_pod_exec",
+                    "redacted": true
+                }),
             )
             .await?;
     }
@@ -2623,19 +2680,17 @@ async fn execute_approved_remote_computer_codex(
             event_type,
             json!({
                 "status": status,
-                "stdout": stdout.text,
                 "stdout_bytes": stdout.original_bytes,
                 "stdout_truncated": stdout_truncated,
-                "stderr": stderr.text,
                 "stderr_bytes": stderr.original_bytes,
                 "stderr_truncated": stderr_truncated,
-                "final_message": final_output.text,
                 "final_message_bytes": final_output.original_bytes,
                 "final_message_truncated": final_output.truncated,
                 "runner": "remote_computer_pod_exec",
                 "remote_computer_id": target.remote_computer.id,
                 "assignment_id": assignment.id,
                 "lease_id": assignment.lease_id,
+                "redacted": true,
             }),
         )
         .await?;
@@ -2669,7 +2724,18 @@ async fn execute_approved_remote_computer_codex(
                 Some(tool_call.id),
                 approval.session_id,
                 "tool.error",
-                json!({"tool_call_id": tool_call.id, "tool": tool_call.tool_name, "content": error_payload}),
+                json!({
+                    "tool_call_id": tool_call.id,
+                    "tool": tool_call.tool_name,
+                    "content": {
+                        "error": "Remote Computer Codex exec failed",
+                        "status": status,
+                        "stdout_bytes": stdout.original_bytes,
+                        "stderr_bytes": stderr.original_bytes,
+                        "final_message_bytes": final_output.original_bytes,
+                        "redacted": true
+                    }
+                }),
             )
             .await?;
         state
@@ -2706,7 +2772,21 @@ async fn execute_approved_remote_computer_codex(
             Some(tool_call.id),
             approval.session_id,
             "tool.result",
-            json!({"tool_call_id": tool_call.id, "tool": tool_call.tool_name, "content": result}),
+            json!({
+                "tool_call_id": tool_call.id,
+                "tool": tool_call.tool_name,
+                "content": {
+                    "runner": "remote_computer_pod_exec",
+                    "remote_computer_id": target.remote_computer.id,
+                    "assignment_id": assignment.id,
+                    "lease_id": assignment.lease_id,
+                    "status": status,
+                    "stdout_bytes": stdout.original_bytes,
+                    "stderr_bytes": stderr.original_bytes,
+                    "final_message_bytes": final_output.original_bytes,
+                    "redacted": true
+                }
+            }),
         )
         .await?;
     state
@@ -2754,7 +2834,27 @@ async fn execute_approved_remote_computer_agent_cli(
         AgentCliProfileConfigSource::Environment => "environment",
     };
     let runtime_type = profile_config.runtime_type.clone();
-    let command = remote_agent_cli_exec_command(&request, &profile_config, &target.workspace_path)?;
+    let mut environment = BTreeMap::new();
+    environment.extend(profile_config.env.iter().cloned());
+    let mut args = profile_config.args.clone();
+    args.extend(request.args.clone());
+    let runtime_request = SandboxRuntimeRequest::new(
+        approval.session_id,
+        request
+            .timeout_seconds
+            .or(profile_config.timeout_seconds)
+            .unwrap_or(180)
+            .clamp(1, 900),
+        environment,
+        SandboxRuntimeOperation::AgentCli {
+            executable: normalize_agent_cli_executable(&profile_config.command)
+                .map_err(AppError::bad_request)?,
+            args,
+            task: request.task.clone(),
+            profile: profile.clone(),
+        },
+    );
+    runtime_request.validate().map_err(AppError::bad_request)?;
     state
         .append_event(
             "tool",
@@ -2765,7 +2865,7 @@ async fn execute_approved_remote_computer_agent_cli(
                 "profile": profile,
                 "profile_source": profile_source,
                 "runtime_type": runtime_type,
-                "task": &request.task,
+                "task_chars": request.task.chars().count(),
                 "runner": "remote_computer_pod_exec",
                 "remote_computer_id": target.remote_computer.id,
                 "assignment_id": assignment.id,
@@ -2779,7 +2879,7 @@ async fn execute_approved_remote_computer_agent_cli(
     let exec_result = run_remote_computer_pod_exec(
         &target,
         approval.session_id,
-        command,
+        runtime_request,
         json!({"tool_call_id": tool_call.id, "profile": profile, "profile_source": profile_source, "runtime_type": runtime_type}),
         "Remote Computer agent CLI exec did not return output",
     )
@@ -2805,25 +2905,27 @@ async fn execute_approved_remote_computer_agent_cli(
         .and_then(Value::as_str)
         .unwrap_or_default();
     let adapter_events = parse_runtime_adapter_events(&runtime_type, stdout_full);
-    record_runtime_adapter_events(
-        state,
-        approval.session_id,
-        &profile,
-        &profile_config,
-        &adapter_events,
-        Some(tool_call.id),
-    )
-    .await?;
-    let turn_recording = record_runtime_adapter_turn_metadata(
-        state,
-        approval.session_id,
-        &profile,
-        &profile_config,
-        &adapter_events,
-        &request.args,
-        Some(tool_call.id),
-    )
-    .await?;
+    for event in &adapter_events {
+        state
+            .append_event(
+                "runtime_adapter",
+                Some(tool_call.id),
+                approval.session_id,
+                "runtime_adapter.event",
+                json!({
+                    "profile": profile,
+                    "runtime_type": runtime_type,
+                    "adapter_event_type": event.adapter_event_type,
+                    "event_index": event.index,
+                    "event_bytes": serde_json::to_vec(&event.event)
+                        .map(|value| value.len())
+                        .unwrap_or(0),
+                    "redacted": true
+                }),
+            )
+            .await?;
+    }
+    let turn_recording = RuntimeAdapterTurnRecording::default();
     let status = exec_result.get("status").cloned().unwrap_or(Value::Null);
     let exec_succeeded = kubernetes_exec_status_succeeded(&status);
     let event_type = if exec_succeeded {
@@ -2869,13 +2971,11 @@ async fn execute_approved_remote_computer_agent_cli(
                 "profile_source": profile_source,
                 "runtime_type": runtime_type,
                 "status": status,
-                "stdout": stdout.text,
                 "stdout_bytes": stdout.original_bytes,
                 "stdout_truncated": stdout.truncated || exec_result
                     .get("stdout_truncated")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
-                "stderr": stderr.text,
                 "stderr_bytes": stderr.original_bytes,
                 "stderr_truncated": stderr.truncated || exec_result
                     .get("stderr_truncated")
@@ -2888,6 +2988,7 @@ async fn execute_approved_remote_computer_agent_cli(
                 "remote_computer_id": target.remote_computer.id,
                 "assignment_id": assignment.id,
                 "lease_id": assignment.lease_id,
+                "redacted": true,
             }),
         )
         .await?;
@@ -2930,7 +3031,19 @@ async fn execute_approved_remote_computer_agent_cli(
                 Some(tool_call.id),
                 approval.session_id,
                 "tool.error",
-                json!({"tool_call_id": tool_call.id, "tool": tool_call.tool_name, "content": error_payload}),
+                json!({
+                    "tool_call_id": tool_call.id,
+                    "tool": tool_call.tool_name,
+                    "content": {
+                        "error": "Remote Computer agent CLI exec failed",
+                        "profile": profile,
+                        "runtime_type": runtime_type,
+                        "status": status,
+                        "stdout_bytes": stdout.original_bytes,
+                        "stderr_bytes": stderr.original_bytes,
+                        "redacted": true
+                    }
+                }),
             )
             .await?;
         state
@@ -2974,7 +3087,22 @@ async fn execute_approved_remote_computer_agent_cli(
             Some(tool_call.id),
             approval.session_id,
             "tool.result",
-            json!({"tool_call_id": tool_call.id, "tool": tool_call.tool_name, "content": result}),
+            json!({
+                "tool_call_id": tool_call.id,
+                "tool": tool_call.tool_name,
+                "content": {
+                    "runner": "remote_computer_pod_exec",
+                    "profile": profile,
+                    "runtime_type": runtime_type,
+                    "remote_computer_id": target.remote_computer.id,
+                    "assignment_id": assignment.id,
+                    "lease_id": assignment.lease_id,
+                    "status": status,
+                    "stdout_bytes": stdout.original_bytes,
+                    "stderr_bytes": stderr.original_bytes,
+                    "redacted": true
+                }
+            }),
         )
         .await?;
     state
@@ -3282,117 +3410,6 @@ fn codex_execution_strategy(request: &CodexRequest) -> Result<CodexExecutionStra
 struct RemoteCodexOutput {
     jsonl_stdout: String,
     final_message: String,
-}
-
-fn remote_codex_exec_command(request: &CodexRequest, workspace_path: &str) -> String {
-    let final_path = format!("{workspace_path}/.mandoforge/codex-final-message.md");
-    format!(
-        "set -u\nmkdir -p {workspace}/.mandoforge\ncd {workspace}\ncodex exec --sandbox {} --json --output-last-message {} --cd {workspace} {}\ncode=$?\nprintf '\\n{}\\n'\ncat {} 2>/dev/null || true\nprintf '\\n{}\\n'\nexit $code",
-        shell_single_quote(&request.sandbox_mode),
-        shell_single_quote(&final_path),
-        shell_single_quote(&request.task),
-        REMOTE_CODEX_FINAL_BEGIN,
-        shell_single_quote(&final_path),
-        REMOTE_CODEX_FINAL_END,
-        workspace = shell_single_quote(workspace_path),
-    )
-}
-
-fn shell_single_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
-}
-
-fn remote_agent_cli_exec_command(
-    request: &AgentCliRequest,
-    config: &AgentCliProfileConfig,
-    workspace_path: &str,
-) -> Result<String, AppError> {
-    let profile = normalize_agent_cli_profile(&request.profile)?;
-    if config.source == AgentCliProfileConfigSource::Managed {
-        let mut command = String::new();
-        command.push_str(&format!(
-            "set -eu\nmkdir -p {workspace}\ncd {workspace}\n",
-            workspace = shell_single_quote(workspace_path)
-        ));
-        for (key, value) in &config.env {
-            command.push_str(&format!("export {}={}\n", key, shell_single_quote(value)));
-        }
-        command.push_str("set --\n");
-        for arg in &config.args {
-            command.push_str(&format!("set -- \"$@\" {}\n", shell_single_quote(arg)));
-        }
-        for arg in &request.args {
-            command.push_str(&format!("set -- \"$@\" {}\n", shell_single_quote(arg)));
-        }
-        command.push_str(&format!(
-            "MANDOFORGE_AGENT_CLI_PROFILE={} MANDOFORGE_AGENT_TASK={} {} \"$@\" {}\n",
-            shell_single_quote(&profile),
-            shell_single_quote(&request.task),
-            shell_single_quote(&config.command),
-            shell_single_quote(&request.task)
-        ));
-        return Ok(command);
-    }
-
-    let mut command = String::new();
-    command.push_str(&format!(
-        "set -eu\nmkdir -p {workspace}\ncd {workspace}\nagent_cli_profile=",
-        workspace = shell_single_quote(workspace_path)
-    ));
-    command.push_str(&shell_single_quote(&profile));
-    command.push('\n');
-    command.push_str(
-        "allowed=\",${MANDOFORGE_AGENT_CLI_ALLOWED_PROFILES:-},\"\n\
-case \"$allowed\" in *\",$agent_cli_profile,\"*) ;; *) echo \"agent CLI profile is not allowlisted: $agent_cli_profile\" >&2; exit 64 ;; esac\n\
-command_var=\"MANDOFORGE_AGENT_CLI_$(printf '%s' \"$agent_cli_profile\" | tr '[:lower:]-' '[:upper:]_')_COMMAND\"\n\
-args_var=\"MANDOFORGE_AGENT_CLI_$(printf '%s' \"$agent_cli_profile\" | tr '[:lower:]-' '[:upper:]_')_ARGS\"\n\
-agent_command=\"$(printenv \"$command_var\" 2>/dev/null || true)\"\n\
-agent_args=\"$(printenv \"$args_var\" 2>/dev/null || true)\"\n\
-if [ -z \"$agent_command\" ]; then echo \"agent CLI profile $agent_cli_profile is missing $command_var\" >&2; exit 64; fi\n",
-    );
-    command.push_str("set --\n");
-    command.push_str("if [ -n \"$agent_args\" ]; then\n  # Profile args intentionally use simple whitespace splitting; wrap complex CLIs in a shim.\n  set -f\n  set -- $agent_args\n  set +f\nfi\n");
-    for arg in &request.args {
-        command.push_str(&format!("set -- \"$@\" {}\n", shell_single_quote(arg)));
-    }
-    command.push_str(&format!(
-        "MANDOFORGE_AGENT_CLI_PROFILE=\"$agent_cli_profile\" MANDOFORGE_AGENT_TASK={} \"$agent_command\" \"$@\" {}\n",
-        shell_single_quote(&request.task),
-        shell_single_quote(&request.task)
-    ));
-    Ok(command)
-}
-
-fn remote_shell_exec_command(workspace_path: &str, command: &str) -> String {
-    format!(
-        "set -e\nmkdir -p {workspace}\ncd {workspace}\n{command}",
-        workspace = shell_single_quote(workspace_path),
-        command = command
-    )
-}
-
-fn remote_file_write_command(workspace_path: &str, relative_path: &str, content: &str) -> String {
-    let delimiter = heredoc_delimiter(content);
-    format!(
-        "set -eu\nmkdir -p {workspace}\ncd {workspace}\nmkdir -p -- \"$(dirname -- {})\"\ncat > {} <<'{}'\n{}\n{}\nprintf 'wrote file %s\\n' {}",
-        shell_single_quote(relative_path),
-        shell_single_quote(relative_path),
-        delimiter,
-        content,
-        delimiter,
-        shell_single_quote(relative_path),
-        workspace = shell_single_quote(workspace_path)
-    )
-}
-
-fn heredoc_delimiter(content: &str) -> String {
-    for index in 0..1000 {
-        let delimiter = format!("MANDOFORGE_FILE_WRITE_EOF_{index}");
-        if !content.lines().any(|line| line == delimiter) {
-            return delimiter;
-        }
-    }
-    format!("MANDOFORGE_FILE_WRITE_EOF_{}", Uuid::new_v4().simple())
 }
 
 fn split_remote_codex_output(stdout: &str) -> RemoteCodexOutput {
@@ -5416,26 +5433,6 @@ mod tests {
     static ENV_VAR_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
-    fn remote_codex_command_quotes_task_and_emits_final_markers() {
-        let request = CodexRequest {
-            task: "inspect README && echo 'done'".to_string(),
-            sandbox_mode: "workspace-write".to_string(),
-            execution_strategy: None,
-            poll_attempts: None,
-            poll_interval_ms: None,
-        };
-        let command = remote_codex_exec_command(&request, "/workspace/sessions/session-1");
-
-        assert!(command.contains("cd '/workspace/sessions/session-1'"));
-        assert!(command.contains("codex exec --sandbox 'workspace-write'"));
-        assert!(command.contains("--cd '/workspace/sessions/session-1'"));
-        assert!(command.contains("'inspect README && echo '\"'\"'done'\"'\"''"));
-        assert!(command.contains(REMOTE_CODEX_FINAL_BEGIN));
-        assert!(command.contains(REMOTE_CODEX_FINAL_END));
-        assert!(command.contains("exit $code"));
-    }
-
-    #[test]
     fn remote_codex_output_splits_jsonl_from_final_message() {
         let output = split_remote_codex_output(&format!(
             "{{\"type\":\"session.started\"}}\n{}\n# Report\n\nDone\n{}\nignored",
@@ -5491,62 +5488,6 @@ mod tests {
             metadata.tool_calls[0].value["args"],
             json!({"command": "pwd", "description": "show cwd"})
         );
-    }
-
-    #[test]
-    fn remote_file_write_command_uses_safe_heredoc_delimiter() {
-        let command = remote_file_write_command(
-            "/workspace/sessions/session-1",
-            "reports/diagnostics.md",
-            "line one\nMANDOFORGE_FILE_WRITE_EOF_0\nline two",
-        );
-
-        assert!(command.contains("cd '/workspace/sessions/session-1'"));
-        assert!(command.contains("mkdir -p -- \"$(dirname -- 'reports/diagnostics.md')\""));
-        assert!(command.contains("cat > 'reports/diagnostics.md'"));
-        assert!(command.contains("MANDOFORGE_FILE_WRITE_EOF_1"));
-        assert!(!command.contains("<<'MANDOFORGE_FILE_WRITE_EOF_0'"));
-    }
-
-    #[test]
-    fn remote_shell_command_runs_inside_session_workspace() {
-        let command =
-            remote_shell_exec_command("/workspace/sessions/session-1", "pwd && touch marker.txt");
-
-        assert!(command.contains("mkdir -p '/workspace/sessions/session-1'"));
-        assert!(command.contains("cd '/workspace/sessions/session-1'"));
-        assert!(command.ends_with("pwd && touch marker.txt"));
-    }
-
-    #[test]
-    fn remote_agent_cli_environment_profile_avoids_eval_and_globbing() {
-        let request = AgentCliRequest {
-            profile: "legacy-coder".to_string(),
-            task: "summarize repo".to_string(),
-            args: vec!["--json".to_string()],
-            timeout_seconds: None,
-        };
-        let config = AgentCliProfileConfig {
-            command: String::new(),
-            args: Vec::new(),
-            env: Vec::new(),
-            timeout_seconds: None,
-            remote_computer_required: true,
-            runtime_type: "agent_cli".to_string(),
-            source: AgentCliProfileConfigSource::Environment,
-        };
-
-        let command = remote_agent_cli_exec_command(&request, &config, "/workspace/sessions/s1")
-            .expect("agent cli command");
-
-        assert!(command.contains("printenv \"$command_var\""));
-        assert!(command.contains("printenv \"$args_var\""));
-        assert!(!command.contains("eval \"printf"));
-        assert!(command.contains("set -f\n  set -- $agent_args\n  set +f"));
-        assert!(command.contains("MANDOFORGE_AGENT_CLI_$(printf '%s' \"$agent_cli_profile\""));
-        assert!(command.contains("'legacy-coder'"));
-        assert!(command.contains("'--json'"));
-        assert!(command.contains("'summarize repo'"));
     }
 
     #[test]
