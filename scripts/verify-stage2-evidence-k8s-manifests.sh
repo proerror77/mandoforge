@@ -380,6 +380,12 @@ if ! grep -q "MANDOFORGE_PROVIDER_RUNTIME_ENV: production" "$deploy_render_file"
   echo "deploy/k8s render must force provider runtime production mode" >&2
   exit 1
 fi
+if ! grep -q "MANDOFORGE_AGENT_RELEASE_ENVIRONMENT: production" "$deploy_render_file"; then
+  fail "rendered deployment must bind production sessions to production agent releases"
+fi
+if ! grep -q "MANDOFORGE_AGENT_RELEASE_ENFORCEMENT: required" "$deploy_render_file"; then
+  fail "rendered deployment must require the agent release execution gate"
+fi
 
 if ! grep -q "kind: Job" "$stage2_render_file"; then
   echo "Stage 2 evidence kustomize render is missing a Job" >&2

@@ -136,7 +136,7 @@ fn App() -> Html {
         provider_runtime: use_polling::<Value>(
             "/api/providers/runtime",
             5_000,
-            poll_system_ops_detail,
+            poll_system_ops_detail || poll_agent_detail,
         ),
         observability: use_polling::<ObservabilitySummary>(
             "/api/observability",
@@ -852,29 +852,37 @@ fn App() -> Html {
 
     let start_task = {
         let agents = data.agents.data.clone();
+        let environments = data.environments.data.clone();
+        let direct_session_launch_allowed = data.direct_session_launch_allowed();
         let task_title = task_title.clone();
         let task_message = task_message.clone();
         let task_agent_id = task_agent_id.clone();
         let task_environment_id = task_environment_id.clone();
         let mutation_status = mutation_status.clone();
         Callback::from(move |_| {
-            let selected_agent_id = if task_agent_id.trim().is_empty() {
-                agents
-                    .first()
-                    .map(|agent| agent.id.clone())
-                    .unwrap_or_default()
-            } else {
-                (*task_agent_id).clone()
-            };
+            if !direct_session_launch_allowed {
+                mutation_status.set(
+                    "Start task blocked: production requires a WorkflowRun-issued TaskGrant."
+                        .to_string(),
+                );
+                return;
+            }
+            let selected_agent_id = agents
+                .iter()
+                .find(|agent| agent.is_runnable() && agent.id == *task_agent_id)
+                .or_else(|| agents.iter().find(|agent| agent.is_runnable()))
+                .map(|agent| agent.id.clone())
+                .unwrap_or_default();
             if selected_agent_id.trim().is_empty() {
                 mutation_status.set("Start task failed: no agent is available.".to_string());
                 return;
             }
-            let environment_id = if task_environment_id.trim().is_empty() {
-                None
-            } else {
-                Some(task_environment_id.as_str())
-            };
+            let environment_id = environments
+                .iter()
+                .find(|environment| {
+                    environment.is_runnable() && environment.id == *task_environment_id
+                })
+                .map(|environment| environment.id.as_str());
             let body = create_session_body(
                 &selected_agent_id,
                 environment_id,
@@ -2130,14 +2138,6 @@ fn state_select(handle: UseStateHandle<String>) -> Callback<Event> {
         let input: HtmlSelectElement = event.target_unchecked_into();
         handle.set(input.value());
     })
-}
-
-pub(crate) fn effective_selected(selected: &str, fallback: Option<&str>) -> String {
-    if selected.trim().is_empty() {
-        fallback.unwrap_or_default().to_string()
-    } else {
-        selected.to_string()
-    }
 }
 
 pub(crate) fn session_title(session: &Session) -> String {

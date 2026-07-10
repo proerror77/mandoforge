@@ -84,6 +84,10 @@ static_contract_check() {
   fi
   grep -Eq 'MANDOFORGE_PROVIDER_RUNTIME_ENV:[[:space:]]*"production"' deploy/k8s/configmap.yaml \
     || fail "K8s config must force provider runtime production mode"
+  grep -Eq 'MANDOFORGE_AGENT_RELEASE_ENVIRONMENT:[[:space:]]*"production"' deploy/k8s/configmap.yaml \
+    || fail "K8s config must bind production sessions to production agent releases"
+  grep -Eq 'MANDOFORGE_AGENT_RELEASE_ENFORCEMENT:[[:space:]]*"required"' deploy/k8s/configmap.yaml \
+    || fail "K8s config must require the agent release execution gate"
   grep -Eq 'MANDOFORGE_ENTERPRISE_PRODUCT_EVIDENCE_DIR:[[:space:]]*"/evidence"' deploy/k8s/configmap.yaml \
     || fail "K8s config must point enterprise readiness at the production evidence PVC mount"
   grep -Eq 'MANDOFORGE_REMOTE_COMPUTER_RUNNER:[[:space:]]*"kubernetes"' deploy/k8s/configmap.yaml \

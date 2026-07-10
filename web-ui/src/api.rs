@@ -38,6 +38,12 @@ pub struct Agent {
     pub release_state: String,
 }
 
+impl Agent {
+    pub(crate) fn is_runnable(&self) -> bool {
+        self.release_state == "active"
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 pub struct Environment {
     pub id: String,
@@ -46,6 +52,14 @@ pub struct Environment {
     pub kind: String,
     #[serde(default)]
     pub status: String,
+    #[serde(default)]
+    pub release_state: String,
+}
+
+impl Environment {
+    pub(crate) fn is_runnable(&self) -> bool {
+        self.status == "enabled" && self.release_state == "active"
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]

@@ -196,6 +196,14 @@ pub(crate) struct ConsoleData {
     pub(crate) semantic_retrieval_backends: ApiState<Value>,
 }
 
+impl ConsoleData {
+    pub(crate) fn direct_session_launch_allowed(&self) -> bool {
+        self.provider_runtime.status == LoadStatus::Ready
+            && self.provider_runtime.data["agent_release_enforcement_required"].as_bool()
+                != Some(true)
+    }
+}
+
 pub(crate) fn storage_get(key: &str) -> Option<String> {
     web_sys::window()
         .and_then(|window| window.local_storage().ok().flatten())

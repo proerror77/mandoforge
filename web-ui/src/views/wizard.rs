@@ -69,7 +69,12 @@ pub(crate) fn WizardView(props: &WizardProps) -> Html {
     let token_saved = storage_get("mandoforge.adminToken")
         .map(|value| !value.trim().is_empty())
         .unwrap_or(false);
-    let has_runtime = !data.agents.data.is_empty() && !data.environments.data.is_empty();
+    let has_runtime = data.agents.data.iter().any(|agent| agent.is_runnable())
+        && data
+            .environments
+            .data
+            .iter()
+            .any(|environment| environment.is_runnable());
     let fallback_pack_id = cards
         .iter()
         .find(|card| card.id.starts_with("ecommerce-"))
@@ -119,7 +124,7 @@ pub(crate) fn WizardView(props: &WizardProps) -> Html {
         .cloned()
         .or_else(|| first_lane_blocker(enterprise))
         .unwrap_or_else(|| "No enterprise readiness next action reported.".to_string());
-    let can_start_session = has_runtime;
+    let can_start_session = has_runtime && data.direct_session_launch_allowed();
 
     let choose_mode = |mode: &'static str, access_mode: UseStateHandle<String>| {
         Callback::from(move |_| {
@@ -142,7 +147,13 @@ pub(crate) fn WizardView(props: &WizardProps) -> Html {
         let data = data.clone();
         let on_status = props.on_status.clone();
         Callback::from(move |_| {
-            let Some(agent) = data.agents.data.first().cloned() else {
+            let Some(agent) = data
+                .agents
+                .data
+                .iter()
+                .find(|agent| agent.is_runnable())
+                .cloned()
+            else {
                 on_status
                     .emit("Wizard cannot start a pilot session: no agent is registered.".to_string());
                 return;
@@ -150,7 +161,8 @@ pub(crate) fn WizardView(props: &WizardProps) -> Html {
             let environment_id = data
                 .environments
                 .data
-                .first()
+                .iter()
+                .find(|environment| environment.is_runnable())
                 .map(|environment| environment.id.as_str());
             let body = create_session_body(
                 &agent.id,
@@ -234,7 +246,7 @@ pub(crate) fn WizardView(props: &WizardProps) -> Html {
                 <WizardStep
                     number="7"
                     title="Governed pilot"
-                    status={if can_start_session { "ready to start" } else { "blocked by runtime inventory" }}
+                    status={if can_start_session { "ready to start" } else if has_runtime { "workflow required" } else { "blocked by runtime inventory" }}
                     detail={"Creates a normal managed session through /api/sessions; it does not bypass policy, approval, audit, or connector gates."}
                     tone={if can_start_session { "info" } else { "warn" }}
                 />
@@ -284,7 +296,7 @@ pub(crate) fn WizardView(props: &WizardProps) -> Html {
                         <div class="settings-row">
                             <div>
                                 <span>{ "Start pilot session" }</span>
-                                <strong>{ if can_start_session { "available" } else { "needs agent and environment" } }</strong>
+                                <strong>{ if can_start_session { "available" } else if has_runtime { "workflow required" } else { "needs agent and environment" } }</strong>
                                 <p>{ "The first-run session is an internal smoke task. It creates no external writes and remains visible in session, worker, approval, and audit surfaces." }</p>
                             </div>
                             <button disabled={!can_start_session} onclick={start_session}>{ "Start session" }</button>
