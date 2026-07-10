@@ -74,6 +74,15 @@ async fn migration_paths_include_stage2_migrations_in_order() {
 }
 
 #[test]
+fn project_github_bindings_migration_is_restart_safe() {
+    let migration = include_str!("../../../../db/migrations/0062_project_github_bindings.sql");
+
+    assert!(migration.contains("CREATE TABLE IF NOT EXISTS project_github_bindings"));
+    assert!(migration.contains("CREATE INDEX IF NOT EXISTS ix_pgb_tenant"));
+    assert!(migration.contains("CREATE INDEX IF NOT EXISTS ix_pgb_repo"));
+}
+
+#[test]
 fn tenant_rls_migration_covers_tracked_tables() {
     let migration = [
         include_str!("../../../../db/migrations/0024_tenant_rls_policies.sql"),
