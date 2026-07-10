@@ -317,6 +317,19 @@ fn validate_environment_update(
     validate_optional_json_object(&input.remote_computer_profile, "remote_computer_profile")?;
     validate_optional_json_object(&input.codex_app_server_profile, "codex_app_server_profile")?;
     validate_optional_json_object(&input.worker_queue_binding, "worker_queue_binding")?;
+    let worker_queue_binding = input
+        .worker_queue_binding
+        .as_ref()
+        .unwrap_or(&existing.worker_queue_binding);
+    let effective_status = input.status.as_deref().unwrap_or(&existing.status);
+    let effective_release_state = input
+        .release_state
+        .as_deref()
+        .unwrap_or(&existing.release_state);
+    validate_worker_queue_binding(
+        worker_queue_binding,
+        requires_release_environment(effective_status, effective_release_state),
+    )?;
     validate_optional_json_object(&input.state_mounts, "state_mounts")?;
     validate_optional_json_object(&input.network_policy, "network_policy")?;
     validate_optional_json_object(&input.vault_requirements, "vault_requirements")?;
@@ -333,6 +346,10 @@ fn validate_environment_json_fields(
     validate_json_object(&input.remote_computer_profile, "remote_computer_profile")?;
     validate_json_object(&input.codex_app_server_profile, "codex_app_server_profile")?;
     validate_json_object(&input.worker_queue_binding, "worker_queue_binding")?;
+    validate_worker_queue_binding(
+        &input.worker_queue_binding,
+        requires_release_environment(&input.status, &input.release_state),
+    )?;
     validate_json_object(&input.state_mounts, "state_mounts")?;
     validate_json_object(&input.network_policy, "network_policy")?;
     validate_json_object(&input.vault_requirements, "vault_requirements")?;
@@ -447,6 +464,31 @@ fn validate_json_object(value: &serde_json::Value, field: &str) -> Result<(), Ap
             "environment {field} must be a JSON object"
         )))
     }
+}
+
+fn requires_release_environment(status: &str, release_state: &str) -> bool {
+    crate::store_entities::agent_release_enforcement_required()
+        && status == "enabled"
+        && release_state == "active"
+}
+
+fn validate_worker_queue_binding(value: &Value, required: bool) -> Result<(), AppError> {
+    let release_environment = value
+        .get("release_environment")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|environment| !environment.is_empty());
+    if required && release_environment.is_none() {
+        return Err(AppError::bad_request(
+            "active production environment requires worker_queue_binding.release_environment",
+        ));
+    }
+    if value.get("release_environment").is_some() && release_environment.is_none() {
+        return Err(AppError::bad_request(
+            "worker_queue_binding.release_environment must be a non-empty string",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_remote_computer_profile_schema(

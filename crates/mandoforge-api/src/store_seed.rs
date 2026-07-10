@@ -82,14 +82,25 @@ impl AppState {
 
     async fn seed_default_environment(&self) -> Result<(), AppError> {
         let now = Utc::now();
+        let release_environment = crate::store_entities::configured_agent_release_environment()
+            .unwrap_or_else(|| "development".to_string());
+        let environment_id = match &self.store {
+            StoreBackend::Memory(_) => {
+                Uuid::parse_str("22222222-2222-4222-8222-222222222222").expect("valid uuid")
+            }
+            StoreBackend::Postgres(_) => Uuid::new_v4(),
+        };
         let environment = Environment {
-            id: Uuid::parse_str("22222222-2222-4222-8222-222222222222").expect("valid uuid"),
+            id: environment_id,
             name: "Local Worker".to_string(),
             environment_type: "local".to_string(),
             runtime_profile_id: None,
             remote_computer_profile: json!({}),
             codex_app_server_profile: json!({}),
-            worker_queue_binding: json!({"queue": "managed-agent"}),
+            worker_queue_binding: json!({
+                "queue": "managed-agent",
+                "release_environment": release_environment.clone(),
+            }),
             state_mounts: json!({}),
             network_policy: json!({}),
             vault_requirements: json!({}),
@@ -111,13 +122,34 @@ impl AppState {
             }
             StoreBackend::Postgres(pool) => {
                 sqlx::query(
+                    "UPDATE environments
+                     SET worker_queue_binding = jsonb_set(
+                             worker_queue_binding,
+                             '{release_environment}',
+                             to_jsonb($2::text),
+                             true
+                         ),
+                         updated_at = $3
+                     WHERE tenant_id = $1
+                       AND archived_at IS NULL
+                       AND (
+                           worker_queue_binding->>'release_environment' IS NULL
+                           OR btrim(worker_queue_binding->>'release_environment') = ''
+                       )",
+                )
+                .bind(self.current_tenant_id())
+                .bind(&release_environment)
+                .bind(now)
+                .execute(pool)
+                .await?;
+                sqlx::query(
                     "INSERT INTO environments
                         (id, tenant_id, name, environment_type, runtime_profile_id,
                          remote_computer_profile, codex_app_server_profile, worker_queue_binding,
                          state_mounts, network_policy, vault_requirements, mcp_requirements,
                          release_state, status, created_at, updated_at, archived_at)
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NULL)
-                     ON CONFLICT (id) DO NOTHING",
+                     ON CONFLICT DO NOTHING",
                 )
                 .bind(environment.id)
                 .bind(self.current_tenant_id())

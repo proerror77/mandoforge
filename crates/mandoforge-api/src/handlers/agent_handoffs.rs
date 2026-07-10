@@ -11,14 +11,14 @@ use crate::{
     AgentHandoffAssignment, AgentHandoffEvent, AppError, AppState,
     AttachAgentHandoffRemoteComputerAssignment, CreateAgentHandoffAssignment,
     CreateAgentHandoffEvent, CreateSession, EscalateAgentHandoffEvent, Permission,
-    TransitionAgentHandoffEvent, active_task_grant_for_session, authorize_collection_request,
-    authorize_request, create_agent_handoff_event_for_session, create_handoff_session_thread,
+    TransitionAgentHandoffEvent, authorize_collection_request, authorize_request,
+    create_agent_handoff_event_for_session, create_handoff_session_thread,
     default_handoff_assignment_message, ensure_primary_session_thread,
     materialize_workflow_handoff_assignment, normalize_handoff_human_escalation_status,
     normalize_optional_text, record_agent_handoff_assignment_audit_and_events,
     record_agent_handoff_assignment_remote_computer_event, record_agent_handoff_audit_and_event,
-    session_thread_event_payload, transition_agent_handoff_event,
-    visible_session_ids_for_principal,
+    require_active_task_grant_for_session, session_thread_event_payload,
+    transition_agent_handoff_event, visible_session_ids_for_principal,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -282,25 +282,31 @@ async fn assign_agent_handoff_event(
         }
     }
     let source_session = state.get_session(handoff.source_session_id).await?;
-    if crate::store_entities::agent_release_enforcement_required()
-        && active_task_grant_for_session(&state, source_session.id)
-            .await?
-            .is_none()
-    {
-        return Err(AppError::forbidden(
-            "production handoff assignment requires an active TaskGrant",
-        ));
+    state.ensure_session_runnable(source_session.id).await?;
+    if crate::store_entities::agent_release_enforcement_required() {
+        require_active_task_grant_for_session(&state, source_session.id).await?;
     }
     let parent_thread = ensure_primary_session_thread(&state, source_session.id).await?;
 
     let specialist_session = match input.specialist_session_id {
         Some(session_id) => {
+            if crate::store_entities::agent_release_enforcement_required() {
+                return Err(AppError::forbidden(
+                    "production handoff assignment cannot reuse an existing specialist session",
+                ));
+            }
             let session = state.get_session(session_id).await?;
             if session.agent_id != handoff.target_agent_id {
                 return Err(AppError::bad_request(
                     "specialist_session_id must belong to the handoff target agent",
                 ));
             }
+            if session.environment_id != source_session.environment_id {
+                return Err(AppError::bad_request(
+                    "specialist_session_id must use the same environment as the source session",
+                ));
+            }
+            state.ensure_session_runnable(session.id).await?;
             session
         }
         None => {

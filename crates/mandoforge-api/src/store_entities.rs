@@ -68,6 +68,22 @@ fn production_agent_release_environment() -> Result<String, AppError> {
     })
 }
 
+fn environment_release_environment(environment: &crate::Environment) -> Result<String, AppError> {
+    environment
+        .worker_queue_binding
+        .get("release_environment")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| {
+            AppError::forbidden(format!(
+                "environment {} requires worker_queue_binding.release_environment",
+                environment.name
+            ))
+        })
+}
+
 pub(crate) fn agent_release_enforcement_required() -> bool {
     crate::provider_runtime_production_mode()
         && std::env::var("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT")
@@ -603,6 +619,14 @@ impl AppState {
                 environment.name
             )));
         }
+        let release_environment = environment_release_environment(&environment)?;
+        let configured_release_environment = production_agent_release_environment()?;
+        if release_environment != configured_release_environment {
+            return Err(AppError::forbidden(format!(
+                "environment {} release environment {} does not match runtime release environment {}",
+                environment.name, release_environment, configured_release_environment
+            )));
+        }
 
         let runtime_profile_id = environment.runtime_profile_id.or(agent.runtime_profile_id);
         if let Some(runtime_profile_id) = runtime_profile_id {
@@ -617,8 +641,24 @@ impl AppState {
             }
         }
 
-        self.promoted_agent_version(agent_id, production_agent_release_environment()?.as_str())
+        self.promoted_agent_version(agent_id, &release_environment)
             .await
+    }
+
+    pub(crate) async fn ensure_session_runnable(&self, session_id: Uuid) -> Result<(), AppError> {
+        if !agent_release_enforcement_required() {
+            return Ok(());
+        }
+        let session = self.get_session(session_id).await?;
+        let runnable_version = self
+            .runnable_agent_version(session.agent_id, session.environment_id)
+            .await?;
+        if session.agent_version_id != Some(runnable_version.id) {
+            return Err(AppError::forbidden(
+                "session is not pinned to the promoted agent version",
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) async fn agent_exists(&self, agent_id: Uuid) -> Result<bool, AppError> {

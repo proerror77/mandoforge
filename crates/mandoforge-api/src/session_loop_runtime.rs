@@ -604,12 +604,12 @@ pub(crate) async fn run_session_loop(
             "session is terminal and cannot run session loop work",
         ));
     }
-    let active_task_grant = active_task_grant_for_session(state, id).await?;
-    if crate::store_entities::agent_release_enforcement_required() && active_task_grant.is_none() {
-        return Err(AppError::forbidden(
-            "production session loop requires an active TaskGrant",
-        ));
-    }
+    state.ensure_session_runnable(id).await?;
+    let active_task_grant = if crate::store_entities::agent_release_enforcement_required() {
+        Some(require_active_task_grant_for_session(state, id).await?)
+    } else {
+        active_task_grant_for_session(state, id).await?
+    };
     ensure_primary_session_thread(state, id).await?;
     set_managed_session_status(state, id, SessionStatus::Running, "session loop started").await?;
     state

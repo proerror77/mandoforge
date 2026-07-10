@@ -4570,6 +4570,60 @@ async fn seed_promoted_agent_for_test(
     (agent, version, runtime_environment)
 }
 
+async fn promote_replacement_agent_version_for_test(
+    state: &AppState,
+    agent: &Agent,
+    environment: &str,
+) -> AgentVersion {
+    let mut changed_agent = agent.clone();
+    changed_agent.system_prompt = "Promoted replacement prompt".to_string();
+    let next_version = state
+        .list_agent_versions(agent.id)
+        .await
+        .expect("list agent versions")
+        .len() as i32
+        + 1;
+    state
+        .insert_agent_version(&changed_agent, next_version, json!({}))
+        .await
+        .expect("insert replacement version");
+    let replacement = state
+        .current_agent_version(agent.id)
+        .await
+        .expect("load replacement version");
+    let now = Utc::now() + chrono::Duration::seconds(1);
+    let replacement_release = AgentRelease {
+        id: Uuid::new_v4(),
+        agent_id: agent.id,
+        agent_version_id: replacement.id,
+        environment: environment.to_string(),
+        status: "promoted".to_string(),
+        eval_run_id: None,
+        eval_score: Some(1.0),
+        min_score: 1.0,
+        requested_by: Some("test".to_string()),
+        requested_at: Some(now),
+        request_reason: None,
+        approver_subject: None,
+        decision_by: Some("test".to_string()),
+        decided_at: Some(now),
+        decision_reason: Some("replacement release".to_string()),
+        promoted_by: Some("test".to_string()),
+        promoted_at: Some(now),
+        automation_policy: json!({}),
+        created_at: now,
+    };
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test requires memory store");
+    };
+    inner
+        .write()
+        .await
+        .agent_releases
+        .insert(replacement_release.id, replacement_release);
+    replacement
+}
+
 #[tokio::test]
 async fn production_session_binds_promoted_agent_version() {
     let _env = env_lock().lock().expect("env lock");
@@ -4663,6 +4717,104 @@ async fn production_session_requires_bound_environment() {
 }
 
 #[tokio::test]
+async fn production_session_rejects_environment_release_mismatch() {
+    let _env = env_lock().lock().expect("env lock");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let (agent, _, environment) = seed_promoted_agent_for_test(&state, "production").await;
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test requires memory store");
+    };
+    inner
+        .write()
+        .await
+        .environments
+        .get_mut(&environment.id)
+        .expect("seeded environment")
+        .worker_queue_binding["release_environment"] = json!("staging");
+
+    let error = {
+        let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+        let _release_enforcement =
+            EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+        let _release_environment =
+            EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT", "production");
+        state
+            .create_session(CreateSession {
+                agent_id: agent.id,
+                environment_id: Some(environment.id),
+                title: "mismatched release environment".to_string(),
+                message: None,
+            })
+            .await
+            .expect_err("runtime must reject an environment from another release channel")
+    };
+    assert!(
+        error
+            .message
+            .contains("does not match runtime release environment")
+    );
+}
+
+#[tokio::test]
+async fn environment_rejects_invalid_release_channel_binding() {
+    let app = test_app().await;
+    let (status, error) = request_value(
+        app,
+        json_request_with_headers(
+            "POST",
+            "/api/environments",
+            json!({
+                "name": "Invalid Release Binding",
+                "environment_type": "self_hosted",
+                "worker_queue_binding": {"release_environment": "   "},
+                "release_state": "active",
+                "status": "enabled"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error["error"],
+        "worker_queue_binding.release_environment must be a non-empty string"
+    );
+}
+
+#[tokio::test]
+async fn active_production_environment_requires_release_channel_binding() {
+    let _env = env_lock().lock().expect("env lock");
+    let app = test_app().await;
+    let (status, error) = {
+        let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+        let _release_enforcement =
+            EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+        request_value(
+            app,
+            json_request_with_headers(
+                "POST",
+                "/api/environments",
+                json!({
+                    "name": "Missing Release Binding",
+                    "environment_type": "self_hosted",
+                    "release_state": "active",
+                    "status": "enabled"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await
+    };
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error["error"],
+        "active production environment requires worker_queue_binding.release_environment"
+    );
+}
+
+#[tokio::test]
 async fn production_direct_session_requires_governed_workflow() {
     let _env = env_lock().lock().expect("env lock");
     let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
@@ -4719,6 +4871,113 @@ async fn production_session_loop_requires_active_task_grant() {
         .await
         .expect_err("production loop must require a TaskGrant");
     assert!(error.message.contains("active TaskGrant"));
+}
+
+#[tokio::test]
+async fn production_session_loop_rejects_stale_promoted_version_before_grant_lookup() {
+    let _env = env_lock().lock().expect("env lock");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let (agent, _, environment) = seed_promoted_agent_for_test(&state, "production").await;
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: Some(environment.id),
+            title: "stale production version".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create production session");
+    promote_replacement_agent_version_for_test(&state, &agent, "production").await;
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test requires memory store");
+    };
+    {
+        let mut store = inner.write().await;
+        store
+            .environments
+            .get_mut(&environment.id)
+            .expect("seeded environment")
+            .worker_queue_binding["release_environment"] = json!("production");
+    }
+    let job = enqueue_session_loop(&state, session.id, None, "test stale release enforcement")
+        .await
+        .expect("enqueue session loop");
+
+    let error = {
+        let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+        let _release_enforcement =
+            EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+        let _release_environment =
+            EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT", "production");
+        run_session_loop(&state, &job)
+            .await
+            .expect_err("production loop must reject a stale promoted version")
+    };
+    assert!(
+        error
+            .message
+            .contains("not pinned to the promoted agent version")
+    );
+}
+
+#[tokio::test]
+async fn production_handoff_rejects_stale_source_agent_version() {
+    let _env = env_lock().lock().expect("env lock");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let (agent, _, environment) = seed_promoted_agent_for_test(&state, "production").await;
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: Some(environment.id),
+            title: "stale manager handoff".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create manager session");
+    promote_replacement_agent_version_for_test(&state, &agent, "production").await;
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test requires memory store");
+    };
+    inner
+        .write()
+        .await
+        .environments
+        .get_mut(&environment.id)
+        .expect("seeded environment")
+        .worker_queue_binding["release_environment"] = json!("production");
+
+    let error = {
+        let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+        let _release_enforcement =
+            EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+        let _release_environment =
+            EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT", "production");
+        create_agent_handoff_event_for_session(
+            &state,
+            session.id,
+            CreateAgentHandoffEvent {
+                target_agent_id: Uuid::new_v4(),
+                manager_plan_id: None,
+                intent: "delegate".to_string(),
+                payload: json!({}),
+                schema_version: "handoff.v1".to_string(),
+                risk_level: "low".to_string(),
+                approval_required: false,
+                semantic_scopes: None,
+                runtime_profile_id: None,
+                remote_computer_required: None,
+                review_status: None,
+                human_escalation_status: None,
+            },
+        )
+        .await
+        .expect_err("stale source session must not create a production handoff")
+    };
+    assert!(
+        error
+            .message
+            .contains("not pinned to the promoted agent version")
+    );
 }
 
 #[tokio::test]
@@ -6315,6 +6574,46 @@ async fn manager_handoff_assignment_creates_specialist_execution_entry() {
     .await;
     assert_eq!(accepted.status, "accepted");
 
+    let environments: Vec<Environment> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/environments")
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let mismatched_session: Session = request_json(
+        app.clone(),
+        json_request(
+            "POST",
+            "/api/sessions",
+            json!({
+                "agent_id": specialist.id,
+                "environment_id": environments.first().expect("seeded environment").id,
+                "title": "wrong environment specialist session"
+            }),
+        ),
+    )
+    .await;
+    let (mismatch_status, mismatch_error) = request_value(
+        app.clone(),
+        json_request(
+            "POST",
+            &format!("/api/agent-handoffs/{}/assignment", handoff.id),
+            json!({
+                "specialist_session_id": mismatched_session.id,
+                "assigned_by": "manager-agent"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(mismatch_status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        mismatch_error["error"],
+        "specialist_session_id must use the same environment as the source session"
+    );
+
     let sessions_before: Vec<Session> = request_json(
         app.clone(),
         Request::builder()
@@ -6342,7 +6641,7 @@ async fn manager_handoff_assignment_creates_specialist_execution_entry() {
     assert!(
         production_error["error"]
             .as_str()
-            .is_some_and(|message| message.contains("active TaskGrant"))
+            .is_some_and(|message| message.contains("bound environment"))
     );
     let sessions_after: Vec<Session> = request_json(
         app.clone(),
@@ -14368,6 +14667,21 @@ async fn workflow_handoff_assignment_materializes_step_and_child_grant() {
         handoff_step.session_id,
         Some(assignment.specialist_session_id)
     );
+    let specialist_session: Session = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!(
+                "/api/sessions/{}",
+                assignment.specialist_session_id
+            ))
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(
+        handoff_step.agent_version_id,
+        specialist_session.agent_version_id
+    );
     assert!(handoff_step.task_grant_id.is_some());
 
     let grants: Vec<TaskGrant> = request_json(
@@ -14710,6 +15024,96 @@ async fn workflow_tool_execution_enforces_task_grant_scope() {
     assert!(events.iter().any(|event| {
         event.event_type == "task_grant.denied" && event.payload["tool"] == json!("mcp.call")
     }));
+}
+
+#[tokio::test]
+async fn required_task_grant_for_session_rejects_revoked_expired_and_terminal_root_grants() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let app = build_router(state.clone());
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let definition: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-definitions",
+            json!({
+                "name": "Root grant lifecycle",
+                "entrypoint": "root-grant-lifecycle",
+                "default_agent_id": agent.id,
+                "release_state": "released"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let run: WorkflowRun = request_json(
+        app,
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-runs",
+            json!({
+                "workflow_definition_id": definition["id"],
+                "title": "root grant lifecycle"
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    let root_grant_id = run.root_task_grant_id.expect("root task grant");
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test requires memory store");
+    };
+
+    inner
+        .write()
+        .await
+        .task_grants
+        .get_mut(&root_grant_id)
+        .expect("root task grant")
+        .status = "revoked".to_string();
+    let revoked = active_task_grant_for_session(&state, run.primary_session_id)
+        .await
+        .expect_err("revoked root grant must fail closed");
+    assert!(revoked.message.contains("not active"));
+
+    {
+        let mut store = inner.write().await;
+        let grant = store
+            .task_grants
+            .get_mut(&root_grant_id)
+            .expect("root task grant");
+        grant.status = "active".to_string();
+        grant.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+    }
+    let expired = active_task_grant_for_session(&state, run.primary_session_id)
+        .await
+        .expect_err("expired root grant must fail closed");
+    assert!(expired.message.contains("expired"));
+
+    {
+        let mut store = inner.write().await;
+        store
+            .task_grants
+            .get_mut(&root_grant_id)
+            .expect("root task grant")
+            .expires_at = None;
+        store
+            .workflow_runs
+            .get_mut(&run.id)
+            .expect("workflow run")
+            .status = "completed".to_string();
+    }
+    let terminal = require_active_task_grant_for_session(&state, run.primary_session_id)
+        .await
+        .expect_err("terminal workflow run must fail closed");
+    assert!(terminal.message.contains("workflow run is not active"));
 }
 
 #[tokio::test]

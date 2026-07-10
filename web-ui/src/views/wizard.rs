@@ -70,11 +70,9 @@ pub(crate) fn WizardView(props: &WizardProps) -> Html {
         .map(|value| !value.trim().is_empty())
         .unwrap_or(false);
     let has_runtime = data.agents.data.iter().any(|agent| agent.is_runnable())
-        && data
-            .environments
-            .data
-            .iter()
-            .any(|environment| environment.is_runnable());
+        && data.environments.data.iter().any(|environment| {
+            environment.is_runnable_for_release(data.agent_release_environment())
+        });
     let fallback_pack_id = cards
         .iter()
         .find(|card| card.id.starts_with("ecommerce-"))
@@ -162,7 +160,9 @@ pub(crate) fn WizardView(props: &WizardProps) -> Html {
                 .environments
                 .data
                 .iter()
-                .find(|environment| environment.is_runnable())
+                .find(|environment| {
+                    environment.is_runnable_for_release(data.agent_release_environment())
+                })
                 .map(|environment| environment.id.as_str());
             let body = create_session_body(
                 &agent.id,

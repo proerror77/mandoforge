@@ -89,6 +89,8 @@ async fn provider_runtime_status_reports_production_mode() {
     let _lock = env_lock().lock().expect("env lock");
     let _provider_runtime_env = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
     let _release_enforcement = EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+    let _release_environment =
+        EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT", "production");
     let app = build_router(test_state_with_worker(Arc::new(InlineExecutionWorker)));
 
     let runtime: Value = request_json(
@@ -106,6 +108,7 @@ async fn provider_runtime_status_reports_production_mode() {
     assert_eq!(runtime["mode"], json!("production"));
     assert_eq!(runtime["production_mode"], json!(true));
     assert_eq!(runtime["agent_release_enforcement_required"], json!(true));
+    assert_eq!(runtime["agent_release_environment"], json!("production"));
     assert!(
         runtime["contract"]
             .as_str()

@@ -36,7 +36,7 @@ pub(crate) fn AgentsView(props: &AgentsProps) -> Html {
         .environments
         .data
         .iter()
-        .filter(|environment| environment.is_runnable())
+        .filter(|environment| environment.is_runnable_for_release(data.agent_release_environment()))
         .collect::<Vec<_>>();
     let selected_agent_id = runnable_agents
         .iter()

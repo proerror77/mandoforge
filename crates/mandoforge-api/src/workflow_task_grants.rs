@@ -520,6 +520,15 @@ pub(crate) async fn active_task_grant_for_session(
             .root_task_grant_id
             .ok_or_else(|| AppError::forbidden("task grant is required for workflow session"))?;
         let grant = state.get_task_grant(root_task_grant_id).await?;
+        if grant.status != "active" {
+            return Err(AppError::forbidden("task grant is not active"));
+        }
+        if grant
+            .expires_at
+            .is_some_and(|expires_at| expires_at <= Utc::now())
+        {
+            return Err(AppError::forbidden("task grant is expired"));
+        }
         return Ok(Some((run, grant)));
     }
     let mut grants = state
@@ -527,6 +536,11 @@ pub(crate) async fn active_task_grant_for_session(
         .await?
         .into_iter()
         .filter(|grant| grant.status == "active")
+        .filter(|grant| {
+            grant
+                .expires_at
+                .is_none_or(|expires_at| expires_at > Utc::now())
+        })
         .filter(|grant| task_grant_session_matches(grant, &run, session_id))
         .collect::<Vec<_>>();
     grants.sort_by_key(|grant| grant.created_at);
@@ -536,6 +550,19 @@ pub(crate) async fn active_task_grant_for_session(
         ));
     };
     Ok(Some((run, grant)))
+}
+
+pub(crate) async fn require_active_task_grant_for_session(
+    state: &AppState,
+    session_id: Uuid,
+) -> Result<(WorkflowRun, TaskGrant), AppError> {
+    let (run, grant) = active_task_grant_for_session(state, session_id)
+        .await?
+        .ok_or_else(|| AppError::forbidden("workflow session requires an active TaskGrant"))?;
+    if workflow_step_status_terminal(&run.status) {
+        return Err(AppError::forbidden("workflow run is not active"));
+    }
+    Ok((run, grant))
 }
 
 pub(crate) fn task_grant_allows_tool(grant: &TaskGrant, tool_name: &str) -> bool {

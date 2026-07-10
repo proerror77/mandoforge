@@ -374,6 +374,10 @@ pub(crate) async fn create_agent_handoff_event_for_session(
     input: CreateAgentHandoffEvent,
 ) -> Result<AgentHandoffEvent, AppError> {
     let session = state.get_session(session_id).await?;
+    state.ensure_session_runnable(session.id).await?;
+    if crate::store_entities::agent_release_enforcement_required() {
+        require_active_task_grant_for_session(state, session.id).await?;
+    }
     let source_version = state.agent_version_for_session(session_id).await?;
     let target_agent = state.get_agent(input.target_agent_id).await?;
     if target_agent.agent_role != "specialist" {
@@ -497,6 +501,9 @@ pub(crate) async fn materialize_workflow_handoff_assignment(
     else {
         return Ok(None);
     };
+    if workflow_step_status_terminal(&run.status) {
+        return Err(AppError::forbidden("workflow run is not active"));
+    }
     let step_id = Uuid::new_v4();
     let now = Utc::now();
     let objective = manager_plan
@@ -546,7 +553,7 @@ pub(crate) async fn materialize_workflow_handoff_assignment(
     validate_task_grant_scope_objects(&child_grant)?;
     ensure_child_task_grant_within_parent(&parent_grant, &child_grant)?;
 
-    let agent_version_id = Some(state.current_agent_version(target_agent.id).await?.id);
+    let agent_version_id = specialist_session.agent_version_id;
     let step = state
         .create_workflow_step_run(WorkflowStepRun {
             id: step_id,
@@ -662,6 +669,12 @@ pub(crate) async fn transition_agent_handoff_event(
         Some(current.source_session_id),
     )
     .await?;
+    state
+        .ensure_session_runnable(current.source_session_id)
+        .await?;
+    if crate::store_entities::agent_release_enforcement_required() {
+        require_active_task_grant_for_session(&state, current.source_session_id).await?;
+    }
     ensure_agent_handoff_transition(&current.status, next_status)?;
     let event_type = format!("agent_handoff.{next_status}");
     let audit =

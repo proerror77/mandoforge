@@ -853,6 +853,7 @@ fn App() -> Html {
     let start_task = {
         let agents = data.agents.data.clone();
         let environments = data.environments.data.clone();
+        let agent_release_environment = data.agent_release_environment().map(str::to_string);
         let direct_session_launch_allowed = data.direct_session_launch_allowed();
         let task_title = task_title.clone();
         let task_message = task_message.clone();
@@ -880,7 +881,8 @@ fn App() -> Html {
             let environment_id = environments
                 .iter()
                 .find(|environment| {
-                    environment.is_runnable() && environment.id == *task_environment_id
+                    environment.is_runnable_for_release(agent_release_environment.as_deref())
+                        && environment.id == *task_environment_id
                 })
                 .map(|environment| environment.id.as_str());
             let body = create_session_body(
