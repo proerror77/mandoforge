@@ -251,9 +251,10 @@ use remote_computer_runner::{
 };
 pub(crate) use remote_computer_runtime::{
     RemoteComputerRuntimeIdentity, RemoteComputerSubstrate, build_remote_computer_runner_readiness,
-    metadata_with_remote_computer_runtime_identity, remote_computer_runner_request_is_exec,
-    remote_computer_runner_response_for_audit, remote_computer_runtime_identity,
-    required_remote_computer_runtime_identity, runtime_identity_metadata,
+    cleanup_remote_computer_lease_runtime, cleanup_remote_computer_session_runtimes,
+    delete_remote_computer_runtime_resource, metadata_with_remote_computer_runtime_identity,
+    remote_computer_runner_request_is_exec, remote_computer_runner_response_for_audit,
+    remote_computer_runtime_identity, required_remote_computer_runtime_identity,
 };
 pub(crate) use remote_computer_sidecars::{
     build_remote_computer_sidecar_recovery_readiness, build_remote_computer_sidecar_supervision,

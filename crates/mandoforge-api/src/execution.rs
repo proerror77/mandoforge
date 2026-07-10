@@ -17,19 +17,18 @@ use crate::codex_app_server::{CodexThreadRequest, CodexTurnRequest, CodexTurnRes
 use crate::execution_queue::{ExecutionJob, ExecutionJobRequest, ExecutionJobStatus};
 use crate::mcp_gateway::McpCallRequest;
 use crate::remote_computer_runner::{
-    RemoteComputerRunner, RemoteComputerRunnerConfig, RemoteComputerRunnerDryRunRequest,
-    poll_agent_sandbox_binding, poll_kubernetes_pod_running_in_namespace,
-    remote_computer_runner_for_config,
+    RemoteComputerRunnerConfig, RemoteComputerRunnerDryRunRequest, poll_agent_sandbox_binding,
+    poll_kubernetes_pod_running_in_namespace, remote_computer_runner_for_config,
 };
 use crate::shell_runner::{shell_command, shell_runner};
 use crate::{
     AppError, AppState, Approval, Artifact, CreateRemoteComputer,
     CreateRemoteComputerJobAssignment, CreateRemoteComputerLease, Environment, RemoteComputer,
     RemoteComputerJobAssignment, RemoteComputerLease, RemoteComputerRuntimeIdentity,
-    RemoteComputerSubstrate, ToolCall, metadata_with_remote_computer_runtime_identity,
-    new_audit_log, record_remote_computer_job_assignment_event, remote_computer_runtime_identity,
+    RemoteComputerSubstrate, ToolCall, delete_remote_computer_runtime_resource,
+    metadata_with_remote_computer_runtime_identity, new_audit_log,
+    record_remote_computer_job_assignment_event, remote_computer_runtime_identity,
     required_remote_computer_runtime_identity, resolve_mcp_runtime_secret_refs,
-    runtime_identity_metadata,
 };
 
 const DEFAULT_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
@@ -1255,7 +1254,25 @@ async fn provision_remote_computer_pod_for_job(
         c.id == remote_computer_id
             || remote_computer_runtime_resource_name(c).as_deref() == Some(resource_name.as_str())
     });
-    let computer = if let Some(existing_computer) = existing {
+    if let Some(existing) = existing.as_ref()
+        && existing.status == "attention"
+        && !existing
+            .metadata
+            .get("on_demand")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    {
+        return Err(AppError::internal(
+            "Remote Computer attention record is not an on-demand runtime",
+        ));
+    }
+    let rebind_candidate = existing
+        .as_ref()
+        .filter(|computer| computer.status == "attention")
+        .cloned();
+    let rebinding_existing_record = rebind_candidate.is_some();
+    let reusable_existing = existing.filter(|computer| computer.status != "attention");
+    let computer = if let Some(existing_computer) = reusable_existing {
         required_remote_computer_runtime_identity(&existing_computer)
             .map_err(AppError::internal)?;
         existing_computer
@@ -1302,6 +1319,19 @@ async fn provision_remote_computer_pod_for_job(
             .live_mutation_status_code
             .is_some_and(|status_code| (200..300).contains(&status_code));
         // Wait for Pod to reach Running phase. Agent Sandbox first resolves the claimed pod name.
+        let provisional_identity = RemoteComputerRuntimeIdentity::new(
+            if agent_sandbox {
+                RemoteComputerSubstrate::AgentSandbox
+            } else {
+                RemoteComputerSubstrate::KubernetesPod
+            },
+            namespace.clone(),
+            resource_name.clone(),
+            resource_name.clone(),
+            agent_sandbox.then(|| resource_name.clone()),
+            None,
+            lifecycle_deadline,
+        );
         let runtime_identity = if agent_sandbox {
             match poll_agent_sandbox_binding(
                 &config,
@@ -1325,16 +1355,10 @@ async fn provision_remote_computer_pod_for_job(
                     let cleanup_error = if created_pod {
                         cleanup_on_demand_remote_computer_pod_after_failed_provision(
                             state,
-                            runner.as_ref(),
-                            &config,
-                            &resource_name,
+                            &provisional_identity,
                             job,
                             worker_id,
                             "agent_sandbox_pod_not_bound",
-                            json!({
-                                "namespace": namespace,
-                                "runtime_substrate": "agent-sandbox"
-                            }),
                         )
                         .await
                     } else {
@@ -1369,13 +1393,10 @@ async fn provision_remote_computer_pod_for_job(
             let cleanup_error = if created_pod {
                 cleanup_on_demand_remote_computer_pod_after_failed_provision(
                     state,
-                    runner.as_ref(),
-                    &config,
-                    &runtime_identity.resource_name,
+                    &runtime_identity,
                     job,
                     worker_id,
                     "pod_not_ready",
-                    runtime_identity_metadata(&runtime_identity),
                 )
                 .await
             } else {
@@ -1389,66 +1410,94 @@ async fn provision_remote_computer_pod_for_job(
         // Persist the remote_computer record so the assignment chain can find pod_name.
         // On concurrent provisioning, a unique-constraint violation can occur — in that
         // case the winner's record is already in the DB; re-read it.
-        match state
-            .create_remote_computer(CreateRemoteComputer {
-                id: Some(remote_computer_id),
-                name: resource_name.clone(),
-                profile: Some(if agent_sandbox {
-                    "agent-sandbox".to_string()
-                } else {
-                    "workspace-write".to_string()
-                }),
-                namespace: Some(runtime_identity.namespace.clone()),
-                pod_name: Some(runtime_identity.pod_name.clone()),
-                workspace_path: Some("/workspace".to_string()),
-                state_mount_path: Some("/agent-state".to_string()),
-                metadata: Some(metadata_with_remote_computer_runtime_identity(&json!({
-                    "on_demand": true,
-                    "session_id": job.session_id,
-                    "session_workspace_path": remote_session_workspace_path_from_base("/workspace", job.session_id),
-                    "provisioned_by_worker": worker_id,
-                    "environment_contract": contract.evidence()
-                }), &runtime_identity)),
-            })
-            .await
-        {
-            Ok(computer) => computer,
-            Err(error) => {
-                // Duplicate insert — another worker won the race; use the existing record
-                if let Some(existing) = state
-                    .list_remote_computers()
-                    .await?
-                    .into_iter()
-                    .find(|c| {
-                        c.id == remote_computer_id
-                            || remote_computer_runtime_resource_name(c)
-                                .as_deref()
-                                == Some(resource_name.as_str())
-                    })
-                {
-                    required_remote_computer_runtime_identity(&existing)
-                        .map_err(AppError::internal)?;
-                    existing
-                } else {
-                    if created_pod {
-                        let cleanup_error =
-                            cleanup_on_demand_remote_computer_pod_after_failed_provision(
-                                state,
-                                runner.as_ref(),
-                                &config,
-                                &resource_name,
-                                job,
-                                worker_id,
-                                "remote_computer_record_failed",
-                                runtime_identity_metadata(&runtime_identity),
-                            )
-                            .await;
-                        return Err(remote_computer_pod_provision_error(
-                            error.message,
-                            cleanup_error,
-                        ));
+        let persisted_metadata = metadata_with_remote_computer_runtime_identity(
+            &json!({
+                "on_demand": true,
+                "session_id": job.session_id,
+                "session_workspace_path": remote_session_workspace_path_from_base("/workspace", job.session_id),
+                "provisioned_by_worker": worker_id,
+                "environment_contract": contract.evidence()
+            }),
+            &runtime_identity,
+        );
+        if let Some(rebind_candidate) = rebind_candidate {
+            match state
+                .rebind_on_demand_remote_computer(
+                    rebind_candidate.id,
+                    &runtime_identity,
+                    persisted_metadata,
+                )
+                .await
+            {
+                Ok(computer) => computer,
+                Err(error) => {
+                    let cleanup_error = if created_pod {
+                        cleanup_on_demand_remote_computer_pod_after_failed_provision(
+                            state,
+                            &runtime_identity,
+                            job,
+                            worker_id,
+                            "remote_computer_rebind_failed",
+                        )
+                        .await
+                    } else {
+                        None
+                    };
+                    return Err(remote_computer_pod_provision_error(
+                        error.message,
+                        cleanup_error,
+                    ));
+                }
+            }
+        } else {
+            match state
+                .create_remote_computer(CreateRemoteComputer {
+                    id: Some(remote_computer_id),
+                    name: resource_name.clone(),
+                    profile: Some(if agent_sandbox {
+                        "agent-sandbox".to_string()
+                    } else {
+                        "workspace-write".to_string()
+                    }),
+                    namespace: Some(runtime_identity.namespace.clone()),
+                    pod_name: Some(runtime_identity.pod_name.clone()),
+                    workspace_path: Some("/workspace".to_string()),
+                    state_mount_path: Some("/agent-state".to_string()),
+                    metadata: Some(persisted_metadata),
+                })
+                .await
+            {
+                Ok(computer) => computer,
+                Err(error) => {
+                    // Duplicate insert — another worker won the race; use the existing record
+                    if let Some(existing) =
+                        state.list_remote_computers().await?.into_iter().find(|c| {
+                            c.id == remote_computer_id
+                                || remote_computer_runtime_resource_name(c).as_deref()
+                                    == Some(resource_name.as_str())
+                        })
+                    {
+                        required_remote_computer_runtime_identity(&existing)
+                            .map_err(AppError::internal)?;
+                        existing
+                    } else {
+                        if created_pod {
+                            let cleanup_error =
+                                cleanup_on_demand_remote_computer_pod_after_failed_provision(
+                                    state,
+                                    &runtime_identity,
+                                    job,
+                                    worker_id,
+                                    "remote_computer_record_failed",
+                                )
+                                .await;
+                            return Err(remote_computer_pod_provision_error(
+                                error.message,
+                                cleanup_error,
+                            ));
+                        }
+                        return Err(error);
                     }
-                    return Err(error);
                 }
             }
         }
@@ -1483,19 +1532,31 @@ async fn provision_remote_computer_pod_for_job(
                 let cleanup_error = match required_remote_computer_runtime_identity(&computer) {
                     Ok(identity) => cleanup_on_demand_remote_computer_pod_after_failed_provision(
                         state,
-                        runner.as_ref(),
-                        &config,
-                        &identity.resource_name,
+                        &identity,
                         job,
                         worker_id,
                         "remote_computer_lease_failed",
-                        runtime_identity_metadata(&identity),
                     )
                     .await,
                     Err(identity_error) => Some(identity_error),
                 };
                 if cleanup_error.is_none() {
-                    let _ = state.delete_remote_computer_if_unleased(computer.id).await;
+                    if rebinding_existing_record {
+                        if let Err(state_error) = state
+                            .mark_remote_computer_attention_if_unleased(
+                                computer.id,
+                                "remote_computer_lease_failed_after_rebind",
+                            )
+                            .await
+                        {
+                            return Err(remote_computer_pod_provision_error(
+                                error.message,
+                                Some(state_error.message),
+                            ));
+                        }
+                    } else {
+                        let _ = state.delete_remote_computer_if_unleased(computer.id).await;
+                    }
                 }
                 return Err(remote_computer_pod_provision_error(
                     error.message,
@@ -1544,35 +1605,24 @@ async fn provision_remote_computer_pod_for_job(
 
 async fn cleanup_on_demand_remote_computer_pod_after_failed_provision(
     state: &AppState,
-    runner: &dyn RemoteComputerRunner,
-    config: &RemoteComputerRunnerConfig,
-    resource_name: &str,
+    identity: &RemoteComputerRuntimeIdentity,
     job: &ExecutionJob,
     worker_id: &str,
     reason: &str,
-    request_metadata: Value,
 ) -> Option<String> {
-    let response = runner
-        .mutate(
-            config,
-            RemoteComputerRunnerDryRunRequest {
-                operation: Some("live_delete".to_string()),
-                remote_computer_id: None,
-                session_id: Some(job.session_id),
-                pod_name: Some(resource_name.to_string()),
-                metadata: Some(merge_json_object(
-                    request_metadata,
-                    json!({
-                        "source": "cleanup_on_demand_remote_computer_pod_after_failed_provision",
-                        "reason": reason,
-                        "execution_job_id": job.id,
-                        "tool_call_id": job.tool_call_id,
-                        "worker_id": worker_id,
-                    }),
-                )),
-            },
-        )
-        .await;
+    let response = delete_remote_computer_runtime_resource(
+        identity,
+        None,
+        Some(job.session_id),
+        json!({
+            "source": "cleanup_on_demand_remote_computer_pod_after_failed_provision",
+            "reason": reason,
+            "execution_job_id": job.id,
+            "tool_call_id": job.tool_call_id,
+            "worker_id": worker_id,
+        }),
+    )
+    .await;
     let cleanup_failed = response.status != "mutation_ok";
     let event_type = if cleanup_failed {
         "remote_computer.on_demand_pod_cleanup_failed"
@@ -1580,7 +1630,9 @@ async fn cleanup_on_demand_remote_computer_pod_after_failed_provision(
         "remote_computer.on_demand_pod_cleaned_up"
     };
     let details = json!({
-        "pod_name": resource_name,
+        "resource_name": identity.resource_name,
+        "runtime_substrate": identity.substrate,
+        "namespace": identity.namespace,
         "reason": reason,
         "execution_job_id": job.id,
         "tool_call_id": job.tool_call_id,

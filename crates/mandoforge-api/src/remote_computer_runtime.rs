@@ -2,11 +2,14 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::RemoteComputer;
 use crate::remote_computer_runner::{
     RemoteComputerRunnerConfig, RemoteComputerRunnerDryRunRequest,
     RemoteComputerRunnerDryRunResponse, RemoteComputerRunnerReadiness,
     remote_computer_runner_for_config,
+};
+use crate::{
+    AppError, AppState, RemoteComputer, RemoteComputerJobAssignment, RemoteComputerLease,
+    UpdateRemoteComputerLease, new_audit_log, record_remote_computer_lease_event,
 };
 
 pub(crate) const REMOTE_COMPUTER_RUNTIME_IDENTITY_METADATA_KEY: &str = "runtime_identity";
@@ -170,11 +173,7 @@ pub(crate) fn remote_computer_runtime_identity_from_parts(
             })
         }
         RemoteComputerSubstrate::KubernetesPod => {
-            let resource_name = fallback_name
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToString::to_string)
-                .unwrap_or_else(|| pod_name.clone());
+            let resource_name = pod_name.clone();
             Some(RemoteComputerRuntimeIdentity {
                 version: remote_computer_runtime_identity_version(),
                 substrate,
@@ -229,12 +228,289 @@ pub(crate) fn metadata_with_remote_computer_runtime_identity(
     Value::Object(metadata)
 }
 
-pub(crate) fn runtime_identity_metadata(identity: &RemoteComputerRuntimeIdentity) -> Value {
-    json!({
-        "runtime_substrate": identity.substrate,
-        "namespace": identity.namespace,
-        REMOTE_COMPUTER_RUNTIME_IDENTITY_METADATA_KEY: identity
-    })
+pub(crate) async fn delete_remote_computer_runtime_resource(
+    identity: &RemoteComputerRuntimeIdentity,
+    remote_computer_id: Option<uuid::Uuid>,
+    session_id: Option<uuid::Uuid>,
+    metadata: Value,
+) -> RemoteComputerRunnerDryRunResponse {
+    let delete_name = remote_computer_runtime_delete_name(identity);
+    let config = remote_computer_runner_config_for_identity(
+        RemoteComputerRunnerConfig::from_env(),
+        identity,
+    );
+    remote_computer_runner_for_config(&config)
+        .mutate(
+            &config,
+            RemoteComputerRunnerDryRunRequest {
+                operation: Some("live_delete".to_string()),
+                remote_computer_id,
+                session_id,
+                pod_name: Some(delete_name.to_string()),
+                metadata: Some(merge_runtime_cleanup_metadata(
+                    &metadata,
+                    json!({
+                        "namespace": identity.namespace,
+                        "runtime_substrate": identity.substrate,
+                    }),
+                )),
+            },
+        )
+        .await
+}
+
+fn remote_computer_runtime_delete_name(identity: &RemoteComputerRuntimeIdentity) -> &str {
+    match identity.substrate {
+        RemoteComputerSubstrate::AgentSandbox => identity
+            .claim_name
+            .as_deref()
+            .unwrap_or(&identity.resource_name),
+        RemoteComputerSubstrate::KubernetesPod => &identity.pod_name,
+    }
+}
+
+fn remote_computer_runner_config_for_identity(
+    mut config: RemoteComputerRunnerConfig,
+    identity: &RemoteComputerRuntimeIdentity,
+) -> RemoteComputerRunnerConfig {
+    config.mode = match identity.substrate {
+        RemoteComputerSubstrate::AgentSandbox => "agent-sandbox",
+        RemoteComputerSubstrate::KubernetesPod => "kubernetes",
+    }
+    .to_string();
+    config.namespace = identity.namespace.clone();
+    config
+}
+
+pub(crate) async fn cleanup_remote_computer_lease_runtime(
+    state: &AppState,
+    lease: &RemoteComputerLease,
+    assignment: Option<&RemoteComputerJobAssignment>,
+    reason: &str,
+    assignment_status: &str,
+) -> Result<Value, AppError> {
+    if !matches!(assignment_status, "canceled" | "released" | "failed") {
+        return Err(AppError::internal(
+            "Remote Computer cleanup assignment status is invalid",
+        ));
+    }
+    if lease.status != "leased" {
+        return Ok(json!({
+            "status": "already_converged",
+            "lease_id": lease.id,
+            "remote_computer_id": lease.remote_computer_id,
+            "lease_status": lease.status,
+        }));
+    }
+    if let Some(assignment) = assignment
+        && (assignment.lease_id != lease.id
+            || assignment.remote_computer_id != lease.remote_computer_id)
+    {
+        return Err(AppError::internal(
+            "Remote Computer cleanup assignment does not match its lease",
+        ));
+    }
+
+    let remote_computer = state
+        .list_remote_computers()
+        .await?
+        .into_iter()
+        .find(|computer| computer.id == lease.remote_computer_id)
+        .ok_or_else(|| AppError::not_found("Remote computer not found"))?;
+    let on_demand = remote_computer
+        .metadata
+        .get("on_demand")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || lease
+            .metadata
+            .get("on_demand")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+    let mut runtime_evidence = json!({
+        "delete_attempted": false,
+        "delete_status": "not_required",
+    });
+    if on_demand {
+        let identity = required_remote_computer_runtime_identity(&remote_computer)
+            .map_err(AppError::internal)?;
+        let response = delete_remote_computer_runtime_resource(
+            &identity,
+            Some(remote_computer.id),
+            lease.session_id,
+            json!({
+                "cleanup_reason": reason,
+                "lease_id": lease.id,
+            }),
+        )
+        .await;
+        runtime_evidence = json!({
+            "delete_attempted": response.live_mutation_attempted,
+            "delete_status": response.status,
+            "delete_status_code": response.live_mutation_status_code,
+            "namespace": identity.namespace,
+            "resource_name": identity.resource_name,
+            "substrate": identity.substrate,
+        });
+        if response.status != "mutation_ok" {
+            record_remote_computer_runtime_cleanup_evidence(
+                state,
+                lease,
+                assignment,
+                reason,
+                "failed",
+                &runtime_evidence,
+            )
+            .await?;
+            return Err(AppError::internal(format!(
+                "Remote Computer runtime cleanup failed: {}",
+                response.message
+            )));
+        }
+    }
+
+    let updated_assignment = if let Some(assignment) = assignment {
+        if assignment.status == "assigned" {
+            Some(
+                state
+                    .update_remote_computer_job_assignment_status(
+                        assignment.id,
+                        assignment_status,
+                        json!({
+                            "runtime_cleanup_reason": reason,
+                            "runtime_cleanup_at": Utc::now(),
+                            "runtime_cleanup": runtime_evidence,
+                        }),
+                    )
+                    .await?,
+            )
+        } else {
+            Some(assignment.clone())
+        }
+    } else {
+        None
+    };
+
+    let lease_status = if on_demand { "failed" } else { "released" };
+    let lease_metadata = merge_runtime_cleanup_metadata(
+        &lease.metadata,
+        json!({
+            "runtime_cleanup_reason": reason,
+            "runtime_cleanup_at": Utc::now(),
+            "runtime_cleanup": runtime_evidence,
+        }),
+    );
+    let updated_lease = state
+        .update_remote_computer_lease_status(
+            lease.id,
+            lease_status,
+            UpdateRemoteComputerLease {
+                reason: Some(reason.to_string()),
+                metadata: Some(lease_metadata),
+            },
+        )
+        .await?;
+    record_remote_computer_lease_event(
+        state,
+        &updated_lease,
+        "remote_computer.lease_runtime_cleaned",
+    )
+    .await?;
+    record_remote_computer_runtime_cleanup_evidence(
+        state,
+        &updated_lease,
+        updated_assignment.as_ref(),
+        reason,
+        "completed",
+        &runtime_evidence,
+    )
+    .await?;
+
+    Ok(json!({
+        "status": "completed",
+        "lease_id": updated_lease.id,
+        "lease_status": updated_lease.status,
+        "assignment_id": updated_assignment.as_ref().map(|assignment| assignment.id),
+        "assignment_status": updated_assignment.as_ref().map(|assignment| assignment.status.as_str()),
+        "remote_computer_id": remote_computer.id,
+        "remote_computer_status": if on_demand { "attention" } else { "available" },
+        "runtime": runtime_evidence,
+    }))
+}
+
+pub(crate) async fn cleanup_remote_computer_session_runtimes(
+    state: &AppState,
+    session_id: uuid::Uuid,
+    reason: &str,
+) -> Result<Vec<Value>, AppError> {
+    let leases = state.list_remote_computer_leases().await?;
+    let assignments = state.list_remote_computer_job_assignments().await?;
+    let mut results = Vec::new();
+    for lease in leases
+        .iter()
+        .filter(|lease| lease.session_id == Some(session_id) && lease.status == "leased")
+    {
+        let assignment = assignments
+            .iter()
+            .find(|assignment| assignment.lease_id == lease.id && assignment.status == "assigned");
+        results.push(
+            cleanup_remote_computer_lease_runtime(state, lease, assignment, reason, "released")
+                .await?,
+        );
+    }
+    Ok(results)
+}
+
+fn merge_runtime_cleanup_metadata(existing: &Value, patch: Value) -> Value {
+    let mut merged = existing.as_object().cloned().unwrap_or_default();
+    if let Some(patch) = patch.as_object() {
+        for (key, value) in patch {
+            merged.insert(key.clone(), value.clone());
+        }
+    }
+    Value::Object(merged)
+}
+
+async fn record_remote_computer_runtime_cleanup_evidence(
+    state: &AppState,
+    lease: &RemoteComputerLease,
+    assignment: Option<&RemoteComputerJobAssignment>,
+    reason: &str,
+    status: &str,
+    runtime: &Value,
+) -> Result<(), AppError> {
+    let event_type = if status == "completed" {
+        "remote_computer.runtime_cleanup_completed"
+    } else {
+        "remote_computer.runtime_cleanup_failed"
+    };
+    let details = json!({
+        "lease_id": lease.id,
+        "remote_computer_id": lease.remote_computer_id,
+        "assignment_id": assignment.map(|assignment| assignment.id),
+        "session_id": lease.session_id,
+        "status": status,
+        "reason": reason,
+        "runtime": runtime,
+    });
+    if let Some(session_id) = lease.session_id {
+        state
+            .append_event("system", None, session_id, event_type, details.clone())
+            .await?;
+    }
+    state
+        .append_audit_log(new_audit_log(
+            lease.session_id,
+            "system",
+            None,
+            event_type,
+            "remote_computer",
+            Some(lease.remote_computer_id),
+            details,
+        ))
+        .await?;
+    Ok(())
 }
 
 pub(crate) fn remote_computer_runner_request_is_exec(
@@ -371,6 +647,61 @@ mod tests {
             required_remote_computer_runtime_identity(&remote_computer)
                 .expect_err("corrupt identity must fail closed"),
             "Remote Computer runtime_identity metadata is invalid"
+        );
+    }
+
+    #[test]
+    fn cleanup_runner_config_uses_persisted_identity_after_global_mode_change() {
+        let identity = RemoteComputerRuntimeIdentity::new(
+            RemoteComputerSubstrate::AgentSandbox,
+            "persisted-namespace".to_string(),
+            "persisted-claim".to_string(),
+            "persisted-pod".to_string(),
+            Some("persisted-claim".to_string()),
+            Some("persisted-sandbox".to_string()),
+            None,
+        );
+        let config = remote_computer_runner_config_for_identity(
+            RemoteComputerRunnerConfig {
+                mode: "reserved".to_string(),
+                namespace: "new-global-namespace".to_string(),
+                pod_template_path: "unused".to_string(),
+                service_account: "unused".to_string(),
+                kubeconfig_path: None,
+                kube_api_url: None,
+                bearer_token_path: None,
+                in_cluster: false,
+                mutation_enabled: true,
+                live_mutation_enabled: true,
+                execution_enabled: false,
+            },
+            &identity,
+        );
+
+        assert_eq!(config.mode, "agent-sandbox");
+        assert_eq!(config.namespace, "persisted-namespace");
+        assert!(config.mutation_enabled);
+        assert!(config.live_mutation_enabled);
+        assert!(!config.execution_enabled);
+    }
+
+    #[test]
+    fn legacy_kubernetes_pod_identity_uses_pod_name_as_delete_resource() {
+        let decoded = remote_computer_runtime_identity_from_parts(
+            &json!({"on_demand": true}),
+            "legacy-ns",
+            Some("actual-legacy-pod"),
+            Some("record-display-name"),
+            Some("workspace-write"),
+        )
+        .expect("legacy pod identity");
+
+        assert_eq!(decoded.substrate, RemoteComputerSubstrate::KubernetesPod);
+        assert_eq!(decoded.resource_name, "actual-legacy-pod");
+        assert_eq!(decoded.pod_name, "actual-legacy-pod");
+        assert_eq!(
+            remote_computer_runtime_delete_name(&decoded),
+            "actual-legacy-pod"
         );
     }
 }

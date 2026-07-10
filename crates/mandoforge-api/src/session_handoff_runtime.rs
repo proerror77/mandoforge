@@ -269,6 +269,7 @@ pub(crate) async fn set_managed_session_status(
     status: SessionStatus,
     reason: &str,
 ) -> Result<Session, AppError> {
+    let terminal = matches!(status, SessionStatus::Terminated | SessionStatus::Failed);
     let session = state.set_session_status(session_id, status).await?;
     set_primary_session_thread_status(
         state,
@@ -289,6 +290,9 @@ pub(crate) async fn set_managed_session_status(
             }),
         )
         .await?;
+    if terminal {
+        cleanup_remote_computer_session_runtimes(state, session_id, reason).await?;
+    }
     Ok(session)
 }
 
