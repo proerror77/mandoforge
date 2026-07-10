@@ -86,6 +86,28 @@ Covered today:
 - `/api/scheduler/due-plan` and `/api/scheduler/run-due` include Remote Computer stale reclaim in the aggregate operations path.
 - **On-demand Pod provisioning** (`provision_remote_computer_pod_for_job`): when no warm-pool Remote Computer is available, the execution engine creates a Kubernetes Pod, polls until Running phase, persists the DB record with a unique pod-name index (`remote_computers(tenant_id, pod_name)`), and leases it to the job. Requires `MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT=kubernetes` plus the triple mutation gate. Pod-ready polling is configurable via `MANDOFORGE_REMOTE_COMPUTER_POD_READY_TIMEOUT_SECONDS` (default 60s) and `MANDOFORGE_REMOTE_COMPUTER_POD_READY_POLL_INTERVAL_MS` (default 2000ms).
 - Stale reclaim now issues a `live_delete` mutation for expired on-demand Pod leases, preventing orphaned Pods.
+- The dedicated Agent Sandbox runtime image is built from a clean Git-index
+  context and includes pinned Rust, Node, pnpm, uv, sccache, Codex CLI, Claude
+  Code, and the fixed MandoForge launcher. The runtime is non-root, has a
+  read-only root filesystem, mounts only `/workspace/sessions` from the private
+  workspace PVC, and mounts dependency caches under `/cache/project`.
+- `GET /api/remote-computers/readiness` now separates static Agent Sandbox
+  contracts from live lifecycle evidence. Static readiness without a fresh,
+  complete `.mandoforge/agent-sandbox-runtime-evidence/summary.json` remains
+  `pilot_only`; malformed, stale, wrong-controller, or failed evidence remains
+  production-blocking.
+- A live Docker Desktop drill against Agent Sandbox controller `v0.5.1` proved
+  WarmPool Claim binding, generated Sandbox/Pod resolution, runtime versions,
+  same-session lease/workspace reuse, cross-Sandbox workspace isolation,
+  project-cache persistence, NetworkPolicy behavior, idempotent retry, TTL
+  cleanup, and terminal-session cleanup. It also proved the governed MandoForge
+  path from pending approval through Postgres-backed execution job, Pod exec,
+  durable events, artifact, and audit records. This is local pilot evidence,
+  not multi-node or production storage evidence.
+- Out-of-cluster runners can use
+  `MANDOFORGE_REMOTE_COMPUTER_CA_CERT_PATH` with a short-lived
+  `mandoforge-worker` ServiceAccount token. Runtime Pods keep token automount
+  disabled and do not receive runner permissions.
 
 Not covered today:
 
@@ -96,7 +118,15 @@ Not covered today:
 - Warm-pool Remote Computer records can be claimed by the worker when present, but there is not yet a production controller that registers and recycles prewarmed Pods automatically.
 - The artifact discovery sidecar is present but disabled by default; there is still no production artifact/state sync daemon running against real leased Pods.
 - No production KEDA/HPA queue-depth scaling for remote computer pools; the KEDA manifest is an opt-in example only.
-- Agent Sandbox controller integration is now adapter-level only: the worker can create `SandboxClaim` resources and map the claimed Pod into `remote_computers` when `MANDOFORGE_REMOTE_COMPUTER_RUNNER=agent-sandbox`, but production promotion still requires live cluster evidence, state-sync proof, and controller lifecycle hardening.
+- Agent Sandbox has a successful local lifecycle drill, but production
+  promotion still requires the drill on the target cluster, a real RWX/shared
+  cache provider, distributed state-sync proof, target-CNI enforcement, load
+  evidence, and an operator-owned controller upgrade/rollback process.
+- Standard Kubernetes `NetworkPolicy` cannot express an FQDN allowlist and may
+  not block traffic to node or host-network endpoints. The pilot allows
+  external TCP 443 and relies on an uncredentialed runtime Pod; production
+  deployments that require domain or API-server egress enforcement need a
+  Cilium FQDN/host policy, egress proxy, or equivalent.
 
 ## Target Components
 

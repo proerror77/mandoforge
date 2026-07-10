@@ -38,9 +38,46 @@ pub(crate) struct RemoteComputerReadinessReport {
     pub(crate) sidecar_recovery: RemoteComputerSidecarRecoveryReadiness,
     pub(crate) runner: RemoteComputerRunnerReadiness,
     pub(crate) execution_transport: RemoteComputerExecutionTransportReadiness,
+    pub(crate) agent_sandbox: RemoteComputerAgentSandboxReadiness,
     pub(crate) event_types: Vec<String>,
     pub(crate) attention_items: Vec<RemoteComputerAttentionItem>,
     pub(crate) runbook_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct RemoteComputerAgentSandboxReadiness {
+    pub(crate) status: String,
+    pub(crate) static_contract_ready: bool,
+    pub(crate) production_blocked: bool,
+    pub(crate) runtime_image: String,
+    pub(crate) runtime_dockerfile_present: bool,
+    pub(crate) tracked_context_builder_present: bool,
+    pub(crate) runtime_manifest_present: bool,
+    pub(crate) egress_policy_present: bool,
+    pub(crate) smoke_claim_present: bool,
+    pub(crate) static_verifier_present: bool,
+    pub(crate) live_evidence: RemoteComputerAgentSandboxLiveEvidenceReadiness,
+    pub(crate) blocking_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct RemoteComputerAgentSandboxLiveEvidenceReadiness {
+    pub(crate) path: String,
+    pub(crate) present: bool,
+    pub(crate) valid: bool,
+    pub(crate) status: String,
+    pub(crate) captured_at: Option<DateTime<Utc>>,
+    pub(crate) cluster_context: Option<String>,
+    pub(crate) controller_version: Option<String>,
+    pub(crate) validation_scope: Option<String>,
+    pub(crate) production_checks: Value,
+    pub(crate) production_ready: bool,
+    pub(crate) expected_controller_version: String,
+    pub(crate) max_age_hours: i64,
+    pub(crate) age_hours: Option<i64>,
+    pub(crate) fresh: bool,
+    pub(crate) checks: Value,
+    pub(crate) blocking_reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

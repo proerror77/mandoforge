@@ -449,6 +449,7 @@ pub(crate) use types::remote_computer::{
     CreateRemoteComputer, CreateRemoteComputerAttachment, CreateRemoteComputerJobAssignment,
     CreateRemoteComputerLease, CreateRemoteComputerSidecarHeartbeat, CreateRemoteComputerStateLock,
     ReleaseRemoteComputerStateLock, RemoteComputer,
+    RemoteComputerAgentSandboxLiveEvidenceReadiness, RemoteComputerAgentSandboxReadiness,
     RemoteComputerArtifactDiscoverySidecarConfigReadiness, RemoteComputerAttachment,
     RemoteComputerAttentionItem, RemoteComputerAutoscalingReadiness,
     RemoteComputerExecutionTransportReadiness, RemoteComputerJobAssignment, RemoteComputerLease,

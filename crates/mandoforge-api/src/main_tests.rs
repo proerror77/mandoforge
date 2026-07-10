@@ -15743,6 +15743,274 @@ async fn test_app() -> Router {
 }
 
 #[tokio::test]
+async fn remote_computer_readiness_separates_agent_sandbox_static_and_live_evidence() {
+    let _env = env_lock().lock().expect("env lock");
+    let evidence_path = std::env::temp_dir().join(format!(
+        "mandoforge-agent-sandbox-missing-{}.json",
+        Uuid::new_v4()
+    ));
+    let _evidence_file = EnvVarGuard::set(
+        "MANDOFORGE_AGENT_SANDBOX_EVIDENCE_FILE",
+        evidence_path.to_string_lossy().as_ref(),
+    );
+    let app = test_app().await;
+
+    let readiness: Value = request_json(
+        app,
+        Request::builder()
+            .uri("/api/remote-computers/readiness")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+
+    assert_eq!(readiness["agent_sandbox"]["status"], "pilot_only");
+    assert_eq!(readiness["agent_sandbox"]["static_contract_ready"], true);
+    assert_eq!(readiness["agent_sandbox"]["production_blocked"], true);
+    assert_eq!(
+        readiness["agent_sandbox"]["runtime_image"],
+        "mandoforge-agent-sandbox-runtime:0.1.1"
+    );
+    assert_eq!(
+        readiness["agent_sandbox"]["tracked_context_builder_present"],
+        true
+    );
+    assert_eq!(
+        readiness["agent_sandbox"]["live_evidence"]["path"],
+        evidence_path.to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        readiness["agent_sandbox"]["live_evidence"]["status"],
+        "missing"
+    );
+    assert_eq!(
+        readiness["agent_sandbox"]["live_evidence"]["present"],
+        false
+    );
+    assert!(
+        readiness["attention_items"]
+            .as_array()
+            .is_some_and(|items| {
+                items.iter().any(|item| {
+                    item["kind"] == "agent_sandbox_live_evidence_missing"
+                        && item["severity"] == "critical"
+                })
+            })
+    );
+}
+
+#[tokio::test]
+async fn remote_computer_readiness_accepts_complete_fresh_agent_sandbox_evidence() {
+    let _env = env_lock().lock().expect("env lock");
+    let evidence_path = std::env::temp_dir().join(format!(
+        "mandoforge-agent-sandbox-ready-{}.json",
+        Uuid::new_v4()
+    ));
+    fs::write(
+        &evidence_path,
+        json!({
+            "schema_version": 1,
+            "status": "passed",
+            "captured_at": Utc::now().to_rfc3339(),
+            "cluster_context": "docker-desktop",
+            "controller_version": "v0.5.1",
+            "validation_scope": "production_target",
+            "production_checks": complete_agent_sandbox_production_checks(),
+            "checks": complete_agent_sandbox_live_checks()
+        })
+        .to_string(),
+    )
+    .expect("write live evidence");
+    let _evidence_file = EnvVarGuard::set(
+        "MANDOFORGE_AGENT_SANDBOX_EVIDENCE_FILE",
+        evidence_path.to_string_lossy().as_ref(),
+    );
+    let _max_age = EnvVarGuard::set("MANDOFORGE_AGENT_SANDBOX_EVIDENCE_MAX_AGE_HOURS", "24");
+    let app = test_app().await;
+
+    let readiness: Value = request_json(
+        app,
+        Request::builder()
+            .uri("/api/remote-computers/readiness")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+
+    assert_eq!(readiness["agent_sandbox"]["status"], "live_validated");
+    assert_eq!(
+        readiness["agent_sandbox"]["live_evidence"]["status"],
+        "ready"
+    );
+    assert_eq!(
+        readiness["agent_sandbox"]["live_evidence"]["production_ready"],
+        true
+    );
+    assert_eq!(readiness["agent_sandbox"]["production_blocked"], false);
+    fs::remove_file(evidence_path).expect("remove live evidence");
+}
+
+#[tokio::test]
+async fn remote_computer_readiness_keeps_local_agent_sandbox_evidence_pilot_only() {
+    let _env = env_lock().lock().expect("env lock");
+    let evidence_path = std::env::temp_dir().join(format!(
+        "mandoforge-agent-sandbox-local-{}.json",
+        Uuid::new_v4()
+    ));
+    fs::write(
+        &evidence_path,
+        json!({
+            "schema_version": 1,
+            "status": "passed",
+            "captured_at": Utc::now().to_rfc3339(),
+            "cluster_context": "docker-desktop",
+            "controller_version": "v0.5.1",
+            "validation_scope": "local_pilot",
+            "checks": complete_agent_sandbox_live_checks()
+        })
+        .to_string(),
+    )
+    .expect("write local live evidence");
+    let _evidence_file = EnvVarGuard::set(
+        "MANDOFORGE_AGENT_SANDBOX_EVIDENCE_FILE",
+        evidence_path.to_string_lossy().as_ref(),
+    );
+    let app = test_app().await;
+
+    let readiness: Value = request_json(
+        app,
+        Request::builder()
+            .uri("/api/remote-computers/readiness")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+
+    assert_eq!(readiness["agent_sandbox"]["status"], "pilot_only");
+    assert_eq!(
+        readiness["agent_sandbox"]["live_evidence"]["status"],
+        "ready"
+    );
+    assert_eq!(
+        readiness["agent_sandbox"]["live_evidence"]["validation_scope"],
+        "local_pilot"
+    );
+    assert_eq!(
+        readiness["agent_sandbox"]["live_evidence"]["production_ready"],
+        false
+    );
+    assert_eq!(readiness["agent_sandbox"]["production_blocked"], true);
+    assert!(
+        readiness["agent_sandbox"]["blocking_reasons"]
+            .as_array()
+            .is_some_and(|reasons| reasons.iter().any(|reason| {
+                reason
+                    .as_str()
+                    .is_some_and(|value| value.contains("production_target"))
+            }))
+    );
+    fs::remove_file(evidence_path).expect("remove local live evidence");
+}
+
+#[tokio::test]
+async fn remote_computer_readiness_rejects_stale_or_wrong_agent_sandbox_evidence() {
+    let _env = env_lock().lock().expect("env lock");
+    let evidence_path = std::env::temp_dir().join(format!(
+        "mandoforge-agent-sandbox-stale-{}.json",
+        Uuid::new_v4()
+    ));
+    fs::write(
+        &evidence_path,
+        json!({
+            "schema_version": 1,
+            "status": "passed",
+            "captured_at": "2020-01-01T00:00:00Z",
+            "cluster_context": "docker-desktop",
+            "controller_version": "v0.0.0",
+            "validation_scope": "production_target",
+            "checks": complete_agent_sandbox_live_checks()
+        })
+        .to_string(),
+    )
+    .expect("write stale live evidence");
+    let _evidence_file = EnvVarGuard::set(
+        "MANDOFORGE_AGENT_SANDBOX_EVIDENCE_FILE",
+        evidence_path.to_string_lossy().as_ref(),
+    );
+    let _max_age = EnvVarGuard::set("MANDOFORGE_AGENT_SANDBOX_EVIDENCE_MAX_AGE_HOURS", "24");
+    let app = test_app().await;
+
+    let readiness: Value = request_json(
+        app,
+        Request::builder()
+            .uri("/api/remote-computers/readiness")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+
+    assert_eq!(readiness["agent_sandbox"]["status"], "pilot_only");
+    assert_eq!(
+        readiness["agent_sandbox"]["live_evidence"]["status"],
+        "blocked"
+    );
+    assert!(
+        readiness["agent_sandbox"]["live_evidence"]["blocking_reasons"]
+            .as_array()
+            .is_some_and(|reasons| {
+                reasons
+                    .iter()
+                    .any(|reason| reason.as_str().is_some_and(|value| value.contains("stale")))
+                    && reasons.iter().any(|reason| {
+                        reason
+                            .as_str()
+                            .is_some_and(|value| value.contains("controller version"))
+                    })
+            })
+    );
+    fs::remove_file(evidence_path).expect("remove stale live evidence");
+}
+
+fn complete_agent_sandbox_live_checks() -> Value {
+    json!({
+        "controller_ready": true,
+        "claim_bound": true,
+        "pod_ready": true,
+        "runtime_versions": true,
+        "workspace_reuse": true,
+        "cross_session_isolation": true,
+        "cache_scope": true,
+        "network_policy": true,
+        "cancel_cleanup": true,
+        "ttl_cleanup": true,
+        "retry_idempotency": true,
+        "approved_exec": true,
+        "durable_event": true,
+        "artifact": true,
+        "audit_log": true
+    })
+}
+
+fn complete_agent_sandbox_production_checks() -> Value {
+    json!({
+        "target_cluster": true,
+        "rwx_cache": true,
+        "distributed_state_sync": true,
+        "network_enforcement": true,
+        "load_validation": true,
+        "rollback_validation": true
+    })
+}
+
+#[tokio::test]
 async fn run_execution_job_emits_completion_event_and_projects_loop_without_route() {
     let state = test_state_with_worker(Arc::new(QueueBackedExecutionWorker));
     state.seed_demo_agent().await.expect("seed demo agent");

@@ -196,6 +196,9 @@ write_summary() {
   local sidecar_checked_pod_detail_count
   local sidecar_checked_pods_json
   local same_cluster_target
+  local agent_sandbox_production_blocked
+  local agent_sandbox_production_ready
+  local agent_sandbox_validation_scope
 
   worker_production_ready="$(jq -r '.production_ops.status == "ready" and (.production_ops.production_blocked == false)' "$worker_readiness")"
   isolated_pool="$(jq -r '.load_validation.isolated_worker_pool_configured == true' "$worker_readiness")"
@@ -234,6 +237,9 @@ write_summary() {
   ]' "$worker_validation")"
 
   remote_state_ready="$(jq -r '.production_state_sync.status == "ready" and (.production_state_sync.production_blocked == false)' "$remote_readiness")"
+  agent_sandbox_production_blocked="$(jq -r 'if ((.agent_sandbox // {}) | has("production_blocked")) then .agent_sandbox.production_blocked else true end' "$remote_readiness")"
+  agent_sandbox_production_ready="$(jq -r '.agent_sandbox.live_evidence.production_ready == true' "$remote_readiness")"
+  agent_sandbox_validation_scope="$(jq -r '.agent_sandbox.live_evidence.validation_scope // "missing"' "$remote_readiness")"
   state_sync_evidence_status="$(jq -r '.status // "unknown"' "$state_sync")"
   state_sync_response_status="$(jq -r '.response.status // "unknown"' "$state_sync")"
   state_controller_fresh="$(jq -r '.production_state_sync.controller_evidence_fresh == true' "$remote_readiness")"
@@ -328,6 +334,8 @@ write_summary() {
     [[ "$worker_cluster_id" == "$PRODUCTION_CLUSTER_ID" ]] || blocked_count=$((blocked_count + 1))
   fi
   [[ "$remote_state_ready" == "true" ]] || blocked_count=$((blocked_count + 1))
+  [[ "$agent_sandbox_production_blocked" == "false" ]] || blocked_count=$((blocked_count + 1))
+  [[ "$agent_sandbox_production_ready" == "true" ]] || blocked_count=$((blocked_count + 1))
   [[ "$state_sync_evidence_status" == "captured" ]] || blocked_count=$((blocked_count + 1))
   [[ "$state_controller_fresh" == "true" ]] || blocked_count=$((blocked_count + 1))
   is_real_cluster_kind "$state_target_kind" || blocked_count=$((blocked_count + 1))
@@ -381,6 +389,7 @@ write_summary() {
     --argjson worker_load_checks "$worker_load_checks_json" \
     --arg state_sync_response_status "$state_sync_response_status" \
     --arg state_sync_evidence_status "$state_sync_evidence_status" \
+    --arg agent_sandbox_validation_scope "$agent_sandbox_validation_scope" \
     --arg state_cluster_id "$state_cluster_id" \
     --arg state_target_kind "$state_target_kind" \
     --arg state_node_count "$state_node_count" \
@@ -404,6 +413,8 @@ write_summary() {
     --argjson load_validated "$(bool_json "$load_validated")" \
     --argjson worker_controller_evidence_fresh "$(bool_json "$worker_controller_fresh")" \
     --argjson remote_state_sync_ready "$(bool_json "$remote_state_ready")" \
+    --argjson agent_sandbox_production_blocked "$(bool_json "$agent_sandbox_production_blocked")" \
+    --argjson agent_sandbox_production_ready "$(bool_json "$agent_sandbox_production_ready")" \
     --argjson remote_state_controller_evidence_fresh "$(bool_json "$state_controller_fresh")" \
     --argjson remote_runner_ready "$(bool_json "$runner_ready")" \
     --argjson sidecar_recovery_required "$(bool_json "$([[ "$RUN_STAGE2_REMOTE_SIDECAR_RECOVERY" == "1" ]] && echo true || echo false)")" \
@@ -445,6 +456,9 @@ write_summary() {
         state_controller_evidence_fresh: $remote_state_controller_evidence_fresh,
         state_sync_evidence_status: $state_sync_evidence_status,
         state_sync_response_status: $state_sync_response_status,
+        agent_sandbox_production_blocked: $agent_sandbox_production_blocked,
+        agent_sandbox_production_ready: $agent_sandbox_production_ready,
+        agent_sandbox_validation_scope: $agent_sandbox_validation_scope,
         state_sync_cluster_id: $state_cluster_id,
         state_sync_target_kind: $state_target_kind,
         state_sync_node_count: ($state_node_count | tonumber),
@@ -486,6 +500,9 @@ write_summary() {
     jq -r '"worker_load_check_count=\(.worker.load_check_count)"' "$summary_json"
     jq -r '"worker_load_check_detail_count=\(.worker.load_check_detail_count)"' "$summary_json"
     jq -r '"remote_state_sync_ready=\(.remote_computer.state_sync_ready)"' "$summary_json"
+    jq -r '"agent_sandbox_production_blocked=\(.remote_computer.agent_sandbox_production_blocked)"' "$summary_json"
+    jq -r '"agent_sandbox_production_ready=\(.remote_computer.agent_sandbox_production_ready)"' "$summary_json"
+    jq -r '"agent_sandbox_validation_scope=\(.remote_computer.agent_sandbox_validation_scope)"' "$summary_json"
     jq -r '"remote_state_controller_evidence_fresh=\(.remote_computer.state_controller_evidence_fresh)"' "$summary_json"
     jq -r '"remote_state_sync_evidence_status=\(.remote_computer.state_sync_evidence_status)"' "$summary_json"
     jq -r '"remote_state_cluster_id=\(.remote_computer.state_sync_cluster_id)"' "$summary_json"

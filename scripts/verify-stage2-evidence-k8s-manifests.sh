@@ -47,6 +47,7 @@ worker_remote_computer_script="scripts/worker-remote-computer-evidence-gate.sh"
 remote_computer_production_state_script="scripts/remote-computer-production-state-gate.sh"
 remote_computer_runner_source="crates/mandoforge-api/src/remote_computer_runner.rs"
 execution_source="crates/mandoforge-api/src/execution.rs"
+runtime_protocol_source="crates/mandoforge-api/src/sandbox_runtime_protocol.rs"
 provider_script="scripts/provider-governance-evidence-gate.sh"
 tenant_script="scripts/tenant-isolation-evidence-gate.sh"
 vault_script="scripts/vault-evidence-gate.sh"
@@ -437,15 +438,18 @@ for tracking_key in \
   fi
 done
 
-if ! grep -q "parse_kubernetes_exec_command" "$remote_computer_runner_source" \
-  || ! grep -q "metadata.command array must contain only non-empty string arguments" "$remote_computer_runner_source" \
-  || ! grep -q "command_query" "$remote_computer_runner_source"; then
-  echo "Remote Computer runner must preserve Kubernetes exec argv semantics and validate array commands" >&2
+if ! grep -q "parse_kubernetes_exec_stdin" "$remote_computer_runner_source" \
+  || ! grep -q "metadata.sandbox_runtime_request is required" "$remote_computer_runner_source" \
+  || ! grep -q "stdin=true.*command={}&command={}" "$remote_computer_runner_source" \
+  || ! grep -q "SANDBOX_RUNTIME_EXECUTABLE" "$remote_computer_runner_source" \
+  || ! grep -q "SANDBOX_RUNTIME_SUBCOMMAND" "$remote_computer_runner_source"; then
+  echo "Remote Computer runner must use the fixed launcher argv and structured stdin envelope" >&2
   exit 1
 fi
 
-if grep -q 'parts.join(" ")' "$remote_computer_runner_source"; then
-  echo "Remote Computer runner must not collapse metadata.command arrays into shell strings" >&2
+if grep -q "parse_kubernetes_exec_command" "$remote_computer_runner_source" \
+  || grep -q 'parts.join(" ")' "$remote_computer_runner_source"; then
+  echo "Remote Computer runner must not restore URL argv or shell-string command transport" >&2
   exit 1
 fi
 
@@ -669,10 +673,12 @@ for whiskey_script in scripts/whiskey-adoption-deploy.sh scripts/whiskey-adoptio
 done
 
 if grep -q 'eval "printf' "$execution_source" \
-  || ! grep -q 'printenv.*command_var' "$execution_source" \
-  || ! grep -q 'printenv.*args_var' "$execution_source" \
-  || ! grep -q "set -f" "$execution_source"; then
-  echo "agent_cli Remote Computer command generation must read dynamic env vars without eval and disable globbing for profile args" >&2
+  || ! grep -q "SandboxRuntimeOperation::AgentCli" "$execution_source" \
+  || ! grep -q "normalize_agent_cli_executable" "$execution_source" \
+  || ! grep -q "runtime_request.validate" "$execution_source" \
+  || ! grep -q "validate_arguments" "$runtime_protocol_source" \
+  || ! grep -q "validate_environment" "$runtime_protocol_source"; then
+  echo "agent_cli Remote Computer execution must use the validated structured runtime envelope without eval" >&2
   exit 1
 fi
 
@@ -1420,6 +1426,14 @@ fi
 
 if ! grep -q "remote-computer-evidence-gate.sh" "$worker_remote_computer_script"; then
   echo "Worker/Remote Computer evidence script must run the Remote Computer evidence gate" >&2
+  exit 1
+fi
+
+if ! grep -q 'agent_sandbox.production_blocked' "$remote_computer_script" \
+  || ! grep -q 'agent_sandbox.live_evidence.production_ready' "$remote_computer_script" \
+  || ! grep -q 'agent_sandbox.production_blocked' "$worker_remote_computer_script" \
+  || ! grep -q 'agent_sandbox.live_evidence.production_ready' "$worker_remote_computer_script"; then
+  echo "Remote Computer evidence gates must fail closed without production-target Agent Sandbox evidence" >&2
   exit 1
 fi
 
