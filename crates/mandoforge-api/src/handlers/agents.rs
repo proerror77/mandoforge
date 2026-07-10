@@ -73,7 +73,26 @@ async fn create_agent(
     Json(input): Json<CreateAgent>,
 ) -> Result<Json<Agent>, AppError> {
     authorize_request(&state, &headers, Permission::AgentsWrite, "agents", None).await?;
-    Ok(Json(state.create_agent(input).await?))
+    let principal = principal_from_request(&state, &headers).await?;
+    let agent = state.create_agent(input).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "agent.created",
+            "agent",
+            Some(agent.id),
+            json!({
+                "subject": principal.subject_id,
+                "provider": agent.provider,
+                "model": agent.model,
+                "release_state": agent.release_state,
+                "runtime_profile_id": agent.runtime_profile_id,
+            }),
+        ))
+        .await?;
+    Ok(Json(agent))
 }
 
 async fn list_agent_versions(

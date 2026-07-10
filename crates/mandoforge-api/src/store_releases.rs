@@ -5,11 +5,43 @@ use uuid::Uuid;
 
 use crate::store_backend::StoreBackend;
 use crate::store_rows::agent_release_from_row;
-use crate::{AgentRelease, AppError, AppState, CreateAgentRelease};
+use crate::{AgentRelease, AgentVersion, AppError, AppState, CreateAgentRelease};
 
 const AGENT_RELEASE_COLUMNS: &str = "id, agent_id, agent_version_id, environment, status, eval_run_id, eval_score, min_score, requested_by, requested_at, request_reason, approver_subject, decision_by, decided_at, decision_reason, promoted_by, promoted_at, automation_policy, created_at";
 
 impl AppState {
+    pub(crate) async fn promoted_agent_version(
+        &self,
+        agent_id: Uuid,
+        environment: &str,
+    ) -> Result<AgentVersion, AppError> {
+        let release = self
+            .list_agent_releases(agent_id)
+            .await?
+            .into_iter()
+            .filter(|release| {
+                release.status == "promoted"
+                    && release.environment.eq_ignore_ascii_case(environment)
+            })
+            .max_by_key(|release| {
+                (
+                    release.promoted_at.unwrap_or(release.created_at),
+                    release.created_at,
+                    release.id,
+                )
+            })
+            .ok_or_else(|| {
+                AppError::forbidden(format!(
+                    "agent has no promoted release for environment {environment}"
+                ))
+            })?;
+        self.list_agent_versions(agent_id)
+            .await?
+            .into_iter()
+            .find(|version| version.id == release.agent_version_id)
+            .ok_or_else(|| AppError::not_found("promoted agent version not found"))
+    }
+
     pub(crate) async fn list_agent_releases(
         &self,
         agent_id: Uuid,
@@ -282,7 +314,7 @@ impl AppState {
         release_id: Uuid,
     ) -> Result<AgentRelease, AppError> {
         self.get_agent(agent_id).await?;
-        match &self.store {
+        let release = match &self.store {
             StoreBackend::Memory(inner) => {
                 let mut store = inner.write().await;
                 let release = store
@@ -328,7 +360,8 @@ impl AppState {
                 .await?;
                 agent_release_from_row(row)
             }
-        }
+        }?;
+        Ok(release)
     }
 
     async fn validate_agent_release_input(
@@ -383,7 +416,7 @@ impl AppState {
         reason: Option<String>,
     ) -> Result<AgentRelease, AppError> {
         self.get_agent(agent_id).await?;
-        match &self.store {
+        let release = match &self.store {
             StoreBackend::Memory(inner) => {
                 let mut store = inner.write().await;
                 let release = store
@@ -444,7 +477,8 @@ impl AppState {
                 .await?;
                 agent_release_from_row(row)
             }
-        }
+        }?;
+        Ok(release)
     }
 
     pub(crate) async fn automate_agent_release_decision(
@@ -461,7 +495,7 @@ impl AppState {
                 "unsupported automated release decision",
             ));
         }
-        match &self.store {
+        let release = match &self.store {
             StoreBackend::Memory(inner) => {
                 let mut store = inner.write().await;
                 let release = store
@@ -533,7 +567,8 @@ impl AppState {
                 .await?;
                 agent_release_from_row(row)
             }
-        }
+        }?;
+        Ok(release)
     }
 }
 

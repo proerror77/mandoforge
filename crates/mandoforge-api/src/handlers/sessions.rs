@@ -217,6 +217,11 @@ async fn create_session(
         None,
     )
     .await?;
+    if crate::store_entities::agent_release_enforcement_required() {
+        return Err(AppError::forbidden(
+            "production sessions require a WorkflowRun-issued TaskGrant",
+        ));
+    }
     let has_initial_message = input
         .message
         .as_ref()

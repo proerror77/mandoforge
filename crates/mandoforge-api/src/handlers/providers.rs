@@ -97,6 +97,8 @@ async fn get_provider_runtime_status(
         }
         .to_string(),
         production_mode,
+        agent_release_enforcement_required:
+            crate::store_entities::agent_release_enforcement_required(),
         contract: "production mode forbids mock providers and env/mock fallback".to_string(),
     }))
 }

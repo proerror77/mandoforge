@@ -11,8 +11,8 @@ use crate::{
     AgentHandoffAssignment, AgentHandoffEvent, AppError, AppState,
     AttachAgentHandoffRemoteComputerAssignment, CreateAgentHandoffAssignment,
     CreateAgentHandoffEvent, CreateSession, EscalateAgentHandoffEvent, Permission,
-    TransitionAgentHandoffEvent, authorize_collection_request, authorize_request,
-    create_agent_handoff_event_for_session, create_handoff_session_thread,
+    TransitionAgentHandoffEvent, active_task_grant_for_session, authorize_collection_request,
+    authorize_request, create_agent_handoff_event_for_session, create_handoff_session_thread,
     default_handoff_assignment_message, ensure_primary_session_thread,
     materialize_workflow_handoff_assignment, normalize_handoff_human_escalation_status,
     normalize_optional_text, record_agent_handoff_assignment_audit_and_events,
@@ -282,6 +282,15 @@ async fn assign_agent_handoff_event(
         }
     }
     let source_session = state.get_session(handoff.source_session_id).await?;
+    if crate::store_entities::agent_release_enforcement_required()
+        && active_task_grant_for_session(&state, source_session.id)
+            .await?
+            .is_none()
+    {
+        return Err(AppError::forbidden(
+            "production handoff assignment requires an active TaskGrant",
+        ));
+    }
     let parent_thread = ensure_primary_session_thread(&state, source_session.id).await?;
 
     let specialist_session = match input.specialist_session_id {

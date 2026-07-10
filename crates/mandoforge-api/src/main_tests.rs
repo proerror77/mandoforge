@@ -4428,7 +4428,11 @@ async fn reads_agent_versions_for_agent() {
                 "provider": "openai-compatible",
                 "model": "gpt-5.5-mini",
                 "system_prompt": "Keep a version record.",
-                "tools": ["file.read", "sql.query"]
+                "tools": ["file.read", "sql.query"],
+                "tool_policy": {
+                    "blocked_tools": ["sql.query"],
+                    "approval_required": [{"tool": "file.read", "risk": "low"}]
+                }
                 })
                 .to_string(),
             ))
@@ -4449,9 +4453,10 @@ async fn reads_agent_versions_for_agent() {
     assert_eq!(versions[0].version, 1);
     assert_eq!(versions[0].model, created.model);
     assert_eq!(versions[0].tool_names, created.tools);
+    assert_eq!(versions[0].approval_policy, created.tool_policy);
 
     let version: AgentVersion = request_json(
-        app,
+        app.clone(),
         Request::builder()
             .uri(format!("/api/agents/{}/versions/1", created.id))
             .body(Body::empty())
@@ -4460,6 +4465,373 @@ async fn reads_agent_versions_for_agent() {
     .await;
     assert_eq!(version.id, versions[0].id);
     assert_eq!(version.system_prompt, created.system_prompt);
+
+    let audit_logs: Vec<AuditLog> = request_json(
+        app,
+        Request::builder()
+            .uri("/api/audit-logs")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(
+        audit_logs
+            .iter()
+            .any(|log| { log.action == "agent.created" && log.resource_id == Some(created.id) })
+    );
+}
+
+#[tokio::test]
+async fn create_agent_cannot_bypass_release_promotion() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+    let _release_enforcement = EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+    let app = test_app().await;
+    let (status, error) = request_value(
+        app,
+        json_request_with_headers(
+            "POST",
+            "/api/agents",
+            json!({
+                "name": "Unreviewed Active Agent",
+                "kind": "orchestrator",
+                "provider": "openai-compatible",
+                "model": "gpt-5.5-mini",
+                "system_prompt": "This must not become active directly.",
+                "release_state": "active"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        error["error"]
+            .as_str()
+            .is_some_and(|message| { message.contains("release promotion") })
+    );
+}
+
+async fn seed_promoted_agent_for_test(
+    state: &AppState,
+    environment: &str,
+) -> (Agent, AgentVersion, Environment) {
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let version = state
+        .current_agent_version(agent.id)
+        .await
+        .expect("seeded agent version");
+    let runtime_environment = state
+        .list_environments()
+        .await
+        .expect("list environments")
+        .into_iter()
+        .next()
+        .expect("seeded environment");
+    let now = Utc::now();
+    let release = AgentRelease {
+        id: Uuid::new_v4(),
+        agent_id: agent.id,
+        agent_version_id: version.id,
+        environment: environment.to_string(),
+        status: "promoted".to_string(),
+        eval_run_id: None,
+        eval_score: Some(1.0),
+        min_score: 1.0,
+        requested_by: Some("test".to_string()),
+        requested_at: Some(now),
+        request_reason: None,
+        approver_subject: None,
+        decision_by: Some("test".to_string()),
+        decided_at: Some(now),
+        decision_reason: Some("test release".to_string()),
+        promoted_by: Some("test".to_string()),
+        promoted_at: Some(now),
+        automation_policy: json!({}),
+        created_at: now,
+    };
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test requires memory store");
+    };
+    inner
+        .write()
+        .await
+        .agent_releases
+        .insert(release.id, release);
+    (agent, version, runtime_environment)
+}
+
+#[tokio::test]
+async fn production_session_binds_promoted_agent_version() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+    let _release_enforcement = EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+    let _release_environment =
+        EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT", "production");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let (agent, promoted_version, environment) =
+        seed_promoted_agent_for_test(&state, "production").await;
+    let mut changed_agent = agent.clone();
+    changed_agent.system_prompt = "Unreleased prompt".to_string();
+    state
+        .insert_agent_version(&changed_agent, 2, json!({}))
+        .await
+        .expect("insert unreleased version");
+    let unreleased_version = state
+        .current_agent_version(agent.id)
+        .await
+        .expect("version 2");
+    assert_ne!(promoted_version.id, unreleased_version.id);
+
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: Some(environment.id),
+            title: "production version binding".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create production session");
+    assert_eq!(session.agent_version_id, Some(promoted_version.id));
+}
+
+#[tokio::test]
+async fn production_session_rejects_agent_without_promoted_release() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+    let _release_enforcement = EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+    let _release_environment =
+        EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT", "production");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let environment = state
+        .list_environments()
+        .await
+        .expect("list environments")
+        .into_iter()
+        .next()
+        .expect("seeded environment");
+
+    let error = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: Some(environment.id),
+            title: "unreleased production session".to_string(),
+            message: None,
+        })
+        .await
+        .expect_err("production session must require a promoted release");
+    assert!(error.message.contains("promoted release"));
+}
+
+#[tokio::test]
+async fn production_session_requires_bound_environment() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+    let _release_enforcement = EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+    let _release_environment =
+        EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT", "production");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let (agent, _, _) = seed_promoted_agent_for_test(&state, "production").await;
+
+    let error = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "missing production environment".to_string(),
+            message: None,
+        })
+        .await
+        .expect_err("production session must require an environment");
+    assert!(error.message.contains("bound environment"));
+}
+
+#[tokio::test]
+async fn production_direct_session_requires_governed_workflow() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+    let _release_enforcement = EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+    let _release_environment =
+        EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT", "production");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let app = build_router(state);
+
+    let (status, error) = request_value(
+        app,
+        json_request_with_headers(
+            "POST",
+            "/api/sessions",
+            json!({
+                "agent_id": "11111111-1111-4111-8111-111111111111",
+                "title": "ungoverned production session"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(error["error"].as_str().is_some_and(|message| {
+        message.contains("WorkflowRun") && message.contains("TaskGrant")
+    }));
+}
+
+#[tokio::test]
+async fn production_session_loop_requires_active_task_grant() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+    let _release_enforcement = EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+    let _release_environment =
+        EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT", "production");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let (agent, _, environment) = seed_promoted_agent_for_test(&state, "production").await;
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: Some(environment.id),
+            title: "production grant enforcement".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create promoted production session");
+    let job = enqueue_session_loop(&state, session.id, None, "test grant enforcement")
+        .await
+        .expect("enqueue session loop");
+
+    let error = run_session_loop(&state, &job)
+        .await
+        .expect_err("production loop must require a TaskGrant");
+    assert!(error.message.contains("active TaskGrant"));
+}
+
+#[tokio::test]
+async fn agent_registry_state_tracks_configured_release_environment() {
+    let _env = env_lock().lock().expect("env lock");
+    let _release_environment =
+        EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT", "production");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let agent = state
+        .create_agent(CreateAgent {
+            name: "Release State Agent".to_string(),
+            kind: "orchestrator".to_string(),
+            provider: "openai-compatible".to_string(),
+            model: "gpt-5.5-mini".to_string(),
+            team_id: None,
+            project_id: None,
+            runtime_profile_id: None,
+            agent_role: "specialist".to_string(),
+            system_prompt: "Prove release state activation.".to_string(),
+            runtime_config: json!({}),
+            tools: vec!["file.read".to_string()],
+            tool_policy: json!({}),
+            mcp_server_ids: vec![],
+            skill_ids: vec![],
+            workflow_pack_ids: vec![],
+            remote_computer_profile: json!({}),
+            semantic_scopes: json!({}),
+            release_state: "draft".to_string(),
+        })
+        .await
+        .expect("create draft agent");
+    let dataset = state
+        .create_eval_dataset(CreateEvalDataset {
+            name: "release state activation".to_string(),
+            description: None,
+        })
+        .await
+        .expect("create eval dataset");
+    state
+        .create_eval_case(
+            dataset.id,
+            CreateEvalCase {
+                input: json!({"final_answer": "release ready"}),
+                expected: Some(json!({"contains": ["release"]})),
+                grading_policy: json!({"kind": "final_answer"}),
+            },
+        )
+        .await
+        .expect("create eval case");
+    let run = state
+        .create_eval_run(dataset.id, CreateEvalRun { agent_id: agent.id })
+        .await
+        .expect("create eval run");
+    assert_eq!(run.status, "completed");
+
+    state
+        .create_agent_release(
+            agent.id,
+            CreateAgentRelease {
+                agent_version_id: None,
+                eval_run_id: run.id,
+                environment: "staging".to_string(),
+                min_score: Some(1.0),
+            },
+            "release-admin".to_string(),
+        )
+        .await
+        .expect("promote staging agent release");
+
+    assert_eq!(
+        state
+            .get_agent(agent.id)
+            .await
+            .expect("staging agent")
+            .release_state,
+        "staged"
+    );
+
+    let production_release = state
+        .create_agent_release(
+            agent.id,
+            CreateAgentRelease {
+                agent_version_id: None,
+                eval_run_id: run.id,
+                environment: "production".to_string(),
+                min_score: Some(1.0),
+            },
+            "release-admin".to_string(),
+        )
+        .await
+        .expect("promote production agent release");
+
+    assert_eq!(
+        state
+            .get_agent(agent.id)
+            .await
+            .expect("released agent")
+            .release_state,
+        "active"
+    );
+
+    state
+        .rollback_agent_release(agent.id, production_release.id)
+        .await
+        .expect("rollback production release");
+    assert_eq!(
+        state
+            .get_agent(agent.id)
+            .await
+            .expect("rolled back agent")
+            .release_state,
+        "staged"
+    );
 }
 
 #[tokio::test]
@@ -5942,6 +6314,45 @@ async fn manager_handoff_assignment_creates_specialist_execution_entry() {
     )
     .await;
     assert_eq!(accepted.status, "accepted");
+
+    let sessions_before: Vec<Session> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/sessions")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let (production_status, production_error) = {
+        let _env = env_lock().lock().expect("env lock");
+        let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+        let _release_enforcement =
+            EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+        request_value(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/agent-handoffs/{}/assignment", handoff.id),
+                json!({"assigned_by": "manager-agent"}),
+            ),
+        )
+        .await
+    };
+    assert_eq!(production_status, StatusCode::FORBIDDEN);
+    assert!(
+        production_error["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("active TaskGrant"))
+    );
+    let sessions_after: Vec<Session> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/sessions")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(sessions_after.len(), sessions_before.len());
 
     let assignment: AgentHandoffAssignment = request_json(
         app.clone(),

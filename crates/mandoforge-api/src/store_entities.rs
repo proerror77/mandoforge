@@ -30,9 +30,54 @@ fn normalize_agent_release_state(state: &str) -> Result<String, AppError> {
     }
 }
 
+fn apply_effective_agent_release_state(agent: &mut Agent, releases: &[crate::AgentRelease]) {
+    if agent.release_state == "disabled" {
+        return;
+    }
+    let target_environment = configured_agent_release_environment();
+    let promoted = releases
+        .iter()
+        .filter(|release| release.agent_id == agent.id && release.status == "promoted")
+        .collect::<Vec<_>>();
+    let target_promoted = promoted.iter().any(|release| {
+        target_environment
+            .as_ref()
+            .is_none_or(|environment| release.environment.eq_ignore_ascii_case(environment))
+    });
+    if target_promoted {
+        agent.release_state = "active".to_string();
+    } else if target_environment.is_some()
+        && (!promoted.is_empty() || agent.release_state == "active")
+    {
+        agent.release_state = "staged".to_string();
+    }
+}
+
+pub(crate) fn configured_agent_release_environment() -> Option<String> {
+    std::env::var("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+}
+
+fn production_agent_release_environment() -> Result<String, AppError> {
+    configured_agent_release_environment().ok_or_else(|| {
+        AppError::forbidden(
+            "production agent runtime requires MANDOFORGE_AGENT_RELEASE_ENVIRONMENT",
+        )
+    })
+}
+
+pub(crate) fn agent_release_enforcement_required() -> bool {
+    crate::provider_runtime_production_mode()
+        && std::env::var("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT")
+            .ok()
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("required"))
+}
+
 impl AppState {
     pub(crate) async fn list_agents(&self) -> Result<Vec<Agent>, AppError> {
-        match &self.store {
+        let mut agents = match &self.store {
             StoreBackend::Memory(inner) => {
                 Ok(inner.read().await.agents.values().cloned().collect())
             }
@@ -51,7 +96,12 @@ impl AppState {
                 .await?;
                 rows.into_iter().map(agent_from_row).collect()
             }
+        }?;
+        let releases = self.list_all_agent_releases().await?;
+        for agent in &mut agents {
+            apply_effective_agent_release_state(agent, &releases);
         }
+        Ok(agents)
     }
 
     pub(crate) async fn list_agents_visible_to(
@@ -86,7 +136,7 @@ impl AppState {
     }
 
     pub(crate) async fn get_agent(&self, agent_id: Uuid) -> Result<Agent, AppError> {
-        match &self.store {
+        let mut agent = match &self.store {
             StoreBackend::Memory(inner) => inner
                 .read()
                 .await
@@ -110,10 +160,18 @@ impl AppState {
                 .ok_or_else(|| AppError::not_found("agent not found"))?;
                 agent_from_row(row)
             }
-        }
+        }?;
+        apply_effective_agent_release_state(&mut agent, &self.list_all_agent_releases().await?);
+        Ok(agent)
     }
 
     pub(crate) async fn create_agent(&self, input: CreateAgent) -> Result<Agent, AppError> {
+        let release_state = normalize_agent_release_state(&input.release_state)?;
+        if release_state == "active" && agent_release_enforcement_required() {
+            return Err(AppError::bad_request(
+                "agents must become active through release promotion",
+            ));
+        }
         let agent = Agent {
             id: Uuid::new_v4(),
             name: input.name,
@@ -132,7 +190,7 @@ impl AppState {
             workflow_pack_ids: input.workflow_pack_ids,
             remote_computer_profile: input.remote_computer_profile,
             semantic_scopes: input.semantic_scopes,
-            release_state: normalize_agent_release_state(&input.release_state)?,
+            release_state,
             created_at: Utc::now(),
         };
         if let Some(team_id) = agent.team_id {
@@ -204,7 +262,7 @@ impl AppState {
             tools: agent.tools.clone(),
             tool_names: agent.tools.clone(),
             runtime_config,
-            approval_policy: json!({}),
+            approval_policy: agent.tool_policy.clone(),
             mcp_server_ids: agent.mcp_server_ids.clone(),
             skill_ids: agent.skill_ids.clone(),
             workflow_pack_ids: agent.workflow_pack_ids.clone(),
@@ -455,13 +513,9 @@ impl AppState {
     }
 
     pub(crate) async fn create_session(&self, input: CreateSession) -> Result<Session, AppError> {
-        if !self.agent_exists(input.agent_id).await? {
-            return Err(AppError::not_found("agent not found"));
-        }
-        if let Some(environment_id) = input.environment_id {
-            self.get_environment(environment_id).await?;
-        }
-        let agent_version = self.current_agent_version(input.agent_id).await?;
+        let agent_version = self
+            .runnable_agent_version(input.agent_id, input.environment_id)
+            .await?;
         let now = Utc::now();
         let session = Session {
             id: Uuid::new_v4(),
@@ -520,6 +574,51 @@ impl AppState {
             .await?;
         }
         Ok(session)
+    }
+
+    async fn runnable_agent_version(
+        &self,
+        agent_id: Uuid,
+        environment_id: Option<Uuid>,
+    ) -> Result<AgentVersion, AppError> {
+        let agent = self.get_agent(agent_id).await?;
+        if agent.release_state == "disabled" {
+            return Err(AppError::forbidden("agent is disabled"));
+        }
+
+        let environment = match environment_id {
+            Some(id) => Some(self.get_environment(id).await?),
+            None => None,
+        };
+        if !agent_release_enforcement_required() {
+            return self.current_agent_version(agent_id).await;
+        }
+
+        let environment = environment.ok_or_else(|| {
+            AppError::forbidden("production agent runtime requires a bound environment")
+        })?;
+        if environment.status != "enabled" || environment.release_state != "active" {
+            return Err(AppError::forbidden(format!(
+                "environment {} is not enabled and active",
+                environment.name
+            )));
+        }
+
+        let runtime_profile_id = environment.runtime_profile_id.or(agent.runtime_profile_id);
+        if let Some(runtime_profile_id) = runtime_profile_id {
+            let profile = self.get_agent_runtime_profile(runtime_profile_id).await?;
+            let gate = crate::evaluate_agent_runtime_profile_release_gate(&profile);
+            if gate.fail_closed {
+                return Err(AppError::forbidden(format!(
+                    "agent runtime profile {} is blocked: {}",
+                    profile.name,
+                    gate.blocking_reasons.join(", ")
+                )));
+            }
+        }
+
+        self.promoted_agent_version(agent_id, production_agent_release_environment()?.as_str())
+            .await
     }
 
     pub(crate) async fn agent_exists(&self, agent_id: Uuid) -> Result<bool, AppError> {
