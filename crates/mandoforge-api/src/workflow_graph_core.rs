@@ -238,6 +238,86 @@ pub(crate) fn workflow_definition_root_task_grant_scope(
         .unwrap_or_else(default_value)
 }
 
+fn workflow_definition_root_task_grant_value<'a>(
+    definition: &'a WorkflowDefinition,
+    key: &str,
+) -> Option<&'a Value> {
+    definition
+        .handoff_rules
+        .get("root_task_grant")
+        .and_then(|value| value.get(key))
+        .or_else(|| {
+            definition
+                .handoff_rules
+                .get("task_grant_template")
+                .and_then(|value| value.get(key))
+        })
+}
+
+pub(crate) fn workflow_definition_root_task_grant_budget_i32(
+    definition: &WorkflowDefinition,
+    key: &str,
+) -> Result<Option<i32>, AppError> {
+    let Some(value) = workflow_definition_root_task_grant_value(definition, key) else {
+        return Ok(None);
+    };
+    let value = value.as_i64().ok_or_else(|| {
+        AppError::bad_request(format!("root task grant {key} must be a positive integer"))
+    })?;
+    let value = i32::try_from(value).map_err(|_| {
+        AppError::bad_request(format!("root task grant {key} exceeds the supported range"))
+    })?;
+    if value <= 0 {
+        return Err(AppError::bad_request(format!(
+            "root task grant {key} must be a positive integer"
+        )));
+    }
+    Ok(Some(value))
+}
+
+pub(crate) fn workflow_definition_root_task_grant_budget_i64(
+    definition: &WorkflowDefinition,
+    key: &str,
+) -> Result<Option<i64>, AppError> {
+    let Some(value) = workflow_definition_root_task_grant_value(definition, key) else {
+        return Ok(None);
+    };
+    let value = value.as_i64().ok_or_else(|| {
+        AppError::bad_request(format!("root task grant {key} must be a positive integer"))
+    })?;
+    if value <= 0 {
+        return Err(AppError::bad_request(format!(
+            "root task grant {key} must be a positive integer"
+        )));
+    }
+    Ok(Some(value))
+}
+
+pub(crate) fn validate_task_grant_budgets(grant: &TaskGrant) -> Result<(), AppError> {
+    for (field, value) in [
+        ("max_turns", grant.max_turns),
+        ("max_tool_calls", grant.max_tool_calls),
+        ("max_runtime_seconds", grant.max_runtime_seconds),
+    ] {
+        if value.is_some_and(|value| value <= 0) {
+            return Err(AppError::bad_request(format!(
+                "task grant {field} must be positive"
+            )));
+        }
+    }
+    if grant.max_cost_usd_micros.is_some_and(|value| value <= 0) {
+        return Err(AppError::bad_request(
+            "task grant max_cost_usd_micros must be positive",
+        ));
+    }
+    if grant.turns_used < 0 || grant.tool_calls_used < 0 || grant.cost_usd_micros_used < 0 {
+        return Err(AppError::bad_request(
+            "task grant usage counters cannot be negative",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn ensure_child_task_grant_within_parent(
     parent: &TaskGrant,
     child: &TaskGrant,

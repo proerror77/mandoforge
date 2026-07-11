@@ -537,6 +537,9 @@ pub(crate) async fn materialize_workflow_handoff_assignment(
         max_tool_calls: parent_grant.max_tool_calls,
         max_runtime_seconds: parent_grant.max_runtime_seconds,
         max_cost_usd_micros: parent_grant.max_cost_usd_micros,
+        turns_used: 0,
+        tool_calls_used: 0,
+        cost_usd_micros_used: 0,
         semantic_scopes: handoff.semantic_scopes.clone(),
         memory_scope: child_handoff_memory_scope(&parent_grant.memory_scope),
         tool_scope: child_tool_scope_for_agent(&parent_grant.tool_scope, target_agent),
@@ -672,7 +675,8 @@ pub(crate) async fn transition_agent_handoff_event(
     state
         .ensure_session_runnable(current.source_session_id)
         .await?;
-    if crate::store_entities::agent_release_enforcement_required() {
+    let terminal_transition = matches!(next_status, "completed" | "failed" | "rejected");
+    if crate::store_entities::agent_release_enforcement_required() && !terminal_transition {
         require_active_task_grant_for_session(&state, current.source_session_id).await?;
     }
     ensure_agent_handoff_transition(&current.status, next_status)?;
@@ -682,6 +686,9 @@ pub(crate) async fn transition_agent_handoff_event(
     let updated = state
         .update_agent_handoff_event_status(current.id, next_status, Some(audit.id))
         .await?;
+    if matches!(next_status, "completed" | "failed") {
+        close_workflow_handoff_step(&state, &current, next_status).await?;
+    }
     if matches!(next_status, "completed" | "failed")
         && let Some(thread) = state.session_thread_for_handoff(current.id).await?
     {
@@ -715,6 +722,42 @@ pub(crate) async fn transition_agent_handoff_event(
         }
     }
     Ok(Json(updated))
+}
+
+async fn close_workflow_handoff_step(
+    state: &AppState,
+    handoff: &AgentHandoffEvent,
+    handoff_status: &str,
+) -> Result<(), AppError> {
+    for run in state.list_workflow_runs().await? {
+        let Some(step) = state
+            .list_workflow_step_runs(run.id)
+            .await?
+            .into_iter()
+            .find(|step| step.handoff_id == Some(handoff.id))
+        else {
+            continue;
+        };
+        if workflow_step_status_terminal(&step.status) {
+            return Ok(());
+        }
+        let previous_status = step.status.clone();
+        let now = Utc::now();
+        let mut next = step;
+        next.status = if handoff_status == "completed" {
+            "completed".to_string()
+        } else {
+            "failed".to_string()
+        };
+        next.started_at = next.started_at.or(Some(now));
+        next.completed_at = Some(now);
+        next.updated_at = now;
+        let updated = state.update_workflow_step_run(next).await?;
+        record_workflow_step_run_updated(state, &run, &updated, &previous_status).await?;
+        advance_workflow_graph_after_step_update(state, &run, &updated).await?;
+        return Ok(());
+    }
+    Ok(())
 }
 
 pub(crate) async fn record_agent_handoff_audit_and_event(

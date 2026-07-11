@@ -27,10 +27,10 @@ use crate::{
     RemoteComputer, RemoteComputerJobAssignment, RemoteComputerLease,
     RemoteComputerRuntimeIdentity, RemoteComputerSubstrate, SandboxRuntimeOperation,
     SandboxRuntimeRequest, ToolCall, delete_remote_computer_runtime_resource,
-    enforce_task_grant_for_tool_invocation, metadata_with_remote_computer_runtime_identity,
-    new_audit_log, normalize_agent_cli_executable, record_remote_computer_job_assignment_event,
-    remote_computer_runtime_identity, required_remote_computer_runtime_identity,
-    resolve_mcp_runtime_secret_refs,
+    metadata_with_remote_computer_runtime_identity, new_audit_log, normalize_agent_cli_executable,
+    record_remote_computer_job_assignment_event, remote_computer_runtime_identity,
+    required_remote_computer_runtime_identity, resolve_mcp_runtime_secret_refs,
+    revalidate_task_grant_for_tool_invocation,
 };
 
 const DEFAULT_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
@@ -258,7 +258,7 @@ pub(crate) async fn run_execution_job(
         )
         .await;
     }
-    if let Err(error) = enforce_task_grant_for_tool_invocation(
+    if let Err(error) = revalidate_task_grant_for_tool_invocation(
         state,
         &tool_call.tool_name,
         &ExecuteTool {

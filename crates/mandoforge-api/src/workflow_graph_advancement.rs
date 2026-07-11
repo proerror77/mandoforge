@@ -660,6 +660,16 @@ pub(crate) async fn update_workflow_run_status_and_record(
     let updated = state
         .update_workflow_run_status(run.id, status.to_string(), started_at, completed_at)
         .await?;
+    if terminal {
+        let grant_status = if workflow_step_status_successful(status) {
+            "completed"
+        } else {
+            "cancelled"
+        };
+        state
+            .close_active_task_grants_for_workflow_run(run.id, grant_status)
+            .await?;
+    }
     let event_type = format!("workflow.run.{status}");
     state
         .append_event(

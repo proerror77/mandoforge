@@ -9811,7 +9811,7 @@ async fn semantic_synthesis_run_creates_reflection_artifact_and_review_candidate
     }));
 
     let events: Vec<SessionEvent> = request_json(
-        app,
+        app.clone(),
         Request::builder()
             .uri(format!("/api/sessions/{}/events", session.id))
             .header("x-mandoforge-roles", "admin")
@@ -11555,7 +11555,7 @@ async fn delegated_runtime_workflow_records_external_envelope() {
 
     let session_id = run["primary_session_id"].as_str().expect("session id");
     let events: Vec<SessionEvent> = request_json(
-        app,
+        app.clone(),
         Request::builder()
             .uri(format!("/api/sessions/{session_id}/events"))
             .body(Body::empty())
@@ -15172,6 +15172,47 @@ async fn workflow_handoff_assignment_materializes_step_and_child_grant() {
             && event.payload["task_grant_id"] == json!(child_grant.id)
             && event.payload["parent_grant_id"] == json!(root_task_grant_id)
     }));
+
+    let completed: AgentHandoffEvent = request_json(
+        app.clone(),
+        json_request(
+            "POST",
+            &format!("/api/agent-handoffs/{}/complete", handoff.id),
+            json!({"reason": "specialist review completed"}),
+        ),
+    )
+    .await;
+    assert_eq!(completed.status, "completed");
+    let closed_grant: TaskGrant = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/task-grants/{}", child_grant.id))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(closed_grant.status, "completed");
+    let closed_steps: Vec<WorkflowStepRun> = request_json(
+        app,
+        Request::builder()
+            .uri(format!(
+                "/api/workflow-runs/{}/steps",
+                run["id"].as_str().unwrap()
+            ))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(
+        closed_steps
+            .into_iter()
+            .find(|step| step.id == handoff_step.id)
+            .expect("closed handoff step")
+            .status,
+        "completed"
+    );
 }
 
 #[tokio::test]
@@ -15673,11 +15714,12 @@ async fn required_task_grant_for_session_rejects_revoked_expired_and_terminal_ro
 
     {
         let mut store = inner.write().await;
-        store
+        let grant = store
             .task_grants
             .get_mut(&root_grant_id)
-            .expect("root task grant")
-            .expires_at = None;
+            .expect("root task grant");
+        grant.status = "active".to_string();
+        grant.expires_at = None;
         store
             .workflow_runs
             .get_mut(&run.id)
@@ -15688,6 +15730,310 @@ async fn required_task_grant_for_session_rejects_revoked_expired_and_terminal_ro
         .await
         .expect_err("terminal workflow run must fail closed");
     assert!(terminal.message.contains("workflow run is not active"));
+}
+
+#[tokio::test]
+async fn workflow_root_task_grant_materializes_and_enforces_tool_budget() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let app = build_router(state.clone());
+    let agents: Vec<Agent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/agents")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let agent = agents.first().expect("seeded agent");
+    let definition: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-definitions",
+            json!({
+                "name": "Bounded tool workflow",
+                "entrypoint": "bounded-tool-workflow",
+                "default_agent_id": agent.id,
+                "handoff_rules": {
+                    "root_task_grant": {
+                        "max_turns": 2,
+                        "max_tool_calls": 1,
+                        "max_runtime_seconds": 300,
+                        "max_cost_usd_micros": 500000,
+                        "tool_scope": {
+                            "read": ["file.read"],
+                            "write": [],
+                            "external_write": []
+                        }
+                    }
+                },
+                "release_state": "released"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let run: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-runs",
+            json!({"workflow_definition_id": definition["id"]}),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    let session_id = run["primary_session_id"].as_str().unwrap();
+    let grant_id = run["root_task_grant_id"].as_str().unwrap();
+    let initial: Value = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/task-grants/{grant_id}"))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(initial["max_turns"], 2);
+    assert_eq!(initial["max_tool_calls"], 1);
+    assert_eq!(initial["max_runtime_seconds"], 300);
+    assert_eq!(initial["max_cost_usd_micros"], 500000);
+    assert_eq!(initial["tool_calls_used"], 0);
+
+    let first: Value = request_json(
+        app.clone(),
+        json_request(
+            "POST",
+            "/api/tools/file.read/execute",
+            json!({
+                "session_id": session_id,
+                "task_grant_id": grant_id,
+                "args": {"path": "README.md"}
+            }),
+        ),
+    )
+    .await;
+    assert!(first.get("files").is_some());
+
+    let (status, error) = request_value(
+        app.clone(),
+        json_request(
+            "POST",
+            "/api/tools/file.read/execute",
+            json!({
+                "session_id": session_id,
+                "task_grant_id": grant_id,
+                "args": {"path": "README.md"}
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(error["error"], "task grant tool call budget exhausted");
+
+    let exhausted: Value = request_json(
+        app,
+        Request::builder()
+            .uri(format!("/api/task-grants/{grant_id}"))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(exhausted["tool_calls_used"], 1);
+
+    let grant_id = Uuid::parse_str(grant_id).expect("grant id");
+    let root = state.get_task_grant(grant_id).await.expect("root grant");
+    let mut child = root.clone();
+    child.id = Uuid::new_v4();
+    child.parent_grant_id = Some(root.id);
+    child.turns_used = 0;
+    child.tool_calls_used = 0;
+    child.cost_usd_micros_used = 0;
+    child.created_at = Utc::now();
+    child.updated_at = child.created_at;
+    let child = state.create_task_grant(child).await.expect("child grant");
+    let child_budget_error = state
+        .reserve_task_grant_tool_call(child.id)
+        .await
+        .expect_err("child must share the exhausted parent tool budget");
+    assert_eq!(
+        child_budget_error.message,
+        "task grant tool call budget exhausted"
+    );
+    assert_eq!(
+        state
+            .get_task_grant(child.id)
+            .await
+            .expect("child grant")
+            .tool_calls_used,
+        0
+    );
+
+    state
+        .reserve_task_grant_turn(root.id)
+        .await
+        .expect("first turn");
+    state
+        .reserve_task_grant_turn(root.id)
+        .await
+        .expect("second turn");
+    let turn_error = state
+        .reserve_task_grant_turn(root.id)
+        .await
+        .expect_err("third turn must exceed the root budget");
+    assert_eq!(turn_error.message, "task grant turn budget exhausted");
+
+    state
+        .add_task_grant_cost(root.id, 500_000)
+        .await
+        .expect("record task grant cost");
+    let cost_error = state
+        .reserve_task_grant_turn(root.id)
+        .await
+        .expect_err("cost budget must block further turns");
+    assert_eq!(cost_error.message, "task grant cost budget exhausted");
+
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test uses memory store");
+    };
+    {
+        let mut store = inner.write().await;
+        let root = store.task_grants.get_mut(&root.id).expect("root grant");
+        root.max_cost_usd_micros = None;
+        root.max_runtime_seconds = Some(1);
+        root.created_at = Utc::now() - chrono::Duration::seconds(2);
+        root.status = "active".to_string();
+    }
+    let runtime_error = state
+        .reserve_task_grant_turn(root.id)
+        .await
+        .expect_err("runtime budget must expire the grant");
+    assert_eq!(runtime_error.message, "task grant runtime budget expired");
+    assert_eq!(
+        state
+            .get_task_grant(root.id)
+            .await
+            .expect("expired root")
+            .status,
+        "expired"
+    );
+}
+
+#[tokio::test]
+async fn terminal_workflow_run_closes_active_task_grants() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let app = build_router(state.clone());
+    let agent = state
+        .list_agents()
+        .await
+        .expect("agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let definition: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-definitions",
+            json!({
+                "name": "Terminal grant lifecycle",
+                "entrypoint": "terminal-grant-lifecycle",
+                "default_agent_id": agent.id,
+                "release_state": "released"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let run: WorkflowRun = request_json(
+        app,
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-runs",
+            json!({"workflow_definition_id": definition["id"]}),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    let root_grant_id = run.root_task_grant_id.expect("root grant");
+
+    let completed = update_workflow_run_status_and_record(&state, &run, "completed")
+        .await
+        .expect("complete workflow run");
+    assert_eq!(completed.status, "completed");
+    assert_eq!(
+        state
+            .get_task_grant(root_grant_id)
+            .await
+            .expect("closed root grant")
+            .status,
+        "completed"
+    );
+}
+
+#[tokio::test]
+async fn workflow_cost_budget_requires_metered_provider() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let app = build_router(state.clone());
+    let agent = state
+        .list_agents()
+        .await
+        .expect("agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let definition: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-definitions",
+            json!({
+                "name": "Metered provider workflow",
+                "entrypoint": "metered-provider-workflow",
+                "default_agent_id": agent.id,
+                "handoff_rules": {
+                    "root_task_grant": {
+                        "max_turns": 2,
+                        "max_cost_usd_micros": 1000000
+                    }
+                },
+                "release_state": "released"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let run: WorkflowRun = request_json(
+        app,
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-runs",
+            json!({"workflow_definition_id": definition["id"]}),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    let job = enqueue_session_loop(&state, run.primary_session_id, None, "cost metering test")
+        .await
+        .expect("enqueue session loop");
+
+    let error = run_session_loop(&state, &job)
+        .await
+        .expect_err("unpriced provider must fail closed for a cost-bounded grant");
+    assert_eq!(
+        error.message,
+        "task grant cost budget requires a stored provider with pricing"
+    );
+    let grant = state
+        .get_task_grant(run.root_task_grant_id.expect("root grant"))
+        .await
+        .expect("root grant");
+    assert_eq!(grant.turns_used, 1);
+    assert_eq!(grant.cost_usd_micros_used, 0);
 }
 
 #[tokio::test]
@@ -15793,7 +16139,7 @@ async fn workflow_session_loop_uses_root_task_grant_for_tool_calls() {
     }));
 
     let events: Vec<SessionEvent> = request_json(
-        app,
+        app.clone(),
         Request::builder()
             .uri(format!("/api/sessions/{session_id}/events"))
             .header("x-mandoforge-roles", "operator")
@@ -15811,6 +16157,17 @@ async fn workflow_session_loop_uses_root_task_grant_for_tool_calls() {
             "missing task grant check for {tool}"
         );
     }
+    let root_grant: TaskGrant = request_json(
+        app,
+        Request::builder()
+            .uri(format!("/api/task-grants/{root_task_grant_id}"))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(root_grant.turns_used, 1);
+    assert_eq!(root_grant.tool_calls_used, 4);
 }
 
 #[tokio::test]

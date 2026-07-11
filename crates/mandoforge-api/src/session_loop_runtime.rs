@@ -491,6 +491,71 @@ pub(crate) fn provider_completion_token_price_cents(provider: &ProviderRecord) -
         .and_then(Value::as_f64)
 }
 
+async fn task_grant_cost_metering_provider(
+    state: &AppState,
+    provider_name: &str,
+) -> Result<ProviderRecord, AppError> {
+    let provider = state
+        .provider_by_name(provider_name)
+        .await?
+        .ok_or_else(|| {
+            AppError::forbidden("task grant cost budget requires a stored provider with pricing")
+        })?;
+    let metered = provider
+        .config
+        .get("pricing")
+        .and_then(Value::as_object)
+        .is_some_and(|pricing| {
+            [
+                "per_request_cents",
+                "per_1k_prompt_tokens_cents",
+                "per_1k_completion_tokens_cents",
+            ]
+            .iter()
+            .any(|key| pricing.get(*key).and_then(Value::as_f64).is_some())
+        });
+    if !metered {
+        return Err(AppError::forbidden(
+            "task grant cost budget requires a stored provider with pricing",
+        ));
+    }
+    Ok(provider)
+}
+
+fn provider_uses_token_pricing(provider: &ProviderRecord) -> bool {
+    provider_prompt_token_price_cents(provider).is_some()
+        || provider_completion_token_price_cents(provider).is_some()
+}
+
+fn provider_response_cost_usd_micros(
+    provider: &ProviderRecord,
+    usage: Option<&crate::provider::ProviderTokenUsage>,
+) -> Result<i64, AppError> {
+    let mut cost_cents = provider_per_request_cost_cents(&provider);
+    if let Some(usage) = usage {
+        cost_cents += token_cost_cents(
+            usage.prompt_tokens,
+            provider_prompt_token_price_cents(&provider),
+        );
+        cost_cents += token_cost_cents(
+            usage.completion_tokens,
+            provider_completion_token_price_cents(&provider),
+        );
+    }
+    if !cost_cents.is_finite() || cost_cents < 0.0 {
+        return Err(AppError::bad_request(
+            "provider pricing produced an invalid task grant cost",
+        ));
+    }
+    let micros = (cost_cents * 10_000.0).ceil();
+    if micros > i64::MAX as f64 {
+        return Err(AppError::bad_request(
+            "provider pricing exceeds task grant cost range",
+        ));
+    }
+    Ok(micros as i64)
+}
+
 pub(crate) async fn provider_estimated_cost_cents_since(
     state: &AppState,
     provider: &ProviderRecord,
@@ -613,6 +678,27 @@ pub(crate) async fn run_session_loop(
     } else {
         active_task_grant_for_session(state, id).await?
     };
+    let active_task_grant = match active_task_grant {
+        Some((run, grant)) => {
+            let reserved = match state.reserve_task_grant_turn(grant.id).await {
+                Ok(grant) => grant,
+                Err(error) => {
+                    record_task_grant_denied(
+                        state,
+                        id,
+                        Some(&grant),
+                        Some(run.id),
+                        "session_loop.turn",
+                        &error.message,
+                    )
+                    .await?;
+                    return Err(error);
+                }
+            };
+            Some((run, reserved))
+        }
+        None => None,
+    };
     ensure_primary_session_thread(state, id).await?;
     set_managed_session_status(state, id, SessionStatus::Running, "session loop started").await?;
     state
@@ -628,6 +714,27 @@ pub(crate) async fn run_session_loop(
         .await?;
 
     let (provider_label, provider) = provider_client_for_session(state, id).await?;
+    let cost_metering_provider = if let Some((run, grant)) = active_task_grant.as_ref()
+        && grant.max_cost_usd_micros.is_some()
+    {
+        match task_grant_cost_metering_provider(state, &provider_label).await {
+            Ok(provider) => Some(provider),
+            Err(error) => {
+                record_task_grant_denied(
+                    state,
+                    id,
+                    Some(grant),
+                    Some(run.id),
+                    "session_loop.provider",
+                    &error.message,
+                )
+                .await?;
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
     let provider_response = run_provider_harness(
         state,
         id,
@@ -637,6 +744,49 @@ pub(crate) async fn run_session_loop(
         job.pending_event_seq_end,
     )
     .await?;
+
+    if let Some((run, grant)) = active_task_grant.as_ref() {
+        if let Some(provider) = cost_metering_provider.as_ref()
+            && provider_uses_token_pricing(provider)
+            && provider_response.usage.is_none()
+        {
+            let reason = "task grant cost budget requires provider token usage";
+            record_task_grant_denied(
+                state,
+                id,
+                Some(grant),
+                Some(run.id),
+                "session_loop.provider",
+                reason,
+            )
+            .await?;
+            return Err(AppError::forbidden(reason));
+        }
+        let cost_usd_micros = cost_metering_provider
+            .as_ref()
+            .map(|provider| {
+                provider_response_cost_usd_micros(provider, provider_response.usage.as_ref())
+            })
+            .transpose()?
+            .unwrap_or(0);
+        let updated = state.add_task_grant_cost(grant.id, cost_usd_micros).await?;
+        if updated
+            .max_cost_usd_micros
+            .is_some_and(|limit| updated.cost_usd_micros_used > limit)
+        {
+            let reason = "task grant cost budget exceeded by provider response";
+            record_task_grant_denied(
+                state,
+                id,
+                Some(&updated),
+                Some(run.id),
+                "session_loop.provider",
+                reason,
+            )
+            .await?;
+            return Err(AppError::forbidden(reason));
+        }
+    }
 
     state
         .append_event(
@@ -650,7 +800,7 @@ pub(crate) async fn run_session_loop(
         )
         .await?;
 
-    let session_task_grant_id = active_task_grant.map(|(_, grant)| grant.id);
+    let session_task_grant_id = active_task_grant.as_ref().map(|(_, grant)| grant.id);
     let mut waiting_for_approval = false;
     for tool_call in provider_response.tool_calls {
         let result = execute_tool_invocation(
