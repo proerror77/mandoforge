@@ -29520,6 +29520,7 @@ async fn mcp_commit_write_uses_approval_commit_token_exact_binding() {
                 .get_mut(&root_task_grant_id)
                 .expect("root task grant");
             grant.expires_at = None;
+            grant.status = "active".to_string();
             grant.updated_at = Utc::now();
         }
         StoreBackend::Postgres(_) => panic!("test uses memory store"),

@@ -965,6 +965,9 @@ impl AppState {
         if agent.release_state == "disabled" {
             return Err(AppError::forbidden("agent is disabled"));
         }
+        if let Some(environment_id) = environment_id {
+            self.get_environment(environment_id).await?;
+        }
 
         if !agent_release_enforcement_required() {
             return self.current_agent_version(agent_id).await;
