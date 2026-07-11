@@ -10,6 +10,44 @@ use crate::{AgentRelease, AgentVersion, AppError, AppState, CreateAgentRelease};
 const AGENT_RELEASE_COLUMNS: &str = "id, agent_id, agent_version_id, environment, status, eval_run_id, eval_score, min_score, requested_by, requested_at, request_reason, approver_subject, decision_by, decided_at, decision_reason, promoted_by, promoted_at, automation_policy, created_at";
 
 impl AppState {
+    pub(crate) async fn agent_version_has_promoted_release(
+        &self,
+        agent_id: Uuid,
+        agent_version_id: Uuid,
+        environment: &str,
+    ) -> Result<bool, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                Ok(inner.read().await.agent_releases.values().any(|release| {
+                    release.agent_id == agent_id
+                        && release.agent_version_id == agent_version_id
+                        && release.status == "promoted"
+                        && release.environment.eq_ignore_ascii_case(environment)
+                }))
+            }
+            StoreBackend::Postgres(pool) => {
+                let exists: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(
+                        SELECT 1
+                        FROM agent_releases
+                        WHERE tenant_id = $1
+                          AND agent_id = $2
+                          AND agent_version_id = $3
+                          AND lower(environment) = lower($4)
+                          AND status = 'promoted'
+                    )",
+                )
+                .bind(self.current_tenant_id())
+                .bind(agent_id)
+                .bind(agent_version_id)
+                .bind(environment)
+                .fetch_one(pool)
+                .await?;
+                Ok(exists)
+            }
+        }
+    }
+
     pub(crate) async fn promoted_agent_version(
         &self,
         agent_id: Uuid,

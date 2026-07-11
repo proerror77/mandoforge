@@ -2882,8 +2882,8 @@ async fn execute_approved_remote_computer_agent_cli(
     let request: AgentCliRequest = serde_json::from_value(tool_call.args.clone())?;
     let profile = normalize_agent_cli_profile(&request.profile)?;
     let target = remote_computer_pod_exec_target(state, approval.session_id, assignment).await?;
-    let profile_config = agent_cli_profile_config(state, &profile).await?;
-    enforce_bound_agent_cli_profile(state, approval.session_id, &profile).await?;
+    let profile_config =
+        agent_cli_profile_config_for_session(state, approval.session_id, &profile).await?;
     let profile_source = match profile_config.source {
         AgentCliProfileConfigSource::Managed => "managed",
         AgentCliProfileConfigSource::Environment => "environment",
@@ -4073,8 +4073,7 @@ pub(crate) async fn run_agent_cli(
     request: AgentCliRequest,
 ) -> Result<Value, AppError> {
     let profile = normalize_agent_cli_profile(&request.profile)?;
-    let config = agent_cli_profile_config(state, &profile).await?;
-    enforce_bound_agent_cli_profile(state, session_id, &profile).await?;
+    let config = agent_cli_profile_config_for_session(state, session_id, &profile).await?;
     let runtime_type = config.runtime_type.clone();
     if config.remote_computer_required {
         return Err(AppError::bad_request(format!(
@@ -4260,6 +4259,43 @@ async fn enforce_bound_agent_cli_profile(
     Ok(())
 }
 
+async fn agent_cli_profile_config_for_session(
+    state: &AppState,
+    session_id: Uuid,
+    requested_profile: &str,
+) -> Result<AgentCliProfileConfig, AppError> {
+    enforce_bound_agent_cli_profile(state, session_id, requested_profile).await?;
+    let bound_profile = bound_agent_cli_profile(state, session_id).await?;
+    if bound_profile
+        .as_ref()
+        .is_some_and(|profile| profile.source == "agent_version")
+    {
+        let agent_version = state.agent_version_for_session(session_id).await?;
+        let snapshot_present = agent_version
+            .runtime_profile_snapshot
+            .as_object()
+            .is_some_and(|snapshot| !snapshot.is_empty());
+        if snapshot_present {
+            let managed_profile = serde_json::from_value::<crate::AgentRuntimeProfile>(
+                agent_version.runtime_profile_snapshot,
+            )
+            .map_err(|error| {
+                AppError::bad_request(format!(
+                    "agent version runtime profile snapshot is invalid: {error}"
+                ))
+            })?;
+            let snapshot_name = normalize_agent_cli_profile(&managed_profile.name)?;
+            if snapshot_name != requested_profile {
+                return Err(AppError::bad_request(
+                    "agent version runtime profile snapshot name does not match its binding",
+                ));
+            }
+            return managed_agent_cli_profile_config(managed_profile, requested_profile);
+        }
+    }
+    agent_cli_profile_config(state, requested_profile).await
+}
+
 async fn bound_agent_cli_profile(
     state: &AppState,
     session_id: Uuid,
@@ -4291,13 +4327,21 @@ async fn bound_agent_cli_profile(
         }));
     }
 
-    let agent = state.get_agent(session.agent_id).await?;
-    match agent.runtime_profile_id {
+    let agent_version = state.agent_version_for_session(session_id).await?;
+    match agent_version.runtime_profile_id {
         Some(profile_id) => {
-            let profile = state.get_agent_runtime_profile(profile_id).await?;
+            let profile_name = agent_version
+                .runtime_profile_snapshot
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let name = match profile_name {
+                Some(name) => name,
+                None => state.get_agent_runtime_profile(profile_id).await?.name,
+            };
             Ok(Some(BoundAgentCliProfile {
-                name: profile.name,
-                source: "agent",
+                name,
+                source: "agent_version",
             }))
         }
         None => Ok(None),
@@ -4309,39 +4353,7 @@ async fn agent_cli_profile_config(
     profile: &str,
 ) -> Result<AgentCliProfileConfig, AppError> {
     if let Some(managed_profile) = state.get_agent_runtime_profile_by_name(profile).await? {
-        if managed_profile.status != "enabled" {
-            return Err(AppError::bad_request(format!(
-                "agent runtime profile is not enabled: {profile}"
-            )));
-        }
-        if !agent_runtime_profile_is_cli_executable(&managed_profile.runtime_type) {
-            return Err(AppError::bad_request(format!(
-                "agent runtime profile {profile} is not executable through agent_cli.exec"
-            )));
-        }
-        let env = managed_profile
-            .env
-            .as_object()
-            .map(|object| {
-                object
-                    .iter()
-                    .filter_map(|(key, value)| {
-                        value.as_str().map(|value| (key.clone(), value.to_string()))
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        return Ok(AgentCliProfileConfig {
-            command: managed_profile.command,
-            args: managed_profile.default_args,
-            env,
-            timeout_seconds: managed_profile
-                .timeout_seconds
-                .and_then(|value| u64::try_from(value).ok()),
-            remote_computer_required: managed_profile.remote_computer_required,
-            runtime_type: managed_profile.runtime_type,
-            source: AgentCliProfileConfigSource::Managed,
-        });
+        return managed_agent_cli_profile_config(managed_profile, profile);
     }
 
     let allowed = std::env::var("MANDOFORGE_AGENT_CLI_ALLOWED_PROFILES").unwrap_or_default();
@@ -4394,6 +4406,45 @@ async fn agent_cli_profile_config(
         remote_computer_required: false,
         runtime_type: "agent_cli".to_string(),
         source: AgentCliProfileConfigSource::Environment,
+    })
+}
+
+fn managed_agent_cli_profile_config(
+    managed_profile: crate::AgentRuntimeProfile,
+    profile: &str,
+) -> Result<AgentCliProfileConfig, AppError> {
+    if managed_profile.status != "enabled" {
+        return Err(AppError::bad_request(format!(
+            "agent runtime profile is not enabled: {profile}"
+        )));
+    }
+    if !agent_runtime_profile_is_cli_executable(&managed_profile.runtime_type) {
+        return Err(AppError::bad_request(format!(
+            "agent runtime profile {profile} is not executable through agent_cli.exec"
+        )));
+    }
+    let env = managed_profile
+        .env
+        .as_object()
+        .map(|object| {
+            object
+                .iter()
+                .filter_map(|(key, value)| {
+                    value.as_str().map(|value| (key.clone(), value.to_string()))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Ok(AgentCliProfileConfig {
+        command: managed_profile.command,
+        args: managed_profile.default_args,
+        env,
+        timeout_seconds: managed_profile
+            .timeout_seconds
+            .and_then(|value| u64::try_from(value).ok()),
+        remote_computer_required: managed_profile.remote_computer_required,
+        runtime_type: managed_profile.runtime_type,
+        source: AgentCliProfileConfigSource::Managed,
     })
 }
 

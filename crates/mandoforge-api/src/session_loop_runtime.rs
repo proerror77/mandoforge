@@ -13,6 +13,7 @@ pub(crate) async fn build_harness_context(
     pending_event_seq_start: Option<i64>,
     pending_event_seq_end: Option<i64>,
 ) -> Result<HarnessContext, AppError> {
+    let agent_version = state.agent_version_for_session(session_id).await?;
     let events = state.list_events(session_id).await?;
     let pending_events = events
         .iter()
@@ -123,6 +124,9 @@ pub(crate) async fn build_harness_context(
         build_provider_context_packet(state, session_id).await?;
     Ok(HarnessContext {
         session_id,
+        agent_version_id: agent_version.id,
+        agent_version: agent_version.version,
+        system_prompt: agent_version.system_prompt,
         task_grant_id,
         context_packet_id,
         rendered_context_packet,
@@ -327,9 +331,8 @@ pub(crate) async fn provider_client_for_session(
     state: &AppState,
     session_id: Uuid,
 ) -> Result<(String, Box<dyn ProviderClient>), AppError> {
-    let session = state.get_session(session_id).await?;
-    let agent = state.get_agent(session.agent_id).await?;
-    if let Some(provider) = state.provider_by_name(&agent.provider).await? {
+    let agent_version = state.agent_version_for_session(session_id).await?;
+    if let Some(provider) = state.provider_by_name(&agent_version.provider).await? {
         if provider.status != "active" {
             return Err(AppError::forbidden(format!(
                 "provider {} is not active",
@@ -354,13 +357,13 @@ pub(crate) async fn provider_client_for_session(
             let base_url = provider.base_url.clone().ok_or_else(|| {
                 AppError::bad_request("stored openai-compatible provider requires base_url")
             })?;
-            let model = agent
+            let model = agent_version
                 .model
                 .trim()
                 .is_empty()
                 .then(|| provider.default_model.clone())
                 .flatten()
-                .unwrap_or(agent.model);
+                .unwrap_or(agent_version.model);
             let api_key = stored_provider_api_key(&provider).await?;
             return Ok((
                 provider.name,
@@ -377,11 +380,11 @@ pub(crate) async fn provider_client_for_session(
     if provider_runtime_production_mode() {
         return Err(AppError::forbidden(format!(
             "production provider runtime requires stored active provider {}",
-            agent.provider
+            agent_version.provider
         )));
     }
     let fallback = provider_client_from_env().await?;
-    Ok((agent.provider, fallback))
+    Ok((agent_version.provider, fallback))
 }
 
 pub(crate) fn provider_runtime_production_mode() -> bool {

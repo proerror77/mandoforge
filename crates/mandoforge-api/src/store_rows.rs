@@ -153,18 +153,22 @@ pub(crate) fn agent_version_from_row(row: PgRow) -> Result<AgentVersion, AppErro
         id: row.try_get("id")?,
         agent_id: row.try_get("agent_id")?,
         version: row.try_get("version")?,
+        provider: row.try_get("provider")?,
         model: row.try_get("model")?,
         system_prompt: row.try_get("system_prompt")?,
         tools: json_array_from_row(tools, "agent_versions.tools")?,
         tool_names: json_array_from_row(tool_names, "agent_versions.tool_names")?,
         runtime_config: row.try_get("runtime_config")?,
         approval_policy: row.try_get("approval_policy")?,
+        runtime_profile_id: row.try_get("runtime_profile_id")?,
+        runtime_profile_snapshot: row.try_get("runtime_profile_snapshot")?,
         mcp_server_ids: json_array_from_row(mcp_server_ids, "agent_versions.mcp_server_ids")?,
         skill_ids: json_array_from_row(skill_ids, "agent_versions.skill_ids")?,
         workflow_pack_ids: json_array_from_row(
             workflow_pack_ids,
             "agent_versions.workflow_pack_ids",
         )?,
+        remote_computer_profile: row.try_get("remote_computer_profile")?,
         semantic_scopes: row
             .try_get("semantic_scopes")
             .unwrap_or_else(|_| serde_json::json!({})),

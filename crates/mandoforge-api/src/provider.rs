@@ -11,9 +11,14 @@ use crate::{
     secrets::{SecretProvider, SecretProviderConfig, SecretRef, secret_provider_from_env},
 };
 
+const PROVIDER_HARNESS_RUNTIME_CONTRACT: &str = "You are MandoForge's managed-agent provider harness. First read rendered_context_packet when it is present: it is the bounded ontology, memory, tool, and policy context for this task. Do not invent domain definitions outside that packet. If the packet is missing needed ontology detail, use only the listed ontology tools and include the current context_packet_id in the tool arguments. Runtime actions must go through the supplied tools, TaskGrant, and policy path.";
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct HarnessContext {
     pub(crate) session_id: Uuid,
+    pub(crate) agent_version_id: Uuid,
+    pub(crate) agent_version: i32,
+    pub(crate) system_prompt: String,
     pub(crate) task_grant_id: Option<Uuid>,
     pub(crate) context_packet_id: Option<Uuid>,
     pub(crate) rendered_context_packet: Option<Value>,
@@ -344,18 +349,24 @@ impl ProviderClient for OpenAiCompatibleProviderClient {
     async fn complete(&self, context: HarnessContext) -> Result<ProviderResponse, AppError> {
         let endpoint = format!("{}/v1/chat/completions", self.base_url);
         let tools = provider_tool_schemas(&context.provider_tool_names);
+        let system_prompt = if context.system_prompt.trim().is_empty() {
+            PROVIDER_HARNESS_RUNTIME_CONTRACT.to_string()
+        } else {
+            format!(
+                "{}\n\nMandatory MandoForge runtime contract:\n{}",
+                context.system_prompt, PROVIDER_HARNESS_RUNTIME_CONTRACT
+            )
+        };
+        let messages = vec![
+            json!({"role": "system", "content": system_prompt}),
+            json!({
+                "role": "user",
+                "content": serde_json::to_string(&context)?,
+            }),
+        ];
         let mut body = json!({
             "model": self.model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You are MandoForge's managed-agent provider harness. First read rendered_context_packet when it is present: it is the bounded ontology, memory, tool, and policy context for this task. Do not invent domain definitions outside that packet. If the packet is missing needed ontology detail, use only the listed ontology tools and include the current context_packet_id in the tool arguments. Runtime actions must go through the supplied tools, TaskGrant, and policy path."
-                },
-                {
-                    "role": "user",
-                    "content": serde_json::to_string(&context)?
-                }
-            ]
+            "messages": messages,
         });
         if tools.as_array().is_some_and(|values| !values.is_empty()) {
             body["tools"] = tools;

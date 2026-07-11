@@ -321,8 +321,9 @@ pub(crate) use types::agent::{
     AgentReleaseOrchestrationValidationRun, AgentReleaseProductionOpsReadiness,
     AgentReleaseProductionOrchestrationReadiness, AgentReleaseRolloutSummary, AgentRuntimeProfile,
     AgentRuntimeProfileReleaseGate, AgentVersion, CreateAgent, CreateAgentRelease,
-    CreateAgentRuntimeProfile, CreateEnvironment, Environment, RejectAgentReleasePromotion,
-    RequestAgentReleasePromotion, UpdateAgentRuntimeProfile, UpdateEnvironment,
+    CreateAgentRuntimeProfile, CreateAgentVersion, CreateEnvironment, Environment,
+    RejectAgentReleasePromotion, RequestAgentReleasePromotion, UpdateAgentRuntimeProfile,
+    UpdateEnvironment,
 };
 pub(crate) use types::agent_handoff::{
     AgentHandoffAssignment, AgentHandoffEvent, AttachAgentHandoffRemoteComputerAssignment,

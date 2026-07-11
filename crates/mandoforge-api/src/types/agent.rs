@@ -33,17 +33,38 @@ pub(crate) struct AgentVersion {
     pub(crate) id: Uuid,
     pub(crate) agent_id: Uuid,
     pub(crate) version: i32,
+    pub(crate) provider: String,
     pub(crate) model: String,
     pub(crate) system_prompt: String,
     pub(crate) tools: Vec<String>,
     pub(crate) tool_names: Vec<String>,
     pub(crate) runtime_config: Value,
     pub(crate) approval_policy: Value,
+    pub(crate) runtime_profile_id: Option<Uuid>,
+    pub(crate) runtime_profile_snapshot: Value,
     pub(crate) mcp_server_ids: Vec<Uuid>,
     pub(crate) skill_ids: Vec<String>,
     pub(crate) workflow_pack_ids: Vec<String>,
+    pub(crate) remote_computer_profile: Value,
     pub(crate) semantic_scopes: Value,
     pub(crate) created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CreateAgentVersion {
+    pub(crate) provider: String,
+    pub(crate) model: String,
+    #[serde(default)]
+    pub(crate) runtime_profile_id: Option<Uuid>,
+    pub(crate) system_prompt: String,
+    pub(crate) tools: Vec<String>,
+    pub(crate) runtime_config: Value,
+    pub(crate) approval_policy: Value,
+    pub(crate) mcp_server_ids: Vec<Uuid>,
+    pub(crate) skill_ids: Vec<String>,
+    pub(crate) workflow_pack_ids: Vec<String>,
+    pub(crate) remote_computer_profile: Value,
+    pub(crate) semantic_scopes: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
