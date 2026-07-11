@@ -386,6 +386,15 @@ fi
 if ! grep -q "MANDOFORGE_AGENT_RELEASE_ENFORCEMENT: required" "$deploy_render_file"; then
   fail "rendered deployment must require the agent release execution gate"
 fi
+for controller_flag in \
+  MANDOFORGE_AGENT_RELEASE_CONTROLLER_REQUIRED \
+  MANDOFORGE_AGENT_RELEASE_DEPLOYMENT_CONTROLLER_REQUIRED \
+  MANDOFORGE_AGENT_RELEASE_ORCHESTRATION_CONTROLLER_REQUIRED \
+  MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_REQUIRED; do
+  if ! grep -Eq "${controller_flag}:[[:space:]]*\"?true\"?" "$deploy_render_file"; then
+    fail "rendered deployment must require ${controller_flag}"
+  fi
+done
 
 if ! grep -q "kind: Job" "$stage2_render_file"; then
   echo "Stage 2 evidence kustomize render is missing a Job" >&2

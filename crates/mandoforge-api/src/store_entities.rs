@@ -86,7 +86,7 @@ fn environment_release_environment(environment: &crate::Environment) -> Result<S
 
 pub(crate) fn agent_release_enforcement_required() -> bool {
     crate::provider_runtime_production_mode()
-        && std::env::var("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT")
+        || std::env::var("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT")
             .ok()
             .is_some_and(|value| value.trim().eq_ignore_ascii_case("required"))
 }

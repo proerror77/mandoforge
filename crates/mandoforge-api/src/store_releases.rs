@@ -350,14 +350,15 @@ impl AppState {
                 let row = sqlx::query(
                     "UPDATE agent_releases
                      SET status = 'rolled_back'
-                     WHERE tenant_id = $1 AND agent_id = $2 AND id = $3
+                     WHERE tenant_id = $1 AND agent_id = $2 AND id = $3 AND status = 'promoted'
                      RETURNING id, agent_id, agent_version_id, environment, status, eval_run_id, eval_score, min_score, requested_by, requested_at, request_reason, approver_subject, decision_by, decided_at, decision_reason, promoted_by, promoted_at, automation_policy, created_at",
                 )
                 .bind(self.current_tenant_id())
                 .bind(agent_id)
                 .bind(release_id)
-                .fetch_one(pool)
-                .await?;
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::bad_request("agent release is not promoted"))?;
                 agent_release_from_row(row)
             }
         }?;
@@ -423,7 +424,7 @@ impl AppState {
                     .agent_releases
                     .get_mut(&release_id)
                     .ok_or_else(|| AppError::not_found("agent release not found"))?;
-                validate_release_decision(release, &decided_by)?;
+                validate_agent_release_decision(release, &decided_by)?;
                 let now = Utc::now();
                 release.status = next_status.to_string();
                 release.decision_by = Some(decided_by.clone());
@@ -449,7 +450,7 @@ impl AppState {
                     .await?
                     .ok_or_else(|| AppError::not_found("agent release not found"))
                     .and_then(agent_release_from_row)?;
-                validate_release_decision(&existing, &decided_by)?;
+                validate_agent_release_decision(&existing, &decided_by)?;
                 let now = Utc::now();
                 let promoted_by = (next_status == "promoted").then_some(decided_by.clone());
                 let promoted_at = (next_status == "promoted").then_some(now);
@@ -461,7 +462,7 @@ impl AppState {
                          decision_reason = $7,
                          promoted_by = $8,
                          promoted_at = $9
-                     WHERE tenant_id = $1 AND agent_id = $2 AND id = $3
+                     WHERE tenant_id = $1 AND agent_id = $2 AND id = $3 AND status = 'pending_approval'
                      RETURNING id, agent_id, agent_version_id, environment, status, eval_run_id, eval_score, min_score, requested_by, requested_at, request_reason, approver_subject, decision_by, decided_at, decision_reason, promoted_by, promoted_at, automation_policy, created_at",
                 )
                 .bind(self.current_tenant_id())
@@ -473,8 +474,9 @@ impl AppState {
                 .bind(&reason)
                 .bind(&promoted_by)
                 .bind(promoted_at)
-                .fetch_one(pool)
-                .await?;
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::bad_request("agent release is not pending approval"))?;
                 agent_release_from_row(row)
             }
         }?;
@@ -551,7 +553,7 @@ impl AppState {
                          decision_reason = $7,
                          promoted_by = $8,
                          promoted_at = $9
-                     WHERE tenant_id = $1 AND agent_id = $2 AND id = $3
+                     WHERE tenant_id = $1 AND agent_id = $2 AND id = $3 AND status = 'pending_approval'
                      RETURNING id, agent_id, agent_version_id, environment, status, eval_run_id, eval_score, min_score, requested_by, requested_at, request_reason, approver_subject, decision_by, decided_at, decision_reason, promoted_by, promoted_at, automation_policy, created_at",
                 )
                 .bind(self.current_tenant_id())
@@ -563,8 +565,9 @@ impl AppState {
                 .bind(&reason)
                 .bind(&promoted_by)
                 .bind(promoted_at)
-                .fetch_one(pool)
-                .await?;
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::bad_request("agent release is not pending approval"))?;
                 agent_release_from_row(row)
             }
         }?;
@@ -572,7 +575,10 @@ impl AppState {
     }
 }
 
-fn validate_release_decision(release: &AgentRelease, decided_by: &str) -> Result<(), AppError> {
+pub(crate) fn validate_agent_release_decision(
+    release: &AgentRelease,
+    decided_by: &str,
+) -> Result<(), AppError> {
     if release.status != "pending_approval" {
         return Err(AppError::bad_request(
             "agent release is not pending approval",

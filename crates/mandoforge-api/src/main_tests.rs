@@ -4486,7 +4486,7 @@ async fn reads_agent_versions_for_agent() {
 async fn create_agent_cannot_bypass_release_promotion() {
     let _env = env_lock().lock().expect("env lock");
     let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
-    let _release_enforcement = EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+    let _release_enforcement = EnvVarGuard::remove("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT");
     let app = test_app().await;
     let (status, error) = request_value(
         app,
@@ -4843,6 +4843,118 @@ async fn production_direct_session_requires_governed_workflow() {
     assert!(error["error"].as_str().is_some_and(|message| {
         message.contains("WorkflowRun") && message.contains("TaskGrant")
     }));
+}
+
+#[tokio::test]
+async fn production_rejects_direct_agent_release_promotion() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+    let _release_enforcement = EnvVarGuard::remove("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT");
+    let app = test_app().await;
+    let agents: Vec<Agent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/agents")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let agent = agents.first().expect("seeded agent");
+
+    let (status, error) = request_value(
+        app,
+        json_request_with_headers(
+            "POST",
+            &format!("/api/agents/{}/releases", agent.id),
+            json!({
+                "eval_run_id": Uuid::new_v4(),
+                "environment": "production"
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        error["error"],
+        "production agent releases require a release request and independent approval"
+    );
+}
+
+#[tokio::test]
+async fn production_release_approval_requires_configured_controller() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+    let _release_enforcement = EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let version = state
+        .current_agent_version(agent.id)
+        .await
+        .expect("agent version");
+    let now = Utc::now();
+    let release = AgentRelease {
+        id: Uuid::new_v4(),
+        agent_id: agent.id,
+        agent_version_id: version.id,
+        environment: "production".to_string(),
+        status: "pending_approval".to_string(),
+        eval_run_id: None,
+        eval_score: Some(1.0),
+        min_score: 1.0,
+        requested_by: Some("release-requester".to_string()),
+        requested_at: Some(now),
+        request_reason: Some("production release".to_string()),
+        approver_subject: Some("release-approver".to_string()),
+        decision_by: None,
+        decided_at: None,
+        decision_reason: None,
+        promoted_by: None,
+        promoted_at: None,
+        automation_policy: json!({}),
+        created_at: now,
+    };
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test uses memory store");
+    };
+    inner
+        .write()
+        .await
+        .agent_releases
+        .insert(release.id, release.clone());
+    let app = build_router(state);
+
+    let (status, error) = request_value(
+        app,
+        Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/api/agents/{}/releases/{}/approve",
+                agent.id, release.id
+            ))
+            .header("x-mandoforge-subject", "release-approver")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error["error"],
+        "agent release controller is required but not configured"
+    );
 }
 
 #[tokio::test]
@@ -19169,6 +19281,10 @@ async fn agent_release_required_controller_skips_auto_promotion_when_missing() {
 
 #[tokio::test]
 async fn agent_release_deployment_controller_executes_external_boundary() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::remove("MANDOFORGE_PROVIDER_RUNTIME_ENV");
+    let _controller_required =
+        EnvVarGuard::remove("MANDOFORGE_AGENT_RELEASE_DEPLOYMENT_CONTROLLER_REQUIRED");
     let payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -19406,6 +19522,10 @@ fn agent_release_deployment_readiness_requires_controller_when_configured() {
 
 #[tokio::test]
 async fn agent_release_orchestration_controller_executes_external_boundary() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::remove("MANDOFORGE_PROVIDER_RUNTIME_ENV");
+    let _controller_required =
+        EnvVarGuard::remove("MANDOFORGE_AGENT_RELEASE_ORCHESTRATION_CONTROLLER_REQUIRED");
     let payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -19730,6 +19850,19 @@ fn agent_release_rollback_controller_required_flag_is_fail_closed() {
     };
     assert!(agent_release_rollback_controller_required(&configured));
     assert!(agent_release_rollback_controller_configured(&configured));
+}
+
+#[test]
+fn agent_release_controllers_are_required_by_default_in_production() {
+    let production = |key: &str| match key {
+        "MANDOFORGE_PROVIDER_RUNTIME_ENV" => Some("production".to_string()),
+        _ => None,
+    };
+
+    assert!(agent_release_controller_required(&production));
+    assert!(agent_release_deployment_controller_required(&production));
+    assert!(agent_release_orchestration_controller_required(&production));
+    assert!(agent_release_rollback_controller_required(&production));
 }
 
 #[tokio::test]

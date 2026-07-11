@@ -228,14 +228,28 @@ pub(crate) fn agent_release_controller_required<F>(lookup: &F) -> bool
 where
     F: Fn(&str) -> Option<String>,
 {
-    lookup("MANDOFORGE_AGENT_RELEASE_CONTROLLER_REQUIRED")
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes"
-            )
-        })
-        .unwrap_or(false)
+    agent_release_controller_required_for(lookup, "MANDOFORGE_AGENT_RELEASE_CONTROLLER_REQUIRED")
+}
+
+fn agent_release_controller_required_for<F>(lookup: &F, key: &str) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let production = lookup("MANDOFORGE_PROVIDER_RUNTIME_ENV").is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "production" | "prod"
+        )
+    });
+    production
+        || lookup(key)
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes"
+                )
+            })
+            .unwrap_or(false)
 }
 
 pub(crate) async fn execute_agent_release_controller<F>(
@@ -306,14 +320,10 @@ pub(crate) fn agent_release_deployment_controller_required<F>(lookup: &F) -> boo
 where
     F: Fn(&str) -> Option<String>,
 {
-    lookup("MANDOFORGE_AGENT_RELEASE_DEPLOYMENT_CONTROLLER_REQUIRED")
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes"
-            )
-        })
-        .unwrap_or(false)
+    agent_release_controller_required_for(
+        lookup,
+        "MANDOFORGE_AGENT_RELEASE_DEPLOYMENT_CONTROLLER_REQUIRED",
+    )
 }
 
 pub(crate) fn agent_release_deployment_controller_configured<F>(lookup: &F) -> bool
@@ -422,14 +432,10 @@ pub(crate) fn agent_release_orchestration_controller_required<F>(lookup: &F) -> 
 where
     F: Fn(&str) -> Option<String>,
 {
-    lookup("MANDOFORGE_AGENT_RELEASE_ORCHESTRATION_CONTROLLER_REQUIRED")
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes"
-            )
-        })
-        .unwrap_or(false)
+    agent_release_controller_required_for(
+        lookup,
+        "MANDOFORGE_AGENT_RELEASE_ORCHESTRATION_CONTROLLER_REQUIRED",
+    )
 }
 
 pub(crate) fn agent_release_orchestration_controller_configured<F>(lookup: &F) -> bool
@@ -525,14 +531,10 @@ pub(crate) fn agent_release_rollback_controller_required<F>(lookup: &F) -> bool
 where
     F: Fn(&str) -> Option<String>,
 {
-    lookup("MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_REQUIRED")
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes"
-            )
-        })
-        .unwrap_or(false)
+    agent_release_controller_required_for(
+        lookup,
+        "MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_REQUIRED",
+    )
 }
 
 pub(crate) fn agent_release_rollback_controller_configured<F>(lookup: &F) -> bool

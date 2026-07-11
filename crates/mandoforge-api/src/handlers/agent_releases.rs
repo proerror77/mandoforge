@@ -8,20 +8,22 @@ use chrono::Utc;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use crate::store_releases::validate_agent_release_decision;
 use crate::{
     AgentRelease, AgentReleaseAutomationRun, AgentReleaseAutomationRunSummary,
     AgentReleaseDeploymentValidationRun, AgentReleaseOrchestrationValidationRun,
     AgentReleaseRolloutSummary, AppError, AppState, AuthorizationRequest, CreateAgentRelease,
     Permission, RejectAgentReleasePromotion, RequestAgentReleasePromotion,
+    agent_release_controller_configured, agent_release_controller_required,
     agent_release_deployment_controller_configured, agent_release_deployment_controller_required,
     agent_release_orchestration_controller_configured,
     agent_release_orchestration_controller_required, agent_release_rollback_controller_configured,
     agent_release_rollback_controller_required, authorize_request,
     build_agent_release_automation_run_summary, build_agent_release_rollout_summary,
-    dedupe_strings, enforce_resource_scope, execute_agent_release_deployment_controller,
-    execute_agent_release_orchestration_controller, execute_agent_release_rollback_controller,
-    execute_due_agent_release_promotions, new_audit_log, normalize_release_automation_policy,
-    optional_trimmed, principal_from_request,
+    dedupe_strings, enforce_resource_scope, execute_agent_release_controller,
+    execute_agent_release_deployment_controller, execute_agent_release_orchestration_controller,
+    execute_agent_release_rollback_controller, execute_due_agent_release_promotions, new_audit_log,
+    normalize_release_automation_policy, optional_trimmed, principal_from_request,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -388,6 +390,11 @@ async fn create_agent_release(
     };
     state.authorizer.authorize(&principal, &request).await?;
     enforce_resource_scope(&state, &principal, &request).await?;
+    if crate::store_entities::agent_release_enforcement_required() {
+        return Err(AppError::forbidden(
+            "production agent releases require a release request and independent approval",
+        ));
+    }
     Ok(Json(
         state
             .create_agent_release(id, input, principal.subject_id)
@@ -487,6 +494,33 @@ async fn decide_agent_release_promotion(
     };
     state.authorizer.authorize(&principal, &request).await?;
     enforce_resource_scope(&state, &principal, &request).await?;
+    let mut controller_execution = Value::Null;
+    if decision == "approve" {
+        let release = state
+            .list_agent_releases(agent_id)
+            .await?
+            .into_iter()
+            .find(|release| release.id == release_id)
+            .ok_or_else(|| AppError::not_found("agent release not found"))?;
+        validate_agent_release_decision(&release, &principal.subject_id)?;
+        let lookup = |key: &str| std::env::var(key).ok();
+        let controller_required = agent_release_controller_required(&lookup);
+        let controller_configured = agent_release_controller_configured(&lookup);
+        if controller_required && !controller_configured {
+            return Err(AppError::bad_request(
+                "agent release controller is required but not configured",
+            ));
+        }
+        if controller_configured {
+            controller_execution =
+                execute_agent_release_controller(&lookup, &release, Utc::now()).await?;
+            if controller_execution.get("status").and_then(Value::as_str) != Some("promoted") {
+                return Err(AppError::bad_request(
+                    "agent release controller did not confirm promotion",
+                ));
+            }
+        }
+    }
     let release = match decision {
         "approve" => {
             state
@@ -525,6 +559,7 @@ async fn decide_agent_release_promotion(
                 "status": release.status,
                 "requested_by": release.requested_by,
                 "decision_by": release.decision_by,
+                "controller_execution": controller_execution,
             }),
         ))
         .await?;
