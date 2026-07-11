@@ -20682,6 +20682,7 @@ async fn agent_release_controller_executes_external_rollout_boundary() {
     let payloads = payloads.lock().await;
     assert_eq!(payloads.len(), 1);
     assert_eq!(payloads[0]["type"], "mandoforge.agent_release_rollout");
+    assert_eq!(payloads[0]["idempotency_key"], release.id.to_string());
     assert_eq!(payloads[0]["release_id"], release.id.to_string());
     assert_eq!(payloads[0]["agent_id"], release.agent_id.to_string());
     assert_eq!(payloads[0]["environment"], "prod");
@@ -20775,6 +20776,183 @@ async fn agent_release_required_controller_skips_auto_promotion_when_missing() {
         .await
         .expect("pending releases");
     assert!(pending.iter().any(|candidate| candidate.id == release.id));
+}
+
+#[tokio::test]
+async fn agent_release_controller_observes_durable_promotion_state_and_failure_is_retryable() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::remove("MANDOFORGE_PROVIDER_RUNTIME_ENV");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let version = state
+        .current_agent_version(agent.id)
+        .await
+        .expect("agent version");
+    let pending_release = |environment: &str| {
+        let now = Utc::now();
+        AgentRelease {
+            id: Uuid::new_v4(),
+            agent_id: agent.id,
+            agent_version_id: version.id,
+            environment: environment.to_string(),
+            status: "pending_approval".to_string(),
+            eval_run_id: None,
+            eval_score: Some(1.0),
+            min_score: 1.0,
+            requested_by: Some("release-requester".to_string()),
+            requested_at: Some(now),
+            request_reason: Some("durable controller ordering".to_string()),
+            approver_subject: Some("release-approver".to_string()),
+            decision_by: None,
+            decided_at: None,
+            decision_reason: None,
+            promoted_by: None,
+            promoted_at: None,
+            automation_policy: json!({}),
+            created_at: now,
+        }
+    };
+    let successful_release = pending_release("prod-success");
+    let failed_release = pending_release("prod-fail");
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test requires memory store");
+    };
+    {
+        let mut store = inner.write().await;
+        store
+            .agent_releases
+            .insert(successful_release.id, successful_release.clone());
+        store
+            .agent_releases
+            .insert(failed_release.id, failed_release.clone());
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("release controller listener");
+    let controller_addr = listener.local_addr().expect("release controller addr");
+    let controller = Router::new()
+        .route(
+            "/agent-release",
+            post(mock_agent_release_controller_requires_in_progress),
+        )
+        .with_state(state.clone());
+    let controller_server = tokio::spawn(async move {
+        axum::serve(listener, controller)
+            .await
+            .expect("mock release controller");
+    });
+    let _controller_url = EnvVarGuard::set(
+        "MANDOFORGE_AGENT_RELEASE_CONTROLLER_URL",
+        format!("http://{controller_addr}/agent-release").as_str(),
+    );
+    let _controller_required =
+        EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_CONTROLLER_REQUIRED", "true");
+    let _controller_token = EnvVarGuard::remove("MANDOFORGE_AGENT_RELEASE_CONTROLLER_TOKEN");
+    let app = build_router(state.clone());
+
+    let promoted: AgentRelease = request_json(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/api/agents/{}/releases/{}/approve",
+                agent.id, successful_release.id
+            ))
+            .header("x-mandoforge-subject", "release-approver")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(promoted.status, "promoted");
+    assert_eq!(promoted.promoted_by.as_deref(), Some("release-approver"));
+
+    let (status, error) = request_value(
+        app,
+        Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/api/agents/{}/releases/{}/approve",
+                agent.id, failed_release.id
+            ))
+            .header("x-mandoforge-subject", "release-approver")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error["error"],
+        "agent release controller did not confirm promotion"
+    );
+    let failed = state
+        .list_all_agent_releases()
+        .await
+        .expect("list releases")
+        .into_iter()
+        .find(|release| release.id == failed_release.id)
+        .expect("failed release");
+    assert_eq!(failed.status, "promotion_failed");
+    assert!(
+        failed
+            .decision_reason
+            .as_deref()
+            .is_some_and(|reason| { reason.contains("did not confirm promotion") })
+    );
+    let pending = state
+        .list_pending_agent_releases()
+        .await
+        .expect("retryable releases");
+    assert!(pending.iter().any(|release| release.id == failed.id));
+    let summary = build_agent_release_rollout_summary(
+        state
+            .list_all_agent_releases()
+            .await
+            .expect("release summary inputs"),
+        Utc::now(),
+    );
+    assert_eq!(summary.pending_count, 1);
+    assert_eq!(summary.by_status["promotion_failed"], 1);
+    assert!(summary.attention_items.iter().any(|item| {
+        item.release_id == failed.id && item.reason.contains("promotion_failed_retryable")
+    }));
+
+    let retry = state
+        .begin_agent_release_promotion(
+            agent.id,
+            failed.id,
+            "release-approver".to_string(),
+            "retry after controller repair".to_string(),
+        )
+        .await
+        .expect("retry promotion");
+    assert_eq!(retry.status, "promotion_in_progress");
+    let idempotent_retry = state
+        .begin_agent_release_promotion(
+            agent.id,
+            failed.id,
+            "release-approver".to_string(),
+            "retry after controller repair".to_string(),
+        )
+        .await
+        .expect("resume promotion");
+    assert_eq!(idempotent_retry.id, retry.id);
+    let recovered = state
+        .complete_agent_release_promotion(agent.id, failed.id, "release-approver".to_string())
+        .await
+        .expect("complete recovered promotion");
+    assert_eq!(recovered.status, "promoted");
+
+    controller_server.abort();
 }
 
 #[tokio::test]
@@ -22596,6 +22774,40 @@ async fn mock_agent_release_controller(
             {"name": "promote", "status": "promoted"},
             {"name": "verify", "status": "passed"}
         ]
+    }))
+}
+
+async fn mock_agent_release_controller_requires_in_progress(
+    State(state): State<AppState>,
+    Json(payload): Json<Value>,
+) -> Json<Value> {
+    let release_id = payload["release_id"]
+        .as_str()
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .expect("release id");
+    let release = state
+        .list_all_agent_releases()
+        .await
+        .expect("list agent releases")
+        .into_iter()
+        .find(|release| release.id == release_id)
+        .expect("controller release");
+    if release.status != "promotion_in_progress" {
+        return Json(json!({
+            "status": "blocked",
+            "message": "release state was not persisted before controller invocation"
+        }));
+    }
+    if release.environment == "prod-fail" {
+        return Json(json!({
+            "status": "blocked",
+            "message": "simulated rollout failure"
+        }));
+    }
+    Json(json!({
+        "status": "promoted",
+        "deployment_id": format!("deployment-{release_id}"),
+        "message": "durable promotion state observed"
     }))
 }
 

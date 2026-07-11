@@ -8,7 +8,6 @@ use chrono::Utc;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::store_releases::validate_agent_release_decision;
 use crate::{
     AgentRelease, AgentReleaseAutomationRun, AgentReleaseAutomationRunSummary,
     AgentReleaseDeploymentValidationRun, AgentReleaseOrchestrationValidationRun,
@@ -495,36 +494,98 @@ async fn decide_agent_release_promotion(
     state.authorizer.authorize(&principal, &request).await?;
     enforce_resource_scope(&state, &principal, &request).await?;
     let mut controller_execution = Value::Null;
-    if decision == "approve" {
-        let release = state
-            .list_agent_releases(agent_id)
-            .await?
-            .into_iter()
-            .find(|release| release.id == release_id)
-            .ok_or_else(|| AppError::not_found("agent release not found"))?;
-        validate_agent_release_decision(&release, &principal.subject_id)?;
-        let lookup = |key: &str| std::env::var(key).ok();
-        let controller_required = agent_release_controller_required(&lookup);
-        let controller_configured = agent_release_controller_configured(&lookup);
-        if controller_required && !controller_configured {
-            return Err(AppError::bad_request(
-                "agent release controller is required but not configured",
-            ));
-        }
-        if controller_configured {
-            controller_execution =
-                execute_agent_release_controller(&lookup, &release, Utc::now()).await?;
-            if controller_execution.get("status").and_then(Value::as_str) != Some("promoted") {
-                return Err(AppError::bad_request(
-                    "agent release controller did not confirm promotion",
-                ));
-            }
-        }
-    }
     let release = match decision {
         "approve" => {
+            let lookup = |key: &str| std::env::var(key).ok();
+            let controller_required = agent_release_controller_required(&lookup);
+            let controller_configured = agent_release_controller_configured(&lookup);
+            if controller_required && !controller_configured {
+                return Err(AppError::bad_request(
+                    "agent release controller is required but not configured",
+                ));
+            }
+            let in_progress = state
+                .begin_agent_release_promotion(
+                    agent_id,
+                    release_id,
+                    principal.subject_id.clone(),
+                    "approved".to_string(),
+                )
+                .await?;
+            if controller_configured {
+                controller_execution =
+                    match execute_agent_release_controller(&lookup, &in_progress, Utc::now()).await
+                    {
+                        Ok(execution) => execution,
+                        Err(error) => {
+                            let failure_reason =
+                                format!("release controller failed: {}", error.message);
+                            let failed = state
+                                .fail_agent_release_promotion(
+                                    agent_id,
+                                    release_id,
+                                    principal.subject_id.clone(),
+                                    failure_reason.clone(),
+                                )
+                                .await?;
+                            state
+                                .append_audit_log(new_audit_log(
+                                    None,
+                                    "user",
+                                    None,
+                                    "agent.release_promotion_failed",
+                                    "agent_release",
+                                    Some(failed.id),
+                                    json!({
+                                        "subject": principal.subject_id.clone(),
+                                        "agent_id": agent_id,
+                                        "environment": failed.environment,
+                                        "status": failed.status,
+                                        "reason": failure_reason
+                                    }),
+                                ))
+                                .await?;
+                            return Err(error);
+                        }
+                    };
+                if controller_execution.get("status").and_then(Value::as_str) != Some("promoted") {
+                    let failure_reason =
+                        "agent release controller did not confirm promotion".to_string();
+                    let failed = state
+                        .fail_agent_release_promotion(
+                            agent_id,
+                            release_id,
+                            principal.subject_id.clone(),
+                            failure_reason.clone(),
+                        )
+                        .await?;
+                    state
+                        .append_audit_log(new_audit_log(
+                            None,
+                            "user",
+                            None,
+                            "agent.release_promotion_failed",
+                            "agent_release",
+                            Some(failed.id),
+                            json!({
+                                "subject": principal.subject_id.clone(),
+                                "agent_id": agent_id,
+                                "environment": failed.environment,
+                                "status": failed.status,
+                                "reason": failure_reason,
+                                "controller_execution": controller_execution.clone()
+                            }),
+                        ))
+                        .await?;
+                    return Err(AppError::bad_request(failure_reason));
+                }
+            }
             state
-                .approve_agent_release_promotion(agent_id, release_id, principal.subject_id.clone())
+                .complete_agent_release_promotion(
+                    agent_id,
+                    release_id,
+                    principal.subject_id.clone(),
+                )
                 .await?
         }
         "reject" => {

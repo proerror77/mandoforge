@@ -154,7 +154,12 @@ impl AppState {
                     .await
                     .agent_releases
                     .values()
-                    .filter(|release| release.status == "pending_approval")
+                    .filter(|release| {
+                        matches!(
+                            release.status.as_str(),
+                            "pending_approval" | "promotion_in_progress" | "promotion_failed"
+                        )
+                    })
                     .cloned()
                     .collect();
                 releases.sort_by_key(|release| release.created_at);
@@ -164,7 +169,8 @@ impl AppState {
                 let sql = format!(
                     "SELECT {AGENT_RELEASE_COLUMNS}
                      FROM agent_releases
-                     WHERE tenant_id = $1 AND status = 'pending_approval'
+                     WHERE tenant_id = $1
+                       AND status IN ('pending_approval', 'promotion_in_progress', 'promotion_failed')
                      ORDER BY created_at ASC"
                 );
                 let rows = sqlx::query(&sql)
@@ -319,20 +325,212 @@ impl AppState {
         Ok(release)
     }
 
-    pub(crate) async fn approve_agent_release_promotion(
+    pub(crate) async fn begin_agent_release_promotion(
         &self,
         agent_id: Uuid,
         release_id: Uuid,
-        approved_by: String,
+        decided_by: String,
+        reason: String,
     ) -> Result<AgentRelease, AppError> {
-        self.decide_agent_release_promotion(
-            agent_id,
-            release_id,
-            "promoted",
-            approved_by,
-            Some("approved".to_string()),
-        )
-        .await
+        self.get_agent(agent_id).await?;
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let release = store
+                    .agent_releases
+                    .get_mut(&release_id)
+                    .ok_or_else(|| AppError::not_found("agent release not found"))?;
+                if release.agent_id != agent_id {
+                    return Err(AppError::not_found("agent release not found"));
+                }
+                if release.status == "promotion_in_progress" {
+                    validate_agent_release_decider(release, &decided_by)?;
+                    if release.decision_by.as_deref() != Some(decided_by.as_str()) {
+                        return Err(AppError::forbidden(
+                            "agent release promotion is owned by another approver",
+                        ));
+                    }
+                    return Ok(release.clone());
+                }
+                validate_agent_release_decision(release, &decided_by)?;
+                let now = Utc::now();
+                release.status = "promotion_in_progress".to_string();
+                release.decision_by = Some(decided_by);
+                release.decided_at = Some(now);
+                release.decision_reason = Some(reason);
+                release.promoted_by = None;
+                release.promoted_at = None;
+                Ok(release.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let sql = format!(
+                    "SELECT {AGENT_RELEASE_COLUMNS}
+                     FROM agent_releases
+                     WHERE tenant_id = $1 AND agent_id = $2 AND id = $3"
+                );
+                let existing = sqlx::query(&sql)
+                    .bind(self.current_tenant_id())
+                    .bind(agent_id)
+                    .bind(release_id)
+                    .fetch_optional(pool)
+                    .await?
+                    .ok_or_else(|| AppError::not_found("agent release not found"))
+                    .and_then(agent_release_from_row)?;
+                if existing.status == "promotion_in_progress" {
+                    validate_agent_release_decider(&existing, &decided_by)?;
+                    if existing.decision_by.as_deref() != Some(decided_by.as_str()) {
+                        return Err(AppError::forbidden(
+                            "agent release promotion is owned by another approver",
+                        ));
+                    }
+                    return Ok(existing);
+                }
+                validate_agent_release_decision(&existing, &decided_by)?;
+                let now = Utc::now();
+                let row = sqlx::query(
+                    "UPDATE agent_releases
+                     SET status = 'promotion_in_progress',
+                         decision_by = $4,
+                         decided_at = $5,
+                         decision_reason = $6,
+                         promoted_by = NULL,
+                         promoted_at = NULL
+                     WHERE tenant_id = $1
+                       AND agent_id = $2
+                       AND id = $3
+                       AND status IN ('pending_approval', 'promotion_failed')
+                     RETURNING id, agent_id, agent_version_id, environment, status, eval_run_id, eval_score, min_score, requested_by, requested_at, request_reason, approver_subject, decision_by, decided_at, decision_reason, promoted_by, promoted_at, automation_policy, created_at",
+                )
+                .bind(self.current_tenant_id())
+                .bind(agent_id)
+                .bind(release_id)
+                .bind(&decided_by)
+                .bind(now)
+                .bind(&reason)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| {
+                    AppError::bad_request("agent release promotion state changed concurrently")
+                })?;
+                agent_release_from_row(row)
+            }
+        }
+    }
+
+    pub(crate) async fn complete_agent_release_promotion(
+        &self,
+        agent_id: Uuid,
+        release_id: Uuid,
+        promoted_by: String,
+    ) -> Result<AgentRelease, AppError> {
+        self.get_agent(agent_id).await?;
+        let now = Utc::now();
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let release = store
+                    .agent_releases
+                    .get_mut(&release_id)
+                    .ok_or_else(|| AppError::not_found("agent release not found"))?;
+                if release.agent_id != agent_id {
+                    return Err(AppError::not_found("agent release not found"));
+                }
+                if release.status != "promotion_in_progress"
+                    || release.decision_by.as_deref() != Some(promoted_by.as_str())
+                {
+                    return Err(AppError::bad_request(
+                        "agent release is not in promotion by this approver",
+                    ));
+                }
+                release.status = "promoted".to_string();
+                release.promoted_by = Some(promoted_by);
+                release.promoted_at = Some(now);
+                Ok(release.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE agent_releases
+                     SET status = 'promoted', promoted_by = $4, promoted_at = $5
+                     WHERE tenant_id = $1
+                       AND agent_id = $2
+                       AND id = $3
+                       AND status = 'promotion_in_progress'
+                       AND decision_by = $4
+                     RETURNING id, agent_id, agent_version_id, environment, status, eval_run_id, eval_score, min_score, requested_by, requested_at, request_reason, approver_subject, decision_by, decided_at, decision_reason, promoted_by, promoted_at, automation_policy, created_at",
+                )
+                .bind(self.current_tenant_id())
+                .bind(agent_id)
+                .bind(release_id)
+                .bind(&promoted_by)
+                .bind(now)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| {
+                    AppError::bad_request("agent release is not in promotion by this approver")
+                })?;
+                agent_release_from_row(row)
+            }
+        }
+    }
+
+    pub(crate) async fn fail_agent_release_promotion(
+        &self,
+        agent_id: Uuid,
+        release_id: Uuid,
+        decided_by: String,
+        reason: String,
+    ) -> Result<AgentRelease, AppError> {
+        self.get_agent(agent_id).await?;
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let release = store
+                    .agent_releases
+                    .get_mut(&release_id)
+                    .ok_or_else(|| AppError::not_found("agent release not found"))?;
+                if release.agent_id != agent_id {
+                    return Err(AppError::not_found("agent release not found"));
+                }
+                if release.status != "promotion_in_progress"
+                    || release.decision_by.as_deref() != Some(decided_by.as_str())
+                {
+                    return Err(AppError::bad_request(
+                        "agent release is not in promotion by this approver",
+                    ));
+                }
+                release.status = "promotion_failed".to_string();
+                release.decision_reason = Some(reason);
+                release.promoted_by = None;
+                release.promoted_at = None;
+                Ok(release.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE agent_releases
+                     SET status = 'promotion_failed',
+                         decision_reason = $5,
+                         promoted_by = NULL,
+                         promoted_at = NULL
+                     WHERE tenant_id = $1
+                       AND agent_id = $2
+                       AND id = $3
+                       AND status = 'promotion_in_progress'
+                       AND decision_by = $4
+                     RETURNING id, agent_id, agent_version_id, environment, status, eval_run_id, eval_score, min_score, requested_by, requested_at, request_reason, approver_subject, decision_by, decided_at, decision_reason, promoted_by, promoted_at, automation_policy, created_at",
+                )
+                .bind(self.current_tenant_id())
+                .bind(agent_id)
+                .bind(release_id)
+                .bind(&decided_by)
+                .bind(&reason)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| {
+                    AppError::bad_request("agent release is not in promotion by this approver")
+                })?;
+                agent_release_from_row(row)
+            }
+        }
     }
 
     pub(crate) async fn reject_agent_release_promotion(
@@ -500,7 +698,10 @@ impl AppState {
                          decision_reason = $7,
                          promoted_by = $8,
                          promoted_at = $9
-                     WHERE tenant_id = $1 AND agent_id = $2 AND id = $3 AND status = 'pending_approval'
+                     WHERE tenant_id = $1
+                       AND agent_id = $2
+                       AND id = $3
+                       AND status IN ('pending_approval', 'promotion_failed')
                      RETURNING id, agent_id, agent_version_id, environment, status, eval_run_id, eval_score, min_score, requested_by, requested_at, request_reason, approver_subject, decision_by, decided_at, decision_reason, promoted_by, promoted_at, automation_policy, created_at",
                 )
                 .bind(self.current_tenant_id())
@@ -535,6 +736,13 @@ impl AppState {
                 "unsupported automated release decision",
             ));
         }
+        if next_status == "promoted" {
+            self.begin_agent_release_promotion(agent_id, release_id, decided_by.clone(), reason)
+                .await?;
+            return self
+                .complete_agent_release_promotion(agent_id, release_id, decided_by)
+                .await;
+        }
         let release = match &self.store {
             StoreBackend::Memory(inner) => {
                 let mut store = inner.write().await;
@@ -545,7 +753,10 @@ impl AppState {
                 if release.agent_id != agent_id {
                     return Err(AppError::not_found("agent release not found"));
                 }
-                if release.status != "pending_approval" {
+                if !matches!(
+                    release.status.as_str(),
+                    "pending_approval" | "promotion_failed"
+                ) {
                     return Err(AppError::bad_request(
                         "agent release is not pending approval",
                     ));
@@ -575,7 +786,10 @@ impl AppState {
                     .await?
                     .ok_or_else(|| AppError::not_found("agent release not found"))
                     .and_then(agent_release_from_row)?;
-                if existing.status != "pending_approval" {
+                if !matches!(
+                    existing.status.as_str(),
+                    "pending_approval" | "promotion_failed"
+                ) {
                     return Err(AppError::bad_request(
                         "agent release is not pending approval",
                     ));
@@ -591,7 +805,10 @@ impl AppState {
                          decision_reason = $7,
                          promoted_by = $8,
                          promoted_at = $9
-                     WHERE tenant_id = $1 AND agent_id = $2 AND id = $3 AND status = 'pending_approval'
+                     WHERE tenant_id = $1
+                       AND agent_id = $2
+                       AND id = $3
+                       AND status IN ('pending_approval', 'promotion_failed')
                      RETURNING id, agent_id, agent_version_id, environment, status, eval_run_id, eval_score, min_score, requested_by, requested_at, request_reason, approver_subject, decision_by, decided_at, decision_reason, promoted_by, promoted_at, automation_policy, created_at",
                 )
                 .bind(self.current_tenant_id())
@@ -617,11 +834,21 @@ pub(crate) fn validate_agent_release_decision(
     release: &AgentRelease,
     decided_by: &str,
 ) -> Result<(), AppError> {
-    if release.status != "pending_approval" {
+    if !matches!(
+        release.status.as_str(),
+        "pending_approval" | "promotion_failed"
+    ) {
         return Err(AppError::bad_request(
             "agent release is not pending approval",
         ));
     }
+    validate_agent_release_decider(release, decided_by)
+}
+
+fn validate_agent_release_decider(
+    release: &AgentRelease,
+    decided_by: &str,
+) -> Result<(), AppError> {
     if release
         .requested_by
         .as_deref()
