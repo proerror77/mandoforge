@@ -530,6 +530,228 @@ impl AppState {
         }
     }
 
+    pub(crate) async fn create_workflow_step_run_with_task_grant(
+        &self,
+        mut step: WorkflowStepRun,
+        grant: TaskGrant,
+    ) -> Result<(WorkflowStepRun, TaskGrant), AppError> {
+        crate::validate_task_grant_scope_objects(&grant)?;
+        crate::validate_task_grant_budgets(&grant)?;
+        if grant.status != "active" {
+            return Err(AppError::bad_request(
+                "workflow step task grant must be active",
+            ));
+        }
+        if grant.workflow_run_id != step.workflow_run_id
+            || grant.workflow_step_run_id != Some(step.id)
+        {
+            return Err(AppError::bad_request(
+                "workflow step and task grant must reference each other in the same workflow run",
+            ));
+        }
+        if step
+            .task_grant_id
+            .is_some_and(|task_grant_id| task_grant_id != grant.id)
+        {
+            return Err(AppError::bad_request(
+                "workflow step task grant id does not match task grant",
+            ));
+        }
+        if let Some(session_id) = step.session_id
+            && grant.session_id != Some(session_id)
+            && grant.grantee_session_id != Some(session_id)
+        {
+            return Err(AppError::bad_request(
+                "workflow step and task grant must reference the same session",
+            ));
+        }
+        step.task_grant_id = Some(grant.id);
+        let now = Utc::now();
+
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let run = store
+                    .workflow_runs
+                    .get(&step.workflow_run_id)
+                    .ok_or_else(|| AppError::not_found("workflow run not found"))?;
+                if !crate::workflow_run_status_allows_execution(&run.status) {
+                    return Err(AppError::forbidden("workflow run is not executable"));
+                }
+                if store.workflow_step_runs.contains_key(&step.id) {
+                    return Err(AppError::bad_request("workflow step run already exists"));
+                }
+                if store.task_grants.contains_key(&grant.id) {
+                    return Err(AppError::bad_request("task grant already exists"));
+                }
+                if let Some(parent_grant_id) = grant.parent_grant_id {
+                    let parent = store
+                        .task_grants
+                        .get(&parent_grant_id)
+                        .cloned()
+                        .ok_or_else(|| AppError::not_found("task grant parent not found"))?;
+                    if let Some((message, expire)) = task_grant_runtime_denial(&parent, now) {
+                        if expire
+                            && let Some(stored) = store.task_grants.get_mut(&parent_grant_id)
+                            && stored.status == "active"
+                        {
+                            stored.status = "expired".to_string();
+                            stored.updated_at = now;
+                        }
+                        return Err(AppError::forbidden(message));
+                    }
+                    crate::ensure_child_task_grant_within_parent(&parent, &grant)?;
+                }
+                store.task_grants.insert(grant.id, grant.clone());
+                store.workflow_step_runs.insert(step.id, step.clone());
+                Ok((step, grant))
+            }
+            StoreBackend::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let run_status: String = sqlx::query_scalar(
+                    "SELECT status
+                     FROM workflow_runs
+                     WHERE tenant_id = $1 AND id = $2
+                     FOR UPDATE",
+                )
+                .bind(self.current_tenant_id())
+                .bind(step.workflow_run_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or_else(|| AppError::not_found("workflow run not found"))?;
+                if !crate::workflow_run_status_allows_execution(&run_status) {
+                    return Err(AppError::forbidden("workflow run is not executable"));
+                }
+                if let Some(parent_grant_id) = grant.parent_grant_id {
+                    let select_sql = format!(
+                        "SELECT {TASK_GRANT_COLUMNS}
+                         FROM task_grants
+                         WHERE tenant_id = $1 AND id = $2
+                         FOR UPDATE"
+                    );
+                    let row = sqlx::query(&select_sql)
+                        .bind(self.current_tenant_id())
+                        .bind(parent_grant_id)
+                        .fetch_optional(&mut *tx)
+                        .await?
+                        .ok_or_else(|| AppError::not_found("task grant parent not found"))?;
+                    let parent = task_grant_from_row(row)?;
+                    if let Some((message, expire)) = task_grant_runtime_denial(&parent, now) {
+                        if expire {
+                            sqlx::query(
+                                "UPDATE task_grants
+                                 SET status = 'expired', updated_at = $3
+                                 WHERE tenant_id = $1 AND id = $2 AND status = 'active'",
+                            )
+                            .bind(self.current_tenant_id())
+                            .bind(parent_grant_id)
+                            .bind(now)
+                            .execute(&mut *tx)
+                            .await?;
+                        }
+                        tx.commit().await?;
+                        return Err(AppError::forbidden(message));
+                    }
+                    crate::ensure_child_task_grant_within_parent(&parent, &grant)?;
+                }
+
+                sqlx::query(
+                    "INSERT INTO workflow_step_runs
+                        (id, tenant_id, workflow_run_id, step_key, step_type, agent_id, agent_version_id, session_id, thread_id, handoff_id, task_grant_id, environment_id, status, input_payload, output_payload, artifact_ids, approval_ids, tool_call_ids, claimed_by_worker, lease_expires_at, context_packet_id, started_at, completed_at, scheduled_at, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)",
+                )
+                .bind(step.id)
+                .bind(self.current_tenant_id())
+                .bind(step.workflow_run_id)
+                .bind(&step.step_key)
+                .bind(&step.step_type)
+                .bind(step.agent_id)
+                .bind(step.agent_version_id)
+                .bind(step.session_id)
+                .bind(step.thread_id)
+                .bind(step.handoff_id)
+                .bind(step.environment_id)
+                .bind(&step.status)
+                .bind(&step.input_payload)
+                .bind(&step.output_payload)
+                .bind(serde_json::to_value(&step.artifact_ids)?)
+                .bind(serde_json::to_value(&step.approval_ids)?)
+                .bind(serde_json::to_value(&step.tool_call_ids)?)
+                .bind(&step.claimed_by_worker)
+                .bind(step.lease_expires_at)
+                .bind(step.context_packet_id)
+                .bind(step.started_at)
+                .bind(step.completed_at)
+                .bind(step.scheduled_at)
+                .bind(step.created_at)
+                .bind(step.updated_at)
+                .execute(&mut *tx)
+                .await?;
+
+                let grant_row = sqlx::query(
+                    "INSERT INTO task_grants
+                        (id, tenant_id, workflow_run_id, workflow_step_run_id, session_id, parent_grant_id, source_event_id, source_handoff_id, issuer_subject, grantee_agent_id, grantee_session_id, agent_class, objective, risk_level, status, expires_at, max_turns, max_tool_calls, max_runtime_seconds, max_cost_usd_micros, turns_used, tool_calls_used, cost_usd_micros_used, semantic_scopes, memory_scope, tool_scope, connector_scope, approval_policy, external_effects, context_packet_id, policy_revision_id, immutable_args_hash, audit_trace_id, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35)
+                     RETURNING id, workflow_run_id, workflow_step_run_id, session_id, parent_grant_id, source_event_id, source_handoff_id, issuer_subject, grantee_agent_id, grantee_session_id, agent_class, objective, risk_level, status, expires_at, max_turns, max_tool_calls, max_runtime_seconds, max_cost_usd_micros, turns_used, tool_calls_used, cost_usd_micros_used, semantic_scopes, memory_scope, tool_scope, connector_scope, approval_policy, external_effects, context_packet_id, policy_revision_id, immutable_args_hash, audit_trace_id, created_at, updated_at",
+                )
+                .bind(grant.id)
+                .bind(self.current_tenant_id())
+                .bind(grant.workflow_run_id)
+                .bind(grant.workflow_step_run_id)
+                .bind(grant.session_id)
+                .bind(grant.parent_grant_id)
+                .bind(grant.source_event_id)
+                .bind(grant.source_handoff_id)
+                .bind(&grant.issuer_subject)
+                .bind(grant.grantee_agent_id)
+                .bind(grant.grantee_session_id)
+                .bind(&grant.agent_class)
+                .bind(&grant.objective)
+                .bind(&grant.risk_level)
+                .bind(&grant.status)
+                .bind(grant.expires_at)
+                .bind(grant.max_turns)
+                .bind(grant.max_tool_calls)
+                .bind(grant.max_runtime_seconds)
+                .bind(grant.max_cost_usd_micros)
+                .bind(grant.turns_used)
+                .bind(grant.tool_calls_used)
+                .bind(grant.cost_usd_micros_used)
+                .bind(&grant.semantic_scopes)
+                .bind(&grant.memory_scope)
+                .bind(&grant.tool_scope)
+                .bind(&grant.connector_scope)
+                .bind(&grant.approval_policy)
+                .bind(&grant.external_effects)
+                .bind(grant.context_packet_id)
+                .bind(grant.policy_revision_id)
+                .bind(&grant.immutable_args_hash)
+                .bind(grant.audit_trace_id)
+                .bind(grant.created_at)
+                .bind(grant.updated_at)
+                .fetch_one(&mut *tx)
+                .await?;
+                let grant = task_grant_from_row(grant_row)?;
+
+                let step_row = sqlx::query(
+                    "UPDATE workflow_step_runs
+                     SET task_grant_id = $3, updated_at = $4
+                     WHERE tenant_id = $1 AND id = $2
+                     RETURNING id, workflow_run_id, step_key, step_type, agent_id, agent_version_id, session_id, thread_id, handoff_id, task_grant_id, environment_id, status, input_payload, output_payload, artifact_ids, approval_ids, tool_call_ids, claimed_by_worker, lease_expires_at, context_packet_id, started_at, completed_at, scheduled_at, created_at, updated_at",
+                )
+                .bind(self.current_tenant_id())
+                .bind(step.id)
+                .bind(grant.id)
+                .bind(now)
+                .fetch_one(&mut *tx)
+                .await?;
+                let step = workflow_step_run_from_row(step_row)?;
+                tx.commit().await?;
+                Ok((step, grant))
+            }
+        }
+    }
+
     pub(crate) async fn get_workflow_step_run(
         &self,
         id: uuid::Uuid,
@@ -657,40 +879,6 @@ impl AppState {
                 .fetch_optional(pool)
                 .await?;
                 row.map(workflow_step_run_from_row).transpose()
-            }
-        }
-    }
-
-    pub(crate) async fn update_workflow_step_run_task_grant(
-        &self,
-        step_id: uuid::Uuid,
-        task_grant_id: uuid::Uuid,
-    ) -> Result<WorkflowStepRun, AppError> {
-        match &self.store {
-            StoreBackend::Memory(inner) => {
-                let mut store = inner.write().await;
-                let step = store
-                    .workflow_step_runs
-                    .get_mut(&step_id)
-                    .ok_or_else(|| AppError::not_found("workflow step run not found"))?;
-                step.task_grant_id = Some(task_grant_id);
-                step.updated_at = chrono::Utc::now();
-                Ok(step.clone())
-            }
-            StoreBackend::Postgres(pool) => {
-                let row = sqlx::query(
-                    "UPDATE workflow_step_runs
-                     SET task_grant_id = $3, updated_at = now()
-                     WHERE tenant_id = $1 AND id = $2
-                     RETURNING id, workflow_run_id, step_key, step_type, agent_id, agent_version_id, session_id, thread_id, handoff_id, task_grant_id, environment_id, status, input_payload, output_payload, artifact_ids, approval_ids, tool_call_ids, claimed_by_worker, lease_expires_at, context_packet_id, started_at, completed_at, scheduled_at, created_at, updated_at",
-                )
-                .bind(self.current_tenant_id())
-                .bind(step_id)
-                .bind(task_grant_id)
-                .fetch_optional(pool)
-                .await?
-                .ok_or_else(|| AppError::not_found("workflow step run not found"))?;
-                workflow_step_run_from_row(row)
             }
         }
     }
@@ -852,67 +1040,192 @@ impl AppState {
     pub(crate) async fn create_task_grant(&self, grant: TaskGrant) -> Result<TaskGrant, AppError> {
         crate::validate_task_grant_scope_objects(&grant)?;
         crate::validate_task_grant_budgets(&grant)?;
-        if let Some(parent_grant_id) = grant.parent_grant_id {
-            let parent = self.get_task_grant(parent_grant_id).await?;
-            if parent.status != "active" {
-                return Err(AppError::bad_request("task grant parent must be active"));
-            }
-            crate::ensure_child_task_grant_within_parent(&parent, &grant)?;
+        if grant.status != "active" {
+            return Err(AppError::bad_request("new task grant must be active"));
         }
+        if grant.turns_used != 0 || grant.tool_calls_used != 0 || grant.cost_usd_micros_used != 0 {
+            return Err(AppError::bad_request(
+                "new task grant usage counters must be zero",
+            ));
+        }
+        let now = Utc::now();
         match &self.store {
             StoreBackend::Memory(inner) => {
-                inner
-                    .write()
-                    .await
-                    .task_grants
-                    .insert(grant.id, grant.clone());
+                let mut store = inner.write().await;
+                let run = store
+                    .workflow_runs
+                    .get(&grant.workflow_run_id)
+                    .ok_or_else(|| AppError::not_found("workflow run not found"))?;
+                if grant.parent_grant_id.is_some() {
+                    if !crate::workflow_run_status_allows_execution(&run.status) {
+                        return Err(AppError::forbidden("workflow run is not executable"));
+                    }
+                } else {
+                    if (run.status != "initializing"
+                        && !crate::workflow_run_status_allows_execution(&run.status))
+                        || run.root_task_grant_id.is_some()
+                    {
+                        return Err(AppError::forbidden(
+                            "workflow run does not allow root task grant issuance",
+                        ));
+                    }
+                    if store.task_grants.values().any(|candidate| {
+                        candidate.workflow_run_id == grant.workflow_run_id
+                            && candidate.parent_grant_id.is_none()
+                    }) {
+                        return Err(AppError::bad_request(
+                            "workflow run already has a root task grant",
+                        ));
+                    }
+                }
+                if store.task_grants.contains_key(&grant.id) {
+                    return Err(AppError::bad_request("task grant already exists"));
+                }
+                if let Some(parent_grant_id) = grant.parent_grant_id {
+                    let parent = store
+                        .task_grants
+                        .get(&parent_grant_id)
+                        .cloned()
+                        .ok_or_else(|| AppError::not_found("task grant parent not found"))?;
+                    if let Some((message, expire)) = task_grant_runtime_denial(&parent, now) {
+                        if expire
+                            && let Some(stored) = store.task_grants.get_mut(&parent_grant_id)
+                            && stored.status == "active"
+                        {
+                            stored.status = "expired".to_string();
+                            stored.updated_at = now;
+                        }
+                        return Err(AppError::forbidden(message));
+                    }
+                    crate::ensure_child_task_grant_within_parent(&parent, &grant)?;
+                }
+                store.task_grants.insert(grant.id, grant.clone());
                 Ok(grant)
             }
             StoreBackend::Postgres(pool) => {
-                let row = sqlx::query(
+                let mut tx = pool.begin().await?;
+                let (run_status, root_task_grant_id): (String, Option<Uuid>) = sqlx::query_as(
+                    "SELECT status, root_task_grant_id
+                     FROM workflow_runs
+                     WHERE tenant_id = $1 AND id = $2
+                     FOR UPDATE",
+                )
+                .bind(self.current_tenant_id())
+                .bind(grant.workflow_run_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or_else(|| AppError::not_found("workflow run not found"))?;
+                if grant.parent_grant_id.is_some() {
+                    if !crate::workflow_run_status_allows_execution(&run_status) {
+                        return Err(AppError::forbidden("workflow run is not executable"));
+                    }
+                } else {
+                    if (run_status != "initializing"
+                        && !crate::workflow_run_status_allows_execution(&run_status))
+                        || root_task_grant_id.is_some()
+                    {
+                        return Err(AppError::forbidden(
+                            "workflow run does not allow root task grant issuance",
+                        ));
+                    }
+                    let root_exists: bool = sqlx::query_scalar(
+                        "SELECT EXISTS (
+                            SELECT 1
+                            FROM task_grants
+                            WHERE tenant_id = $1
+                              AND workflow_run_id = $2
+                              AND parent_grant_id IS NULL
+                        )",
+                    )
+                    .bind(self.current_tenant_id())
+                    .bind(grant.workflow_run_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    if root_exists {
+                        return Err(AppError::bad_request(
+                            "workflow run already has a root task grant",
+                        ));
+                    }
+                }
+                if let Some(parent_grant_id) = grant.parent_grant_id {
+                    let select_sql = format!(
+                        "SELECT {TASK_GRANT_COLUMNS}
+                         FROM task_grants
+                         WHERE tenant_id = $1 AND id = $2
+                         FOR UPDATE"
+                    );
+                    let row = sqlx::query(&select_sql)
+                        .bind(self.current_tenant_id())
+                        .bind(parent_grant_id)
+                        .fetch_optional(&mut *tx)
+                        .await?
+                        .ok_or_else(|| AppError::not_found("task grant parent not found"))?;
+                    let parent = task_grant_from_row(row)?;
+                    if let Some((message, expire)) = task_grant_runtime_denial(&parent, now) {
+                        if expire {
+                            sqlx::query(
+                                "UPDATE task_grants
+                                 SET status = 'expired', updated_at = $3
+                                 WHERE tenant_id = $1 AND id = $2 AND status = 'active'",
+                            )
+                            .bind(self.current_tenant_id())
+                            .bind(parent_grant_id)
+                            .bind(now)
+                            .execute(&mut *tx)
+                            .await?;
+                        }
+                        tx.commit().await?;
+                        return Err(AppError::forbidden(message));
+                    }
+                    crate::ensure_child_task_grant_within_parent(&parent, &grant)?;
+                }
+                let insert_sql = format!(
                     "INSERT INTO task_grants
                         (id, tenant_id, workflow_run_id, workflow_step_run_id, session_id, parent_grant_id, source_event_id, source_handoff_id, issuer_subject, grantee_agent_id, grantee_session_id, agent_class, objective, risk_level, status, expires_at, max_turns, max_tool_calls, max_runtime_seconds, max_cost_usd_micros, turns_used, tool_calls_used, cost_usd_micros_used, semantic_scopes, memory_scope, tool_scope, connector_scope, approval_policy, external_effects, context_packet_id, policy_revision_id, immutable_args_hash, audit_trace_id, created_at, updated_at)
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35)
-                     RETURNING id, workflow_run_id, workflow_step_run_id, session_id, parent_grant_id, source_event_id, source_handoff_id, issuer_subject, grantee_agent_id, grantee_session_id, agent_class, objective, risk_level, status, expires_at, max_turns, max_tool_calls, max_runtime_seconds, max_cost_usd_micros, turns_used, tool_calls_used, cost_usd_micros_used, semantic_scopes, memory_scope, tool_scope, connector_scope, approval_policy, external_effects, context_packet_id, policy_revision_id, immutable_args_hash, audit_trace_id, created_at, updated_at",
-                )
-                .bind(grant.id)
-                .bind(self.current_tenant_id())
-                .bind(grant.workflow_run_id)
-                .bind(grant.workflow_step_run_id)
-                .bind(grant.session_id)
-                .bind(grant.parent_grant_id)
-                .bind(grant.source_event_id)
-                .bind(grant.source_handoff_id)
-                .bind(&grant.issuer_subject)
-                .bind(grant.grantee_agent_id)
-                .bind(grant.grantee_session_id)
-                .bind(&grant.agent_class)
-                .bind(&grant.objective)
-                .bind(&grant.risk_level)
-                .bind(&grant.status)
-                .bind(grant.expires_at)
-                .bind(grant.max_turns)
-                .bind(grant.max_tool_calls)
-                .bind(grant.max_runtime_seconds)
-                .bind(grant.max_cost_usd_micros)
-                .bind(grant.turns_used)
-                .bind(grant.tool_calls_used)
-                .bind(grant.cost_usd_micros_used)
-                .bind(&grant.semantic_scopes)
-                .bind(&grant.memory_scope)
-                .bind(&grant.tool_scope)
-                .bind(&grant.connector_scope)
-                .bind(&grant.approval_policy)
-                .bind(&grant.external_effects)
-                .bind(grant.context_packet_id)
-                .bind(grant.policy_revision_id)
-                .bind(&grant.immutable_args_hash)
-                .bind(grant.audit_trace_id)
-                .bind(grant.created_at)
-                .bind(grant.updated_at)
-                .fetch_one(pool)
-                .await?;
-                task_grant_from_row(row)
+                     RETURNING {TASK_GRANT_COLUMNS}"
+                );
+                let row = sqlx::query(&insert_sql)
+                    .bind(grant.id)
+                    .bind(self.current_tenant_id())
+                    .bind(grant.workflow_run_id)
+                    .bind(grant.workflow_step_run_id)
+                    .bind(grant.session_id)
+                    .bind(grant.parent_grant_id)
+                    .bind(grant.source_event_id)
+                    .bind(grant.source_handoff_id)
+                    .bind(&grant.issuer_subject)
+                    .bind(grant.grantee_agent_id)
+                    .bind(grant.grantee_session_id)
+                    .bind(&grant.agent_class)
+                    .bind(&grant.objective)
+                    .bind(&grant.risk_level)
+                    .bind(&grant.status)
+                    .bind(grant.expires_at)
+                    .bind(grant.max_turns)
+                    .bind(grant.max_tool_calls)
+                    .bind(grant.max_runtime_seconds)
+                    .bind(grant.max_cost_usd_micros)
+                    .bind(grant.turns_used)
+                    .bind(grant.tool_calls_used)
+                    .bind(grant.cost_usd_micros_used)
+                    .bind(&grant.semantic_scopes)
+                    .bind(&grant.memory_scope)
+                    .bind(&grant.tool_scope)
+                    .bind(&grant.connector_scope)
+                    .bind(&grant.approval_policy)
+                    .bind(&grant.external_effects)
+                    .bind(grant.context_packet_id)
+                    .bind(grant.policy_revision_id)
+                    .bind(&grant.immutable_args_hash)
+                    .bind(grant.audit_trace_id)
+                    .bind(grant.created_at)
+                    .bind(grant.updated_at)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                let grant = task_grant_from_row(row)?;
+                tx.commit().await?;
+                Ok(grant)
             }
         }
     }

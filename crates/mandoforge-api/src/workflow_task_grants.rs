@@ -398,8 +398,7 @@ async fn validate_task_grant_for_tool_invocation(
 
     let mut grant = state.get_task_grant(task_grant_id).await?;
     let run = state.get_workflow_run(grant.workflow_run_id).await?;
-    if workflow_step_status_terminal(&run.status) {
-        let reason = "workflow run is not active";
+    if let Some(reason) = workflow_run_execution_denial(&run.status) {
         record_task_grant_denied(
             state,
             input.session_id,
@@ -632,6 +631,52 @@ pub(crate) async fn active_task_grant_for_session(
     Ok(Some((run, grant)))
 }
 
+pub(crate) async fn governing_task_grant_for_memory_writeback(
+    state: &AppState,
+    session_id: Uuid,
+) -> Result<Option<(WorkflowRun, TaskGrant)>, AppError> {
+    let Some(run) = workflow_run_for_session(state, session_id).await? else {
+        return Ok(None);
+    };
+    if run.status != "completed" {
+        return active_task_grant_for_session(state, session_id).await;
+    }
+
+    let grant = if run.primary_session_id == session_id {
+        let root_task_grant_id = run
+            .root_task_grant_id
+            .ok_or_else(|| AppError::forbidden("task grant is required for workflow session"))?;
+        state.get_task_grant(root_task_grant_id).await?
+    } else {
+        let mut grants = state
+            .list_task_grants_for_workflow_run(run.id)
+            .await?
+            .into_iter()
+            .filter(|grant| task_grant_session_matches(grant, &run, session_id))
+            .collect::<Vec<_>>();
+        grants.sort_by_key(|grant| grant.created_at);
+        grants
+            .pop()
+            .ok_or_else(|| AppError::forbidden("task grant is required for workflow session"))?
+    };
+    if !task_grant_session_matches(&grant, &run, session_id) {
+        return Err(AppError::forbidden(
+            "task grant is not valid for this session",
+        ));
+    }
+    if state
+        .task_grant_lineage(grant.id)
+        .await?
+        .iter()
+        .any(|candidate| candidate.status != "completed")
+    {
+        return Err(AppError::forbidden(
+            "completed workflow memory governance requires completed task grants",
+        ));
+    }
+    Ok(Some((run, grant)))
+}
+
 pub(crate) async fn require_active_task_grant_for_session(
     state: &AppState,
     session_id: Uuid,
@@ -639,8 +684,8 @@ pub(crate) async fn require_active_task_grant_for_session(
     let (run, grant) = active_task_grant_for_session(state, session_id)
         .await?
         .ok_or_else(|| AppError::forbidden("workflow session requires an active TaskGrant"))?;
-    if workflow_step_status_terminal(&run.status) {
-        return Err(AppError::forbidden("workflow run is not active"));
+    if let Some(reason) = workflow_run_execution_denial(&run.status) {
+        return Err(AppError::forbidden(reason));
     }
     Ok((run, grant))
 }

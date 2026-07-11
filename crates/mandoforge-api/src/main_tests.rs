@@ -15216,6 +15216,113 @@ async fn workflow_handoff_assignment_materializes_step_and_child_grant() {
 }
 
 #[tokio::test]
+async fn workflow_run_initialization_failure_is_fail_closed() {
+    let app = test_app().await;
+    let agents: Vec<Agent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/agents")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let agent = agents.first().expect("seeded agent");
+    let definition: WorkflowDefinition = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-definitions",
+            json!({
+                "name": "Fail-closed workflow initialization",
+                "entrypoint": "fail-closed-init",
+                "trigger_type": "manual",
+                "default_agent_id": agent.id,
+                "handoff_rules": {
+                    "root_task_grant": {
+                        "max_turns": 0
+                    }
+                },
+                "release_state": "released"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+
+    let (status, error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-runs",
+            json!({
+                "workflow_definition_id": definition.id,
+                "title": "invalid budget must not leave executable state"
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error["error"],
+        json!("root task grant max_turns must be a positive integer")
+    );
+
+    let runs: Vec<WorkflowRun> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/workflow-runs")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let failed_run = runs
+        .iter()
+        .find(|run| run.workflow_definition_id == definition.id)
+        .expect("failed initialization must retain a diagnostic workflow run");
+    assert_eq!(failed_run.status, "failed");
+    assert_eq!(failed_run.root_task_grant_id, None);
+
+    let sessions: Vec<Session> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/sessions")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let failed_session = sessions
+        .iter()
+        .find(|session| session.id == failed_run.primary_session_id)
+        .expect("failed workflow session must remain inspectable");
+    assert_eq!(failed_session.status, SessionStatus::Failed);
+
+    let grants: Vec<TaskGrant> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/workflow-runs/{}/task-grants", failed_run.id))
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(grants.is_empty());
+    let steps: Vec<WorkflowStepRun> = request_json(
+        app,
+        Request::builder()
+            .uri(format!("/api/workflow-runs/{}/steps", failed_run.id))
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(steps.is_empty());
+}
+
+#[tokio::test]
 async fn workflow_step_run_rejects_agent_version_without_agent_boundary() {
     let app = test_app().await;
     let agents: Vec<Agent> = request_json(
@@ -16652,7 +16759,7 @@ async fn workflow_memory_writeback_requires_task_grant_writeback_permission() {
             source_event_id: None,
             source_work_item_id: None,
             source_schedule_id: None,
-            status: "queued".to_string(),
+            status: "initializing".to_string(),
             primary_session_id: session.id,
             root_task_grant_id: None,
             input_payload: empty_json_object(),
@@ -16679,6 +16786,10 @@ async fn workflow_memory_writeback_requires_task_grant_writeback_permission() {
         .update_workflow_run_root_task_grant(run.id, root_grant.id)
         .await
         .expect("root task grant binding");
+    let run = state
+        .update_workflow_run_status(run.id, "queued".to_string(), None, None)
+        .await
+        .expect("workflow run activation");
     state
         .append_event(
             "system",

@@ -35,9 +35,10 @@ use crate::{
     update_workflow_step_after_worker_session, validate_task_grant_scope_objects,
     validate_workflow_execution_binding, validate_workflow_graph_definition,
     visible_session_ids_for_principal, workflow_definition_step_graph_for_execution,
-    workflow_input_digest, workflow_run_owns_session, workflow_run_runtime_envelope,
-    workflow_step_is_adapter_owned_compensation, workflow_step_status_terminal,
-    workflow_step_worker_message, workflow_transition_filter_from_query,
+    workflow_input_digest, workflow_run_execution_denial, workflow_run_owns_session,
+    workflow_run_runtime_envelope, workflow_step_is_adapter_owned_compensation,
+    workflow_step_status_terminal, workflow_step_worker_message,
+    workflow_transition_filter_from_query,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -451,16 +452,6 @@ async fn create_workflow_run(
         .title
         .filter(|title| !title.trim().is_empty())
         .unwrap_or_else(|| format!("Workflow: {}", definition.name));
-    let session = state
-        .create_session(CreateSession {
-            agent_id: definition.default_agent_id,
-            environment_id,
-            title,
-            message: None,
-        })
-        .await?;
-    ensure_primary_session_thread(&state, session.id).await?;
-    let now = Utc::now();
     let input_digest = workflow_input_digest(&input.input_payload);
     let execution_strategy = input
         .execution_strategy
@@ -493,7 +484,26 @@ async fn create_workflow_run(
         external_run_ref.as_deref(),
         &input.runtime_envelope,
     );
-    let run = state
+    let session = state
+        .create_session(CreateSession {
+            agent_id: definition.default_agent_id,
+            environment_id,
+            title,
+            message: None,
+        })
+        .await?;
+    if let Err(error) = ensure_primary_session_thread(&state, session.id).await {
+        let _ = set_managed_session_status(
+            &state,
+            session.id,
+            SessionStatus::Failed,
+            "workflow run initialization failed before primary thread creation",
+        )
+        .await;
+        return Err(error);
+    }
+    let now = Utc::now();
+    let run = match state
         .create_workflow_run(WorkflowRun {
             id: Uuid::new_v4(),
             workflow_definition_id: definition.id,
@@ -501,7 +511,7 @@ async fn create_workflow_run(
             source_event_id: input.source_event_id,
             source_work_item_id: input.source_work_item_id,
             source_schedule_id: input.source_schedule_id,
-            status: "queued".to_string(),
+            status: "initializing".to_string(),
             primary_session_id: session.id,
             root_task_grant_id: None,
             input_payload: input.input_payload,
@@ -519,14 +529,74 @@ async fn create_workflow_run(
             created_at: now,
             updated_at: now,
         })
+        .await
+    {
+        Ok(run) => run,
+        Err(error) => {
+            let _ = set_managed_session_status(
+                &state,
+                session.id,
+                SessionStatus::Failed,
+                "workflow run persistence failed",
+            )
+            .await;
+            return Err(error);
+        }
+    };
+    let initialized = async {
+        let root_grant =
+            issue_root_task_grant_for_workflow_run(&state, &run, &definition, &session).await?;
+        let linked_run = state
+            .update_workflow_run_root_task_grant(run.id, root_grant.id)
+            .await?;
+        materialize_workflow_graph_start_steps(
+            &state,
+            &definition,
+            &linked_run,
+            &session,
+            &root_grant,
+        )
         .await?;
-    let root_grant =
-        issue_root_task_grant_for_workflow_run(&state, &run, &definition, &session).await?;
-    let run = state
-        .update_workflow_run_root_task_grant(run.id, root_grant.id)
-        .await?;
-    materialize_workflow_graph_start_steps(&state, &definition, &run, &session, &root_grant)
-        .await?;
+        state
+            .update_workflow_run_status(run.id, "queued".to_string(), None, None)
+            .await
+    }
+    .await;
+    let run = match initialized {
+        Ok(run) => run,
+        Err(error) => {
+            let failed_at = Utc::now();
+            let _ = state
+                .update_workflow_run_status(run.id, "failed".to_string(), None, Some(failed_at))
+                .await;
+            let _ = state
+                .close_active_task_grants_for_workflow_run(run.id, "cancelled")
+                .await;
+            let _ = set_managed_session_status(
+                &state,
+                session.id,
+                SessionStatus::Failed,
+                "workflow run initialization failed",
+            )
+            .await;
+            let _ = state
+                .append_audit_log(new_audit_log(
+                    Some(session.id),
+                    "system",
+                    Some(run.id),
+                    "workflow_run.initialization_failed",
+                    "workflow_run",
+                    Some(run.id),
+                    json!({
+                        "workflow_definition_id": definition.id,
+                        "primary_session_id": session.id,
+                        "error": error.message
+                    }),
+                ))
+                .await;
+            return Err(error);
+        }
+    };
     state
         .append_event(
             "system",
@@ -867,6 +937,9 @@ async fn run_workflow_step_run(
 ) -> Result<Json<RunWorkflowStepRunResponse>, AppError> {
     let current = state.get_workflow_step_run(id).await?;
     let run = state.get_workflow_run(current.workflow_run_id).await?;
+    if let Some(reason) = workflow_run_execution_denial(&run.status) {
+        return Err(AppError::forbidden(reason));
+    }
     let session_id = current.session_id.unwrap_or(run.primary_session_id);
     enforce_worker_environment_binding(&state, &headers, session_id, current.environment_id)
         .await?;
@@ -1096,6 +1169,9 @@ async fn create_workflow_task_grant(
         Some(run.primary_session_id),
     )
     .await?;
+    if let Some(reason) = workflow_run_execution_denial(&run.status) {
+        return Err(AppError::forbidden(reason));
+    }
     let principal = principal_from_request(&state, &headers).await?;
     let parent_grant_id = input
         .parent_grant_id

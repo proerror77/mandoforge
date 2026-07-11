@@ -22,6 +22,9 @@ pub(crate) async fn claim_workflow_step_run(
         Some(run.primary_session_id),
     )
     .await?;
+    if let Some(reason) = workflow_run_execution_denial(&run.status) {
+        return Err(AppError::forbidden(reason));
+    }
     let principal = principal_from_request(state, headers).await?;
     let agent = state.get_agent(input.agent_id).await?;
     if current.agent_id != Some(agent.id) {

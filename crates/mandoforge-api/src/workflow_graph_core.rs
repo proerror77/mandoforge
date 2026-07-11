@@ -174,6 +174,20 @@ pub(crate) fn normalize_workflow_run_status(value: &str) -> Result<String, AppEr
     }
 }
 
+pub(crate) fn workflow_run_status_allows_execution(status: &str) -> bool {
+    matches!(status, "queued" | "running" | "requires_action")
+}
+
+pub(crate) fn workflow_run_execution_denial(status: &str) -> Option<&'static str> {
+    if workflow_run_status_allows_execution(status) {
+        None
+    } else if matches!(status, "completed" | "failed" | "canceled" | "skipped") {
+        Some("workflow run is not active")
+    } else {
+        Some("workflow run is not executable")
+    }
+}
+
 pub(crate) async fn ensure_session_event_exists(
     state: &AppState,
     event_id: Uuid,

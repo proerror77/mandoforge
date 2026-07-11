@@ -501,8 +501,8 @@ pub(crate) async fn materialize_workflow_handoff_assignment(
     else {
         return Ok(None);
     };
-    if workflow_step_status_terminal(&run.status) {
-        return Err(AppError::forbidden("workflow run is not active"));
+    if let Some(reason) = workflow_run_execution_denial(&run.status) {
+        return Err(AppError::forbidden(reason));
     }
     let step_id = Uuid::new_v4();
     let now = Utc::now();
@@ -557,51 +557,48 @@ pub(crate) async fn materialize_workflow_handoff_assignment(
     ensure_child_task_grant_within_parent(&parent_grant, &child_grant)?;
 
     let agent_version_id = specialist_session.agent_version_id;
-    let step = state
-        .create_workflow_step_run(WorkflowStepRun {
-            id: step_id,
-            workflow_run_id: run.id,
-            step_key: handoff.intent.clone(),
-            step_type: "handoff".to_string(),
-            agent_id: Some(target_agent.id),
-            agent_version_id,
-            session_id: Some(specialist_session.id),
-            thread_id: Some(child_thread.id),
-            handoff_id: Some(handoff.id),
-            task_grant_id: None,
-            environment_id: specialist_session.environment_id,
-            status: if assignment.status == "waiting_remote_computer" {
-                "requires_action".to_string()
-            } else {
-                "queued".to_string()
-            },
-            input_payload: json!({
-                "agent_handoff_assignment_id": assignment.id,
-                "agent_handoff_event_id": handoff.id,
-                "manager_plan_id": manager_plan.id,
-                "payload": handoff.payload.clone(),
-                "semantic_scopes": handoff.semantic_scopes.clone(),
-                "remote_computer_required": assignment.remote_computer_required
-            }),
-            output_payload: empty_json_object(),
-            artifact_ids: Vec::new(),
-            approval_ids: Vec::new(),
-            tool_call_ids: Vec::new(),
-            claimed_by_worker: None,
-            lease_expires_at: None,
-            context_packet_id: None,
-            started_at: None,
-            completed_at: None,
-            scheduled_at: None,
-            created_at: now,
-            updated_at: now,
-        })
+    let step = WorkflowStepRun {
+        id: step_id,
+        workflow_run_id: run.id,
+        step_key: handoff.intent.clone(),
+        step_type: "handoff".to_string(),
+        agent_id: Some(target_agent.id),
+        agent_version_id,
+        session_id: Some(specialist_session.id),
+        thread_id: Some(child_thread.id),
+        handoff_id: Some(handoff.id),
+        task_grant_id: Some(child_grant.id),
+        environment_id: specialist_session.environment_id,
+        status: if assignment.status == "waiting_remote_computer" {
+            "requires_action".to_string()
+        } else {
+            "queued".to_string()
+        },
+        input_payload: json!({
+            "agent_handoff_assignment_id": assignment.id,
+            "agent_handoff_event_id": handoff.id,
+            "manager_plan_id": manager_plan.id,
+            "payload": handoff.payload.clone(),
+            "semantic_scopes": handoff.semantic_scopes.clone(),
+            "remote_computer_required": assignment.remote_computer_required
+        }),
+        output_payload: empty_json_object(),
+        artifact_ids: Vec::new(),
+        approval_ids: Vec::new(),
+        tool_call_ids: Vec::new(),
+        claimed_by_worker: None,
+        lease_expires_at: None,
+        context_packet_id: None,
+        started_at: None,
+        completed_at: None,
+        scheduled_at: None,
+        created_at: now,
+        updated_at: now,
+    };
+    let (step, child_grant) = state
+        .create_workflow_step_run_with_task_grant(step, child_grant)
         .await?;
-    let child_grant = state.create_task_grant(child_grant).await?;
     record_task_grant_issued(state, &child_grant, run.primary_session_id).await?;
-    let step = state
-        .update_workflow_step_run_task_grant(step.id, child_grant.id)
-        .await?;
     record_workflow_step_run_created(state, &run, &step).await?;
     Ok(Some((step, child_grant)))
 }
