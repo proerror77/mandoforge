@@ -16643,22 +16643,13 @@ async fn workflow_root_task_grant_materializes_and_enforces_tool_budget() {
     child.cost_usd_micros_used = 0;
     child.created_at = Utc::now();
     child.updated_at = child.created_at;
-    let child = state.create_task_grant(child).await.expect("child grant");
     let child_budget_error = state
-        .reserve_task_grant_tool_call(child.id)
+        .create_task_grant(child)
         .await
-        .expect_err("child must share the exhausted parent tool budget");
+        .expect_err("exhausted parent budget must reject child grant creation");
     assert_eq!(
         child_budget_error.message,
-        "task grant tool call budget exhausted"
-    );
-    assert_eq!(
-        state
-            .get_task_grant(child.id)
-            .await
-            .expect("child grant")
-            .tool_calls_used,
-        0
+        "task grant tool call budget is exhausted"
     );
 
     state
