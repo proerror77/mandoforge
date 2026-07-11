@@ -5107,6 +5107,43 @@ async fn seed_promoted_agent_for_test(
     (agent, version, runtime_environment)
 }
 
+async fn insert_promoted_agent_version_for_test(
+    state: &AppState,
+    version: &AgentVersion,
+    environment: &str,
+) {
+    let now = Utc::now();
+    let release = AgentRelease {
+        id: Uuid::new_v4(),
+        agent_id: version.agent_id,
+        agent_version_id: version.id,
+        environment: environment.to_string(),
+        status: "promoted".to_string(),
+        eval_run_id: None,
+        eval_score: Some(1.0),
+        min_score: 1.0,
+        requested_by: Some("test".to_string()),
+        requested_at: Some(now),
+        request_reason: None,
+        approver_subject: None,
+        decision_by: Some("test".to_string()),
+        decided_at: Some(now),
+        decision_reason: Some("test release".to_string()),
+        promoted_by: Some("test".to_string()),
+        promoted_at: Some(now),
+        automation_policy: json!({}),
+        created_at: now,
+    };
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test requires memory store");
+    };
+    inner
+        .write()
+        .await
+        .agent_releases
+        .insert(release.id, release);
+}
+
 async fn promote_replacement_agent_version_for_test(
     state: &AppState,
     agent: &Agent,
@@ -5617,6 +5654,365 @@ async fn production_rollback_revokes_sessions_pinned_to_rolled_back_version() {
         error
             .message
             .contains("pinned agent version no longer has a promoted release")
+    );
+}
+
+#[tokio::test]
+async fn terminal_handoff_can_close_after_source_agent_is_disabled() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+    let _release_enforcement = EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+    let _release_environment =
+        EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT", "production");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let (agent, _, environment) = seed_promoted_agent_for_test(&state, "production").await;
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: Some(environment.id),
+            title: "terminal handoff after disable".to_string(),
+            message: None,
+        })
+        .await
+        .expect("production session");
+    let now = Utc::now();
+    let handoff = state
+        .create_agent_handoff_event(AgentHandoffEvent {
+            id: Uuid::new_v4(),
+            source_session_id: session.id,
+            source_agent_id: agent.id,
+            target_agent_id: agent.id,
+            manager_plan_id: None,
+            intent: "close_after_disable".to_string(),
+            payload: json!({}),
+            schema_version: "handoff.v1".to_string(),
+            risk_level: "low".to_string(),
+            approval_required: false,
+            semantic_scopes: json!({}),
+            runtime_profile_id: None,
+            remote_computer_required: false,
+            review_status: "manager_reviewed".to_string(),
+            human_escalation_status: "none".to_string(),
+            status: "accepted".to_string(),
+            audit_trace_id: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .expect("accepted handoff");
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test requires memory store");
+    };
+    inner
+        .write()
+        .await
+        .agents
+        .get_mut(&agent.id)
+        .expect("source agent")
+        .release_state = "disabled".to_string();
+
+    let completed: AgentHandoffEvent = request_json(
+        build_router(state),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/agent-handoffs/{}/complete", handoff.id),
+            json!({"reason": "close terminal governance state"}),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    assert_eq!(completed.status, "completed");
+}
+
+#[tokio::test]
+async fn production_handoff_uses_promoted_target_version_runtime_snapshot() {
+    let _env = env_lock().lock().expect("env lock");
+    let setup_provider = EnvVarGuard::remove("MANDOFORGE_PROVIDER_RUNTIME_ENV");
+    let setup_enforcement = EnvVarGuard::remove("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT");
+    let setup_release_environment = EnvVarGuard::remove("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let profile_v1 = state
+        .create_agent_runtime_profile(CreateAgentRuntimeProfile {
+            name: "promoted-handoff-runtime-v1".to_string(),
+            runtime_type: "codex_cli".to_string(),
+            command: "/usr/local/bin/codex".to_string(),
+            default_args: vec!["exec".to_string(), "--json".to_string()],
+            env: json!({}),
+            timeout_seconds: Some(300),
+            remote_computer_required: false,
+            status: "enabled".to_string(),
+        })
+        .await
+        .expect("runtime profile v1");
+    let profile_v2 = state
+        .create_agent_runtime_profile(CreateAgentRuntimeProfile {
+            name: "unreleased-handoff-runtime-v2".to_string(),
+            runtime_type: "codex_cli".to_string(),
+            command: "/usr/local/bin/codex".to_string(),
+            default_args: vec!["exec".to_string(), "--json".to_string()],
+            env: json!({}),
+            timeout_seconds: Some(300),
+            remote_computer_required: true,
+            status: "enabled".to_string(),
+        })
+        .await
+        .expect("runtime profile v2");
+    let specialist = state
+        .create_agent(CreateAgent {
+            name: "Promoted Runtime Specialist".to_string(),
+            kind: "specialist".to_string(),
+            provider: "openai-compatible".to_string(),
+            model: "gpt-5.5-mini".to_string(),
+            team_id: None,
+            project_id: None,
+            runtime_profile_id: Some(profile_v1.id),
+            agent_role: "specialist".to_string(),
+            system_prompt: "promoted specialist v1".to_string(),
+            runtime_config: json!({}),
+            tools: vec!["file.read".to_string()],
+            tool_policy: json!({"revision": "v1"}),
+            mcp_server_ids: Vec::new(),
+            skill_ids: Vec::new(),
+            workflow_pack_ids: Vec::new(),
+            remote_computer_profile: json!({"required": false, "revision": "v1"}),
+            semantic_scopes: json!({"workflow_scope": "pinned-v1"}),
+            release_state: "draft".to_string(),
+        })
+        .await
+        .expect("specialist agent");
+    let specialist_v1 = state
+        .current_agent_version(specialist.id)
+        .await
+        .expect("specialist v1");
+    let manager = state
+        .create_agent(CreateAgent {
+            name: "Promoted Runtime Manager".to_string(),
+            kind: "manager".to_string(),
+            provider: "openai-compatible".to_string(),
+            model: "gpt-5.5-mini".to_string(),
+            team_id: None,
+            project_id: None,
+            runtime_profile_id: None,
+            agent_role: "manager".to_string(),
+            system_prompt: "delegate through promoted versions".to_string(),
+            runtime_config: json!({
+                "handoffs": {
+                    "allowed_targets": [{
+                        "target_agent_id": specialist.id,
+                        "intents": ["pinned_review"],
+                        "schema_versions": ["handoff.v1"],
+                        "risk_levels": ["low"],
+                        "approval_required": false
+                    }]
+                }
+            }),
+            tools: vec!["file.read".to_string()],
+            tool_policy: json!({}),
+            mcp_server_ids: Vec::new(),
+            skill_ids: Vec::new(),
+            workflow_pack_ids: Vec::new(),
+            remote_computer_profile: json!({}),
+            semantic_scopes: json!({"workflow_scope": "pinned-v1"}),
+            release_state: "draft".to_string(),
+        })
+        .await
+        .expect("manager agent");
+    let manager_v1 = state
+        .current_agent_version(manager.id)
+        .await
+        .expect("manager v1");
+    let environment = state
+        .create_environment(CreateEnvironment {
+            name: "Promoted Handoff Production".to_string(),
+            environment_type: "self_hosted".to_string(),
+            runtime_profile_id: None,
+            remote_computer_profile: json!({}),
+            codex_app_server_profile: json!({}),
+            worker_queue_binding: json!({"release_environment": "production"}),
+            state_mounts: json!({}),
+            network_policy: json!({}),
+            vault_requirements: json!({}),
+            mcp_requirements: json!({}),
+            release_state: "active".to_string(),
+            status: "enabled".to_string(),
+        })
+        .await
+        .expect("production environment");
+    insert_promoted_agent_version_for_test(&state, &specialist_v1, "production").await;
+    insert_promoted_agent_version_for_test(&state, &manager_v1, "production").await;
+
+    let mut specialist_v2_draft = specialist.clone();
+    specialist_v2_draft.runtime_profile_id = Some(profile_v2.id);
+    specialist_v2_draft.system_prompt = "unreleased specialist v2".to_string();
+    specialist_v2_draft.tools = vec!["shell.exec".to_string()];
+    specialist_v2_draft.remote_computer_profile = json!({"required": true, "revision": "v2"});
+    specialist_v2_draft.semantic_scopes = json!({"workflow_scope": "unreleased-v2"});
+    state
+        .insert_agent_version(&specialist_v2_draft, 2, json!({}))
+        .await
+        .expect("unreleased specialist v2");
+
+    drop(setup_release_environment);
+    drop(setup_enforcement);
+    drop(setup_provider);
+    let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+    let _release_enforcement = EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+    let _release_environment =
+        EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT", "production");
+    let app = build_router(state.clone());
+    let definition: WorkflowDefinition = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-definitions",
+            json!({
+                "name": "Promoted target handoff",
+                "entrypoint": "promoted-target-handoff",
+                "default_agent_id": manager.id,
+                "default_environment_id": environment.id,
+                "handoff_rules": {
+                    "root_task_grant": {
+                        "semantic_scopes": {"workflow_scope": "pinned-v1"},
+                        "tool_scope": {
+                            "read": ["file.read", "shell.exec"],
+                            "write": [],
+                            "external_write": []
+                        }
+                    }
+                },
+                "release_state": "released"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let run: WorkflowRun = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-runs",
+            json!({"workflow_definition_id": definition.id}),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    let plan: ManagerAgentPlan = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/sessions/{}/manager-plans", run.primary_session_id),
+            json!({
+                "specialist_agent_id": specialist.id,
+                "task_intake": {"goal": "prove promoted runtime pinning"},
+                "decomposition": {"steps": ["delegate"]},
+                "specialist_selection": {"selected_agent_id": specialist.id},
+                "risk_classification": "low"
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    let reviewed: ManagerAgentPlan = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/manager-plans/{}/review", plan.id),
+            json!({"status": "approved", "review": {"status": "approved"}}),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+
+    let (status, error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/sessions/{}/agent-handoffs", run.primary_session_id),
+            json!({
+                "target_agent_id": specialist.id,
+                "manager_plan_id": reviewed.id,
+                "intent": "pinned_review",
+                "payload": {},
+                "schema_version": "handoff.v1",
+                "risk_level": "low",
+                "runtime_profile_id": profile_v2.id
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(error["error"].as_str().is_some_and(|message| {
+        message.contains("must match the promoted target agent version")
+    }));
+
+    let handoff: AgentHandoffEvent = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/sessions/{}/agent-handoffs", run.primary_session_id),
+            json!({
+                "target_agent_id": specialist.id,
+                "manager_plan_id": reviewed.id,
+                "intent": "pinned_review",
+                "payload": {},
+                "schema_version": "handoff.v1",
+                "risk_level": "low"
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    assert_eq!(handoff.runtime_profile_id, Some(profile_v1.id));
+    assert_eq!(handoff.semantic_scopes["workflow_scope"], "pinned-v1");
+    assert!(!handoff.remote_computer_required);
+    let _: AgentHandoffEvent = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/agent-handoffs/{}/accept", handoff.id),
+            json!({"reason": "approved"}),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    let assignment: AgentHandoffAssignment = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/agent-handoffs/{}/assignment", handoff.id),
+            json!({"assigned_by": "manager"}),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    assert_eq!(assignment.runtime_profile_id, None);
+    let specialist_session = state
+        .get_session(assignment.specialist_session_id)
+        .await
+        .expect("specialist session");
+    assert_eq!(specialist_session.agent_version_id, Some(specialist_v1.id));
+    let packet: ContextPacket = request_json(
+        app,
+        json_request_with_headers(
+            "POST",
+            &format!(
+                "/api/sessions/{}/context-packet",
+                assignment.specialist_session_id
+            ),
+            json!({}),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    assert_eq!(packet.agent.tools, vec!["file.read".to_string()]);
+    assert_eq!(
+        packet.runtime_profile.as_ref().map(|profile| profile.id),
+        Some(profile_v1.id)
+    );
+    assert_eq!(
+        packet.replay_summary["runtime_profile_source"],
+        "agent_version_snapshot"
     );
 }
 
@@ -15094,7 +15490,9 @@ async fn workflow_fan_out_max_parallel_defers_extra_ready_steps() {
 
 #[tokio::test]
 async fn workflow_handoff_assignment_materializes_step_and_child_grant() {
-    let app = test_app().await;
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let app = build_router(state.clone());
     let specialist: Agent = request_json(
         app.clone(),
         json_request_with_headers(
@@ -15165,6 +15563,10 @@ async fn workflow_handoff_assignment_materializes_step_and_child_grant() {
                 },
                 "handoff_rules": {
                     "root_task_grant": {
+                        "max_turns": 5,
+                        "max_tool_calls": 6,
+                        "max_runtime_seconds": 3600,
+                        "max_cost_usd_micros": 1000,
                         "semantic_scopes": {
                             "domain_scope": "legal",
                             "workflow_scope": "contract-review"
@@ -15274,6 +15676,22 @@ async fn workflow_handoff_assignment_materializes_step_and_child_grant() {
         ),
     )
     .await;
+    state
+        .reserve_task_grant_turn(root_task_grant_id)
+        .await
+        .expect("reserve first manager turn");
+    state
+        .reserve_task_grant_turn(root_task_grant_id)
+        .await
+        .expect("reserve second manager turn");
+    state
+        .reserve_task_grant_tool_call(root_task_grant_id)
+        .await
+        .expect("reserve manager tool call");
+    state
+        .add_task_grant_cost(root_task_grant_id, 250)
+        .await
+        .expect("record manager cost");
     let assignment: AgentHandoffAssignment = request_json(
         app.clone(),
         json_request(
@@ -15349,6 +15767,14 @@ async fn workflow_handoff_assignment_materializes_step_and_child_grant() {
     );
     assert_eq!(child_grant.agent_class.as_deref(), Some("specialist"));
     assert_eq!(handoff_step.task_grant_id, Some(child_grant.id));
+    assert_eq!(child_grant.max_turns, Some(3));
+    assert_eq!(child_grant.max_tool_calls, Some(5));
+    assert!(
+        child_grant
+            .max_runtime_seconds
+            .is_some_and(|value| value > 0 && value <= 3600)
+    );
+    assert_eq!(child_grant.max_cost_usd_micros, Some(750));
     assert_eq!(child_grant.tool_scope["read"], json!(["file.read"]));
     assert_eq!(child_grant.tool_scope["write"], json!(["agent_cli.exec"]));
 
@@ -15585,8 +16011,32 @@ async fn workflow_step_run_rejects_agent_version_without_agent_boundary() {
     )
     .await;
 
+    let replacement_version: AgentVersion = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/agents/{}/versions", agent.id),
+            json!({
+                "provider": current_version.provider,
+                "model": current_version.model,
+                "runtime_profile_id": current_version.runtime_profile_id,
+                "system_prompt": "replacement version must not leak into the existing workflow session",
+                "tools": current_version.tools,
+                "runtime_config": current_version.runtime_config,
+                "approval_policy": current_version.approval_policy,
+                "mcp_server_ids": current_version.mcp_server_ids,
+                "skill_ids": current_version.skill_ids,
+                "workflow_pack_ids": current_version.workflow_pack_ids,
+                "remote_computer_profile": current_version.remote_computer_profile,
+                "semantic_scopes": current_version.semantic_scopes
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+
     let (status, error) = request_value(
-        app,
+        app.clone(),
         json_request_with_headers(
             "POST",
             &format!("/api/workflow-runs/{}/steps", run["id"].as_str().unwrap()),
@@ -15603,6 +16053,27 @@ async fn workflow_step_run_rejects_agent_version_without_agent_boundary() {
     assert_eq!(
         error["error"],
         "workflow step agent_id is required when agent_version_id is provided"
+    );
+
+    let (status, error) = request_value(
+        app,
+        json_request_with_headers(
+            "POST",
+            &format!("/api/workflow-runs/{}/steps", run["id"].as_str().unwrap()),
+            json!({
+                "step_key": "wrong-version",
+                "step_type": "agent",
+                "agent_id": agent.id,
+                "agent_version_id": replacement_version.id
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error["error"],
+        "workflow step agent_version_id must match its session agent version"
     );
 }
 
@@ -16664,6 +17135,7 @@ async fn workflow_context_packet_applies_task_grant_memory_scope() {
                 "model": "gpt-5.5-mini",
                 "tools": [
                     "file.read",
+                    "file.write",
                     "semantic_object.fetch",
                     "semantic_object.search",
                     "semantic_link.expand",
@@ -16687,6 +17159,18 @@ async fn workflow_context_packet_applies_task_grant_memory_scope() {
                 "default_agent_id": agent.id,
                 "handoff_rules": {
                     "root_task_grant": {
+                        "tool_scope": {
+                            "read": ["file.read"],
+                            "write": [],
+                            "external_write": []
+                        },
+                        "connector_scope": {
+                            "mode": "read_only",
+                            "allowed_connector_ids": [],
+                            "allowed_tool_names": [],
+                            "tenant_scope": {},
+                            "side_effect_classes": []
+                        },
                         "memory_scope": {
                             "mode": "snapshot_only",
                             "max_objects": 0
@@ -16732,6 +17216,24 @@ async fn workflow_context_packet_applies_task_grant_memory_scope() {
         "grant max_objects=0 must withhold matching semantic objects"
     );
     assert_eq!(packet.replay_summary["retrieved_object_count"], json!(0));
+    assert_eq!(packet.agent.tools, vec!["file.read".to_string()]);
+    assert_eq!(
+        packet.tool_policy["task_grant_tool_scope"]["read"],
+        json!(["file.read"])
+    );
+    assert_eq!(
+        packet.replay_summary["task_grant_authority"]["task_grant_id"],
+        json!(root_task_grant_id)
+    );
+    assert!(packet.source_refs.iter().any(|source| {
+        source.source_type == "task_grant" && source.source_id == root_task_grant_id
+    }));
+    assert!(
+        packet
+            .policy_reminders
+            .iter()
+            .all(|reminder| reminder.starts_with("file.read:"))
+    );
 
     let events: Vec<SessionEvent> = request_json(
         app,

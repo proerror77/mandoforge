@@ -956,7 +956,7 @@ impl AppState {
         Ok(())
     }
 
-    async fn runnable_agent_version(
+    pub(crate) async fn runnable_agent_version(
         &self,
         agent_id: Uuid,
         environment_id: Option<Uuid>,

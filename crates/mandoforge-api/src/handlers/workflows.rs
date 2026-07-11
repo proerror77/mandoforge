@@ -778,15 +778,10 @@ async fn create_workflow_step_run(
         state.get_agent_handoff_event(handoff_id).await?;
     }
     let agent_version_id = match (input.agent_version_id, input.agent_id) {
-        (Some(agent_version_id), Some(agent_id)) => {
-            state.get_agent(agent_id).await?;
-            let versions = state.list_agent_versions(agent_id).await?;
-            if !versions
-                .iter()
-                .any(|version| version.id == agent_version_id)
-            {
+        (Some(agent_version_id), Some(_)) => {
+            if Some(agent_version_id) != session.agent_version_id {
                 return Err(AppError::bad_request(
-                    "workflow step agent_version_id must belong to agent_id",
+                    "workflow step agent_version_id must match its session agent version",
                 ));
             }
             Some(agent_version_id)
@@ -796,10 +791,7 @@ async fn create_workflow_step_run(
                 "workflow step agent_id is required when agent_version_id is provided",
             ));
         }
-        (None, Some(agent_id)) => {
-            state.get_agent(agent_id).await?;
-            Some(state.current_agent_version(agent_id).await?.id)
-        }
+        (None, Some(_)) => session.agent_version_id,
         (None, None) => None,
     };
     if let Some(task_grant_id) = input.task_grant_id {

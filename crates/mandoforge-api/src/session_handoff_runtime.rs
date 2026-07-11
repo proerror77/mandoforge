@@ -431,18 +431,54 @@ pub(crate) async fn create_agent_handoff_event_for_session(
         input.approval_required,
     )?;
     validate_handoff_payload_schema(&input.payload, rule.get("payload_schema"))?;
+    let target_version = state
+        .runnable_agent_version(input.target_agent_id, session.environment_id)
+        .await?;
     let semantic_scopes = normalize_handoff_semantic_scopes(
         input
             .semantic_scopes
-            .unwrap_or_else(|| target_agent.semantic_scopes.clone()),
+            .unwrap_or_else(|| target_version.semantic_scopes.clone()),
     )?;
-    let runtime_profile_id = input.runtime_profile_id.or(target_agent.runtime_profile_id);
+    if crate::store_entities::agent_release_enforcement_required()
+        && input.runtime_profile_id.is_some()
+        && input.runtime_profile_id != target_version.runtime_profile_id
+    {
+        return Err(AppError::forbidden(
+            "production handoff runtime profile must match the promoted target agent version",
+        ));
+    }
+    let runtime_profile_id = input
+        .runtime_profile_id
+        .or(target_version.runtime_profile_id);
     let runtime_profile = match runtime_profile_id {
+        Some(profile_id)
+            if Some(profile_id) == target_version.runtime_profile_id
+                && target_version
+                    .runtime_profile_snapshot
+                    .as_object()
+                    .is_some_and(|snapshot| !snapshot.is_empty()) =>
+        {
+            Some(
+                serde_json::from_value::<AgentRuntimeProfile>(
+                    target_version.runtime_profile_snapshot.clone(),
+                )
+                .map_err(|error| {
+                    AppError::forbidden(format!(
+                        "target agent version runtime profile snapshot is invalid: {error}"
+                    ))
+                })?,
+            )
+        }
         Some(profile_id) => Some(state.get_agent_runtime_profile(profile_id).await?),
         None => None,
     };
     let remote_computer_required = input.remote_computer_required.unwrap_or_else(|| {
-        handoff_remote_computer_required(&target_agent, runtime_profile.as_ref())
+        target_version
+            .remote_computer_profile
+            .get("required")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            || runtime_profile.is_some_and(|profile| profile.remote_computer_required)
     });
     let review_status = normalize_handoff_review_status(
         input
@@ -504,8 +540,12 @@ pub(crate) async fn materialize_workflow_handoff_assignment(
     if let Some(reason) = workflow_run_execution_denial(&run.status) {
         return Err(AppError::forbidden(reason));
     }
+    let specialist_version = state
+        .agent_version_for_session(specialist_session.id)
+        .await?;
     let step_id = Uuid::new_v4();
     let now = Utc::now();
+    let remaining_budgets = task_grant_remaining_budgets(&parent_grant, now)?;
     let objective = manager_plan
         .task_intake
         .get("goal")
@@ -533,16 +573,16 @@ pub(crate) async fn materialize_workflow_handoff_assignment(
         risk_level: handoff.risk_level.clone(),
         status: "active".to_string(),
         expires_at: parent_grant.expires_at,
-        max_turns: parent_grant.max_turns,
-        max_tool_calls: parent_grant.max_tool_calls,
-        max_runtime_seconds: parent_grant.max_runtime_seconds,
-        max_cost_usd_micros: parent_grant.max_cost_usd_micros,
+        max_turns: remaining_budgets.max_turns,
+        max_tool_calls: remaining_budgets.max_tool_calls,
+        max_runtime_seconds: remaining_budgets.max_runtime_seconds,
+        max_cost_usd_micros: remaining_budgets.max_cost_usd_micros,
         turns_used: 0,
         tool_calls_used: 0,
         cost_usd_micros_used: 0,
         semantic_scopes: handoff.semantic_scopes.clone(),
         memory_scope: child_handoff_memory_scope(&parent_grant.memory_scope),
-        tool_scope: child_tool_scope_for_agent(&parent_grant.tool_scope, target_agent),
+        tool_scope: child_tool_scope_for_tools(&parent_grant.tool_scope, &specialist_version.tools),
         connector_scope: parent_grant.connector_scope.clone(),
         approval_policy: parent_grant.approval_policy.clone(),
         external_effects: parent_grant.external_effects.clone(),
@@ -613,12 +653,8 @@ pub(crate) fn child_handoff_memory_scope(parent: &Value) -> Value {
     memory_scope
 }
 
-pub(crate) fn child_tool_scope_for_agent(parent: &Value, agent: &Agent) -> Value {
-    let agent_tools = agent
-        .tools
-        .iter()
-        .map(String::as_str)
-        .collect::<HashSet<_>>();
+pub(crate) fn child_tool_scope_for_tools(parent: &Value, tools: &[String]) -> Value {
+    let agent_tools = tools.iter().map(String::as_str).collect::<HashSet<_>>();
     let mut scope = serde_json::Map::new();
     for key in ["read", "write", "external_write"] {
         let values = parent
@@ -669,10 +705,12 @@ pub(crate) async fn transition_agent_handoff_event(
         Some(current.source_session_id),
     )
     .await?;
-    state
-        .ensure_session_runnable(current.source_session_id)
-        .await?;
     let terminal_transition = matches!(next_status, "completed" | "failed" | "rejected");
+    if !terminal_transition {
+        state
+            .ensure_session_runnable(current.source_session_id)
+            .await?;
+    }
     if crate::store_entities::agent_release_enforcement_required() && !terminal_transition {
         require_active_task_grant_for_session(&state, current.source_session_id).await?;
     }
