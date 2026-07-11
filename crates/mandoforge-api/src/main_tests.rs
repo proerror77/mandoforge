@@ -5739,7 +5739,7 @@ async fn production_handoff_uses_promoted_target_version_runtime_snapshot() {
             default_args: vec!["exec".to_string(), "--json".to_string()],
             env: json!({}),
             timeout_seconds: Some(300),
-            remote_computer_required: false,
+            remote_computer_required: true,
             status: "enabled".to_string(),
         })
         .await
@@ -5752,7 +5752,7 @@ async fn production_handoff_uses_promoted_target_version_runtime_snapshot() {
             default_args: vec!["exec".to_string(), "--json".to_string()],
             env: json!({}),
             timeout_seconds: Some(300),
-            remote_computer_required: true,
+            remote_computer_required: false,
             status: "enabled".to_string(),
         })
         .await
@@ -5774,7 +5774,7 @@ async fn production_handoff_uses_promoted_target_version_runtime_snapshot() {
             mcp_server_ids: Vec::new(),
             skill_ids: Vec::new(),
             workflow_pack_ids: Vec::new(),
-            remote_computer_profile: json!({"required": false, "revision": "v1"}),
+            remote_computer_profile: json!({"required": true, "revision": "v1"}),
             semantic_scopes: json!({"workflow_scope": "pinned-v1"}),
             release_state: "draft".to_string(),
         })
@@ -5845,7 +5845,7 @@ async fn production_handoff_uses_promoted_target_version_runtime_snapshot() {
     specialist_v2_draft.runtime_profile_id = Some(profile_v2.id);
     specialist_v2_draft.system_prompt = "unreleased specialist v2".to_string();
     specialist_v2_draft.tools = vec!["shell.exec".to_string()];
-    specialist_v2_draft.remote_computer_profile = json!({"required": true, "revision": "v2"});
+    specialist_v2_draft.remote_computer_profile = json!({"required": false, "revision": "v2"});
     specialist_v2_draft.semantic_scopes = json!({"workflow_scope": "unreleased-v2"});
     state
         .insert_agent_version(&specialist_v2_draft, 2, json!({}))
@@ -5946,6 +5946,31 @@ async fn production_handoff_uses_promoted_target_version_runtime_snapshot() {
         message.contains("must match the promoted target agent version")
     }));
 
+    let (status, error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/sessions/{}/agent-handoffs", run.primary_session_id),
+            json!({
+                "target_agent_id": specialist.id,
+                "manager_plan_id": reviewed.id,
+                "intent": "pinned_review",
+                "payload": {},
+                "schema_version": "handoff.v1",
+                "risk_level": "low",
+                "remote_computer_required": false
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(
+        error["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("cannot disable"))
+    );
+
     let handoff: AgentHandoffEvent = request_json(
         app.clone(),
         json_request_with_headers(
@@ -5965,7 +5990,7 @@ async fn production_handoff_uses_promoted_target_version_runtime_snapshot() {
     .await;
     assert_eq!(handoff.runtime_profile_id, Some(profile_v1.id));
     assert_eq!(handoff.semantic_scopes["workflow_scope"], "pinned-v1");
-    assert!(!handoff.remote_computer_required);
+    assert!(handoff.remote_computer_required);
     let _: AgentHandoffEvent = request_json(
         app.clone(),
         json_request_with_headers(
@@ -5987,6 +6012,7 @@ async fn production_handoff_uses_promoted_target_version_runtime_snapshot() {
     )
     .await;
     assert_eq!(assignment.runtime_profile_id, None);
+    assert_eq!(assignment.status, "waiting_remote_computer");
     let specialist_session = state
         .get_session(assignment.specialist_session_id)
         .await

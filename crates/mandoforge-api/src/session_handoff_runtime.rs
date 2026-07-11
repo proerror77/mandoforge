@@ -472,14 +472,40 @@ pub(crate) async fn create_agent_handoff_event_for_session(
         Some(profile_id) => Some(state.get_agent_runtime_profile(profile_id).await?),
         None => None,
     };
-    let remote_computer_required = input.remote_computer_required.unwrap_or_else(|| {
-        target_version
-            .remote_computer_profile
-            .get("required")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-            || runtime_profile.is_some_and(|profile| profile.remote_computer_required)
-    });
+    let mut governed_remote_computer_required = target_version
+        .remote_computer_profile
+        .get("required")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || runtime_profile
+            .as_ref()
+            .is_some_and(|profile| profile.remote_computer_required);
+    if let Some(environment_id) = session.environment_id {
+        let environment = state.get_environment(environment_id).await?;
+        governed_remote_computer_required |= environment.environment_type == "remote_computer"
+            || environment
+                .remote_computer_profile
+                .get("required")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+        if let Some(profile_id) = environment.runtime_profile_id {
+            governed_remote_computer_required |= state
+                .get_agent_runtime_profile(profile_id)
+                .await?
+                .remote_computer_required;
+        }
+    }
+    if crate::store_entities::agent_release_enforcement_required()
+        && governed_remote_computer_required
+        && input.remote_computer_required == Some(false)
+    {
+        return Err(AppError::forbidden(
+            "production handoff cannot disable the governed Remote Computer requirement",
+        ));
+    }
+    let remote_computer_required = input
+        .remote_computer_required
+        .unwrap_or(governed_remote_computer_required);
     let review_status = normalize_handoff_review_status(
         input
             .review_status
