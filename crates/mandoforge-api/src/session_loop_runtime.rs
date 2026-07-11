@@ -531,15 +531,15 @@ fn provider_response_cost_usd_micros(
     provider: &ProviderRecord,
     usage: Option<&crate::provider::ProviderTokenUsage>,
 ) -> Result<i64, AppError> {
-    let mut cost_cents = provider_per_request_cost_cents(&provider);
+    let mut cost_cents = provider_per_request_cost_cents(provider);
     if let Some(usage) = usage {
         cost_cents += token_cost_cents(
             usage.prompt_tokens,
-            provider_prompt_token_price_cents(&provider),
+            provider_prompt_token_price_cents(provider),
         );
         cost_cents += token_cost_cents(
             usage.completion_tokens,
-            provider_completion_token_price_cents(&provider),
+            provider_completion_token_price_cents(provider),
         );
     }
     if !cost_cents.is_finite() || cost_cents < 0.0 {
