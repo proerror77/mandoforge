@@ -31,13 +31,13 @@ use crate::{
     record_workflow_step_run_created, record_workflow_step_run_updated,
     record_workflow_step_worker_started, require_non_empty, run_session_loop,
     run_workflow_compensation_adapter_step, run_workflow_delegated_runtime_step,
-    set_managed_session_status, update_workflow_step_after_worker_session,
-    validate_task_grant_scope_objects, validate_workflow_execution_binding,
-    validate_workflow_graph_definition, visible_session_ids_for_principal,
-    workflow_definition_step_graph_for_execution, workflow_input_digest,
-    workflow_run_runtime_envelope, workflow_step_is_adapter_owned_compensation,
-    workflow_step_status_terminal, workflow_step_worker_message,
-    workflow_transition_filter_from_query,
+    set_managed_session_status, task_grant_session_matches,
+    update_workflow_step_after_worker_session, validate_task_grant_scope_objects,
+    validate_workflow_execution_binding, validate_workflow_graph_definition,
+    visible_session_ids_for_principal, workflow_definition_step_graph_for_execution,
+    workflow_input_digest, workflow_run_owns_session, workflow_run_runtime_envelope,
+    workflow_step_is_adapter_owned_compensation, workflow_step_status_terminal,
+    workflow_step_worker_message, workflow_transition_filter_from_query,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -670,11 +670,36 @@ async fn create_workflow_step_run(
     let step_key = require_non_empty(input.step_key, "workflow step key")?;
     let step_type = require_non_empty(input.step_type, "workflow step type")?;
     let status = normalize_workflow_run_status(&input.status)?;
-    if let Some(environment_id) = input.environment_id {
-        state.get_environment(environment_id).await?;
+    let session_id = input.session_id.unwrap_or(run.primary_session_id);
+    if !workflow_run_owns_session(&state, &run, session_id).await? {
+        return Err(AppError::forbidden(
+            "session is not part of this workflow run",
+        ));
     }
-    if let Some(session_id) = input.session_id {
-        state.get_session(session_id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRun,
+        "session",
+        Some(session_id),
+    )
+    .await?;
+    let session = state.get_session(session_id).await?;
+    if input
+        .environment_id
+        .is_some_and(|environment_id| Some(environment_id) != session.environment_id)
+    {
+        return Err(AppError::bad_request(
+            "workflow step environment must match its session environment",
+        ));
+    }
+    if input
+        .agent_id
+        .is_some_and(|agent_id| agent_id != session.agent_id)
+    {
+        return Err(AppError::bad_request(
+            "workflow step agent must match its session agent",
+        ));
     }
     if let Some(thread_id) = input.thread_id {
         state.get_session_thread(thread_id).await?;
@@ -709,9 +734,12 @@ async fn create_workflow_step_run(
     };
     if let Some(task_grant_id) = input.task_grant_id {
         let grant = state.get_task_grant(task_grant_id).await?;
-        if grant.workflow_run_id != run.id || grant.status != "active" {
+        if grant.workflow_run_id != run.id
+            || grant.status != "active"
+            || !task_grant_session_matches(&grant, &run, session_id)
+        {
             return Err(AppError::bad_request(
-                "workflow step task_grant_id must reference an active grant for the workflow run",
+                "workflow step task_grant_id must reference an active grant for the workflow session",
             ));
         }
     }
@@ -724,11 +752,11 @@ async fn create_workflow_step_run(
             step_type,
             agent_id: input.agent_id,
             agent_version_id,
-            session_id: input.session_id,
+            session_id: Some(session_id),
             thread_id: input.thread_id,
             handoff_id: input.handoff_id,
             task_grant_id: input.task_grant_id,
-            environment_id: input.environment_id,
+            environment_id: session.environment_id,
             status,
             input_payload: input.input_payload,
             output_payload: input.output_payload,
@@ -1095,9 +1123,29 @@ async fn create_workflow_task_grant(
             ));
         }
     }
-    if let Some(session_id) = input.session_id {
-        state.get_session(session_id).await?;
+    let session_id = match (input.session_id, input.grantee_session_id) {
+        (Some(session_id), Some(grantee_session_id)) if session_id != grantee_session_id => {
+            return Err(AppError::bad_request(
+                "task grant session_id and grantee_session_id must match",
+            ));
+        }
+        (Some(session_id), _) | (_, Some(session_id)) => session_id,
+        (None, None) => run.primary_session_id,
+    };
+    if !workflow_run_owns_session(&state, &run, session_id).await? {
+        return Err(AppError::forbidden(
+            "session is not part of this workflow run",
+        ));
     }
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRun,
+        "session",
+        Some(session_id),
+    )
+    .await?;
+    let session = state.get_session(session_id).await?;
     if let Some(source_event_id) = input.source_event_id {
         ensure_session_event_exists(&state, source_event_id).await?;
     }
@@ -1106,12 +1154,19 @@ async fn create_workflow_task_grant(
     }
     if let Some(agent_id) = input.grantee_agent_id {
         state.get_agent(agent_id).await?;
-    }
-    if let Some(session_id) = input.grantee_session_id {
-        state.get_session(session_id).await?;
+        if agent_id != session.agent_id {
+            return Err(AppError::bad_request(
+                "task grant grantee agent must match its session agent",
+            ));
+        }
     }
     if let Some(context_packet_id) = input.context_packet_id {
-        state.get_context_packet(context_packet_id).await?;
+        let context_packet = state.get_context_packet(context_packet_id).await?;
+        if context_packet.session_id != session_id {
+            return Err(AppError::bad_request(
+                "task grant context packet must belong to its session",
+            ));
+        }
     }
     if let Some(policy_revision_id) = input.policy_revision_id {
         state.get_policy_revision(policy_revision_id).await?;
@@ -1129,13 +1184,13 @@ async fn create_workflow_task_grant(
         id: Uuid::new_v4(),
         workflow_run_id: run.id,
         workflow_step_run_id: input.workflow_step_run_id,
-        session_id: input.session_id.or(Some(run.primary_session_id)),
+        session_id: Some(session_id),
         parent_grant_id: Some(parent.id),
         source_event_id: input.source_event_id,
         source_handoff_id: input.source_handoff_id,
         issuer_subject,
         grantee_agent_id: input.grantee_agent_id,
-        grantee_session_id: input.grantee_session_id,
+        grantee_session_id: input.grantee_session_id.or(Some(session_id)),
         agent_class: input.agent_class.filter(|value| !value.trim().is_empty()),
         objective,
         risk_level: normalize_task_grant_risk_level(&input.risk_level)?,

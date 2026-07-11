@@ -23,10 +23,11 @@ use crate::remote_computer_runner::{
 use crate::shell_runner::{shell_command, shell_runner};
 use crate::{
     AppError, AppState, Approval, Artifact, CreateRemoteComputer,
-    CreateRemoteComputerJobAssignment, CreateRemoteComputerLease, Environment, RemoteComputer,
-    RemoteComputerJobAssignment, RemoteComputerLease, RemoteComputerRuntimeIdentity,
-    RemoteComputerSubstrate, SandboxRuntimeOperation, SandboxRuntimeRequest, ToolCall,
-    delete_remote_computer_runtime_resource, metadata_with_remote_computer_runtime_identity,
+    CreateRemoteComputerJobAssignment, CreateRemoteComputerLease, Environment, ExecuteTool,
+    RemoteComputer, RemoteComputerJobAssignment, RemoteComputerLease,
+    RemoteComputerRuntimeIdentity, RemoteComputerSubstrate, SandboxRuntimeOperation,
+    SandboxRuntimeRequest, ToolCall, delete_remote_computer_runtime_resource,
+    enforce_task_grant_for_tool_invocation, metadata_with_remote_computer_runtime_identity,
     new_audit_log, normalize_agent_cli_executable, record_remote_computer_job_assignment_event,
     remote_computer_runtime_identity, required_remote_computer_runtime_identity,
     resolve_mcp_runtime_secret_refs,
@@ -247,6 +248,36 @@ pub(crate) async fn run_execution_job(
             .await;
         }
     };
+    if let Err(error) = state.ensure_session_runnable(job.session_id).await {
+        return retry_or_fail_started_execution_job(
+            state,
+            &job,
+            None,
+            error,
+            json!({"stage": "session_governance_revalidation"}),
+        )
+        .await;
+    }
+    if let Err(error) = enforce_task_grant_for_tool_invocation(
+        state,
+        &tool_call.tool_name,
+        &ExecuteTool {
+            session_id: job.session_id,
+            task_grant_id: tool_call.task_grant_id,
+            args: tool_call.args.clone(),
+        },
+    )
+    .await
+    {
+        return retry_or_fail_started_execution_job(
+            state,
+            &job,
+            None,
+            error,
+            json!({"stage": "task_grant_revalidation"}),
+        )
+        .await;
+    }
     let active_assignment = match active_remote_computer_assignment_for_job(state, &job).await {
         Ok(assignment) => assignment,
         Err(error) => {

@@ -14819,6 +14819,152 @@ async fn workflow_step_run_rejects_agent_version_without_agent_boundary() {
 }
 
 #[tokio::test]
+async fn workflow_step_run_rejects_session_outside_workflow_run() {
+    let app = test_app().await;
+    let agents: Vec<Agent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/agents")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let agent = agents.first().expect("seeded agent");
+    let definition: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-definitions",
+            json!({
+                "name": "Workflow session ownership",
+                "entrypoint": "workflow-session-ownership",
+                "default_agent_id": agent.id,
+                "release_state": "released"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let run: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-runs",
+            json!({"workflow_definition_id": definition["id"]}),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    let foreign_session: Session = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/sessions",
+            json!({
+                "agent_id": agent.id,
+                "title": "unrelated session"
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+
+    let (status, error) = request_value(
+        app,
+        json_request_with_headers(
+            "POST",
+            &format!("/api/workflow-runs/{}/steps", run["id"].as_str().unwrap()),
+            json!({
+                "step_key": "foreign-session",
+                "step_type": "agent",
+                "agent_id": agent.id,
+                "session_id": foreign_session.id
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(error["error"], "session is not part of this workflow run");
+}
+
+#[tokio::test]
+async fn workflow_task_grant_rejects_session_outside_workflow_run() {
+    let app = test_app().await;
+    let agents: Vec<Agent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/agents")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let agent = agents.first().expect("seeded agent");
+    let definition: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-definitions",
+            json!({
+                "name": "Grant session ownership",
+                "entrypoint": "grant-session-ownership",
+                "default_agent_id": agent.id,
+                "release_state": "released"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let run: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-runs",
+            json!({"workflow_definition_id": definition["id"]}),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    let foreign_session: Session = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/sessions",
+            json!({
+                "agent_id": agent.id,
+                "title": "unrelated grant session"
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+
+    let (status, error) = request_value(
+        app,
+        json_request_with_headers(
+            "POST",
+            &format!(
+                "/api/workflow-runs/{}/task-grants",
+                run["id"].as_str().unwrap()
+            ),
+            json!({
+                "parent_grant_id": run["root_task_grant_id"],
+                "session_id": foreign_session.id,
+                "grantee_session_id": foreign_session.id,
+                "grantee_agent_id": agent.id,
+                "objective": "reuse unrelated session"
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(error["error"], "session is not part of this workflow run");
+}
+
+#[tokio::test]
 async fn workflow_task_grant_rejects_child_scope_expansion() {
     let app = test_app().await;
     let agents: Vec<Agent> = request_json(
@@ -38582,4 +38728,117 @@ async fn queue_backed_worker_defers_approved_tool_until_job_run() {
     )
     .await;
     assert!(matches!(completed_session.status, SessionStatus::Idle));
+}
+
+#[tokio::test]
+async fn queue_backed_worker_revalidates_task_grant_before_file_write() {
+    let state = test_state_with_worker(Arc::new(QueueBackedExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let app = build_router(state.clone());
+    let agents: Vec<Agent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/agents")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let agent = agents.first().expect("seeded agent");
+    let definition: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-definitions",
+            json!({
+                "name": "Queued grant revalidation",
+                "entrypoint": "queued-grant-revalidation",
+                "default_agent_id": agent.id,
+                "handoff_rules": {
+                    "root_task_grant": {
+                        "tool_scope": {
+                            "read": [],
+                            "write": ["file.write"],
+                            "external_write": []
+                        }
+                    }
+                },
+                "release_state": "released"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let run: WorkflowRun = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-runs",
+            json!({"workflow_definition_id": definition["id"]}),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    let task_grant_id = run.root_task_grant_id.expect("root task grant");
+    let relative_path = format!("expired-grant-{}.md", Uuid::new_v4());
+    let approval_required: Value = request_json(
+        app.clone(),
+        json_request(
+            "POST",
+            "/api/tools/file.write/execute",
+            json!({
+                "session_id": run.primary_session_id,
+                "task_grant_id": task_grant_id,
+                "args": {
+                    "path": relative_path,
+                    "content": "must not be written"
+                }
+            }),
+        ),
+    )
+    .await;
+    let approval_id = approval_required["approval_id"]
+        .as_str()
+        .expect("approval id");
+    let approved: Approval = request_json(
+        app,
+        approve_request(format!("/api/approvals/{approval_id}/approve")),
+    )
+    .await;
+    let job = state
+        .execution_queue
+        .list()
+        .await
+        .expect("execution jobs")
+        .into_iter()
+        .find(|job| job.approval_id == approved.id)
+        .expect("queued file write");
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test uses memory store");
+    };
+    {
+        let mut store = inner.write().await;
+        let grant = store
+            .task_grants
+            .get_mut(&task_grant_id)
+            .expect("root task grant");
+        grant.expires_at = Some(Utc::now() - ChronoDuration::seconds(1));
+        grant.updated_at = Utc::now();
+    }
+
+    let retried = run_execution_job(&state, job.id, "grant-revalidation-worker")
+        .await
+        .expect("expired grant should requeue without writing");
+
+    assert_eq!(retried.status, ExecutionJobStatus::Queued);
+    assert!(
+        retried
+            .last_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("task grant is expired")
+    );
+    let workspace_file = test_workspace_root()
+        .join(run.primary_session_id.to_string())
+        .join(relative_path);
+    assert!(tokio::fs::metadata(workspace_file).await.is_err());
 }

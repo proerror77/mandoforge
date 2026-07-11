@@ -351,6 +351,19 @@ pub(crate) async fn enforce_task_grant_for_tool_invocation(
 
     let grant = state.get_task_grant(task_grant_id).await?;
     let run = state.get_workflow_run(grant.workflow_run_id).await?;
+    if workflow_step_status_terminal(&run.status) {
+        let reason = "workflow run is not active";
+        record_task_grant_denied(
+            state,
+            input.session_id,
+            Some(&grant),
+            Some(run.id),
+            tool_name,
+            reason,
+        )
+        .await?;
+        return Err(AppError::forbidden(reason));
+    }
     if workflow_run
         .as_ref()
         .is_some_and(|workflow_run| workflow_run.id != run.id)
@@ -475,6 +488,21 @@ pub(crate) fn task_grant_agent_class_matches(agent: &Agent, agent_class: &str) -
     expected.is_empty() || agent.kind == expected || agent.agent_role == expected
 }
 
+pub(crate) async fn workflow_run_owns_session(
+    state: &AppState,
+    run: &WorkflowRun,
+    session_id: Uuid,
+) -> Result<bool, AppError> {
+    if run.primary_session_id == session_id {
+        return Ok(true);
+    }
+    Ok(state
+        .list_workflow_step_runs(run.id)
+        .await?
+        .into_iter()
+        .any(|step| step.session_id == Some(session_id)))
+}
+
 pub(crate) async fn workflow_run_for_session(
     state: &AppState,
     session_id: Uuid,
@@ -488,20 +516,7 @@ pub(crate) async fn workflow_run_for_session(
         return Ok(Some(run));
     }
     for run in runs {
-        if state
-            .list_workflow_step_runs(run.id)
-            .await?
-            .into_iter()
-            .any(|step| step.session_id == Some(session_id))
-        {
-            return Ok(Some(run));
-        }
-        if state
-            .list_task_grants_for_workflow_run(run.id)
-            .await?
-            .into_iter()
-            .any(|grant| task_grant_session_matches(&grant, &run, session_id))
-        {
+        if workflow_run_owns_session(state, &run, session_id).await? {
             return Ok(Some(run));
         }
     }
