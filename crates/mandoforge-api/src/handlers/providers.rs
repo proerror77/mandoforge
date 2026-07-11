@@ -87,7 +87,14 @@ async fn get_provider_runtime_status(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<ProviderRuntimeStatus>, AppError> {
-    authorize_request(&state, &headers, Permission::Admin, "providers", None).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRead,
+        "runtime_capabilities",
+        None,
+    )
+    .await?;
     let production_mode = provider_runtime_production_mode();
     Ok(Json(ProviderRuntimeStatus {
         mode: if production_mode {

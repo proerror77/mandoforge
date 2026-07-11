@@ -102,8 +102,8 @@ async fn provider_runtime_status_reports_production_mode() {
         Request::builder()
             .method("GET")
             .uri("/api/providers/runtime")
-            .header("x-mandoforge-subject", "admin-1")
-            .header("x-mandoforge-roles", "admin")
+            .header("x-mandoforge-subject", "operator-1")
+            .header("x-mandoforge-roles", "operator")
             .body(Body::empty())
             .unwrap(),
     )

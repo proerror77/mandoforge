@@ -4735,6 +4735,218 @@ async fn session_agent_cli_uses_pinned_runtime_profile_snapshot() {
 }
 
 #[tokio::test]
+async fn context_packet_uses_pinned_agent_version_and_environment_runtime_precedence() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let app = build_router(state.clone());
+    let version_profile: AgentRuntimeProfile = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/agent-runtime-profiles",
+            json!({
+                "name": "context-version-runtime-v1",
+                "runtime_type": "agent_cli",
+                "command": "codex",
+                "default_args": ["exec", "--json"],
+                "remote_computer_required": false,
+                "status": "enabled"
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let environment_profile: AgentRuntimeProfile = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/agent-runtime-profiles",
+            json!({
+                "name": "context-environment-runtime",
+                "runtime_type": "agent_cli",
+                "command": "codex",
+                "default_args": ["exec", "--json"],
+                "remote_computer_required": true,
+                "status": "enabled"
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let environment: Environment = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/environments",
+            json!({
+                "name": "Context environment precedence",
+                "environment_type": "local",
+                "runtime_profile_id": environment_profile.id,
+                "release_state": "active",
+                "status": "enabled"
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let agent: Agent = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/agents",
+            json!({
+                "name": "Pinned Context Agent",
+                "kind": "specialist",
+                "agent_role": "specialist",
+                "provider": "provider-v1",
+                "model": "model-v1",
+                "runtime_profile_id": version_profile.id,
+                "system_prompt": "context version one",
+                "tools": ["file.read"],
+                "tool_policy": {"allowed_tools": ["file.read"], "revision": "v1"},
+                "skill_ids": ["skill-v1"],
+                "workflow_pack_ids": ["pack-v1"],
+                "remote_computer_profile": {"pool": "v1"},
+                "semantic_scopes": {
+                    "project_scope": "mandoforge",
+                    "repo_scope": "mandoforge",
+                    "service_scope": "api-v1",
+                    "workflow_scope": "context-v1",
+                    "policy_scope": "policy-v1",
+                    "memory_scope": "memory-v1"
+                }
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let pinned_session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "pinned context packet".to_string(),
+            message: None,
+        })
+        .await
+        .expect("pinned session");
+    let environment_session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: Some(environment.id),
+            title: "environment context packet".to_string(),
+            message: None,
+        })
+        .await
+        .expect("environment session");
+
+    let _: AgentVersion = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/agents/{}/versions", agent.id),
+            json!({
+                "provider": "provider-v2",
+                "model": "model-v2",
+                "system_prompt": "context version two",
+                "tools": ["file.write"],
+                "runtime_config": {},
+                "approval_policy": {"allowed_tools": ["file.write"], "revision": "v2"},
+                "mcp_server_ids": [],
+                "skill_ids": ["skill-v2"],
+                "workflow_pack_ids": ["pack-v2"],
+                "remote_computer_profile": {"pool": "v2"},
+                "semantic_scopes": {
+                    "project_scope": "mandoforge",
+                    "repo_scope": "mandoforge",
+                    "service_scope": "api-v2",
+                    "workflow_scope": "context-v2",
+                    "policy_scope": "policy-v2",
+                    "memory_scope": "memory-v2"
+                }
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let _: AgentRuntimeProfile = request_json(
+        app,
+        json_request_with_headers(
+            "PATCH",
+            &format!("/api/agent-runtime-profiles/{}", version_profile.id),
+            json!({"status": "disabled", "remote_computer_required": true}),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+
+    let pinned = build_context_packet(&state, pinned_session.id)
+        .await
+        .expect("pinned context packet");
+    assert_eq!(pinned.agent_version_id, pinned_session.agent_version_id);
+    assert_eq!(pinned.agent.tools, vec!["file.read".to_string()]);
+    assert_eq!(pinned.agent.skill_ids, vec!["skill-v1".to_string()]);
+    assert_eq!(pinned.agent.workflow_pack_ids, vec!["pack-v1".to_string()]);
+    assert_eq!(pinned.agent.remote_computer_profile["pool"], "v1");
+    assert_eq!(pinned.semantic_scopes["service_scope"], "api-v1");
+    assert_eq!(pinned.tool_policy["revision"], "v1");
+    let pinned_profile = pinned.runtime_profile.expect("pinned runtime profile");
+    assert_eq!(pinned_profile.id, version_profile.id);
+    assert_eq!(pinned_profile.status, "enabled");
+    assert!(!pinned_profile.remote_computer_required);
+    assert_eq!(
+        pinned.replay_summary["effective_context_source"],
+        "agent_version"
+    );
+    assert_eq!(
+        pinned.replay_summary["runtime_profile_source"],
+        "agent_version_snapshot"
+    );
+    assert!(pinned.source_refs.iter().any(|source| {
+        source.source_type == "agent_runtime_profile"
+            && source.source_id == version_profile.id.to_string()
+            && source
+                .freshness
+                .contains("source:agent_version_snapshot:status:enabled")
+    }));
+
+    let environment_packet = build_context_packet(&state, environment_session.id)
+        .await
+        .expect("environment context packet");
+    assert_eq!(
+        environment_packet
+            .runtime_profile
+            .expect("environment runtime profile")
+            .id,
+        environment_profile.id
+    );
+    assert_eq!(
+        environment_packet.replay_summary["runtime_profile_source"],
+        "environment"
+    );
+    assert_eq!(
+        environment_packet.semantic_scopes["service_scope"],
+        "api-v1"
+    );
+}
+
+#[tokio::test]
 async fn session_provider_resolution_uses_pinned_agent_version() {
     let _env = env_lock().lock().expect("env lock");
     let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
