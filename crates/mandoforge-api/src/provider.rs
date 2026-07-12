@@ -401,7 +401,6 @@ pub(crate) fn default_provider_tool_names() -> Vec<String> {
         "shell.exec",
         "codex.exec",
         "artifact.create",
-        "native.connector.call",
         "semantic_object.fetch",
         "semantic_object.search",
         "semantic_link.expand",
@@ -727,10 +726,25 @@ fn redact_provider_error(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        OpenAiCompatibleProviderClient, provider_api_key_from_env_value,
-        provider_api_key_secret_ref,
+        OpenAiCompatibleProviderClient, default_provider_tool_names,
+        provider_api_key_from_env_value, provider_api_key_secret_ref, provider_tool_schemas,
     };
     use crate::secrets::ReservedSecretProvider;
+
+    #[test]
+    fn default_tools_exclude_approval_only_native_connector_calls() {
+        let default_tools = default_provider_tool_names();
+
+        assert!(
+            !default_tools
+                .iter()
+                .any(|tool| tool == "native.connector.call")
+        );
+        assert_eq!(
+            provider_tool_schemas(&["native.connector.call".to_string()])[0]["function"]["name"],
+            "native.connector.call"
+        );
+    }
 
     #[test]
     fn parses_provider_api_key_vault_reference() {
