@@ -115,6 +115,10 @@ extract_rendered_resource() {
   fi
 }
 
+render_manifest_json() {
+  kubectl patch --local=true --type=merge --patch '{}' -f "$1" -o json
+}
+
 kubectl kustomize deploy/k8s >"$k8s_render"
 kubectl kustomize deploy >"$default_render"
 kubectl kustomize deploy/remote-computer-pilot --load-restrictor LoadRestrictionsNone >"$pilot_render"
@@ -144,7 +148,7 @@ if ! grep -q "serviceAccountName: mandoforge-api" "$k8s_render" \
   exit 1
 fi
 
-role_json="$(kubectl create --dry-run=client -f deploy/k8s/api-agent-sandbox-rbac.yaml -o json \
+role_json="$(render_manifest_json deploy/k8s/api-agent-sandbox-rbac.yaml \
   | jq -cs 'map(select(.kind == "Role" and .metadata.name == "mandoforge-api-agent-sandbox"))[0]')"
 if ! jq -e '
   def exact_rule($group; $resource; $verbs):
@@ -163,7 +167,7 @@ if ! jq -e '
 fi
 
 for worker_manifest in deploy/k8s/worker.yaml deploy/k8s/worker-isolated-pool.yaml; do
-  if ! kubectl create --dry-run=client -f "$worker_manifest" -o json \
+  if ! render_manifest_json "$worker_manifest" \
     | jq -e '.spec.template.spec.automountServiceAccountToken == false' >/dev/null; then
     echo "$worker_manifest must set automountServiceAccountToken: false" >&2
     exit 1
@@ -400,8 +404,7 @@ if grep -q "templateRef:" "$agent_sandbox_render" "$agent_sandbox_smoke_render" 
   exit 1
 fi
 
-network_policy_json="$(kubectl create --dry-run=client \
-  -f deploy/k8s/agent-sandbox-egress-networkpolicy.yaml -o json)"
+network_policy_json="$(render_manifest_json deploy/k8s/agent-sandbox-egress-networkpolicy.yaml)"
 if ! jq -e '
   def ports_exact($expected):
     (.ports | sort_by([.protocol, .port])) == ($expected | sort_by([.protocol, .port]));

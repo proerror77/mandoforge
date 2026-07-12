@@ -19,9 +19,13 @@ fail() {
   exit 1
 }
 
+render_manifest_json() {
+  kubectl patch --local=true --type=merge --patch '{}' -f "$1" -o json
+}
+
 verify_kubernetes_access_contracts() {
   local role_json network_policy_json worker_manifest
-  role_json="$(kubectl create --dry-run=client -f deploy/k8s/api-agent-sandbox-rbac.yaml -o json \
+  role_json="$(render_manifest_json deploy/k8s/api-agent-sandbox-rbac.yaml \
     | jq -cs 'map(select(.kind == "Role" and .metadata.name == "mandoforge-api-agent-sandbox"))[0]')"
   jq -e '
     def exact_rule($group; $resource; $verbs):
@@ -37,8 +41,7 @@ verify_kubernetes_access_contracts() {
   ' <<<"$role_json" >/dev/null \
     || fail "API Agent Sandbox RBAC must contain only the required resource/verb tuples"
 
-  network_policy_json="$(kubectl create --dry-run=client \
-    -f deploy/k8s/agent-sandbox-egress-networkpolicy.yaml -o json)"
+  network_policy_json="$(render_manifest_json deploy/k8s/agent-sandbox-egress-networkpolicy.yaml)"
   jq -e '
     def ports_exact($expected):
       (.ports | sort_by([.protocol, .port])) == ($expected | sort_by([.protocol, .port]));
@@ -73,7 +76,7 @@ verify_kubernetes_access_contracts() {
     || fail "Agent Sandbox NetworkPolicy must deny ingress and allow only bounded DNS, API, and HTTPS egress"
 
   for worker_manifest in deploy/k8s/worker.yaml deploy/k8s/worker-isolated-pool.yaml; do
-    kubectl create --dry-run=client -f "$worker_manifest" -o json \
+    render_manifest_json "$worker_manifest" \
       | jq -e '.spec.template.spec.automountServiceAccountToken == false' >/dev/null \
       || fail "$worker_manifest must set automountServiceAccountToken: false"
   done
