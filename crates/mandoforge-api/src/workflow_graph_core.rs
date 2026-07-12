@@ -788,14 +788,21 @@ pub(crate) async fn create_workflow_run_from_definition(
         runtime_adapter.as_deref(),
         &definition.runtime_capability_contract,
     )?;
-    let session = state
-        .create_session(CreateSession {
-            agent_id: definition.default_agent_id,
-            environment_id: definition.default_environment_id,
-            title,
-            message: None,
-        })
-        .await?;
+    let session_input = CreateSession {
+        agent_id: definition.default_agent_id,
+        environment_id: definition.default_environment_id,
+        title,
+        message: None,
+    };
+    let session =
+        match workflow_definition_agent_version_id(definition, definition.default_agent_id)? {
+            Some(agent_version_id) => {
+                state
+                    .create_session_for_agent_version(session_input, agent_version_id)
+                    .await?
+            }
+            None => state.create_session(session_input).await?,
+        };
     ensure_primary_session_thread(state, session.id).await?;
     let now = Utc::now();
     let input_digest = workflow_input_digest(&input_payload);
@@ -918,6 +925,53 @@ pub(crate) async fn materialize_workflow_graph_step_with_policy_context(
         workflow_graph_step_uuid(graph_step, "environment_id")?.or(session.environment_id);
     let now = Utc::now();
     let terminal = workflow_step_status_terminal(status);
+    if terminal
+        && let Some(agent_id) = agent_id
+        && agent_id != session.agent_id
+    {
+        let agent_version_id = graph_agent_version_id.ok_or_else(|| {
+            AppError::bad_request(
+                "workflow graph steps assigned to another agent must pin agent_version_id",
+            )
+        })?;
+        state
+            .list_agent_versions(agent_id)
+            .await?
+            .into_iter()
+            .find(|version| version.id == agent_version_id)
+            .ok_or_else(|| AppError::not_found("workflow step agent version not found"))?;
+        let step = state
+            .create_workflow_step_run(WorkflowStepRun {
+                id: Uuid::new_v4(),
+                workflow_run_id: run.id,
+                step_key,
+                step_type,
+                agent_id: Some(agent_id),
+                agent_version_id: Some(agent_version_id),
+                session_id: None,
+                thread_id: None,
+                handoff_id: None,
+                task_grant_id: None,
+                environment_id,
+                status: status.to_string(),
+                input_payload: workflow_graph_step_input_payload(run, graph_step, input_context),
+                output_payload,
+                artifact_ids: Vec::new(),
+                approval_ids: Vec::new(),
+                tool_call_ids: Vec::new(),
+                claimed_by_worker: None,
+                lease_expires_at: None,
+                context_packet_id: None,
+                started_at: Some(now),
+                completed_at: Some(now),
+                scheduled_at,
+                created_at: now,
+                updated_at: now,
+            })
+            .await?;
+        record_workflow_step_run_created(state, run, &step).await?;
+        return Ok(step);
+    }
     if let Some(agent_id) = agent_id
         && agent_id != session.agent_id
     {
@@ -926,33 +980,32 @@ pub(crate) async fn materialize_workflow_graph_step_with_policy_context(
                 "workflow graph steps assigned to another agent must pin agent_version_id",
             )
         })?;
-        let child_session = state
-            .create_session_for_agent_version(
-                CreateSession {
-                    agent_id,
-                    environment_id,
-                    title: format!("{} / {}", run.id, step_key),
-                    message: None,
-                },
-                agent_version_id,
-            )
-            .await?;
-        let child_thread = ensure_primary_session_thread(state, child_session.id).await?;
         let target_agent = state.get_agent(agent_id).await?;
-        let target_version = state.agent_version_for_session(child_session.id).await?;
+        let target_version = state
+            .list_agent_versions(agent_id)
+            .await?
+            .into_iter()
+            .find(|version| version.id == agent_version_id)
+            .ok_or_else(|| AppError::not_found("workflow step agent version not found"))?;
         let remaining_budgets = task_grant_remaining_budgets(root_grant, now)?;
+        let risk_level = normalize_task_grant_risk_level(
+            graph_step
+                .get("risk_level")
+                .and_then(Value::as_str)
+                .unwrap_or("low"),
+        )?;
         let step_id = Uuid::new_v4();
-        let child_grant = TaskGrant {
+        let mut child_grant = TaskGrant {
             id: Uuid::new_v4(),
             workflow_run_id: run.id,
             workflow_step_run_id: Some(step_id),
-            session_id: Some(child_session.id),
+            session_id: None,
             parent_grant_id: Some(root_grant.id),
             source_event_id: run.source_event_id,
             source_handoff_id: None,
             issuer_subject: "system".to_string(),
             grantee_agent_id: Some(agent_id),
-            grantee_session_id: Some(child_session.id),
+            grantee_session_id: None,
             agent_class: Some(target_agent.agent_role.clone()),
             objective: graph_step
                 .get("task")
@@ -961,12 +1014,7 @@ pub(crate) async fn materialize_workflow_graph_step_with_policy_context(
                 .filter(|value| !value.is_empty())
                 .unwrap_or(&step_key)
                 .to_string(),
-            risk_level: normalize_task_grant_risk_level(
-                graph_step
-                    .get("risk_level")
-                    .and_then(Value::as_str)
-                    .unwrap_or("low"),
-            )?,
+            risk_level,
             status: "active".to_string(),
             expires_at: root_grant.expires_at,
             max_turns: remaining_budgets.max_turns,
@@ -990,7 +1038,34 @@ pub(crate) async fn materialize_workflow_graph_step_with_policy_context(
             updated_at: now,
         };
         validate_task_grant_scope_objects(&child_grant)?;
+        validate_task_grant_budgets(&child_grant)?;
         ensure_child_task_grant_within_parent(root_grant, &child_grant)?;
+        let child_session = state
+            .create_session_for_agent_version(
+                CreateSession {
+                    agent_id,
+                    environment_id,
+                    title: format!("{} / {}", run.id, step_key),
+                    message: None,
+                },
+                agent_version_id,
+            )
+            .await?;
+        let child_thread = match ensure_primary_session_thread(state, child_session.id).await {
+            Ok(thread) => thread,
+            Err(error) => {
+                let _ = set_managed_session_status(
+                    state,
+                    child_session.id,
+                    SessionStatus::Failed,
+                    "workflow child session initialization failed before thread creation",
+                )
+                .await;
+                return Err(error);
+            }
+        };
+        child_grant.session_id = Some(child_session.id);
+        child_grant.grantee_session_id = Some(child_session.id);
         let step = WorkflowStepRun {
             id: step_id,
             workflow_run_id: run.id,
@@ -1018,9 +1093,22 @@ pub(crate) async fn materialize_workflow_graph_step_with_policy_context(
             created_at: now,
             updated_at: now,
         };
-        let (step, child_grant) = state
+        let (step, child_grant) = match state
             .create_workflow_step_run_with_task_grant(step, child_grant)
-            .await?;
+            .await
+        {
+            Ok(created) => created,
+            Err(error) => {
+                let _ = set_managed_session_status(
+                    state,
+                    child_session.id,
+                    SessionStatus::Failed,
+                    "workflow child session initialization failed before step grant commit",
+                )
+                .await;
+                return Err(error);
+            }
+        };
         record_task_grant_issued(state, &child_grant, run.primary_session_id).await?;
         record_workflow_step_run_created(state, run, &step).await?;
         return Ok(step);
@@ -1301,6 +1389,32 @@ pub(crate) fn workflow_graph_step_agent_version_id(
         return Ok(None);
     }
     workflow_graph_step_uuid(graph_step, "agent_version_id")
+}
+
+pub(crate) fn workflow_definition_agent_version_id(
+    definition: &WorkflowDefinition,
+    agent_id: Uuid,
+) -> Result<Option<Uuid>, AppError> {
+    let mut version_ids = BTreeSet::new();
+    for step in definition
+        .step_graph
+        .get("steps")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if workflow_graph_step_agent_id(definition, step)? == Some(agent_id)
+            && let Some(version_id) = workflow_graph_step_agent_version_id(step)?
+        {
+            version_ids.insert(version_id);
+        }
+    }
+    if version_ids.len() > 1 {
+        return Err(AppError::bad_request(
+            "workflow definition binds one agent to multiple agent versions",
+        ));
+    }
+    Ok(version_ids.into_iter().next())
 }
 
 pub(crate) fn workflow_graph_step_dependencies(step: &Value) -> Result<Vec<String>, AppError> {

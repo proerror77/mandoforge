@@ -19,6 +19,66 @@ fail() {
   exit 1
 }
 
+verify_kubernetes_access_contracts() {
+  local role_json network_policy_json worker_manifest
+  role_json="$(kubectl create --dry-run=client -f deploy/k8s/api-agent-sandbox-rbac.yaml -o json \
+    | jq -cs 'map(select(.kind == "Role" and .metadata.name == "mandoforge-api-agent-sandbox"))[0]')"
+  jq -e '
+    def exact_rule($group; $resource; $verbs):
+      .apiGroups == [$group]
+      and .resources == [$resource]
+      and (.verbs | sort) == ($verbs | sort);
+    .rules as $rules
+    | ($rules | length) == 4
+      and any($rules[]; exact_rule(""; "pods"; ["get"]))
+      and any($rules[]; exact_rule(""; "pods/exec"; ["create", "get"]))
+      and any($rules[]; exact_rule("extensions.agents.x-k8s.io"; "sandboxclaims"; ["get", "create", "delete"]))
+      and any($rules[]; exact_rule("agents.x-k8s.io"; "sandboxes"; ["get"]))
+  ' <<<"$role_json" >/dev/null \
+    || fail "API Agent Sandbox RBAC must contain only the required resource/verb tuples"
+
+  network_policy_json="$(kubectl create --dry-run=client \
+    -f deploy/k8s/agent-sandbox-egress-networkpolicy.yaml -o json)"
+  jq -e '
+    def ports_exact($expected):
+      (.ports | sort_by([.protocol, .port])) == ($expected | sort_by([.protocol, .port]));
+    .spec as $spec
+    | $spec.podSelector.matchLabels == {
+        "app": "mandoforge-agent-remote-computer",
+        "mandoforge.io/runtime-substrate": "agent-sandbox"
+      }
+      and ($spec.policyTypes | sort) == (["Ingress", "Egress"] | sort)
+      and $spec.ingress == []
+      and ($spec.egress | length) == 3
+      and any($spec.egress[];
+        (.to | length) == 1
+        and .to[0].namespaceSelector.matchLabels["kubernetes.io/metadata.name"] == "kube-system"
+        and .to[0].podSelector.matchLabels["k8s-app"] == "kube-dns"
+        and ports_exact([{"protocol":"UDP","port":53},{"protocol":"TCP","port":53}]))
+      and any($spec.egress[];
+        (.to | length) == 1
+        and .to[0].podSelector.matchLabels.app == "mandoforge-api"
+        and ports_exact([{"protocol":"TCP","port":8787}]))
+      and any($spec.egress[];
+        (.to | length) == 2
+        and ([.to[].ipBlock.cidr] | sort) == (["0.0.0.0/0", "::/0"] | sort)
+        and any(.to[];
+          .ipBlock.cidr == "0.0.0.0/0"
+          and (["10.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16"] - .ipBlock.except | length) == 0)
+        and any(.to[];
+          .ipBlock.cidr == "::/0"
+          and (["::1/128", "fc00::/7", "fe80::/10"] - .ipBlock.except | length) == 0)
+        and ports_exact([{"protocol":"TCP","port":443}]))
+  ' <<<"$network_policy_json" >/dev/null \
+    || fail "Agent Sandbox NetworkPolicy must deny ingress and allow only bounded DNS, API, and HTTPS egress"
+
+  for worker_manifest in deploy/k8s/worker.yaml deploy/k8s/worker-isolated-pool.yaml; do
+    kubectl create --dry-run=client -f "$worker_manifest" -o json \
+      | jq -e '.spec.template.spec.automountServiceAccountToken == false' >/dev/null \
+      || fail "$worker_manifest must set automountServiceAccountToken: false"
+  done
+}
+
 require_executable() {
   [[ -x "$1" ]] || fail "missing executable script: $1"
 }
@@ -161,6 +221,10 @@ static_contract_check() {
   if grep -A1 'resources: \["pods"\]' deploy/k8s/api-agent-sandbox-rbac.yaml | grep -Eq '"create"|"delete"'; then
     fail "default API RBAC must not permit legacy direct Pod creation or deletion"
   fi
+  grep -q 'automountServiceAccountToken: false' deploy/k8s/worker.yaml \
+    || fail "queue worker must explicitly disable ServiceAccount token automount"
+  grep -q 'automountServiceAccountToken: false' deploy/k8s/worker-isolated-pool.yaml \
+    || fail "isolated queue worker must explicitly disable ServiceAccount token automount"
   if grep -q 'mountPath: /var/run/secrets/kubernetes.io/serviceaccount' deploy/k8s/worker.yaml \
     || grep -q 'mountPath: /var/run/secrets/kubernetes.io/serviceaccount' deploy/k8s/worker-isolated-pool.yaml; then
     fail "queue workers must not receive Kubernetes API credentials"
@@ -174,6 +238,7 @@ static_contract_check() {
     local deploy_render_file="$EVIDENCE_DIR/deploy-k8s-render.yaml"
     local deploy_root_render_file="$EVIDENCE_DIR/deploy-root-render.yaml"
 
+    verify_kubernetes_access_contracts
     kubectl kustomize deploy/k8s >"$deploy_render_file"
     kubectl kustomize deploy >"$deploy_root_render_file"
     [[ -s "$deploy_render_file" ]] || fail "kubectl kustomize deploy/k8s produced no output"
@@ -219,8 +284,10 @@ static_contract_check() {
     if grep -q 'name: mandoforge-agent-remote-computer-template' "$deploy_render_file"; then
       fail "rendered deploy/k8s output must exclude the legacy direct-Pod runtime"
     fi
+  elif [[ "$STATIC_ONLY" == "1" ]]; then
+    echo "STATIC_ONLY=1: kubectl unavailable; rendered manifest checks were skipped and this result is not production readiness" >&2
   else
-    echo "kubectl not found; skipped production deployment kustomize render validation" >&2
+    fail "kubectl is required for production rendered-manifest validation; use STATIC_ONLY=1 only for non-production static checks"
   fi
 
   grep -q "production-deployment-safety-gate.sh" docs/enterprise-product-completion-contract.md \
@@ -349,9 +416,9 @@ mkdir -p "$EVIDENCE_DIR"
 static_contract_check
 
 if [[ "$STATIC_ONLY" == "1" ]]; then
-  write_summary "static_ready" 0 ""
+  write_summary "static_only_non_production" 0 ""
   cat "$EVIDENCE_DIR/summary.txt"
-  echo "production deployment safety static gate ok"
+  echo "production deployment safety static checks passed; production readiness was not evaluated"
   exit 0
 fi
 

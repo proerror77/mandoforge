@@ -15,6 +15,12 @@ pub(crate) struct WorkflowPackAgentRuntimeTarget {
     pub(crate) version: AgentVersion,
 }
 
+pub(crate) struct WorkflowPackRuntimeMaterialization {
+    pub(crate) bindings: Vec<WorkflowPackBinding>,
+    pub(crate) agents: Vec<(Agent, AgentVersion)>,
+    pub(crate) workflow_definitions: Vec<WorkflowDefinition>,
+}
+
 pub(crate) fn load_and_validate_workflow_pack(
     manifest_path: &str,
 ) -> Result<
@@ -294,11 +300,11 @@ pub(crate) async fn workflow_pack_materialized_bindings_with_runtime_targets(
     state: &AppState,
     installation: &WorkflowPackInstallation,
     profile_assets: &[WorkflowPackProfileAsset],
-) -> Result<Vec<WorkflowPackBinding>, AppError> {
+) -> Result<WorkflowPackRuntimeMaterialization, AppError> {
     let mut bindings = workflow_pack_materialized_bindings(installation, profile_assets, "staged")?;
     let agent_targets = workflow_pack_materialize_agents(state, installation).await?;
     let workflow_definitions =
-        workflow_pack_materialize_workflow_definitions(state, installation, &agent_targets).await?;
+        workflow_pack_materialize_workflow_definitions(installation, &agent_targets)?;
     for binding in &mut bindings {
         match binding.binding_type.as_str() {
             "agent" => {
@@ -350,7 +356,14 @@ pub(crate) async fn workflow_pack_materialized_bindings_with_runtime_targets(
             _ => {}
         }
     }
-    Ok(bindings)
+    Ok(WorkflowPackRuntimeMaterialization {
+        bindings,
+        agents: agent_targets
+            .into_values()
+            .map(|target| (target.agent, target.version))
+            .collect(),
+        workflow_definitions: workflow_definitions.into_values().collect(),
+    })
 }
 
 pub(crate) async fn workflow_pack_materialize_agents(
@@ -407,8 +420,8 @@ pub(crate) async fn workflow_pack_materialize_agents(
                 agent_ref.id
             ))
         })?;
-        let agent = state
-            .create_agent_with_id(
+        let (agent, version) = state
+            .prepare_agent_with_id(
                 agent_id,
                 CreateAgent {
                     name: format!("{} / {}", manifest.name, agent_ref.id),
@@ -432,7 +445,6 @@ pub(crate) async fn workflow_pack_materialize_agents(
                 },
             )
             .await?;
-        let version = state.current_agent_version(agent.id).await?;
         targets.insert(
             agent_ref.id.clone(),
             WorkflowPackAgentRuntimeTarget { agent, version },
@@ -470,7 +482,7 @@ pub(crate) fn workflow_pack_agent_tools(agent: &workflow_pack::AgentRef) -> Vec<
         .iter()
         .chain(&agent.tool_scope.write)
         .chain(&agent.tool_scope.external_write)
-        .cloned()
+        .flat_map(|scope| workflow_pack_runtime_tools_for_scope(scope))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
@@ -480,7 +492,41 @@ pub(crate) fn workflow_pack_agent_tool_policy(agent: &workflow_pack::AgentRef) -
     json!({
         "source": "workflow_pack",
         "tool_scope": agent.tool_scope,
+        "runtime_tool_scope": workflow_pack_runtime_tool_scope(&agent.tool_scope),
         "approval_required_for_external_write": !agent.tool_scope.external_write.is_empty(),
+    })
+}
+
+pub(crate) fn workflow_pack_runtime_tools_for_scope(scope: &str) -> Vec<String> {
+    match scope {
+        "connector.read" | "profile.read" => ["semantic_object.fetch", "semantic_object.search"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        "schema.read" => [
+            "ontology_type.lookup",
+            "semantic_object.fetch",
+            "semantic_object.search",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
+        "artifact.write" => vec!["artifact.create".to_string()],
+        runtime_tool => vec![runtime_tool.to_string()],
+    }
+}
+
+pub(crate) fn workflow_pack_runtime_tool_scope(scope: &workflow_pack::ToolScope) -> Value {
+    let map_scopes = |scopes: &[String]| {
+        scopes
+            .iter()
+            .flat_map(|scope| workflow_pack_runtime_tools_for_scope(scope))
+            .collect::<BTreeSet<_>>()
+    };
+    json!({
+        "read": map_scopes(&scope.read),
+        "write": map_scopes(&scope.write),
+        "external_write": map_scopes(&scope.external_write),
     })
 }
 
@@ -526,8 +572,7 @@ pub(crate) fn workflow_pack_risk_level_slug(risk_level: &workflow_pack::RiskLeve
     }
 }
 
-pub(crate) async fn workflow_pack_materialize_workflow_definitions(
-    state: &AppState,
+pub(crate) fn workflow_pack_materialize_workflow_definitions(
     installation: &WorkflowPackInstallation,
     agent_targets: &BTreeMap<String, WorkflowPackAgentRuntimeTarget>,
 ) -> Result<BTreeMap<String, WorkflowDefinition>, AppError> {
@@ -587,42 +632,40 @@ pub(crate) async fn workflow_pack_materialize_workflow_definitions(
             workflow_file.eval_gate_refs.clone()
         };
         let now = Utc::now();
-        let definition = state
-            .create_workflow_definition(WorkflowDefinition {
-                id: Uuid::new_v4(),
-                pack_installation_id: Some(installation.id),
-                pack_id: Some(installation.pack_id.clone()),
-                pack_version: Some(installation.version.clone()),
-                name: workflow_file
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| workflow.id.clone()),
-                entrypoint: workflow.id.clone(),
-                trigger_type,
-                default_agent_id,
-                default_environment_id: None,
-                input_schema_ref: workflow_file.input_schema_ref.clone(),
-                output_schema_ref: workflow_pack_workflow_output_schema_ref(&workflow_file),
-                step_graph,
-                handoff_rules: workflow_pack_workflow_handoff_rules(
-                    &manifest,
-                    workflow,
-                    &workflow_file,
-                    &semantic_scopes,
-                ),
-                execution_strategy,
-                runtime_adapter,
-                runtime_mode,
-                runtime_capability_contract,
-                event_ingestion_policy,
-                approval_policy_ref: workflow_file.approval_policy_ref.clone(),
-                eval_gate_refs,
-                release_state: "staged".to_string(),
-                created_at: now,
-                updated_at: now,
-                archived_at: None,
-            })
-            .await?;
+        let definition = WorkflowDefinition {
+            id: Uuid::new_v4(),
+            pack_installation_id: Some(installation.id),
+            pack_id: Some(installation.pack_id.clone()),
+            pack_version: Some(installation.version.clone()),
+            name: workflow_file
+                .name
+                .clone()
+                .unwrap_or_else(|| workflow.id.clone()),
+            entrypoint: workflow.id.clone(),
+            trigger_type,
+            default_agent_id,
+            default_environment_id: None,
+            input_schema_ref: workflow_file.input_schema_ref.clone(),
+            output_schema_ref: workflow_pack_workflow_output_schema_ref(&workflow_file),
+            step_graph,
+            handoff_rules: workflow_pack_workflow_handoff_rules(
+                &manifest,
+                workflow,
+                &workflow_file,
+                &semantic_scopes,
+            ),
+            execution_strategy,
+            runtime_adapter,
+            runtime_mode,
+            runtime_capability_contract,
+            event_ingestion_policy,
+            approval_policy_ref: workflow_file.approval_policy_ref.clone(),
+            eval_gate_refs,
+            release_state: "staged".to_string(),
+            created_at: now,
+            updated_at: now,
+            archived_at: None,
+        };
         definitions.insert(workflow.id.clone(), definition);
     }
     Ok(definitions)
@@ -1047,9 +1090,27 @@ pub(crate) fn workflow_pack_workflow_tool_scope(
         .iter()
         .filter(|agent| agent_refs.contains(&agent.id))
     {
-        read.extend(agent.tool_scope.read.iter().cloned());
-        write.extend(agent.tool_scope.write.iter().cloned());
-        external_write.extend(agent.tool_scope.external_write.iter().cloned());
+        read.extend(
+            agent
+                .tool_scope
+                .read
+                .iter()
+                .flat_map(|scope| workflow_pack_runtime_tools_for_scope(scope)),
+        );
+        write.extend(
+            agent
+                .tool_scope
+                .write
+                .iter()
+                .flat_map(|scope| workflow_pack_runtime_tools_for_scope(scope)),
+        );
+        external_write.extend(
+            agent
+                .tool_scope
+                .external_write
+                .iter()
+                .flat_map(|scope| workflow_pack_runtime_tools_for_scope(scope)),
+        );
     }
     json!({
         "read": read,

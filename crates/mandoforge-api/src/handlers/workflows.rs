@@ -34,11 +34,11 @@ use crate::{
     set_managed_session_status, task_grant_session_matches,
     update_workflow_step_after_worker_session, validate_task_grant_scope_objects,
     validate_workflow_execution_binding, validate_workflow_graph_definition,
-    visible_session_ids_for_principal, workflow_definition_step_graph_for_execution,
-    workflow_input_digest, workflow_run_execution_denial, workflow_run_owns_session,
-    workflow_run_runtime_envelope, workflow_step_is_adapter_owned_compensation,
-    workflow_step_status_terminal, workflow_step_worker_message,
-    workflow_transition_filter_from_query,
+    visible_session_ids_for_principal, workflow_definition_agent_version_id,
+    workflow_definition_step_graph_for_execution, workflow_input_digest,
+    workflow_run_execution_denial, workflow_run_owns_session, workflow_run_runtime_envelope,
+    workflow_step_is_adapter_owned_compensation, workflow_step_status_terminal,
+    workflow_step_worker_message, workflow_transition_filter_from_query,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -484,14 +484,21 @@ async fn create_workflow_run(
         external_run_ref.as_deref(),
         &input.runtime_envelope,
     );
-    let session = state
-        .create_session(CreateSession {
-            agent_id: definition.default_agent_id,
-            environment_id,
-            title,
-            message: None,
-        })
-        .await?;
+    let session_input = CreateSession {
+        agent_id: definition.default_agent_id,
+        environment_id,
+        title,
+        message: None,
+    };
+    let session =
+        match workflow_definition_agent_version_id(&definition, definition.default_agent_id)? {
+            Some(agent_version_id) => {
+                state
+                    .create_session_for_agent_version(session_input, agent_version_id)
+                    .await?
+            }
+            None => state.create_session(session_input).await?,
+        };
     if let Err(error) = ensure_primary_session_thread(&state, session.id).await {
         let _ = set_managed_session_status(
             &state,

@@ -400,6 +400,8 @@ pub(crate) fn default_provider_tool_names() -> Vec<String> {
         "sql.query",
         "shell.exec",
         "codex.exec",
+        "artifact.create",
+        "native.connector.call",
         "semantic_object.fetch",
         "semantic_object.search",
         "semantic_link.expand",
@@ -480,6 +482,40 @@ fn provider_tool_schemas(allowed_tool_names: &[String]) -> Value {
                         "poll_interval_ms": {"type": "integer"}
                     },
                     "required": ["task"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "artifact.create",
+                "description": "Create a governed session artifact from normalized output.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "artifact_type": {"type": "string"},
+                        "path": {"type": "string"},
+                        "content": {}
+                    },
+                    "required": ["name", "content"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "native.connector.call",
+                "description": "Request a policy-governed native connector operation. External effects require an exact approval commit binding.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "connector_id": {"type": "string"},
+                        "operation": {"type": "string"},
+                        "side_effect_class": {"type": "string"},
+                        "payload": {"type": "object"}
+                    },
+                    "required": ["connector_id", "operation", "side_effect_class", "payload"]
                 }
             }
         }),

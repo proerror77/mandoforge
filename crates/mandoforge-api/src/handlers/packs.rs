@@ -411,23 +411,23 @@ async fn stage_workflow_pack_installation_route(
         ));
     }
     let profile_assets = state.list_workflow_pack_profile_assets(id).await?;
-    let bindings =
+    let materialization =
         workflow_pack_materialized_bindings_with_runtime_targets(&state, &current, &profile_assets)
             .await?;
     let staged_at = Utc::now();
-    let installation = state
-        .update_workflow_pack_installation_state(
+    let (installation, bindings) = state
+        .stage_workflow_pack_runtime_materialization(
             id,
-            "staged",
             &current.eval_gate_status,
             &current.release_gate_status,
             current.gate_evidence.clone(),
-            Some(staged_at),
+            staged_at,
             current.released_at,
-            Some("installed"),
+            materialization.agents,
+            materialization.workflow_definitions,
+            materialization.bindings,
         )
         .await?;
-    let bindings = state.create_workflow_pack_bindings(bindings).await?;
     let runtime_objects =
         workflow_pack_runtime_objects_from_bindings(&installation, &bindings, "staged")?;
     let runtime_objects = state

@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if ! command -v kubectl >/dev/null 2>&1; then
-  echo "kubectl is required to verify Remote Computer manifests" >&2
-  exit 1
-fi
+for required_command in kubectl jq; do
+  if ! command -v "$required_command" >/dev/null 2>&1; then
+    echo "$required_command is required to verify Remote Computer manifests" >&2
+    exit 1
+  fi
+done
 
 dry_run_manifests=(
   deploy/k8s/agent-remote-computer.yaml
@@ -137,11 +139,36 @@ if grep -q "name: mandoforge-agent-remote-computer-template" "$k8s_render"; then
 fi
 
 if ! grep -q "serviceAccountName: mandoforge-api" "$k8s_render" \
-  || ! grep -q "name: mandoforge-api-agent-sandbox" "$k8s_render" \
-  || ! grep -q 'resources:.*sandboxclaims' deploy/k8s/api-agent-sandbox-rbac.yaml; then
+  || ! grep -q "name: mandoforge-api-agent-sandbox" "$k8s_render"; then
   echo "API must use an explicit Agent Sandbox ServiceAccount and scoped RBAC" >&2
   exit 1
 fi
+
+role_json="$(kubectl create --dry-run=client -f deploy/k8s/api-agent-sandbox-rbac.yaml -o json \
+  | jq -cs 'map(select(.kind == "Role" and .metadata.name == "mandoforge-api-agent-sandbox"))[0]')"
+if ! jq -e '
+  def exact_rule($group; $resource; $verbs):
+    .apiGroups == [$group]
+    and .resources == [$resource]
+    and (.verbs | sort) == ($verbs | sort);
+  .rules as $rules
+  | ($rules | length) == 4
+    and any($rules[]; exact_rule(""; "pods"; ["get"]))
+    and any($rules[]; exact_rule(""; "pods/exec"; ["create", "get"]))
+    and any($rules[]; exact_rule("extensions.agents.x-k8s.io"; "sandboxclaims"; ["get", "create", "delete"]))
+    and any($rules[]; exact_rule("agents.x-k8s.io"; "sandboxes"; ["get"]))
+' <<<"$role_json" >/dev/null; then
+  echo "API Agent Sandbox RBAC must contain only the required resource/verb tuples" >&2
+  exit 1
+fi
+
+for worker_manifest in deploy/k8s/worker.yaml deploy/k8s/worker-isolated-pool.yaml; do
+  if ! kubectl create --dry-run=client -f "$worker_manifest" -o json \
+    | jq -e '.spec.template.spec.automountServiceAccountToken == false' >/dev/null; then
+    echo "$worker_manifest must set automountServiceAccountToken: false" >&2
+    exit 1
+  fi
+done
 
 if grep -q "mountPath: /var/run/secrets/kubernetes.io/serviceaccount" deploy/k8s/worker.yaml \
   || grep -q "mountPath: /var/run/secrets/kubernetes.io/serviceaccount" deploy/k8s/worker-isolated-pool.yaml; then
@@ -283,8 +310,9 @@ fi
 
 for publish_contract in \
   'RUNTIME_IMAGE_NAME: ghcr.io/${{ github.repository }}/mandoforge-agent-sandbox-runtime' \
-  'MANDOFORGE_AGENT_SANDBOX_IMAGE="$RUNTIME_IMAGE_NAME:${{ inputs.runtime_image_tag }}"' \
-  'docker push "$RUNTIME_IMAGE_NAME:${{ inputs.runtime_image_tag }}"'; do
+  'RUNTIME_IMAGE_TAG: ${{ inputs.runtime_image_tag }}' \
+  'MANDOFORGE_AGENT_SANDBOX_IMAGE="$RUNTIME_IMAGE_NAME:$RUNTIME_IMAGE_TAG"' \
+  'docker push "$RUNTIME_IMAGE_NAME:$RUNTIME_IMAGE_TAG"'; do
   if ! grep -Fq "$publish_contract" "$runtime_publish_workflow"; then
     echo "Agent Sandbox deploy workflow is missing publish contract: $publish_contract" >&2
     exit 1
@@ -372,14 +400,40 @@ if grep -q "templateRef:" "$agent_sandbox_render" "$agent_sandbox_smoke_render" 
   exit 1
 fi
 
-if ! grep -q "name: mandoforge-agent-sandbox-egress" "$agent_sandbox_egress_render" \
-  || ! grep -q -- "- Ingress" "$agent_sandbox_egress_render" \
-  || ! grep -q "kubernetes.io/metadata.name: kube-system" "$agent_sandbox_egress_render" \
-  || ! grep -q "port: 8787" "$agent_sandbox_egress_render" \
-  || ! grep -q "port: 443" "$agent_sandbox_egress_render" \
-  || ! grep -q "169.254.0.0/16" "$agent_sandbox_egress_render" \
-  || ! grep -q "fc00::/7" "$agent_sandbox_egress_render"; then
-  echo "Agent Sandbox pilot is missing bounded DNS, API, or external HTTPS egress rules" >&2
+network_policy_json="$(kubectl create --dry-run=client \
+  -f deploy/k8s/agent-sandbox-egress-networkpolicy.yaml -o json)"
+if ! jq -e '
+  def ports_exact($expected):
+    (.ports | sort_by([.protocol, .port])) == ($expected | sort_by([.protocol, .port]));
+  .spec as $spec
+  | $spec.podSelector.matchLabels == {
+      "app": "mandoforge-agent-remote-computer",
+      "mandoforge.io/runtime-substrate": "agent-sandbox"
+    }
+    and ($spec.policyTypes | sort) == (["Ingress", "Egress"] | sort)
+    and $spec.ingress == []
+    and ($spec.egress | length) == 3
+    and any($spec.egress[];
+      (.to | length) == 1
+      and .to[0].namespaceSelector.matchLabels["kubernetes.io/metadata.name"] == "kube-system"
+      and .to[0].podSelector.matchLabels["k8s-app"] == "kube-dns"
+      and ports_exact([{"protocol":"UDP","port":53},{"protocol":"TCP","port":53}]))
+    and any($spec.egress[];
+      (.to | length) == 1
+      and .to[0].podSelector.matchLabels.app == "mandoforge-api"
+      and ports_exact([{"protocol":"TCP","port":8787}]))
+    and any($spec.egress[];
+      (.to | length) == 2
+      and ([.to[].ipBlock.cidr] | sort) == (["0.0.0.0/0", "::/0"] | sort)
+      and any(.to[];
+        .ipBlock.cidr == "0.0.0.0/0"
+        and (["10.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16"] - .ipBlock.except | length) == 0)
+      and any(.to[];
+        .ipBlock.cidr == "::/0"
+        and (["::1/128", "fc00::/7", "fe80::/10"] - .ipBlock.except | length) == 0)
+      and ports_exact([{"protocol":"TCP","port":443}]))
+' <<<"$network_policy_json" >/dev/null; then
+  echo "Agent Sandbox pilot must deny ingress and allow only bounded DNS, API, and external HTTPS egress" >&2
   exit 1
 fi
 

@@ -171,7 +171,6 @@ pub(crate) async fn build_context_packet(
         "event_count": events.len(),
         "created_at": session.created_at,
         "updated_at": session.updated_at,
-        "context_layers": context_layers,
     });
     let policy_reminders = build_context_policy_reminders(&policy, &context_agent_version);
     let tool_policy = context_task_grant
@@ -2743,6 +2742,19 @@ pub(crate) fn validate_ontology_action_parameters(
         .as_object()
         .ok_or_else(|| AppError::bad_request("ontology action parameters must be a JSON object"))?;
     if input_schema.get("type").and_then(Value::as_str) == Some("object") {
+        let properties = input_schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                AppError::bad_request("ontology action object input_schema must declare properties")
+            })?;
+        for name in parameters.keys() {
+            if !properties.contains_key(name) {
+                return Err(AppError::bad_request(format!(
+                    "ontology action parameter {name} is not declared by the published contract"
+                )));
+            }
+        }
         return validate_handoff_payload_schema(
             &Value::Object(parameters.clone()),
             Some(input_schema),

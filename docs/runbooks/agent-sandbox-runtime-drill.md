@@ -69,6 +69,9 @@ kubectl get crd sandboxes.agents.x-k8s.io \
 ```bash
 scripts/build-agent-sandbox-runtime-image.sh
 scripts/verify-remote-computer-k8s-manifests.sh
+kubectl apply -f deploy/k8s/namespace.yaml
+# Disposable local drill only; production uses controlled secret delivery.
+kubectl apply -n agent-os -f deploy/k8s/secret.example.yaml
 kubectl apply --server-side --dry-run=server -k deploy/k8s
 ```
 

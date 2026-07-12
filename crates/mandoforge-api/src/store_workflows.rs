@@ -1,5 +1,6 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use serde_json::json;
 use std::collections::HashSet;
 use uuid::Uuid;
 
@@ -9,8 +10,8 @@ use crate::store_rows::{
     workflow_step_run_from_row, workflow_transition_from_row,
 };
 use crate::{
-    AppError, AppState, TaskGrant, WorkflowDefinition, WorkflowRun, WorkflowStepRun,
-    WorkflowTransition, WorkflowTransitionFilter,
+    Agent, AgentVersion, AppError, AppState, TaskGrant, WorkflowDefinition, WorkflowRun,
+    WorkflowStepRun, WorkflowTransition, WorkflowTransitionFilter,
 };
 
 const TASK_GRANT_COLUMNS: &str = "id, workflow_run_id, workflow_step_run_id, session_id, parent_grant_id, source_event_id, source_handoff_id, issuer_subject, grantee_agent_id, grantee_session_id, agent_class, objective, risk_level, status, expires_at, max_turns, max_tool_calls, max_runtime_seconds, max_cost_usd_micros, turns_used, tool_calls_used, cost_usd_micros_used, semantic_scopes, memory_scope, tool_scope, connector_scope, approval_policy, external_effects, context_packet_id, policy_revision_id, immutable_args_hash, audit_trace_id, created_at, updated_at";
@@ -73,6 +74,129 @@ fn task_grant_reservation_denial(
 }
 
 impl AppState {
+    pub(crate) async fn persist_prepared_agents_and_workflow_definitions(
+        &self,
+        agents: Vec<(Agent, AgentVersion)>,
+        definitions: Vec<WorkflowDefinition>,
+    ) -> Result<(), AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                if agents
+                    .iter()
+                    .any(|(agent, _)| store.agents.contains_key(&agent.id))
+                    || definitions
+                        .iter()
+                        .any(|definition| store.workflow_definitions.contains_key(&definition.id))
+                {
+                    return Err(AppError::bad_request(
+                        "prepared workflow pack materialization conflicts with existing resources",
+                    ));
+                }
+                for (agent, version) in agents {
+                    store.agent_versions.insert(agent.id, vec![version]);
+                    store.agents.insert(agent.id, agent);
+                }
+                for definition in definitions {
+                    store.workflow_definitions.insert(definition.id, definition);
+                }
+                Ok(())
+            }
+            StoreBackend::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                for (agent, version) in agents {
+                    sqlx::query(
+                        "INSERT INTO agents
+                            (id, tenant_id, name, kind, team_id, project_id, runtime_profile_id, agent_role, provider, model, system_prompt, tools, tool_policy, mcp_server_ids, skill_ids, workflow_pack_ids, remote_computer_profile, semantic_scopes, release_state, created_at)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)",
+                    )
+                    .bind(agent.id)
+                    .bind(self.current_tenant_id())
+                    .bind(&agent.name)
+                    .bind(&agent.kind)
+                    .bind(agent.team_id)
+                    .bind(agent.project_id)
+                    .bind(agent.runtime_profile_id)
+                    .bind(&agent.agent_role)
+                    .bind(&agent.provider)
+                    .bind(&agent.model)
+                    .bind(&agent.system_prompt)
+                    .bind(json!(&agent.tools))
+                    .bind(&agent.tool_policy)
+                    .bind(json!(&agent.mcp_server_ids))
+                    .bind(json!(&agent.skill_ids))
+                    .bind(json!(&agent.workflow_pack_ids))
+                    .bind(&agent.remote_computer_profile)
+                    .bind(&agent.semantic_scopes)
+                    .bind(&agent.release_state)
+                    .bind(agent.created_at)
+                    .execute(&mut *tx)
+                    .await?;
+                    sqlx::query(
+                        "INSERT INTO agent_versions (id, agent_id, version, provider, model, system_prompt, tools, tool_names, runtime_config, approval_policy, runtime_profile_id, runtime_profile_snapshot, mcp_server_ids, skill_ids, workflow_pack_ids, remote_computer_profile, semantic_scopes, created_at)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)",
+                    )
+                    .bind(version.id)
+                    .bind(version.agent_id)
+                    .bind(version.version)
+                    .bind(&version.provider)
+                    .bind(&version.model)
+                    .bind(&version.system_prompt)
+                    .bind(json!(&version.tools))
+                    .bind(json!(&version.tool_names))
+                    .bind(&version.runtime_config)
+                    .bind(&version.approval_policy)
+                    .bind(version.runtime_profile_id)
+                    .bind(&version.runtime_profile_snapshot)
+                    .bind(json!(&version.mcp_server_ids))
+                    .bind(json!(&version.skill_ids))
+                    .bind(json!(&version.workflow_pack_ids))
+                    .bind(&version.remote_computer_profile)
+                    .bind(&version.semantic_scopes)
+                    .bind(version.created_at)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                for definition in definitions {
+                    sqlx::query(
+                        "INSERT INTO workflow_definitions
+                            (id, tenant_id, pack_installation_id, pack_id, pack_version, name, entrypoint, trigger_type, default_agent_id, default_environment_id, input_schema_ref, output_schema_ref, step_graph, handoff_rules, execution_strategy, runtime_adapter, runtime_mode, runtime_capability_contract, event_ingestion_policy, approval_policy_ref, eval_gate_refs, release_state, created_at, updated_at, archived_at)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)",
+                    )
+                    .bind(definition.id)
+                    .bind(self.current_tenant_id())
+                    .bind(definition.pack_installation_id)
+                    .bind(&definition.pack_id)
+                    .bind(&definition.pack_version)
+                    .bind(&definition.name)
+                    .bind(&definition.entrypoint)
+                    .bind(&definition.trigger_type)
+                    .bind(definition.default_agent_id)
+                    .bind(definition.default_environment_id)
+                    .bind(&definition.input_schema_ref)
+                    .bind(&definition.output_schema_ref)
+                    .bind(&definition.step_graph)
+                    .bind(&definition.handoff_rules)
+                    .bind(&definition.execution_strategy)
+                    .bind(&definition.runtime_adapter)
+                    .bind(&definition.runtime_mode)
+                    .bind(&definition.runtime_capability_contract)
+                    .bind(&definition.event_ingestion_policy)
+                    .bind(&definition.approval_policy_ref)
+                    .bind(json!(&definition.eval_gate_refs))
+                    .bind(&definition.release_state)
+                    .bind(definition.created_at)
+                    .bind(definition.updated_at)
+                    .bind(definition.archived_at)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                tx.commit().await?;
+                Ok(())
+            }
+        }
+    }
+
     pub(crate) async fn create_workflow_definition(
         &self,
         definition: WorkflowDefinition,
