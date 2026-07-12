@@ -36,11 +36,14 @@ use crate::{
     validate_task_grant_scope_objects, validate_workflow_execution_binding,
     validate_workflow_graph_definition, visible_session_ids_for_principal,
     workflow_definition_agent_version_id, workflow_definition_step_graph_for_execution,
+    workflow_graph_step_agent_id, workflow_graph_step_by_key,
+    workflow_graph_step_requires_isolated_handoff_context,
     workflow_handoff_rules_is_dynamic_materialization, workflow_input_digest,
     workflow_run_execution_denial, workflow_run_owns_session,
     workflow_run_runtime_envelope_with_pinned_ontology_release,
-    workflow_step_is_adapter_owned_compensation, workflow_step_status_terminal,
-    workflow_step_worker_message, workflow_transition_filter_from_query,
+    workflow_step_is_adapter_owned_compensation, workflow_step_run_is_handoff_approval_blocked,
+    workflow_step_status_terminal, workflow_step_worker_message,
+    workflow_transition_filter_from_query,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -766,6 +769,33 @@ async fn create_workflow_step_run(
     )
     .await?;
     let step_key = require_non_empty(input.step_key, "workflow step key")?;
+    let definition = state
+        .get_workflow_definition(run.workflow_definition_id)
+        .await?;
+    if let Some(graph_step) = workflow_graph_step_by_key(&definition.step_graph, &step_key)? {
+        let target_agent_id = workflow_graph_step_agent_id(&definition, graph_step)?;
+        let isolated_handoff_context = workflow_graph_step_requires_isolated_handoff_context(
+            graph_step,
+            target_agent_id,
+            definition.default_agent_id,
+        )?;
+        let approval_required = match graph_step.get("approval_required") {
+            Some(value) => value.as_bool().ok_or_else(|| {
+                AppError::bad_request("workflow graph step approval_required must be boolean")
+            })?,
+            None => false,
+        };
+        let duplicate = state
+            .list_workflow_step_runs(run.id)
+            .await?
+            .iter()
+            .any(|step| step.step_key == step_key);
+        if isolated_handoff_context || approval_required || duplicate {
+            return Err(AppError::forbidden(
+                "governed or duplicate definition-owned workflow steps cannot be created through the workflow step API",
+            ));
+        }
+    }
     let step_type = require_non_empty(input.step_type, "workflow step type")?;
     let status = normalize_workflow_run_status(&input.status)?;
     let session_id = input.session_id.unwrap_or(run.primary_session_id);
@@ -883,6 +913,12 @@ async fn update_workflow_step_run(
         Some(run.primary_session_id),
     )
     .await?;
+
+    if workflow_step_run_is_handoff_approval_blocked(&current) {
+        return Err(AppError::forbidden(
+            "approval-gated workflow handoffs cannot be updated through the workflow step API",
+        ));
+    }
 
     let previous_status = current.status.clone();
     let next_status = input

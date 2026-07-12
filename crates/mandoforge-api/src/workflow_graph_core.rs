@@ -981,9 +981,32 @@ pub(crate) async fn materialize_workflow_graph_step_with_policy_context(
         workflow_graph_step_uuid(graph_step, "environment_id")?.or(session.environment_id);
     let now = Utc::now();
     let terminal = workflow_step_status_terminal(status);
-    if terminal
+    let risk_level = normalize_task_grant_risk_level(
+        graph_step
+            .get("risk_level")
+            .and_then(Value::as_str)
+            .unwrap_or("low"),
+    )?;
+    let approval_required = match graph_step.get("approval_required") {
+        Some(value) => value.as_bool().ok_or_else(|| {
+            AppError::bad_request("workflow graph step approval_required must be boolean")
+        })?,
+        None => false,
+    };
+    let approval_blocked = approval_required && !terminal;
+    let isolated_handoff_context = workflow_graph_step_requires_isolated_handoff_context(
+        graph_step,
+        agent_id,
+        session.agent_id,
+    )?;
+    if isolated_handoff_context && risk_level == "high" && !approval_required {
+        return Err(AppError::bad_request(
+            "high-risk workflow handoffs must require approval",
+        ));
+    }
+    if (terminal || approval_blocked)
+        && isolated_handoff_context
         && let Some(agent_id) = agent_id
-        && agent_id != session.agent_id
     {
         let agent_version_id = graph_agent_version_id.ok_or_else(|| {
             AppError::bad_request(
@@ -996,6 +1019,19 @@ pub(crate) async fn materialize_workflow_graph_step_with_policy_context(
             .into_iter()
             .find(|version| version.id == agent_version_id)
             .ok_or_else(|| AppError::not_found("workflow step agent version not found"))?;
+        let mut input_payload = workflow_graph_step_input_payload(run, graph_step, input_context);
+        if approval_blocked && let Some(input) = input_payload.as_object_mut() {
+            input.insert(
+                "handoff_governance".to_string(),
+                json!({
+                    "source_agent_ref": graph_step.get("handoff_source_agent_ref"),
+                    "intent": graph_step.get("handoff_intent"),
+                    "risk_level": risk_level,
+                    "approval_required": true,
+                    "schema_ref": graph_step.get("handoff_schema_ref"),
+                }),
+            );
+        }
         let step = state
             .create_workflow_step_run(WorkflowStepRun {
                 id: Uuid::new_v4(),
@@ -1009,9 +1045,17 @@ pub(crate) async fn materialize_workflow_graph_step_with_policy_context(
                 handoff_id: None,
                 task_grant_id: None,
                 environment_id,
-                status: status.to_string(),
-                input_payload: workflow_graph_step_input_payload(run, graph_step, input_context),
-                output_payload,
+                status: if approval_blocked {
+                    "requires_action".to_string()
+                } else {
+                    status.to_string()
+                },
+                input_payload,
+                output_payload: if approval_blocked {
+                    json!({"block_reason": "handoff_approval_required"})
+                } else {
+                    output_payload
+                },
                 artifact_ids: Vec::new(),
                 approval_ids: Vec::new(),
                 tool_call_ids: Vec::new(),
@@ -1019,7 +1063,7 @@ pub(crate) async fn materialize_workflow_graph_step_with_policy_context(
                 lease_expires_at: None,
                 context_packet_id: None,
                 started_at: Some(now),
-                completed_at: Some(now),
+                completed_at: terminal.then_some(now),
                 scheduled_at,
                 created_at: now,
                 updated_at: now,
@@ -1028,9 +1072,7 @@ pub(crate) async fn materialize_workflow_graph_step_with_policy_context(
         record_workflow_step_run_created(state, run, &step).await?;
         return Ok(step);
     }
-    if let Some(agent_id) = agent_id
-        && agent_id != session.agent_id
-    {
+    if isolated_handoff_context && let Some(agent_id) = agent_id {
         let agent_version_id = graph_agent_version_id.ok_or_else(|| {
             AppError::bad_request(
                 "workflow graph steps assigned to another agent must pin agent_version_id",
@@ -1044,12 +1086,6 @@ pub(crate) async fn materialize_workflow_graph_step_with_policy_context(
             .find(|version| version.id == agent_version_id)
             .ok_or_else(|| AppError::not_found("workflow step agent version not found"))?;
         let remaining_budgets = task_grant_remaining_budgets(root_grant, now)?;
-        let risk_level = normalize_task_grant_risk_level(
-            graph_step
-                .get("risk_level")
-                .and_then(Value::as_str)
-                .unwrap_or("low"),
-        )?;
         let step_id = Uuid::new_v4();
         let mut child_grant = TaskGrant {
             id: Uuid::new_v4(),
@@ -1425,6 +1461,39 @@ pub(crate) fn workflow_graph_step_is_adapter_owned_compensation(graph_step: &Val
         .or_else(|| graph_step.get("compensation_for"))
         .is_some();
     has_failure_source && (type_is_adapter || adapter_is_compensation || explicit_flag)
+}
+
+pub(crate) fn workflow_graph_step_requires_isolated_handoff_context(
+    graph_step: &Value,
+    target_agent_id: Option<Uuid>,
+    primary_agent_id: Uuid,
+) -> Result<bool, AppError> {
+    let governed_handoff = match graph_step.get("handoff_source_agent_ref") {
+        Some(value) => {
+            value
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    AppError::bad_request(
+                        "workflow graph step handoff_source_agent_ref must be a non-empty string",
+                    )
+                })?;
+            true
+        }
+        None => false,
+    };
+    Ok(target_agent_id
+        .is_some_and(|target_agent_id| target_agent_id != primary_agent_id || governed_handoff))
+}
+
+pub(crate) fn workflow_step_run_is_handoff_approval_blocked(step: &WorkflowStepRun) -> bool {
+    step.status == "requires_action"
+        && step
+            .output_payload
+            .get("block_reason")
+            .and_then(Value::as_str)
+            .is_some_and(|reason| reason == "handoff_approval_required")
 }
 
 pub(crate) fn workflow_graph_step_agent_id(

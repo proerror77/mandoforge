@@ -644,6 +644,7 @@ impl WorkflowPackManifest {
         }
 
         for agent in &self.agents {
+            let mut handoff_keys = BTreeSet::new();
             for handoff in &agent.handoffs {
                 if !agent_ids.contains(&handoff.target_agent) {
                     bail!(
@@ -661,6 +662,14 @@ impl WorkflowPackManifest {
                 }
                 for intent in &handoff.intents {
                     validate_id("handoff intents", intent)?;
+                    if !handoff_keys.insert((handoff.target_agent.clone(), intent.clone())) {
+                        bail!(
+                            "agent {} declares duplicate handoff to {} for intent {}",
+                            agent.id,
+                            handoff.target_agent,
+                            intent
+                        );
+                    }
                 }
                 if handoff.risk_level == RiskLevel::High && !handoff.approval_required {
                     bail!(
@@ -1985,6 +1994,29 @@ release_gates:
             .expect_err("high-risk handoff without approval must fail");
 
         assert!(error.to_string().contains("must require approval"));
+    }
+
+    #[test]
+    fn rejects_duplicate_handoff_target_intent_rules() {
+        let input = std::fs::read_to_string(fixture_manifest_path()).expect("fixture manifest");
+        let mut manifest = WorkflowPackManifest::from_yaml_str(&input).expect("manifest parses");
+        manifest.agents[0].handoffs.push(HandoffRule {
+            target_agent: "analyzer".to_string(),
+            intents: vec!["classify-ai-use-case".to_string()],
+            risk_level: RiskLevel::Low,
+            approval_required: false,
+            schema: "schemas/handoff.schema.json".to_string(),
+        });
+
+        let error = manifest
+            .validate_package_dir(fixture_manifest_path().parent().unwrap())
+            .expect_err("duplicate handoff target and intent must fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("declares duplicate handoff to analyzer for intent classify-ai-use-case")
+        );
     }
 
     #[test]

@@ -11324,6 +11324,101 @@ async fn memory_governance_filters_objects_to_visible_sessions() {
     );
 }
 
+#[test]
+fn workflow_pack_explicit_step_graph_inherits_manifest_handoff_governance() {
+    let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("packs/ai-governance/package.yaml");
+    let manifest_input = std::fs::read_to_string(manifest_path).expect("fixture manifest");
+    let manifest = workflow_pack::WorkflowPackManifest::from_yaml_str(&manifest_input)
+        .expect("manifest parses");
+    let workflow = manifest
+        .workflows
+        .iter()
+        .find(|workflow| workflow.id == "profile-onboarding")
+        .expect("profile onboarding workflow");
+    let workflow_file: WorkflowPackWorkflowFile = serde_yaml::from_str(
+        r#"
+id: profile-onboarding
+entry_agent: reader
+step_graph:
+  source: explicit_test_graph
+  steps:
+    - key: collect
+      type: agent
+      agent_ref: reader
+      start: true
+    - key: analyze
+      type: agent
+      agent_ref: analyzer
+      depends_on: [collect]
+      risk_level: low
+      approval_required: false
+    - key: draft
+      type: agent
+      agent_ref: writer
+      depends_on: [analyze]
+      risk_level: low
+      approval_required: false
+steps:
+  - agent: reader
+  - agent: analyzer
+  - agent: writer
+"#,
+    )
+    .expect("workflow file parses");
+
+    let graph = workflow_pack_workflow_step_graph(&manifest, workflow, &workflow_file)
+        .expect("explicit graph is governed");
+
+    assert_eq!(graph["source"], json!("explicit_test_graph"));
+    assert_eq!(
+        graph["steps"][1]["handoff_source_agent_ref"],
+        json!("reader")
+    );
+    assert_eq!(graph["steps"][1]["risk_level"], json!("medium"));
+    assert_eq!(graph["steps"][1]["approval_required"], json!(false));
+    assert_eq!(
+        graph["steps"][2]["handoff_source_agent_ref"],
+        json!("analyzer")
+    );
+    assert_eq!(graph["steps"][2]["risk_level"], json!("high"));
+    assert_eq!(graph["steps"][2]["approval_required"], json!(true));
+
+    let mut topology_bypass = workflow_file.clone();
+    topology_bypass.step_graph.as_mut().expect("explicit graph")["steps"][2]["depends_on"] =
+        json!(["collect"]);
+    let error = workflow_pack_workflow_step_graph(&manifest, workflow, &topology_bypass)
+        .expect_err("explicit graph cannot change the governed handoff source");
+    assert!(
+        error
+            .message
+            .contains("must preserve its declared linear handoff topology")
+    );
+}
+
+#[test]
+fn governed_handoff_back_to_primary_agent_requires_isolated_context() {
+    let primary_agent_id = Uuid::new_v4();
+
+    assert!(
+        workflow_graph_step_requires_isolated_handoff_context(
+            &json!({"handoff_source_agent_ref": "analyzer"}),
+            Some(primary_agent_id),
+            primary_agent_id,
+        )
+        .expect("governed handoff is valid")
+    );
+    assert!(
+        !workflow_graph_step_requires_isolated_handoff_context(
+            &json!({}),
+            Some(primary_agent_id),
+            primary_agent_id,
+        )
+        .expect("root agent step is valid")
+    );
+}
+
 #[tokio::test]
 async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() {
     let _env = env_lock().lock().expect("env lock");
@@ -11532,6 +11627,30 @@ async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() 
     assert_eq!(
         staged_workflow_definition["step_graph"]["steps"][0]["agent_version_id"],
         reader_binding["target_id"]
+    );
+    assert_eq!(
+        staged_workflow_definition["step_graph"]["steps"][1]["handoff_source_agent_ref"],
+        json!("reader")
+    );
+    assert_eq!(
+        staged_workflow_definition["step_graph"]["steps"][1]["risk_level"],
+        json!("medium")
+    );
+    assert_eq!(
+        staged_workflow_definition["step_graph"]["steps"][1]["approval_required"],
+        json!(false)
+    );
+    assert_eq!(
+        staged_workflow_definition["step_graph"]["steps"][2]["handoff_source_agent_ref"],
+        json!("analyzer")
+    );
+    assert_eq!(
+        staged_workflow_definition["step_graph"]["steps"][2]["risk_level"],
+        json!("high")
+    );
+    assert_eq!(
+        staged_workflow_definition["step_graph"]["steps"][2]["approval_required"],
+        json!(true)
     );
     let root_tool_scope =
         &staged_workflow_definition["handoff_rules"]["root_task_grant"]["tool_scope"];
@@ -12067,6 +12186,142 @@ async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() 
     .await;
     assert_eq!(analyzer_grant["parent_grant_id"], json!(root_task_grant_id));
     assert_eq!(analyzer_grant["grantee_agent_id"], json!(analyzer_agent_id));
+    assert_eq!(analyzer_grant["risk_level"], json!("medium"));
+
+    let analyzer_step_id = analyzer_step["id"].as_str().expect("analyzer step id");
+    let _: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "PATCH",
+            &format!("/api/workflow-step-runs/{analyzer_step_id}"),
+            json!({"status": "completed", "output_payload": {"assessment": "draft"}}),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    let approval_blocked_steps: Vec<Value> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/workflow-runs/{workflow_run_id}/steps"))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let writer_step = approval_blocked_steps
+        .iter()
+        .find(|step| step["step_key"] == json!("writer"))
+        .expect("writer handoff approval step");
+    assert_eq!(writer_step["agent_id"], json!(writer_agent_id));
+    assert_eq!(writer_step["agent_version_id"], writer_binding["target_id"]);
+    assert_eq!(writer_step["status"], json!("requires_action"));
+    assert_eq!(writer_step["session_id"], Value::Null);
+    assert_eq!(writer_step["thread_id"], Value::Null);
+    assert_eq!(writer_step["task_grant_id"], Value::Null);
+    assert_eq!(
+        writer_step["input_payload"]["handoff_governance"]["risk_level"],
+        json!("high")
+    );
+    assert_eq!(
+        writer_step["input_payload"]["handoff_governance"]["approval_required"],
+        json!(true)
+    );
+    assert_eq!(
+        writer_step["output_payload"]["block_reason"],
+        json!("handoff_approval_required")
+    );
+    let writer_step_id = writer_step["id"].as_str().expect("writer step id");
+    let (status, error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/workflow-runs/{workflow_run_id}/steps"),
+            json!({
+                "step_key": "writer",
+                "step_type": "agent",
+                "status": "queued"
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        error["error"].as_str(),
+        Some(
+            "governed or duplicate definition-owned workflow steps cannot be created through the workflow step API"
+        )
+    );
+
+    let mut forged_writer_step: WorkflowStepRun =
+        serde_json::from_value(writer_step.clone()).expect("writer step decodes");
+    forged_writer_step.id = Uuid::new_v4();
+    forged_writer_step.status = "completed".to_string();
+    forged_writer_step.output_payload = json!({"assessment": "forged"});
+    forged_writer_step.completed_at = Some(Utc::now());
+    forged_writer_step.created_at = Utc::now();
+    forged_writer_step.updated_at = Utc::now();
+    state
+        .create_workflow_step_run(forged_writer_step)
+        .await
+        .expect("inject duplicate step to verify finalizer defense");
+    let persisted_run = state
+        .get_workflow_run(Uuid::parse_str(workflow_run_id).expect("workflow run UUID"))
+        .await
+        .expect("workflow run persists");
+    let persisted_definition = state
+        .get_workflow_definition(persisted_run.workflow_definition_id)
+        .await
+        .expect("workflow definition persists");
+    assert!(
+        !workflow_graph_run_completed(&state, &persisted_definition, &persisted_run)
+            .await
+            .expect("blocked handoff prevents completion")
+    );
+
+    let (status, error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "PATCH",
+            &format!("/api/workflow-step-runs/{writer_step_id}"),
+            json!({"status": "completed", "output_payload": {"assessment": "approved"}}),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        error["error"].as_str(),
+        Some("approval-gated workflow handoffs cannot be updated through the workflow step API")
+    );
+    let steps_after_blocked_patch: Vec<WorkflowStepRun> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/workflow-runs/{workflow_run_id}/steps"))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let writer_step_after_patch = steps_after_blocked_patch
+        .iter()
+        .find(|step| step.id.to_string() == writer_step_id)
+        .expect("writer step remains persisted");
+    assert_eq!(writer_step_after_patch.status, "requires_action");
+    assert_eq!(
+        writer_step_after_patch.output_payload["block_reason"],
+        json!("handoff_approval_required")
+    );
+    let approval_blocked_run: Value = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/workflow-runs/{workflow_run_id}"))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(approval_blocked_run["status"], json!("requires_action"));
     assert_eq!(
         released.gate_evidence["evidence"]["eval_run_id"],
         json!("eval-ai-governance-1")

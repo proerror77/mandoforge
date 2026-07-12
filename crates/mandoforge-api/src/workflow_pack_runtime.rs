@@ -605,7 +605,7 @@ pub(crate) fn workflow_pack_materialize_workflow_definitions(
         )?;
         let mut step_graph = workflow_definition_step_graph_for_execution(
             &execution_strategy,
-            &workflow_pack_workflow_step_graph(workflow, &workflow_file)?,
+            &workflow_pack_workflow_step_graph(&manifest, workflow, &workflow_file)?,
         );
         workflow_pack_bind_step_agents(&mut step_graph, workflow, agent_targets)?;
         workflow_graph_start_steps(&step_graph)?;
@@ -783,29 +783,22 @@ pub(crate) fn workflow_pack_value_string_array(value: Option<&Value>) -> Vec<Str
 }
 
 pub(crate) fn workflow_pack_workflow_step_graph(
+    manifest: &workflow_pack::WorkflowPackManifest,
     workflow: &workflow_pack::WorkflowRef,
     workflow_file: &WorkflowPackWorkflowFile,
 ) -> Result<Value, AppError> {
-    if let Some(step_graph) = &workflow_file.step_graph {
-        if !step_graph.is_object() {
-            return Err(AppError::bad_request(format!(
-                "workflow pack workflow {} step_graph must be a JSON object",
-                workflow.id
-            )));
-        }
-        return Ok(step_graph.clone());
-    }
     let mut graph_steps = Vec::new();
     let mut used_keys = BTreeSet::new();
     let mut previous_key: Option<String> = None;
+    let mut previous_agent_ref: Option<String> = None;
     for (index, step) in workflow_file.steps.iter().enumerate() {
         let step_key = workflow_pack_workflow_step_key(step, index, &mut used_keys);
         let mut graph_step = serde_json::Map::new();
         graph_step.insert("key".to_string(), json!(step_key));
         graph_step.insert("type".to_string(), json!("agent"));
-        if let Some(agent_ref) = workflow_pack_workflow_step_string(step, "agent") {
-            graph_step.insert("workflow_agent_ref".to_string(), json!(agent_ref));
-        }
+        let agent_ref = workflow_pack_workflow_step_string(step, "agent")
+            .unwrap_or_else(|| workflow.entry_agent.clone());
+        graph_step.insert("workflow_agent_ref".to_string(), json!(agent_ref));
         if index == 0 {
             graph_step.insert("start".to_string(), json!(true));
         } else if let Some(previous_key) = &previous_key {
@@ -824,6 +817,67 @@ pub(crate) fn workflow_pack_workflow_step_graph(
                 graph_step.insert(key.to_string(), value.clone());
             }
         }
+        if let Some(source_agent_ref) = &previous_agent_ref
+            && (source_agent_ref != &agent_ref || graph_step.contains_key("handoff_intent"))
+        {
+            let intent = graph_step.get("handoff_intent").and_then(Value::as_str);
+            let source_agent = manifest
+                .agents
+                .iter()
+                .find(|agent| agent.id == *source_agent_ref)
+                .ok_or_else(|| {
+                    AppError::bad_request(format!(
+                        "workflow pack workflow {} references unknown source agent {}",
+                        workflow.id, source_agent_ref
+                    ))
+                })?;
+            let candidates = source_agent
+                .handoffs
+                .iter()
+                .filter(|handoff| handoff.target_agent == agent_ref)
+                .collect::<Vec<_>>();
+            let handoff = match intent {
+                Some(intent) => {
+                    let mut matches = candidates.iter().copied().filter(|handoff| {
+                        handoff.intents.iter().any(|candidate| candidate == intent)
+                    });
+                    let handoff = matches.next().ok_or_else(|| {
+                        AppError::bad_request(format!(
+                            "workflow pack workflow {} handoff {} -> {} does not allow intent {}",
+                            workflow.id, source_agent_ref, agent_ref, intent
+                        ))
+                    })?;
+                    if matches.next().is_some() {
+                        return Err(AppError::bad_request(format!(
+                            "workflow pack workflow {} handoff {} -> {} intent {} is ambiguous",
+                            workflow.id, source_agent_ref, agent_ref, intent
+                        )));
+                    }
+                    handoff
+                }
+                None if candidates.len() == 1 => candidates[0],
+                None => {
+                    return Err(AppError::bad_request(format!(
+                        "workflow pack workflow {} handoff {} -> {} requires handoff_intent",
+                        workflow.id, source_agent_ref, agent_ref
+                    )));
+                }
+            };
+            graph_step.insert(
+                "handoff_source_agent_ref".to_string(),
+                json!(source_agent_ref),
+            );
+            graph_step.insert(
+                "risk_level".to_string(),
+                json!(workflow_pack_risk_level_slug(&handoff.risk_level)),
+            );
+            graph_step.insert(
+                "approval_required".to_string(),
+                json!(handoff.approval_required),
+            );
+            graph_step.insert("handoff_schema_ref".to_string(), json!(handoff.schema));
+        }
+        previous_agent_ref = Some(agent_ref);
         previous_key = Some(step_key);
         graph_steps.push(Value::Object(graph_step));
     }
@@ -835,11 +889,125 @@ pub(crate) fn workflow_pack_workflow_step_graph(
             "start": true
         }));
     }
-    Ok(json!({
+    let generated_step_graph = json!({
         "source": "workflow_pack_file",
         "workflow_id": workflow.id,
         "steps": graph_steps
-    }))
+    });
+    match &workflow_file.step_graph {
+        Some(step_graph) => workflow_pack_apply_manifest_governance_to_step_graph(
+            workflow,
+            step_graph,
+            &generated_step_graph,
+        ),
+        None => Ok(generated_step_graph),
+    }
+}
+
+fn workflow_pack_apply_manifest_governance_to_step_graph(
+    workflow: &workflow_pack::WorkflowRef,
+    step_graph: &Value,
+    generated_step_graph: &Value,
+) -> Result<Value, AppError> {
+    let explicit_start_keys = workflow_graph_start_steps(step_graph)?
+        .into_iter()
+        .map(workflow_graph_step_key)
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut step_graph = step_graph.clone();
+    let explicit_steps = step_graph
+        .get_mut("steps")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| {
+            AppError::bad_request(format!(
+                "workflow pack workflow {} step_graph must be a JSON object with steps",
+                workflow.id
+            ))
+        })?;
+    let generated_steps = generated_step_graph
+        .get("steps")
+        .and_then(Value::as_array)
+        .expect("generated workflow pack graph always contains steps");
+    let explicit_agent_step_indexes = explicit_steps
+        .iter()
+        .enumerate()
+        .filter(|(_, step)| !workflow_graph_step_is_adapter_owned_compensation(step))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if explicit_agent_step_indexes.len() != generated_steps.len() {
+        return Err(AppError::bad_request(format!(
+            "workflow pack workflow {} step_graph must match its declared steps",
+            workflow.id
+        )));
+    }
+    let explicit_agent_step_keys = explicit_agent_step_indexes
+        .iter()
+        .map(|index| workflow_graph_step_key(&explicit_steps[*index]))
+        .collect::<Result<Vec<_>, _>>()?;
+    if explicit_start_keys != explicit_agent_step_keys[..1] {
+        return Err(AppError::bad_request(format!(
+            "workflow pack workflow {} step_graph must start with its declared entry agent",
+            workflow.id
+        )));
+    }
+    for (position, explicit_index) in explicit_agent_step_indexes.iter().enumerate() {
+        let step = &explicit_steps[*explicit_index];
+        let dependencies = workflow_graph_step_dependencies(step)?;
+        let expected_dependencies = position
+            .checked_sub(1)
+            .map(|previous| vec![explicit_agent_step_keys[previous].clone()])
+            .unwrap_or_default();
+        let explicitly_starts = step
+            .get("start")
+            .or_else(|| step.get("entrypoint"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if dependencies != expected_dependencies || (position > 0 && explicitly_starts) {
+            return Err(AppError::bad_request(format!(
+                "workflow pack workflow {} step_graph must preserve its declared linear handoff topology",
+                workflow.id
+            )));
+        }
+    }
+
+    for (generated_step, explicit_index) in generated_steps.iter().zip(explicit_agent_step_indexes)
+    {
+        let explicit_step = &mut explicit_steps[explicit_index];
+        let expected_agent_ref =
+            workflow_pack_workflow_step_string(generated_step, "workflow_agent_ref")
+                .expect("generated workflow pack agent step always declares workflow_agent_ref");
+        let actual_agent_ref =
+            workflow_pack_workflow_step_string(explicit_step, "workflow_agent_ref")
+                .or_else(|| workflow_pack_workflow_step_string(explicit_step, "agent_ref"))
+                .or_else(|| workflow_pack_workflow_step_string(explicit_step, "agent"))
+                .unwrap_or_else(|| workflow.entry_agent.clone());
+        if actual_agent_ref != expected_agent_ref {
+            return Err(AppError::bad_request(format!(
+                "workflow pack workflow {} step_graph agent {} does not match declared agent {}",
+                workflow.id, actual_agent_ref, expected_agent_ref
+            )));
+        }
+        let explicit_step = explicit_step.as_object_mut().ok_or_else(|| {
+            AppError::bad_request("workflow pack step_graph steps must be JSON objects")
+        })?;
+        explicit_step.insert("workflow_agent_ref".to_string(), json!(expected_agent_ref));
+        for key in [
+            "handoff_source_agent_ref",
+            "handoff_intent",
+            "risk_level",
+            "approval_required",
+            "handoff_schema_ref",
+        ] {
+            match generated_step.get(key) {
+                Some(value) => {
+                    explicit_step.insert(key.to_string(), value.clone());
+                }
+                None => {
+                    explicit_step.remove(key);
+                }
+            }
+        }
+    }
+    Ok(step_graph)
 }
 
 pub(crate) fn workflow_pack_bind_step_agents(
@@ -856,6 +1024,7 @@ pub(crate) fn workflow_pack_bind_step_agents(
             continue;
         }
         let agent_ref = workflow_pack_workflow_step_string(step, "workflow_agent_ref")
+            .or_else(|| workflow_pack_workflow_step_string(step, "agent_ref"))
             .or_else(|| workflow_pack_workflow_step_string(step, "agent"))
             .unwrap_or_else(|| workflow.entry_agent.clone());
         let target = agent_targets.get(&agent_ref).ok_or_else(|| {
@@ -1076,6 +1245,7 @@ pub(crate) fn workflow_pack_workflow_tool_scope(
     {
         for step in steps {
             if let Some(agent_ref) = workflow_pack_workflow_step_string(step, "workflow_agent_ref")
+                .or_else(|| workflow_pack_workflow_step_string(step, "agent_ref"))
                 .or_else(|| workflow_pack_workflow_step_string(step, "agent"))
             {
                 agent_refs.insert(agent_ref);

@@ -407,6 +407,13 @@ pub(crate) async fn finalize_workflow_graph_after_transition_policy(
             }),
         )
         .await?;
+    } else if state
+        .list_workflow_step_runs(run.id)
+        .await?
+        .iter()
+        .any(|step| step.status == "requires_action")
+    {
+        update_workflow_run_status_and_record(state, &current_run, "requires_action").await?;
     } else {
         update_workflow_run_status_and_record(state, &current_run, "running").await?;
     }
@@ -628,9 +635,14 @@ pub(crate) async fn workflow_graph_run_completed(
     if graph_keys.is_empty() {
         return Ok(false);
     }
-    let existing_by_key = state
-        .list_workflow_step_runs(run.id)
-        .await?
+    let existing_steps = state.list_workflow_step_runs(run.id).await?;
+    if existing_steps
+        .iter()
+        .any(workflow_step_run_is_handoff_approval_blocked)
+    {
+        return Ok(false);
+    }
+    let existing_by_key = existing_steps
         .into_iter()
         .map(|step| (step.step_key, step.status))
         .collect::<HashMap<_, _>>();
