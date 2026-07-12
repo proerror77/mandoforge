@@ -653,7 +653,8 @@ pub(crate) fn workflow_pack_materialize_workflow_definitions(
                 workflow,
                 &workflow_file,
                 &semantic_scopes,
-            ),
+                &package_dir,
+            )?,
             execution_strategy,
             runtime_adapter,
             runtime_mode,
@@ -1188,7 +1189,18 @@ pub(crate) fn workflow_pack_workflow_handoff_rules(
     workflow: &workflow_pack::WorkflowRef,
     workflow_file: &WorkflowPackWorkflowFile,
     semantic_scopes: &Value,
-) -> Value {
+    package_dir: &FsPath,
+) -> Result<Value, AppError> {
+    let tool_scope = workflow_pack_workflow_tool_scope(manifest, workflow, workflow_file);
+    let external_connector_grant = tool_scope["external_write"]
+        .as_array()
+        .is_some_and(|tools| {
+            tools
+                .iter()
+                .any(|tool| tool.as_str() == Some("native.connector.call"))
+        })
+        .then(|| workflow_pack_external_connector_grant(manifest, package_dir))
+        .transpose()?;
     let mut rules = if workflow_file.handoff_rules.is_object() {
         workflow_file.handoff_rules.clone()
     } else {
@@ -1218,12 +1230,77 @@ pub(crate) fn workflow_pack_workflow_handoff_rules(
                 .or_insert_with(workflow_pack_root_task_grant_memory_scope);
             root_task_grant
                 .entry("tool_scope".to_string())
-                .or_insert_with(|| {
-                    workflow_pack_workflow_tool_scope(manifest, workflow, workflow_file)
-                });
+                .or_insert_with(|| tool_scope.clone());
+            if let Some((connector_scope, external_effects)) = &external_connector_grant {
+                root_task_grant
+                    .entry("connector_scope".to_string())
+                    .or_insert_with(|| connector_scope.clone());
+                root_task_grant
+                    .entry("external_effects".to_string())
+                    .or_insert_with(|| external_effects.clone());
+            }
         }
     }
-    rules
+    Ok(rules)
+}
+
+fn workflow_pack_external_connector_grant(
+    manifest: &workflow_pack::WorkflowPackManifest,
+    package_dir: &FsPath,
+) -> Result<(Value, Value), AppError> {
+    let connector_ids = manifest
+        .connectors
+        .iter()
+        .filter(|connector| {
+            connector.writes.enabled
+                && matches!(&connector.kind, workflow_pack::ConnectorKind::Native)
+        })
+        .map(|connector| connector.id.clone())
+        .collect::<BTreeSet<_>>();
+    if connector_ids.is_empty() {
+        return Err(AppError::bad_request(
+            "workflow pack external-write agents require a writable native connector",
+        ));
+    }
+
+    let mut operation_ids = BTreeSet::new();
+    let mut side_effect_classes = BTreeSet::new();
+    for action in &manifest.actions {
+        let action_type = workflow_pack_load_action_type_file(package_dir, action)?;
+        if workflow_pack_value_string(&action_type, "connector_id")
+            .is_some_and(|connector_id| connector_ids.contains(&connector_id))
+        {
+            if let Some(operation_id) = workflow_pack_value_string(&action_type, "operation_id") {
+                operation_ids.insert(operation_id);
+            }
+            if let Some(side_effect_class) =
+                workflow_pack_value_string(&action_type, "side_effect_class")
+            {
+                side_effect_classes.insert(side_effect_class);
+            }
+        }
+    }
+    if operation_ids.is_empty() || side_effect_classes.is_empty() {
+        return Err(AppError::bad_request(
+            "workflow pack external-write agents require governed action side effects",
+        ));
+    }
+    let external_effects = Value::Object(
+        side_effect_classes
+            .iter()
+            .map(|side_effect_class| (side_effect_class.clone(), json!(true)))
+            .collect(),
+    );
+    Ok((
+        json!({
+            "mode": "commit_write",
+            "allowed_connector_ids": connector_ids,
+            "allowed_tool_names": operation_ids,
+            "tenant_scope": {},
+            "side_effect_classes": side_effect_classes,
+        }),
+        external_effects,
+    ))
 }
 
 pub(crate) fn workflow_pack_workflow_tool_scope(

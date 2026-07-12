@@ -11505,6 +11505,62 @@ steps:
 }
 
 #[test]
+fn workflow_pack_external_write_scope_materializes_connector_grant() {
+    let package_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("packs/ecommerce-tmall");
+    let manifest_input =
+        std::fs::read_to_string(package_dir.join("package.yaml")).expect("fixture manifest");
+    let manifest = workflow_pack::WorkflowPackManifest::from_yaml_str(&manifest_input)
+        .expect("manifest parses");
+    let workflow = manifest
+        .workflows
+        .iter()
+        .find(|workflow| workflow.id == "after-sales-triage")
+        .expect("after-sales workflow");
+    let workflow_file =
+        workflow_pack_load_workflow_file(&package_dir, workflow).expect("workflow file");
+    let semantic_scopes =
+        workflow_pack_workflow_semantic_scopes(&manifest, &workflow_file).expect("semantic scopes");
+
+    let rules = workflow_pack_workflow_handoff_rules(
+        &manifest,
+        workflow,
+        &workflow_file,
+        &semantic_scopes,
+        &package_dir,
+    )
+    .expect("handoff rules");
+    let root_grant = &rules["root_task_grant"];
+
+    assert_eq!(root_grant["connector_scope"]["mode"], json!("commit_write"));
+    assert!(
+        root_grant["connector_scope"]["allowed_connector_ids"]
+            .as_array()
+            .is_some_and(|ids| ids.contains(&json!("tmall-top")))
+    );
+    assert!(
+        root_grant["connector_scope"]["allowed_tool_names"]
+            .as_array()
+            .is_some_and(|tools| tools.contains(&json!("refund-agree")))
+    );
+    assert!(
+        !root_grant["connector_scope"]["allowed_tool_names"]
+            .as_array()
+            .is_some_and(|tools| tools.contains(&json!("native.connector.call")))
+    );
+    assert!(
+        root_grant["connector_scope"]["side_effect_classes"]
+            .as_array()
+            .is_some_and(|classes| classes.contains(&json!("marketplace_refund_write")))
+    );
+    assert_eq!(
+        root_grant["external_effects"]["marketplace_refund_write"],
+        json!(true)
+    );
+}
+
+#[test]
 fn governed_handoff_back_to_primary_agent_requires_isolated_context() {
     let primary_agent_id = Uuid::new_v4();
 
