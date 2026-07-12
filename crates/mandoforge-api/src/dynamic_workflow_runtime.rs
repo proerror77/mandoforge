@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use axum::http::HeaderMap;
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use crate::*;
 
@@ -700,11 +701,105 @@ pub(crate) fn dynamic_workflow_plan_event_ingestion_policy(
     )
 }
 
-pub(crate) fn dynamic_workflow_plan_handoff_rules(plan: &DynamicWorkflowPlan) -> Value {
+pub(crate) fn validate_dynamic_workflow_plan_approval_review(
+    review: &Value,
+) -> Result<String, AppError> {
+    review
+        .get("approved_by")
+        .and_then(Value::as_str)
+        .and_then(|value| normalize_optional_text(value.to_string()))
+        .ok_or_else(|| {
+            AppError::bad_request("approved dynamic workflow plan review requires approved_by")
+        })
+}
+
+pub(crate) fn dynamic_workflow_plan_materialization_approval(
+    plan: &DynamicWorkflowPlan,
+    agent_id: Uuid,
+    agent_version_id: Uuid,
+    environment_id: Option<Uuid>,
+) -> Result<Value, AppError> {
+    if plan.status != "approved" {
+        return Err(AppError::bad_request(
+            "dynamic workflow plan must be approved before materialization",
+        ));
+    }
+    let approved_by = validate_dynamic_workflow_plan_approval_review(&plan.review)?;
+    let reviewed_at = plan.reviewed_at.ok_or_else(|| {
+        AppError::bad_request("approved dynamic workflow plan requires reviewed_at evidence")
+    })?;
+    let review_audit_trace_id = plan.audit_trace_id.ok_or_else(|| {
+        AppError::bad_request("approved dynamic workflow plan requires review audit evidence")
+    })?;
+    Ok(json!({
+        "scope": "single_materialization",
+        "dynamic_workflow_plan_id": plan.id,
+        "status": plan.status,
+        "approved_by": approved_by,
+        "review": plan.review,
+        "reviewed_at": reviewed_at,
+        "review_audit_trace_id": review_audit_trace_id,
+        "agent_id": agent_id,
+        "agent_version_id": agent_version_id,
+        "environment_id": environment_id,
+        "reusable_workflow_release_state": "staged"
+    }))
+}
+
+pub(crate) fn bind_dynamic_workflow_agent_version(
+    step_graph: &mut Value,
+    agent_id: Uuid,
+    agent_version_id: Uuid,
+) -> Result<(), AppError> {
+    let steps = step_graph
+        .get_mut("steps")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| AppError::bad_request("dynamic workflow step_graph requires steps"))?;
+    for step in steps {
+        if workflow_graph_step_is_adapter_owned_compensation(step) {
+            continue;
+        }
+        let step_key = step
+            .get("key")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        let explicit_agent_id = match step.get("agent_id") {
+            Some(Value::String(value)) => Some(Uuid::parse_str(value).map_err(|_| {
+                AppError::bad_request(format!(
+                    "dynamic workflow step {step_key} has invalid agent_id"
+                ))
+            })?),
+            Some(Value::Null) | None => None,
+            Some(_) => {
+                return Err(AppError::bad_request(format!(
+                    "dynamic workflow step {step_key} agent_id must be a UUID string"
+                )));
+            }
+        };
+        if explicit_agent_id.is_some_and(|value| value != agent_id) {
+            return Err(AppError::bad_request(format!(
+                "dynamic workflow step {step_key} cannot target an unversioned secondary agent"
+            )));
+        }
+        let step = step.as_object_mut().ok_or_else(|| {
+            AppError::bad_request("dynamic workflow step_graph steps must be JSON objects")
+        })?;
+        step.insert("agent_id".to_string(), json!(agent_id));
+        step.insert("agent_version_id".to_string(), json!(agent_version_id));
+    }
+    Ok(())
+}
+
+pub(crate) fn dynamic_workflow_plan_handoff_rules(
+    plan: &DynamicWorkflowPlan,
+    materialization_approval: Value,
+) -> Value {
     json!({
         "source": "dynamic_workflow_plan",
         "dynamic_workflow_plan_id": plan.id,
         "objective": plan.objective,
+        "materialization_approval": materialization_approval,
         "root_task_grant": {
             "semantic_scopes": plan.governance.get("semantic_scopes").cloned().unwrap_or_else(empty_json_object),
             "memory_scope": plan.governance.get("memory_scope").cloned().unwrap_or_else(default_task_grant_memory_scope),

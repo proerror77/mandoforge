@@ -13,19 +13,21 @@ use crate::{
     DynamicWorkflowAdjudicationRequest, DynamicWorkflowAdjudicationResponse, DynamicWorkflowPlan,
     DynamicWorkflowPlanCompilationResponse, DynamicWorkflowPlanMaterializationResponse,
     DynamicWorkflowPressureTestRequest, DynamicWorkflowPressureTestResponse,
-    MaterializeDynamicWorkflowPlan, Permission, ReviewDynamicWorkflowPlan, WorkflowDefinition,
-    WorkflowRun, analyze_dynamic_workflow_plan, authorize_collection_request,
+    MaterializeDynamicWorkflowPlan, Permission, ReviewDynamicWorkflowPlan, SessionStatus,
+    WorkflowDefinition, WorkflowRun, analyze_dynamic_workflow_plan, authorize_collection_request,
     authorize_dynamic_workflow_plan_read, authorize_dynamic_workflow_plan_run, authorize_request,
-    compile_dynamic_workflow_phases, compile_native_dynamic_workflow_phases, dynamic_policy_u64,
+    bind_dynamic_workflow_agent_version, compile_dynamic_workflow_phases,
+    compile_native_dynamic_workflow_phases, dynamic_policy_u64,
     dynamic_workflow_plan_event_ingestion_policy, dynamic_workflow_plan_execution_strategy,
-    dynamic_workflow_plan_handoff_rules, dynamic_workflow_plan_runtime_adapter,
-    dynamic_workflow_plan_runtime_capability_contract, dynamic_workflow_plan_runtime_mode,
-    dynamic_workflow_plan_step_graph, dynamic_workflow_plan_visible_to_principal,
-    dynamic_workflow_step_vote, empty_json_object, ensure_primary_session_thread,
-    issue_root_task_grant_for_workflow_run, materialize_workflow_graph_start_steps, new_audit_log,
-    normalize_dynamic_workflow_plan_status, normalize_optional_runtime_adapter,
-    normalize_optional_text, normalize_workflow_execution_strategy,
-    record_dynamic_workflow_plan_audit, require_non_empty,
+    dynamic_workflow_plan_handoff_rules, dynamic_workflow_plan_materialization_approval,
+    dynamic_workflow_plan_runtime_adapter, dynamic_workflow_plan_runtime_capability_contract,
+    dynamic_workflow_plan_runtime_mode, dynamic_workflow_plan_step_graph,
+    dynamic_workflow_plan_visible_to_principal, dynamic_workflow_step_vote, empty_json_object,
+    ensure_primary_session_thread, issue_root_task_grant_for_workflow_run,
+    materialize_workflow_graph_start_steps, new_audit_log, normalize_dynamic_workflow_plan_status,
+    normalize_optional_runtime_adapter, normalize_optional_text,
+    normalize_workflow_execution_strategy, principal_from_request,
+    record_dynamic_workflow_plan_audit, require_non_empty, set_managed_session_status,
     validate_dynamic_workflow_agent_fleet_policy, validate_dynamic_workflow_governance,
     validate_dynamic_workflow_materialization, validate_dynamic_workflow_phases,
     validate_dynamic_workflow_validation, validate_workflow_execution_binding,
@@ -311,7 +313,7 @@ async fn review_dynamic_workflow_plan(
     Json(input): Json<ReviewDynamicWorkflowPlan>,
 ) -> Result<Json<DynamicWorkflowPlan>, AppError> {
     let current = state.get_dynamic_workflow_plan(id).await?;
-    authorize_dynamic_workflow_plan_run(&state, &headers, &current).await?;
+    authorize_dynamic_workflow_plan_read(&state, &headers, &current).await?;
     if !input.review.is_object() {
         return Err(AppError::bad_request(
             "dynamic workflow plan review must be a JSON object",
@@ -321,6 +323,34 @@ async fn review_dynamic_workflow_plan(
         Some(status) => normalize_dynamic_workflow_plan_status(&status)?,
         None => "reviewed".to_string(),
     };
+    if !matches!(status.as_str(), "reviewed" | "approved" | "rejected") {
+        return Err(AppError::bad_request(
+            "dynamic workflow plan review status must be reviewed, approved, or rejected",
+        ));
+    }
+    let mut review = input.review;
+    if matches!(status.as_str(), "approved" | "rejected") {
+        authorize_request(
+            &state,
+            &headers,
+            Permission::ApprovalsDecide,
+            "dynamic_workflow_plan",
+            Some(current.id),
+        )
+        .await?;
+        let principal = principal_from_request(&state, &headers).await?;
+        let actor_field = if status == "approved" {
+            "approved_by"
+        } else {
+            "rejected_by"
+        };
+        review[actor_field] = json!(principal.subject_id);
+    } else {
+        authorize_dynamic_workflow_plan_run(&state, &headers, &current).await?;
+    }
+    if status == "approved" {
+        crate::validate_dynamic_workflow_plan_approval_review(&review)?;
+    }
     if current.status == "materialized" {
         return Err(AppError::bad_request(
             "materialized dynamic workflow plan cannot be reviewed",
@@ -331,7 +361,7 @@ async fn review_dynamic_workflow_plan(
         .update_dynamic_workflow_plan_review(
             current.id,
             status,
-            input.review,
+            review,
             current.audit_trace_id,
             reviewed_at,
         )
@@ -523,8 +553,18 @@ async fn materialize_dynamic_workflow_plan(
         runtime_adapter.as_deref(),
         &runtime_capability_contract,
     )?;
-    let step_graph = dynamic_workflow_plan_step_graph(&plan, &execution_strategy)?;
+    let agent_version = state
+        .runnable_agent_version(agent.id, input.environment_id)
+        .await?;
+    let mut step_graph = dynamic_workflow_plan_step_graph(&plan, &execution_strategy)?;
+    bind_dynamic_workflow_agent_version(&mut step_graph, agent.id, agent_version.id)?;
     validate_workflow_graph_definition(&step_graph)?;
+    let materialization_approval = dynamic_workflow_plan_materialization_approval(
+        &plan,
+        agent.id,
+        agent_version.id,
+        input.environment_id,
+    )?;
     let now = Utc::now();
     let workflow_definition = state
         .create_workflow_definition(WorkflowDefinition {
@@ -540,7 +580,10 @@ async fn materialize_dynamic_workflow_plan(
             input_schema_ref: None,
             output_schema_ref: None,
             step_graph,
-            handoff_rules: dynamic_workflow_plan_handoff_rules(&plan),
+            handoff_rules: dynamic_workflow_plan_handoff_rules(
+                &plan,
+                materialization_approval.clone(),
+            ),
             execution_strategy: execution_strategy.clone(),
             runtime_adapter: runtime_adapter.clone(),
             runtime_mode: runtime_mode.clone(),
@@ -548,24 +591,37 @@ async fn materialize_dynamic_workflow_plan(
             event_ingestion_policy: event_ingestion_policy.clone(),
             approval_policy_ref: None,
             eval_gate_refs: Vec::new(),
-            release_state: "released".to_string(),
+            // An approved dynamic plan authorizes this run, not unlimited reuse.
+            release_state: "staged".to_string(),
             created_at: now,
             updated_at: now,
             archived_at: None,
         })
         .await?;
     let session = state
-        .create_session(CreateSession {
-            agent_id: workflow_definition.default_agent_id,
-            environment_id: input.environment_id,
-            title: input
-                .title
-                .filter(|title| !title.trim().is_empty())
-                .unwrap_or_else(|| format!("Dynamic workflow: {}", plan.objective)),
-            message: Some(plan.objective.clone()),
-        })
+        .create_session_for_agent_version(
+            CreateSession {
+                agent_id: workflow_definition.default_agent_id,
+                environment_id: input.environment_id,
+                title: input
+                    .title
+                    .filter(|title| !title.trim().is_empty())
+                    .unwrap_or_else(|| format!("Dynamic workflow: {}", plan.objective)),
+                message: Some(plan.objective.clone()),
+            },
+            agent_version.id,
+        )
         .await?;
-    ensure_primary_session_thread(&state, session.id).await?;
+    if let Err(error) = ensure_primary_session_thread(&state, session.id).await {
+        let _ = set_managed_session_status(
+            &state,
+            session.id,
+            SessionStatus::Failed,
+            "dynamic workflow initialization failed before primary thread creation",
+        )
+        .await;
+        return Err(error);
+    }
     let input_payload = if input.input_payload.is_object()
         && !input
             .input_payload
@@ -594,11 +650,12 @@ async fn materialize_dynamic_workflow_plan(
             "phases": plan.phases,
             "agent_fleet_policy": plan.agent_fleet_policy,
             "validation": plan.validation,
-            "analysis": plan.analysis
+            "analysis": plan.analysis,
+            "materialization_approval": materialization_approval
         }),
     )
     .await?;
-    let workflow_run = state
+    let workflow_run = match state
         .create_workflow_run(WorkflowRun {
             id: Uuid::new_v4(),
             workflow_definition_id: workflow_definition.id,
@@ -606,7 +663,7 @@ async fn materialize_dynamic_workflow_plan(
             source_event_id: None,
             source_work_item_id: plan.source_work_item_id,
             source_schedule_id: None,
-            status: "queued".to_string(),
+            status: "initializing".to_string(),
             primary_session_id: session.id,
             root_task_grant_id: None,
             input_payload,
@@ -625,25 +682,85 @@ async fn materialize_dynamic_workflow_plan(
             created_at: now,
             updated_at: now,
         })
+        .await
+    {
+        Ok(workflow_run) => workflow_run,
+        Err(error) => {
+            let _ = set_managed_session_status(
+                &state,
+                session.id,
+                SessionStatus::Failed,
+                "dynamic workflow run persistence failed",
+            )
+            .await;
+            return Err(error);
+        }
+    };
+    let initialized = async {
+        let root_grant = issue_root_task_grant_for_workflow_run(
+            &state,
+            &workflow_run,
+            &workflow_definition,
+            &session,
+        )
         .await?;
-    let root_grant = issue_root_task_grant_for_workflow_run(
-        &state,
-        &workflow_run,
-        &workflow_definition,
-        &session,
-    )
-    .await?;
-    let workflow_run = state
-        .update_workflow_run_root_task_grant(workflow_run.id, root_grant.id)
+        let linked_run = state
+            .update_workflow_run_root_task_grant(workflow_run.id, root_grant.id)
+            .await?;
+        materialize_workflow_graph_start_steps(
+            &state,
+            &workflow_definition,
+            &linked_run,
+            &session,
+            &root_grant,
+        )
         .await?;
-    materialize_workflow_graph_start_steps(
-        &state,
-        &workflow_definition,
-        &workflow_run,
-        &session,
-        &root_grant,
-    )
-    .await?;
+        state
+            .update_workflow_run_status(linked_run.id, "queued".to_string(), None, None)
+            .await
+    }
+    .await;
+    let workflow_run = match initialized {
+        Ok(workflow_run) => workflow_run,
+        Err(error) => {
+            let failed_at = Utc::now();
+            let _ = state
+                .update_workflow_run_status(
+                    workflow_run.id,
+                    "failed".to_string(),
+                    None,
+                    Some(failed_at),
+                )
+                .await;
+            let _ = state
+                .close_active_task_grants_for_workflow_run(workflow_run.id, "cancelled")
+                .await;
+            let _ = set_managed_session_status(
+                &state,
+                session.id,
+                SessionStatus::Failed,
+                "dynamic workflow run initialization failed",
+            )
+            .await;
+            let _ = state
+                .append_audit_log(new_audit_log(
+                    Some(session.id),
+                    "system",
+                    Some(workflow_run.id),
+                    "dynamic_workflow_plan.materialization_failed",
+                    "dynamic_workflow_plan",
+                    Some(plan.id),
+                    json!({
+                        "workflow_definition_id": workflow_definition.id,
+                        "workflow_run_id": workflow_run.id,
+                        "primary_session_id": session.id,
+                        "error": error.message
+                    }),
+                ))
+                .await;
+            return Err(error);
+        }
+    };
     state
         .append_event(
             "system",
@@ -657,6 +774,8 @@ async fn materialize_dynamic_workflow_plan(
                 "execution_strategy": workflow_run.execution_strategy,
                 "runtime_adapter": workflow_run.runtime_adapter,
                 "runtime_mode": workflow_run.runtime_mode,
+                "agent_version_id": session.agent_version_id,
+                "workflow_release_state": workflow_definition.release_state,
                 "root_task_grant_id": workflow_run.root_task_grant_id
             }),
         )
@@ -671,7 +790,9 @@ async fn materialize_dynamic_workflow_plan(
             "root_task_grant_id": workflow_run.root_task_grant_id,
             "execution_strategy": workflow_run.execution_strategy,
             "runtime_adapter": workflow_run.runtime_adapter,
-            "runtime_mode": workflow_run.runtime_mode
+            "runtime_mode": workflow_run.runtime_mode,
+            "agent_version_id": session.agent_version_id,
+            "workflow_release_state": workflow_definition.release_state
         }),
     )
     .await?;

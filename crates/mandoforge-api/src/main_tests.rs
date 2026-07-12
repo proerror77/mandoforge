@@ -12678,6 +12678,98 @@ async fn dynamic_workflow_plan_validates_agent_fleet_policy() {
     );
 }
 
+#[test]
+fn dynamic_workflow_plan_approval_requires_an_identified_approver() {
+    let error = validate_dynamic_workflow_plan_approval_review(&json!({}))
+        .expect_err("approval without an identified approver must fail");
+
+    assert!(error.message.contains("requires approved_by"));
+}
+
+#[tokio::test]
+async fn dynamic_workflow_plan_decisions_require_an_approver_identity() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "Scoped dynamic workflow review".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create source session");
+    let app = build_router(state);
+    let plan: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/dynamic-workflow-plans",
+            json!({
+                "source_session_id": session.id,
+                "objective": "Review a governed scoped workflow",
+                "phases": [{
+                    "key": "review",
+                    "agent_count": 1,
+                    "prompt": "Review the scoped workflow."
+                }]
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let plan_id = plan["id"].as_str().expect("plan id");
+
+    let (status, error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/dynamic-workflow-plans/{plan_id}/review"),
+            json!({
+                "status": "approved",
+                "review": {"approved_by": "spoofed-subject"}
+            }),
+            &[
+                ("x-mandoforge-subject", "operator-1"),
+                ("x-mandoforge-roles", "operator"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(
+        error["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("ApprovalsDecide"))
+    );
+
+    let reviewed: Value = request_json(
+        app,
+        json_request_with_headers(
+            "POST",
+            &format!("/api/dynamic-workflow-plans/{plan_id}/review"),
+            json!({
+                "status": "approved",
+                "review": {"approved_by": "spoofed-subject"}
+            }),
+            &[
+                ("x-mandoforge-subject", "reviewer-1"),
+                ("x-mandoforge-roles", "approver"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(reviewed["status"], json!("approved"));
+    assert_eq!(reviewed["review"]["approved_by"], json!("reviewer-1"));
+}
+
 #[tokio::test]
 async fn dynamic_workflow_plan_materializes_delegated_runtime_workflow() {
     let app = test_app().await;
@@ -12771,7 +12863,10 @@ async fn dynamic_workflow_plan_materializes_delegated_runtime_workflow() {
                     "reason": "bounded delegated runtime with draft-only external effects"
                 }
             }),
-            &[("x-mandoforge-roles", "admin")],
+            &[
+                ("x-mandoforge-subject", "architecture-review"),
+                ("x-mandoforge-roles", "admin"),
+            ],
         ),
     )
     .await;
@@ -12795,6 +12890,10 @@ async fn dynamic_workflow_plan_materializes_delegated_runtime_workflow() {
     assert_eq!(materialized["plan"]["status"], json!("materialized"));
     assert!(materialized["plan"]["materialized_at"].as_str().is_some());
     assert_eq!(
+        materialized["workflow_definition"]["release_state"],
+        json!("staged")
+    );
+    assert_eq!(
         materialized["workflow_definition"]["execution_strategy"],
         json!("delegated_runtime")
     );
@@ -12809,6 +12908,21 @@ async fn dynamic_workflow_plan_materializes_delegated_runtime_workflow() {
     assert_eq!(
         materialized["workflow_definition"]["step_graph"]["steps"][0]["type"],
         json!("delegated_runtime")
+    );
+    let pinned_agent_id = materialized["workflow_definition"]["step_graph"]["steps"][0]["agent_id"]
+        .as_str()
+        .expect("pinned agent id");
+    let pinned_agent_version_id =
+        materialized["workflow_definition"]["step_graph"]["steps"][0]["agent_version_id"]
+            .as_str()
+            .expect("pinned agent version id");
+    assert_eq!(
+        materialized["workflow_definition"]["handoff_rules"]["materialization_approval"]["approved_by"],
+        json!("architecture-review")
+    );
+    assert_eq!(
+        materialized["workflow_definition"]["handoff_rules"]["materialization_approval"]["scope"],
+        json!("single_materialization")
     );
     assert_eq!(
         materialized["workflow_run"]["delegation_status"],
@@ -12828,6 +12942,44 @@ async fn dynamic_workflow_plan_materializes_delegated_runtime_workflow() {
         json!(2)
     );
 
+    let session_id = materialized["workflow_run"]["primary_session_id"]
+        .as_str()
+        .expect("session id");
+    let session: Value = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/sessions/{session_id}"))
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(session["agent_id"], json!(pinned_agent_id));
+    assert_eq!(session["agent_version_id"], json!(pinned_agent_version_id));
+
+    let workflow_definition_id = materialized["workflow_definition"]["id"]
+        .as_str()
+        .expect("workflow definition id");
+    let (status, error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-runs",
+            json!({
+                "workflow_definition_id": workflow_definition_id,
+                "input_payload": {"objective": "unreviewed reuse"}
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        error["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("released workflow definition"))
+    );
+
     let run_id = materialized["workflow_run"]["id"].as_str().expect("run id");
     let steps: Vec<Value> = request_json(
         app,
@@ -12844,6 +12996,107 @@ async fn dynamic_workflow_plan_materializes_delegated_runtime_workflow() {
         steps[0]["input_payload"]["runtime_delegation"]["runtime_mode"],
         json!("dynamic_workflow")
     );
+}
+
+#[tokio::test]
+async fn production_dynamic_workflow_pins_the_independently_promoted_agent_version() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+    let _release_enforcement = EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+    let _release_environment =
+        EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT", "production");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let (agent, promoted_version, environment) =
+        seed_promoted_agent_for_test(&state, "production").await;
+    let mut unreleased_agent = agent.clone();
+    unreleased_agent.system_prompt = "Unreleased dynamic workflow prompt".to_string();
+    state
+        .insert_agent_version(&unreleased_agent, 2, json!({}))
+        .await
+        .expect("insert unreleased agent version");
+    let unreleased_version = state
+        .current_agent_version(agent.id)
+        .await
+        .expect("current unreleased version");
+    assert_ne!(promoted_version.id, unreleased_version.id);
+    let app = build_router(state.clone());
+
+    let plan: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/dynamic-workflow-plans",
+            json!({
+                "objective": "Run a governed production migration audit",
+                "phases": [{
+                    "key": "audit",
+                    "agent_count": 1,
+                    "prompt": "Inspect the migration and emit bounded evidence."
+                }]
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let plan_id = plan["id"].as_str().expect("plan id");
+    let reviewed: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/dynamic-workflow-plans/{plan_id}/review"),
+            json!({
+                "status": "approved",
+                "review": {
+                    "approved_by": "production-release-reviewer",
+                    "reason": "single bounded production materialization"
+                }
+            }),
+            &[
+                ("x-mandoforge-subject", "production-release-reviewer"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let materialized: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/dynamic-workflow-plans/{plan_id}/materialize"),
+            json!({
+                "environment_id": environment.id,
+                "title": "Governed production dynamic workflow"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+
+    assert_eq!(
+        materialized["workflow_definition"]["release_state"],
+        json!("staged")
+    );
+    assert_eq!(
+        materialized["workflow_definition"]["step_graph"]["steps"][0]["agent_version_id"],
+        json!(promoted_version.id)
+    );
+    assert_ne!(
+        materialized["workflow_definition"]["step_graph"]["steps"][0]["agent_version_id"],
+        json!(unreleased_version.id)
+    );
+    assert_eq!(
+        materialized["workflow_run"]["runtime_envelope"]["request_envelope"]["materialization_approval"]
+            ["review_audit_trace_id"],
+        reviewed["audit_trace_id"]
+    );
+    let session_id = materialized["workflow_run"]["primary_session_id"]
+        .as_str()
+        .expect("session id");
+    let session = state
+        .get_session(Uuid::parse_str(session_id).expect("session uuid"))
+        .await
+        .expect("materialized session");
+    assert_eq!(session.agent_version_id, Some(promoted_version.id));
 }
 
 #[tokio::test]
