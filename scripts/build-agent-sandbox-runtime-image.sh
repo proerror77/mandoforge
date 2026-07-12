@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IMAGE="${MANDOFORGE_AGENT_SANDBOX_IMAGE:-ghcr.io/proerror77/mandoforge/mandoforge-agent-sandbox-runtime:0.1.7}"
+IMAGE="${MANDOFORGE_AGENT_SANDBOX_IMAGE:-ghcr.io/proerror77/mandoforge/mandoforge-agent-sandbox-runtime:0.1.8}"
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 
 cd "$REPO_ROOT"

@@ -10,7 +10,7 @@ on:
       runtime_image_tag:
         description: Agent Sandbox runtime image tag
         required: true
-        default: 0.1.7
+        default: 0.1.8
       runtime_only:
         description: Build and publish only the Agent Sandbox runtime image
         required: false
