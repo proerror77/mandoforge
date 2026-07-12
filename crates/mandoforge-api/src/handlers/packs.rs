@@ -27,7 +27,8 @@ use crate::{
     project_workflow_pack_semantic_layer, record_workflow_pack_installation_audit,
     record_workflow_pack_profile_asset_bootstrap_audit, resolve_workflow_pack_manifest_path,
     validate_workflow_pack_profile_assets_input, workflow_pack,
-    workflow_pack_default_profile_assets, workflow_pack_kind_label, workflow_pack_manifest_summary,
+    workflow_pack_agent_binding_needs_runtime_migration, workflow_pack_default_profile_assets,
+    workflow_pack_kind_label, workflow_pack_manifest_summary,
     workflow_pack_materialized_bindings_with_runtime_targets,
     workflow_pack_runtime_objects_from_bindings,
 };
@@ -418,10 +419,14 @@ async fn stage_workflow_pack_installation_route(
     let materialization =
         workflow_pack_materialized_bindings_with_runtime_targets(&state, &current, &profile_assets)
             .await?;
+    let runtime_objects =
+        workflow_pack_runtime_objects_from_bindings(&current, &materialization.bindings, "staged")?;
     let staged_at = Utc::now();
-    let (installation, bindings) = state
+    let (installation, bindings, runtime_objects, _) = state
         .stage_workflow_pack_runtime_materialization(
             id,
+            "installed",
+            false,
             &current.eval_gate_status,
             &current.release_gate_status,
             current.gate_evidence.clone(),
@@ -430,12 +435,8 @@ async fn stage_workflow_pack_installation_route(
             materialization.agents,
             materialization.workflow_definitions,
             materialization.bindings,
+            runtime_objects,
         )
-        .await?;
-    let runtime_objects =
-        workflow_pack_runtime_objects_from_bindings(&installation, &bindings, "staged")?;
-    let runtime_objects = state
-        .create_workflow_pack_runtime_objects(runtime_objects)
         .await?;
     let semantic_projection =
         project_workflow_pack_semantic_layer(&state, &installation, &bindings, &runtime_objects)
@@ -711,6 +712,122 @@ async fn update_workflow_pack_installation_route(
     Ok(Json(installation))
 }
 
+async fn ensure_staged_workflow_pack_runtime_targets(
+    state: &AppState,
+    installation: &WorkflowPackInstallation,
+    bindings: Vec<WorkflowPackBinding>,
+) -> Result<Vec<WorkflowPackBinding>, AppError> {
+    if !bindings
+        .iter()
+        .any(workflow_pack_agent_binding_needs_runtime_migration)
+    {
+        return Ok(bindings);
+    }
+
+    let profile_assets = state
+        .list_workflow_pack_profile_assets(installation.id)
+        .await?;
+    let materialization = workflow_pack_materialized_bindings_with_runtime_targets(
+        state,
+        installation,
+        &profile_assets,
+    )
+    .await?;
+    let runtime_objects = workflow_pack_runtime_objects_from_bindings(
+        installation,
+        &materialization.bindings,
+        "staged",
+    )?;
+    let (installation, bindings, runtime_objects, migrated) = state
+        .stage_workflow_pack_runtime_materialization(
+            installation.id,
+            "staged",
+            true,
+            &installation.eval_gate_status,
+            &installation.release_gate_status,
+            installation.gate_evidence.clone(),
+            installation.staged_at.unwrap_or_else(Utc::now),
+            installation.released_at,
+            materialization.agents,
+            materialization.workflow_definitions,
+            materialization.bindings,
+            runtime_objects,
+        )
+        .await?;
+    if migrated {
+        let semantic_projection =
+            project_workflow_pack_semantic_layer(state, &installation, &bindings, &runtime_objects)
+                .await?;
+        record_workflow_pack_installation_audit(
+            state,
+            &installation,
+            "workflow_pack.runtime_materialization_migrated",
+            json!({
+                "reason": "legacy staged agent bindings lacked dedicated runtime targets",
+                "binding_count": bindings.len(),
+                "runtime_object_count": runtime_objects.len(),
+                "semantic_projection": semantic_projection,
+            }),
+        )
+        .await?;
+    }
+    Ok(bindings)
+}
+
+fn workflow_pack_agent_release_targets(
+    bindings: &[WorkflowPackBinding],
+) -> Result<Vec<(Uuid, Uuid)>, AppError> {
+    bindings
+        .iter()
+        .filter(|binding| binding.binding_type == "agent")
+        .map(|binding| {
+            let agent_id = binding
+                .materialized_payload
+                .get("agent_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    AppError::bad_request(
+                        "workflow pack agent binding is missing materialized agent_id",
+                    )
+                })
+                .and_then(|value| {
+                    Uuid::parse_str(value).map_err(|_| {
+                        AppError::bad_request(
+                            "workflow pack agent binding has invalid materialized agent_id",
+                        )
+                    })
+                })?;
+            let agent_version_id = binding.target_id.ok_or_else(|| {
+                AppError::bad_request(
+                    "workflow pack agent binding is missing materialized agent version",
+                )
+            })?;
+            let payload_version_id = binding
+                .materialized_payload
+                .get("agent_version_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    AppError::bad_request(
+                        "workflow pack agent binding is missing materialized agent version",
+                    )
+                })
+                .and_then(|value| {
+                    Uuid::parse_str(value).map_err(|_| {
+                        AppError::bad_request(
+                            "workflow pack agent binding has invalid materialized agent version",
+                        )
+                    })
+                })?;
+            if payload_version_id != agent_version_id {
+                return Err(AppError::bad_request(
+                    "workflow pack agent binding materialized agent version does not match target",
+                ));
+            }
+            Ok((agent_id, agent_version_id))
+        })
+        .collect()
+}
+
 async fn release_workflow_pack_installation_route(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -765,34 +882,9 @@ async fn release_workflow_pack_installation_route(
         }
     }
     let staged_bindings = state.list_workflow_pack_bindings(id).await?;
-    let agent_release_targets = staged_bindings
-        .iter()
-        .filter(|binding| binding.binding_type == "agent")
-        .map(|binding| {
-            let agent_id = binding
-                .materialized_payload
-                .get("agent_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    AppError::bad_request(
-                        "workflow pack agent binding is missing materialized agent_id",
-                    )
-                })
-                .and_then(|value| {
-                    Uuid::parse_str(value).map_err(|_| {
-                        AppError::bad_request(
-                            "workflow pack agent binding has invalid materialized agent_id",
-                        )
-                    })
-                })?;
-            let agent_version_id = binding.target_id.ok_or_else(|| {
-                AppError::bad_request(
-                    "workflow pack agent binding is missing materialized agent version",
-                )
-            })?;
-            Ok((agent_id, agent_version_id))
-        })
-        .collect::<Result<Vec<_>, AppError>>()?;
+    let staged_bindings =
+        ensure_staged_workflow_pack_runtime_targets(&state, &current, staged_bindings).await?;
+    let agent_release_targets = workflow_pack_agent_release_targets(&staged_bindings)?;
     let released_at = Utc::now();
     let gate_evidence = json!({
         "reason": input.reason,

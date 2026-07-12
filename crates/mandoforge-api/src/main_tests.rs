@@ -12768,6 +12768,194 @@ async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() 
     }));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn workflow_pack_release_migrates_legacy_staged_agent_bindings() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::remove("MANDOFORGE_PROVIDER_RUNTIME_ENV");
+    let _release_enforcement = EnvVarGuard::remove("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT");
+    let _release_environment = EnvVarGuard::remove("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let app = build_router(state.clone());
+    let installed: WorkflowPackInstallation = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-packs/install",
+            json!({"manifest_path": ai_governance_manifest_path_string()}),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let profile_assets = state
+        .list_workflow_pack_profile_assets(installed.id)
+        .await
+        .expect("legacy staged profile assets");
+    let legacy_bindings =
+        workflow_pack_materialized_bindings(&installed, &profile_assets, "staged")
+            .expect("legacy staged bindings");
+    assert!(legacy_bindings.iter().any(|binding| {
+        binding.binding_type == "agent"
+            && binding.target_id.is_none()
+            && binding.materialized_payload.get("agent_id").is_none()
+    }));
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test requires memory store");
+    };
+    {
+        let mut store = inner.write().await;
+        let installation = store
+            .workflow_pack_installations
+            .get_mut(&installed.id)
+            .expect("installed workflow pack");
+        installation.status = "staged".to_string();
+        installation.staged_at = Some(Utc::now());
+        installation.updated_at = Utc::now();
+        for binding in legacy_bindings {
+            store.workflow_pack_bindings.insert(binding.id, binding);
+        }
+    }
+
+    let caller_count = 8;
+    let start = Arc::new(tokio::sync::Barrier::new(caller_count));
+    let mut callers = Vec::with_capacity(caller_count);
+    for caller in 0..caller_count {
+        let app = app.clone();
+        let start = start.clone();
+        let installation_id = installed.id;
+        callers.push(tokio::spawn(async move {
+            start.wait().await;
+            request_value(
+                app,
+                json_request_with_headers(
+                    "POST",
+                    &format!("/api/workflow-packs/installations/{installation_id}/release"),
+                    json!({
+                        "eval_gate_status": "passed",
+                        "release_gate_status": "passed",
+                        "environment": "staging",
+                        "reason": "upgrade legacy staged materialization",
+                        "gate_evidence": {"migration_test": true, "caller": caller}
+                    }),
+                    &[
+                        (
+                            "x-mandoforge-subject",
+                            &format!("migration-caller-{caller}"),
+                        ),
+                        ("x-mandoforge-roles", "admin"),
+                    ],
+                ),
+            )
+            .await
+        }));
+    }
+    let mut released = None;
+    for caller in callers {
+        let (status, response) = caller.await.expect("legacy release caller");
+        if status == StatusCode::OK {
+            assert!(released.replace(response).is_none());
+        } else {
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "release response: {response}"
+            );
+        }
+    }
+    let released = released.expect("one concurrent legacy release succeeds");
+    assert_eq!(released["status"], json!("released"));
+
+    let bindings: Vec<Value> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!(
+                "/api/workflow-packs/installations/{}/bindings",
+                installed.id
+            ))
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(
+        bindings
+            .iter()
+            .filter(|binding| binding["binding_type"] == "agent")
+            .all(|binding| {
+                binding["target_id"].as_str().is_some()
+                    && binding["materialized_payload"]["agent_id"]
+                        .as_str()
+                        .is_some()
+                    && binding["materialized_payload"]["agent_version_id"] == binding["target_id"]
+                    && binding["status"] == "released"
+            })
+    );
+    let promoted_releases = state
+        .list_all_agent_releases()
+        .await
+        .expect("migrated AgentVersion releases");
+    for binding in bindings
+        .iter()
+        .filter(|binding| binding["binding_type"] == "agent")
+    {
+        let agent_id = Uuid::parse_str(
+            binding["materialized_payload"]["agent_id"]
+                .as_str()
+                .expect("migrated agent id"),
+        )
+        .expect("migrated agent UUID");
+        let agent_version_id = Uuid::parse_str(
+            binding["target_id"]
+                .as_str()
+                .expect("migrated AgentVersion id"),
+        )
+        .expect("migrated AgentVersion UUID");
+        assert!(promoted_releases.iter().any(|release| {
+            release.agent_id == agent_id
+                && release.agent_version_id == agent_version_id
+                && release.environment == "staging"
+                && release.status == "promoted"
+        }));
+    }
+    let runtime_objects: Vec<Value> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!(
+                "/api/workflow-packs/installations/{}/runtime-objects",
+                installed.id
+            ))
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(!runtime_objects.is_empty());
+    assert!(
+        runtime_objects
+            .iter()
+            .all(|object| object["status"] == "released")
+    );
+    let audit_logs: Vec<AuditLog> = request_json(
+        app,
+        Request::builder()
+            .uri("/api/audit-logs")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(
+        audit_logs
+            .iter()
+            .filter(|log| {
+                log.action == "workflow_pack.runtime_materialization_migrated"
+                    && log.resource_id == Some(installed.id)
+            })
+            .count(),
+        1
+    );
+}
+
 #[tokio::test]
 async fn workflow_pack_release_failure_is_atomic() {
     let _env = env_lock().lock().expect("env lock");
@@ -12814,6 +13002,7 @@ async fn workflow_pack_release_failure_is_atomic() {
             })
             .expect("staged agent binding");
         agent_binding.target_id = Some(invalid_version_id);
+        agent_binding.materialized_payload["agent_version_id"] = json!(invalid_version_id);
         store
             .workflow_definitions
             .values()

@@ -165,6 +165,8 @@ impl AppState {
     pub(crate) async fn stage_workflow_pack_runtime_materialization(
         &self,
         installation_id: Uuid,
+        expected_status: &str,
+        replace_existing: bool,
         eval_gate_status: &str,
         release_gate_status: &str,
         gate_evidence: Value,
@@ -173,7 +175,23 @@ impl AppState {
         agents: Vec<(Agent, AgentVersion)>,
         definitions: Vec<WorkflowDefinition>,
         bindings: Vec<WorkflowPackBinding>,
-    ) -> Result<(WorkflowPackInstallation, Vec<WorkflowPackBinding>), AppError> {
+        runtime_objects: Vec<WorkflowPackRuntimeObject>,
+    ) -> Result<
+        (
+            WorkflowPackInstallation,
+            Vec<WorkflowPackBinding>,
+            Vec<WorkflowPackRuntimeObject>,
+            bool,
+        ),
+        AppError,
+    > {
+        if !matches!(expected_status, "installed" | "staged")
+            || replace_existing != (expected_status == "staged")
+        {
+            return Err(AppError::bad_request(
+                "workflow pack staging materialization has invalid replacement mode",
+            ));
+        }
         if bindings
             .iter()
             .any(|binding| binding.installation_id != installation_id)
@@ -183,6 +201,12 @@ impl AppState {
             || agents
                 .iter()
                 .any(|(agent, version)| version.agent_id != agent.id)
+            || runtime_objects.iter().any(|object| {
+                object.installation_id != installation_id
+                    || !bindings
+                        .iter()
+                        .any(|binding| binding.id == object.binding_id)
+            })
         {
             return Err(AppError::bad_request(
                 "workflow pack staging materialization has inconsistent ownership",
@@ -198,10 +222,55 @@ impl AppState {
                     .filter(|installation| installation.archived_at.is_none())
                     .cloned()
                     .ok_or_else(|| AppError::not_found("workflow pack installation not found"))?;
-                if installation.status != "installed" {
+                if installation.status != expected_status {
                     return Err(AppError::bad_request(
                         "workflow pack installation status conflict: concurrent update detected",
                     ));
+                }
+                if replace_existing {
+                    let mut current_bindings = store
+                        .workflow_pack_bindings
+                        .values()
+                        .filter(|binding| {
+                            binding.installation_id == installation_id
+                                && binding.status != "superseded"
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let has_agent_bindings = current_bindings
+                        .iter()
+                        .any(|binding| binding.binding_type == "agent");
+                    let migration_complete = has_agent_bindings
+                        && !current_bindings
+                            .iter()
+                            .any(crate::workflow_pack_agent_binding_needs_runtime_migration);
+                    if migration_complete {
+                        current_bindings.sort_by(|left, right| {
+                            left.binding_type
+                                .cmp(&right.binding_type)
+                                .then(left.binding_key.cmp(&right.binding_key))
+                        });
+                        let mut current_runtime_objects = store
+                            .workflow_pack_runtime_objects
+                            .values()
+                            .filter(|object| {
+                                object.installation_id == installation_id
+                                    && object.status != "superseded"
+                            })
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        current_runtime_objects.sort_by(|left, right| {
+                            left.object_type
+                                .cmp(&right.object_type)
+                                .then(left.object_key.cmp(&right.object_key))
+                        });
+                        return Ok((
+                            installation,
+                            current_bindings,
+                            current_runtime_objects,
+                            false,
+                        ));
+                    }
                 }
                 let conflicts = agents
                     .iter()
@@ -211,14 +280,36 @@ impl AppState {
                         .any(|definition| store.workflow_definitions.contains_key(&definition.id))
                     || bindings
                         .iter()
-                        .any(|binding| store.workflow_pack_bindings.contains_key(&binding.id));
+                        .any(|binding| store.workflow_pack_bindings.contains_key(&binding.id))
+                    || runtime_objects
+                        .iter()
+                        .any(|object| store.workflow_pack_runtime_objects.contains_key(&object.id));
                 if conflicts {
                     return Err(AppError::bad_request(
                         "workflow pack staging materialization conflicts with existing resources",
                     ));
                 }
 
+                if replace_existing {
+                    for definition in store.workflow_definitions.values_mut() {
+                        if definition.pack_installation_id == Some(installation_id)
+                            && definition.archived_at.is_none()
+                        {
+                            definition.release_state = "superseded".to_string();
+                            definition.archived_at = Some(updated_at);
+                            definition.updated_at = updated_at;
+                        }
+                    }
+                }
                 for existing in store.workflow_pack_bindings.values_mut() {
+                    if existing.installation_id == installation_id
+                        && existing.status != "superseded"
+                    {
+                        existing.status = "superseded".to_string();
+                        existing.updated_at = updated_at;
+                    }
+                }
+                for existing in store.workflow_pack_runtime_objects.values_mut() {
                     if existing.installation_id == installation_id
                         && existing.status != "superseded"
                     {
@@ -238,6 +329,11 @@ impl AppState {
                         .workflow_pack_bindings
                         .insert(binding.id, binding.clone());
                 }
+                for object in &runtime_objects {
+                    store
+                        .workflow_pack_runtime_objects
+                        .insert(object.id, object.clone());
+                }
                 let installation = store
                     .workflow_pack_installations
                     .get_mut(&installation_id)
@@ -249,7 +345,7 @@ impl AppState {
                 installation.staged_at = Some(staged_at);
                 installation.released_at = released_at;
                 installation.updated_at = updated_at;
-                Ok((installation.clone(), bindings))
+                Ok((installation.clone(), bindings, runtime_objects, true))
             }
             StoreBackend::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
@@ -257,7 +353,7 @@ impl AppState {
                     "UPDATE workflow_pack_installations
                      SET status = 'staged', eval_gate_status = $3, release_gate_status = $4,
                          gate_evidence = $5, staged_at = $6, released_at = $7, updated_at = $8
-                     WHERE tenant_id = $1 AND id = $2 AND archived_at IS NULL AND status = 'installed'
+                     WHERE tenant_id = $1 AND id = $2 AND archived_at IS NULL AND status = $9
                      RETURNING id, pack_id, kind, version, manifest_path, manifest, validation_report, status, eval_gate_status, release_gate_status, gate_evidence, staged_at, released_at, archived_at, created_at, updated_at",
                 )
                 .bind(self.current_tenant_id())
@@ -268,6 +364,7 @@ impl AppState {
                 .bind(staged_at)
                 .bind(released_at)
                 .bind(updated_at)
+                .bind(expected_status)
                 .fetch_optional(&mut *tx)
                 .await?
                 .ok_or_else(|| {
@@ -277,6 +374,68 @@ impl AppState {
                 })?;
                 let installation = workflow_pack_installation_from_row(installation_row)?;
 
+                if replace_existing {
+                    let binding_rows = sqlx::query(
+                        "SELECT id, installation_id, pack_id, pack_version, binding_type, binding_key, source_path, target_kind, target_id, status, materialized_payload, created_at, updated_at
+                         FROM workflow_pack_bindings
+                         WHERE tenant_id = $1
+                           AND installation_id = $2
+                           AND status <> 'superseded'
+                         ORDER BY binding_type ASC, binding_key ASC",
+                    )
+                    .bind(self.current_tenant_id())
+                    .bind(installation_id)
+                    .fetch_all(&mut *tx)
+                    .await?;
+                    let current_bindings = binding_rows
+                        .into_iter()
+                        .map(workflow_pack_binding_from_row)
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let has_agent_bindings = current_bindings
+                        .iter()
+                        .any(|binding| binding.binding_type == "agent");
+                    let migration_complete = has_agent_bindings
+                        && !current_bindings
+                            .iter()
+                            .any(crate::workflow_pack_agent_binding_needs_runtime_migration);
+                    if migration_complete {
+                        let runtime_object_rows = sqlx::query(
+                            "SELECT id, installation_id, binding_id, pack_id, pack_version, object_type, object_key, runtime_kind, status, spec, created_at, updated_at
+                             FROM workflow_pack_runtime_objects
+                             WHERE tenant_id = $1
+                               AND installation_id = $2
+                               AND status <> 'superseded'
+                             ORDER BY object_type ASC, object_key ASC",
+                        )
+                        .bind(self.current_tenant_id())
+                        .bind(installation_id)
+                        .fetch_all(&mut *tx)
+                        .await?;
+                        let current_runtime_objects = runtime_object_rows
+                            .into_iter()
+                            .map(workflow_pack_runtime_object_from_row)
+                            .collect::<Result<Vec<_>, _>>()?;
+                        tx.commit().await?;
+                        return Ok((
+                            installation,
+                            current_bindings,
+                            current_runtime_objects,
+                            false,
+                        ));
+                    }
+                    sqlx::query(
+                        "UPDATE workflow_definitions
+                         SET release_state = 'superseded', archived_at = $3, updated_at = $3
+                         WHERE tenant_id = $1
+                           AND pack_installation_id = $2
+                           AND archived_at IS NULL",
+                    )
+                    .bind(self.current_tenant_id())
+                    .bind(installation_id)
+                    .bind(updated_at)
+                    .execute(&mut *tx)
+                    .await?;
+                }
                 for (agent, version) in agents {
                     sqlx::query(
                         "INSERT INTO agents
@@ -400,8 +559,50 @@ impl AppState {
                     .await?;
                     created_bindings.push(workflow_pack_binding_from_row(row)?);
                 }
+                sqlx::query(
+                    "UPDATE workflow_pack_runtime_objects
+                     SET status = 'superseded', updated_at = $3
+                     WHERE tenant_id = $1
+                       AND installation_id = $2
+                       AND status <> 'superseded'",
+                )
+                .bind(self.current_tenant_id())
+                .bind(installation_id)
+                .bind(updated_at)
+                .execute(&mut *tx)
+                .await?;
+                let mut created_runtime_objects = Vec::with_capacity(runtime_objects.len());
+                for object in runtime_objects {
+                    let row = sqlx::query(
+                        "INSERT INTO workflow_pack_runtime_objects
+                            (id, tenant_id, installation_id, binding_id, pack_id, pack_version, object_type, object_key, runtime_kind, status, spec, created_at, updated_at)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                         RETURNING id, installation_id, binding_id, pack_id, pack_version, object_type, object_key, runtime_kind, status, spec, created_at, updated_at",
+                    )
+                    .bind(object.id)
+                    .bind(self.current_tenant_id())
+                    .bind(object.installation_id)
+                    .bind(object.binding_id)
+                    .bind(&object.pack_id)
+                    .bind(&object.pack_version)
+                    .bind(&object.object_type)
+                    .bind(&object.object_key)
+                    .bind(&object.runtime_kind)
+                    .bind(&object.status)
+                    .bind(&object.spec)
+                    .bind(object.created_at)
+                    .bind(object.updated_at)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    created_runtime_objects.push(workflow_pack_runtime_object_from_row(row)?);
+                }
                 tx.commit().await?;
-                Ok((installation, created_bindings))
+                Ok((
+                    installation,
+                    created_bindings,
+                    created_runtime_objects,
+                    true,
+                ))
             }
         }
     }
@@ -645,6 +846,7 @@ impl AppState {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn create_workflow_pack_runtime_objects(
         &self,
         objects: Vec<WorkflowPackRuntimeObject>,

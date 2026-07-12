@@ -296,6 +296,25 @@ pub(crate) fn workflow_pack_default_profile_assets(
         .collect()
 }
 
+pub(crate) fn workflow_pack_agent_binding_needs_runtime_migration(
+    binding: &WorkflowPackBinding,
+) -> bool {
+    if binding.binding_type != "agent" {
+        return false;
+    }
+    binding.target_id.is_none()
+        || binding
+            .materialized_payload
+            .get("agent_id")
+            .and_then(Value::as_str)
+            .is_none()
+        || binding
+            .materialized_payload
+            .get("agent_version_id")
+            .and_then(Value::as_str)
+            .is_none()
+}
+
 pub(crate) async fn workflow_pack_materialized_bindings_with_runtime_targets(
     state: &AppState,
     installation: &WorkflowPackInstallation,
