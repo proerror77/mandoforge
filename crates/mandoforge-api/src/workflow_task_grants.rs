@@ -35,10 +35,22 @@ pub(crate) async fn issue_root_task_grant_for_workflow_run(
         risk_level: "low".to_string(),
         status: "active".to_string(),
         expires_at: None,
-        max_turns: None,
-        max_tool_calls: None,
-        max_runtime_seconds: None,
-        max_cost_usd_micros: None,
+        max_turns: workflow_definition_root_task_grant_budget_i32(definition, "max_turns")?,
+        max_tool_calls: workflow_definition_root_task_grant_budget_i32(
+            definition,
+            "max_tool_calls",
+        )?,
+        max_runtime_seconds: workflow_definition_root_task_grant_budget_i32(
+            definition,
+            "max_runtime_seconds",
+        )?,
+        max_cost_usd_micros: workflow_definition_root_task_grant_budget_i64(
+            definition,
+            "max_cost_usd_micros",
+        )?,
+        turns_used: 0,
+        tool_calls_used: 0,
+        cost_usd_micros_used: 0,
         semantic_scopes: workflow_definition_root_task_grant_scope(
             definition,
             "semantic_scopes",
@@ -77,6 +89,7 @@ pub(crate) async fn issue_root_task_grant_for_workflow_run(
         updated_at: now,
     };
     validate_task_grant_scope_objects(&grant)?;
+    validate_task_grant_budgets(&grant)?;
     let grant = state.create_task_grant(grant).await?;
     record_task_grant_issued(state, &grant, run.primary_session_id).await?;
     Ok(grant)
@@ -102,7 +115,14 @@ pub(crate) async fn record_task_grant_issued(
                 "grantee_session_id": grant.grantee_session_id,
                 "agent_class": grant.agent_class,
                 "risk_level": grant.risk_level,
-                "status": grant.status
+                "status": grant.status,
+                "max_turns": grant.max_turns,
+                "max_tool_calls": grant.max_tool_calls,
+                "max_runtime_seconds": grant.max_runtime_seconds,
+                "max_cost_usd_micros": grant.max_cost_usd_micros,
+                "turns_used": grant.turns_used,
+                "tool_calls_used": grant.tool_calls_used,
+                "cost_usd_micros_used": grant.cost_usd_micros_used
             }),
         )
         .await?;
@@ -120,7 +140,11 @@ pub(crate) async fn record_task_grant_issued(
                 "grantee_agent_id": grant.grantee_agent_id,
                 "grantee_session_id": grant.grantee_session_id,
                 "risk_level": grant.risk_level,
-                "status": grant.status
+                "status": grant.status,
+                "max_turns": grant.max_turns,
+                "max_tool_calls": grant.max_tool_calls,
+                "max_runtime_seconds": grant.max_runtime_seconds,
+                "max_cost_usd_micros": grant.max_cost_usd_micros
             }),
         ))
         .await?;
@@ -261,7 +285,10 @@ pub(crate) async fn record_task_grant_checked(
                 "task_grant_id": grant.id,
                 "workflow_run_id": grant.workflow_run_id,
                 "tool": tool_name,
-                "status": "allowed"
+                "status": "allowed",
+                "turns_used": grant.turns_used,
+                "tool_calls_used": grant.tool_calls_used,
+                "cost_usd_micros_used": grant.cost_usd_micros_used
             }),
         )
         .await?;
@@ -276,7 +303,10 @@ pub(crate) async fn record_task_grant_checked(
             json!({
                 "workflow_run_id": grant.workflow_run_id,
                 "tool": tool_name,
-                "status": "allowed"
+                "status": "allowed",
+                "turns_used": grant.turns_used,
+                "tool_calls_used": grant.tool_calls_used,
+                "cost_usd_micros_used": grant.cost_usd_micros_used
             }),
         ))
         .await?;
@@ -330,6 +360,23 @@ pub(crate) async fn enforce_task_grant_for_tool_invocation(
     tool_name: &str,
     input: &ExecuteTool,
 ) -> Result<Option<TaskGrant>, AppError> {
+    validate_task_grant_for_tool_invocation(state, tool_name, input, true).await
+}
+
+pub(crate) async fn revalidate_task_grant_for_tool_invocation(
+    state: &AppState,
+    tool_name: &str,
+    input: &ExecuteTool,
+) -> Result<Option<TaskGrant>, AppError> {
+    validate_task_grant_for_tool_invocation(state, tool_name, input, false).await
+}
+
+async fn validate_task_grant_for_tool_invocation(
+    state: &AppState,
+    tool_name: &str,
+    input: &ExecuteTool,
+    reserve_tool_call: bool,
+) -> Result<Option<TaskGrant>, AppError> {
     let workflow_run = workflow_run_for_session(state, input.session_id).await?;
 
     let Some(task_grant_id) = input.task_grant_id else {
@@ -349,8 +396,20 @@ pub(crate) async fn enforce_task_grant_for_tool_invocation(
         return Ok(None);
     };
 
-    let grant = state.get_task_grant(task_grant_id).await?;
+    let mut grant = state.get_task_grant(task_grant_id).await?;
     let run = state.get_workflow_run(grant.workflow_run_id).await?;
+    if let Some(reason) = workflow_run_execution_denial(&run.status) {
+        record_task_grant_denied(
+            state,
+            input.session_id,
+            Some(&grant),
+            Some(run.id),
+            tool_name,
+            reason,
+        )
+        .await?;
+        return Err(AppError::forbidden(reason));
+    }
     if workflow_run
         .as_ref()
         .is_some_and(|workflow_run| workflow_run.id != run.id)
@@ -401,31 +460,14 @@ pub(crate) async fn enforce_task_grant_for_tool_invocation(
             return Err(AppError::forbidden(reason));
         }
     }
-    if grant.status != "active" {
-        let reason = "task grant is not active";
+    if let Some(reason) = task_grant_lineage_denial(state, &grant).await? {
         record_task_grant_denied(
             state,
             input.session_id,
             Some(&grant),
             Some(run.id),
             tool_name,
-            reason,
-        )
-        .await?;
-        return Err(AppError::forbidden(reason));
-    }
-    if grant
-        .expires_at
-        .is_some_and(|expires_at| expires_at <= Utc::now())
-    {
-        let reason = "task grant is expired";
-        record_task_grant_denied(
-            state,
-            input.session_id,
-            Some(&grant),
-            Some(run.id),
-            tool_name,
-            reason,
+            &reason,
         )
         .await?;
         return Err(AppError::forbidden(reason));
@@ -456,8 +498,52 @@ pub(crate) async fn enforce_task_grant_for_tool_invocation(
         return Err(AppError::forbidden(reason));
     }
 
+    if reserve_tool_call {
+        grant = match state.reserve_task_grant_tool_call(grant.id).await {
+            Ok(grant) => grant,
+            Err(error) => {
+                record_task_grant_denied(
+                    state,
+                    input.session_id,
+                    Some(&grant),
+                    Some(run.id),
+                    tool_name,
+                    &error.message,
+                )
+                .await?;
+                return Err(error);
+            }
+        };
+    }
+
     record_task_grant_checked(state, &grant, input.session_id, tool_name).await?;
     Ok(Some(grant))
+}
+
+async fn task_grant_lineage_denial(
+    state: &AppState,
+    grant: &TaskGrant,
+) -> Result<Option<String>, AppError> {
+    let now = Utc::now();
+    for candidate in state.task_grant_lineage(grant.id).await? {
+        if let Some(step_id) = candidate.workflow_step_run_id {
+            let step = state.get_workflow_step_run(step_id).await?;
+            if workflow_step_status_terminal(&step.status) {
+                return Ok(Some("task grant workflow step is terminal".to_string()));
+            }
+        }
+        if let Some((reason, expire)) =
+            crate::store_workflows::task_grant_runtime_denial(&candidate, now)
+        {
+            if expire && candidate.status == "active" {
+                state
+                    .update_task_grant_status(candidate.id, "expired")
+                    .await?;
+            }
+            return Ok(Some(reason.to_string()));
+        }
+    }
+    Ok(None)
 }
 
 pub(crate) fn task_grant_session_matches(
@@ -475,6 +561,21 @@ pub(crate) fn task_grant_agent_class_matches(agent: &Agent, agent_class: &str) -
     expected.is_empty() || agent.kind == expected || agent.agent_role == expected
 }
 
+pub(crate) async fn workflow_run_owns_session(
+    state: &AppState,
+    run: &WorkflowRun,
+    session_id: Uuid,
+) -> Result<bool, AppError> {
+    if run.primary_session_id == session_id {
+        return Ok(true);
+    }
+    Ok(state
+        .list_workflow_step_runs(run.id)
+        .await?
+        .into_iter()
+        .any(|step| step.session_id == Some(session_id)))
+}
+
 pub(crate) async fn workflow_run_for_session(
     state: &AppState,
     session_id: Uuid,
@@ -488,20 +589,7 @@ pub(crate) async fn workflow_run_for_session(
         return Ok(Some(run));
     }
     for run in runs {
-        if state
-            .list_workflow_step_runs(run.id)
-            .await?
-            .into_iter()
-            .any(|step| step.session_id == Some(session_id))
-        {
-            return Ok(Some(run));
-        }
-        if state
-            .list_task_grants_for_workflow_run(run.id)
-            .await?
-            .into_iter()
-            .any(|grant| task_grant_session_matches(&grant, &run, session_id))
-        {
+        if workflow_run_owns_session(state, &run, session_id).await? {
             return Ok(Some(run));
         }
     }
@@ -520,13 +608,15 @@ pub(crate) async fn active_task_grant_for_session(
             .root_task_grant_id
             .ok_or_else(|| AppError::forbidden("task grant is required for workflow session"))?;
         let grant = state.get_task_grant(root_task_grant_id).await?;
+        if let Some(reason) = task_grant_lineage_denial(state, &grant).await? {
+            return Err(AppError::forbidden(reason));
+        }
         return Ok(Some((run, grant)));
     }
     let mut grants = state
         .list_task_grants_for_workflow_run(run.id)
         .await?
         .into_iter()
-        .filter(|grant| grant.status == "active")
         .filter(|grant| task_grant_session_matches(grant, &run, session_id))
         .collect::<Vec<_>>();
     grants.sort_by_key(|grant| grant.created_at);
@@ -535,7 +625,69 @@ pub(crate) async fn active_task_grant_for_session(
             "task grant is required for workflow session",
         ));
     };
+    if let Some(reason) = task_grant_lineage_denial(state, &grant).await? {
+        return Err(AppError::forbidden(reason));
+    }
     Ok(Some((run, grant)))
+}
+
+pub(crate) async fn governing_task_grant_for_memory_writeback(
+    state: &AppState,
+    session_id: Uuid,
+) -> Result<Option<(WorkflowRun, TaskGrant)>, AppError> {
+    let Some(run) = workflow_run_for_session(state, session_id).await? else {
+        return Ok(None);
+    };
+    if run.status != "completed" {
+        return active_task_grant_for_session(state, session_id).await;
+    }
+
+    let grant = if run.primary_session_id == session_id {
+        let root_task_grant_id = run
+            .root_task_grant_id
+            .ok_or_else(|| AppError::forbidden("task grant is required for workflow session"))?;
+        state.get_task_grant(root_task_grant_id).await?
+    } else {
+        let mut grants = state
+            .list_task_grants_for_workflow_run(run.id)
+            .await?
+            .into_iter()
+            .filter(|grant| task_grant_session_matches(grant, &run, session_id))
+            .collect::<Vec<_>>();
+        grants.sort_by_key(|grant| grant.created_at);
+        grants
+            .pop()
+            .ok_or_else(|| AppError::forbidden("task grant is required for workflow session"))?
+    };
+    if !task_grant_session_matches(&grant, &run, session_id) {
+        return Err(AppError::forbidden(
+            "task grant is not valid for this session",
+        ));
+    }
+    if state
+        .task_grant_lineage(grant.id)
+        .await?
+        .iter()
+        .any(|candidate| candidate.status != "completed")
+    {
+        return Err(AppError::forbidden(
+            "completed workflow memory governance requires completed task grants",
+        ));
+    }
+    Ok(Some((run, grant)))
+}
+
+pub(crate) async fn require_active_task_grant_for_session(
+    state: &AppState,
+    session_id: Uuid,
+) -> Result<(WorkflowRun, TaskGrant), AppError> {
+    let (run, grant) = active_task_grant_for_session(state, session_id)
+        .await?
+        .ok_or_else(|| AppError::forbidden("workflow session requires an active TaskGrant"))?;
+    if let Some(reason) = workflow_run_execution_denial(&run.status) {
+        return Err(AppError::forbidden(reason));
+    }
+    Ok((run, grant))
 }
 
 pub(crate) fn task_grant_allows_tool(grant: &TaskGrant, tool_name: &str) -> bool {

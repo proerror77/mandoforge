@@ -4428,7 +4428,11 @@ async fn reads_agent_versions_for_agent() {
                 "provider": "openai-compatible",
                 "model": "gpt-5.5-mini",
                 "system_prompt": "Keep a version record.",
-                "tools": ["file.read", "sql.query"]
+                "tools": ["file.read", "sql.query"],
+                "tool_policy": {
+                    "blocked_tools": ["sql.query"],
+                    "approval_required": [{"tool": "file.read", "risk": "low"}]
+                }
                 })
                 .to_string(),
             ))
@@ -4447,11 +4451,18 @@ async fn reads_agent_versions_for_agent() {
     assert_eq!(versions.len(), 1);
     assert_eq!(versions[0].agent_id, created.id);
     assert_eq!(versions[0].version, 1);
+    assert_eq!(versions[0].provider, created.provider);
     assert_eq!(versions[0].model, created.model);
     assert_eq!(versions[0].tool_names, created.tools);
+    assert_eq!(versions[0].approval_policy, created.tool_policy);
+    assert_eq!(versions[0].runtime_profile_id, created.runtime_profile_id);
+    assert_eq!(
+        versions[0].remote_computer_profile,
+        created.remote_computer_profile
+    );
 
     let version: AgentVersion = request_json(
-        app,
+        app.clone(),
         Request::builder()
             .uri(format!("/api/agents/{}/versions/1", created.id))
             .body(Body::empty())
@@ -4460,6 +4471,1688 @@ async fn reads_agent_versions_for_agent() {
     .await;
     assert_eq!(version.id, versions[0].id);
     assert_eq!(version.system_prompt, created.system_prompt);
+
+    let audit_logs: Vec<AuditLog> = request_json(
+        app,
+        Request::builder()
+            .uri("/api/audit-logs")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(
+        audit_logs
+            .iter()
+            .any(|log| { log.action == "agent.created" && log.resource_id == Some(created.id) })
+    );
+}
+
+#[tokio::test]
+async fn creates_agent_version_as_complete_immutable_snapshot() {
+    let app = test_app().await;
+    let runtime_profile: AgentRuntimeProfile = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/agent-runtime-profiles",
+            json!({
+                "name": "version-snapshot-runtime",
+                "runtime_type": "agent_cli",
+                "command": "codex",
+                "default_args": ["exec", "--json"],
+                "env": {"CODEX_HOME": "/workspace/.codex"},
+                "timeout_seconds": 300,
+                "remote_computer_required": true
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let agent: Agent = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/agents",
+            json!({
+                "name": "Immutable Version Agent",
+                "kind": "specialist",
+                "provider": "provider-v1",
+                "model": "model-v1",
+                "runtime_profile_id": runtime_profile.id,
+                "system_prompt": "version one",
+                "tools": ["file.read"],
+                "tool_policy": {"allowed_tools": ["file.read"]},
+                "remote_computer_profile": {"pool": "v1"},
+                "semantic_scopes": {"repo_scope": "v1"}
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+
+    let (partial_status, _) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/agents/{}/versions", agent.id),
+            json!({"provider": "provider-v2", "model": "model-v2"}),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(partial_status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let version: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/agents/{}/versions", agent.id),
+            json!({
+                "provider": "provider-v2",
+                "model": "model-v2",
+                "runtime_profile_id": runtime_profile.id,
+                "system_prompt": "version two",
+                "tools": ["file.read", "file.write"],
+                "runtime_config": {"temperature": 0.1},
+                "approval_policy": {"approval_required": ["file.write"]},
+                "mcp_server_ids": [],
+                "skill_ids": ["coding"],
+                "workflow_pack_ids": ["coding-pack"],
+                "remote_computer_profile": {"pool": "isolated", "cache_scope": "project"},
+                "semantic_scopes": {"repo_scope": "mandoforge"}
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(version["version"], 2);
+    assert_eq!(version["provider"], "provider-v2");
+    assert_eq!(version["model"], "model-v2");
+    assert_eq!(version["runtime_profile_id"], json!(runtime_profile.id));
+    assert_eq!(version["runtime_profile_snapshot"]["command"], "codex");
+    assert_eq!(version["remote_computer_profile"]["pool"], "isolated");
+
+    let _: AgentRuntimeProfile = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "PATCH",
+            &format!("/api/agent-runtime-profiles/{}", runtime_profile.id),
+            json!({"command": "claude", "default_args": ["--print"]}),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let stored: Value = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/agents/{}/versions/2", agent.id))
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(stored["runtime_profile_snapshot"]["command"], "codex");
+    assert_eq!(
+        stored["runtime_profile_snapshot"]["default_args"],
+        json!(["exec", "--json"])
+    );
+
+    let agents: Vec<Agent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/agents")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let current = agents
+        .into_iter()
+        .find(|candidate| candidate.id == agent.id)
+        .expect("versioned agent");
+    assert_eq!(current.provider, "provider-v2");
+    assert_eq!(current.model, "model-v2");
+    assert_eq!(current.system_prompt, "version two");
+
+    let audit_logs: Vec<AuditLog> = request_json(
+        app,
+        Request::builder()
+            .uri("/api/audit-logs")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(
+        audit_logs.iter().any(|log| {
+            log.action == "agent.version_created" && log.resource_id == Some(agent.id)
+        })
+    );
+}
+
+#[tokio::test]
+async fn session_agent_cli_uses_pinned_runtime_profile_snapshot() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let app = build_router(state.clone());
+    let runtime_profile: AgentRuntimeProfile = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/agent-runtime-profiles",
+            json!({
+                "name": "pinned-cli-runtime",
+                "runtime_type": "agent_cli",
+                "command": "/bin/echo",
+                "default_args": ["snapshot-v1"],
+                "timeout_seconds": 30
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let agent: Agent = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/agents",
+            json!({
+                "name": "Pinned CLI Agent",
+                "provider": "mock",
+                "model": "mock-v1",
+                "runtime_profile_id": runtime_profile.id,
+                "tools": ["agent_cli.exec"]
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "pinned CLI snapshot".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create session");
+
+    let _: AgentRuntimeProfile = request_json(
+        app,
+        json_request_with_headers(
+            "PATCH",
+            &format!("/api/agent-runtime-profiles/{}", runtime_profile.id),
+            json!({"command": "/bin/false", "default_args": []}),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+
+    let result = run_agent_cli(
+        &state,
+        session.id,
+        AgentCliRequest {
+            profile: runtime_profile.name,
+            task: "snapshot-task".to_string(),
+            args: vec![],
+            timeout_seconds: Some(5),
+        },
+    )
+    .await
+    .expect("session must execute the pinned CLI snapshot");
+    assert!(
+        result["stdout"]
+            .as_str()
+            .is_some_and(|stdout| stdout.contains("snapshot-v1 snapshot-task"))
+    );
+}
+
+#[tokio::test]
+async fn context_packet_uses_pinned_agent_version_and_environment_runtime_precedence() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let app = build_router(state.clone());
+    let version_profile: AgentRuntimeProfile = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/agent-runtime-profiles",
+            json!({
+                "name": "context-version-runtime-v1",
+                "runtime_type": "agent_cli",
+                "command": "codex",
+                "default_args": ["exec", "--json"],
+                "remote_computer_required": false,
+                "status": "enabled"
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let environment_profile: AgentRuntimeProfile = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/agent-runtime-profiles",
+            json!({
+                "name": "context-environment-runtime",
+                "runtime_type": "agent_cli",
+                "command": "codex",
+                "default_args": ["exec", "--json"],
+                "remote_computer_required": true,
+                "status": "enabled"
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let environment: Environment = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/environments",
+            json!({
+                "name": "Context environment precedence",
+                "environment_type": "local",
+                "runtime_profile_id": environment_profile.id,
+                "release_state": "active",
+                "status": "enabled"
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let agent: Agent = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/agents",
+            json!({
+                "name": "Pinned Context Agent",
+                "kind": "specialist",
+                "agent_role": "specialist",
+                "provider": "provider-v1",
+                "model": "model-v1",
+                "runtime_profile_id": version_profile.id,
+                "system_prompt": "context version one",
+                "tools": ["file.read"],
+                "tool_policy": {"allowed_tools": ["file.read"], "revision": "v1"},
+                "skill_ids": ["skill-v1"],
+                "workflow_pack_ids": ["pack-v1"],
+                "remote_computer_profile": {"pool": "v1"},
+                "semantic_scopes": {
+                    "project_scope": "mandoforge",
+                    "repo_scope": "mandoforge",
+                    "service_scope": "api-v1",
+                    "workflow_scope": "context-v1",
+                    "policy_scope": "policy-v1",
+                    "memory_scope": "memory-v1"
+                }
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let pinned_session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "pinned context packet".to_string(),
+            message: None,
+        })
+        .await
+        .expect("pinned session");
+    let environment_session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: Some(environment.id),
+            title: "environment context packet".to_string(),
+            message: None,
+        })
+        .await
+        .expect("environment session");
+
+    let _: AgentVersion = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/agents/{}/versions", agent.id),
+            json!({
+                "provider": "provider-v2",
+                "model": "model-v2",
+                "system_prompt": "context version two",
+                "tools": ["file.write"],
+                "runtime_config": {},
+                "approval_policy": {"allowed_tools": ["file.write"], "revision": "v2"},
+                "mcp_server_ids": [],
+                "skill_ids": ["skill-v2"],
+                "workflow_pack_ids": ["pack-v2"],
+                "remote_computer_profile": {"pool": "v2"},
+                "semantic_scopes": {
+                    "project_scope": "mandoforge",
+                    "repo_scope": "mandoforge",
+                    "service_scope": "api-v2",
+                    "workflow_scope": "context-v2",
+                    "policy_scope": "policy-v2",
+                    "memory_scope": "memory-v2"
+                }
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let _: AgentRuntimeProfile = request_json(
+        app,
+        json_request_with_headers(
+            "PATCH",
+            &format!("/api/agent-runtime-profiles/{}", version_profile.id),
+            json!({"status": "disabled", "remote_computer_required": true}),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+
+    let pinned = build_context_packet(&state, pinned_session.id)
+        .await
+        .expect("pinned context packet");
+    assert_eq!(pinned.agent_version_id, pinned_session.agent_version_id);
+    assert_eq!(pinned.agent.tools, vec!["file.read".to_string()]);
+    assert_eq!(pinned.agent.skill_ids, vec!["skill-v1".to_string()]);
+    assert_eq!(pinned.agent.workflow_pack_ids, vec!["pack-v1".to_string()]);
+    assert_eq!(pinned.agent.remote_computer_profile["pool"], "v1");
+    assert_eq!(pinned.semantic_scopes["service_scope"], "api-v1");
+    assert_eq!(pinned.tool_policy["revision"], "v1");
+    let pinned_profile = pinned.runtime_profile.expect("pinned runtime profile");
+    assert_eq!(pinned_profile.id, version_profile.id);
+    assert_eq!(pinned_profile.status, "enabled");
+    assert!(!pinned_profile.remote_computer_required);
+    assert_eq!(
+        pinned.replay_summary["effective_context_source"],
+        "agent_version"
+    );
+    assert_eq!(
+        pinned.replay_summary["runtime_profile_source"],
+        "agent_version_snapshot"
+    );
+    assert!(pinned.source_refs.iter().any(|source| {
+        source.source_type == "agent_runtime_profile"
+            && source.source_id == version_profile.id.to_string()
+            && source
+                .freshness
+                .contains("source:agent_version_snapshot:status:enabled")
+    }));
+
+    let environment_packet = build_context_packet(&state, environment_session.id)
+        .await
+        .expect("environment context packet");
+    assert_eq!(
+        environment_packet
+            .runtime_profile
+            .expect("environment runtime profile")
+            .id,
+        environment_profile.id
+    );
+    assert_eq!(
+        environment_packet.replay_summary["runtime_profile_source"],
+        "environment"
+    );
+    assert_eq!(
+        environment_packet.semantic_scopes["service_scope"],
+        "api-v1"
+    );
+}
+
+#[tokio::test]
+async fn session_provider_resolution_uses_pinned_agent_version() {
+    let _env = env_lock().lock().expect("env lock");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let app = build_router(state.clone());
+    let agent: Agent = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/agents",
+            json!({
+                "name": "Pinned Provider Agent",
+                "provider": "missing-provider-v1",
+                "model": "model-v1",
+                "system_prompt": "pinned prompt v1"
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "pinned provider".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create session");
+    let _: Value = request_json(
+        app,
+        json_request_with_headers(
+            "POST",
+            &format!("/api/agents/{}/versions", agent.id),
+            json!({
+                "provider": "missing-provider-v2",
+                "model": "model-v2",
+                "system_prompt": "current prompt v2",
+                "tools": [],
+                "runtime_config": {},
+                "approval_policy": {},
+                "mcp_server_ids": [],
+                "skill_ids": [],
+                "workflow_pack_ids": [],
+                "remote_computer_profile": {},
+                "semantic_scopes": {}
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+
+    let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+    let context = build_harness_context(&state, session.id, None, None)
+        .await
+        .expect("pinned harness context");
+    assert_eq!(context.agent_version_id, session.agent_version_id.unwrap());
+    assert_eq!(context.agent_version, 1);
+    assert_eq!(context.system_prompt, "pinned prompt v1");
+    let error = match provider_client_for_session(&state, session.id).await {
+        Ok(_) => panic!("missing pinned provider must fail closed"),
+        Err(error) => error,
+    };
+    assert!(error.message.contains("missing-provider-v1"));
+    assert!(!error.message.contains("missing-provider-v2"));
+}
+
+#[tokio::test]
+async fn create_agent_cannot_bypass_release_promotion() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+    let _release_enforcement = EnvVarGuard::remove("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT");
+    let app = test_app().await;
+    let (status, error) = request_value(
+        app,
+        json_request_with_headers(
+            "POST",
+            "/api/agents",
+            json!({
+                "name": "Unreviewed Active Agent",
+                "kind": "orchestrator",
+                "provider": "openai-compatible",
+                "model": "gpt-5.5-mini",
+                "system_prompt": "This must not become active directly.",
+                "release_state": "active"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        error["error"]
+            .as_str()
+            .is_some_and(|message| { message.contains("release promotion") })
+    );
+}
+
+async fn seed_promoted_agent_for_test(
+    state: &AppState,
+    environment: &str,
+) -> (Agent, AgentVersion, Environment) {
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let version = state
+        .current_agent_version(agent.id)
+        .await
+        .expect("seeded agent version");
+    let runtime_environment = state
+        .list_environments()
+        .await
+        .expect("list environments")
+        .into_iter()
+        .next()
+        .expect("seeded environment");
+    let now = Utc::now();
+    let release = AgentRelease {
+        id: Uuid::new_v4(),
+        agent_id: agent.id,
+        agent_version_id: version.id,
+        environment: environment.to_string(),
+        status: "promoted".to_string(),
+        eval_run_id: None,
+        eval_score: Some(1.0),
+        min_score: 1.0,
+        requested_by: Some("test".to_string()),
+        requested_at: Some(now),
+        request_reason: None,
+        approver_subject: None,
+        decision_by: Some("test".to_string()),
+        decided_at: Some(now),
+        decision_reason: Some("test release".to_string()),
+        promoted_by: Some("test".to_string()),
+        promoted_at: Some(now),
+        automation_policy: json!({}),
+        created_at: now,
+    };
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test requires memory store");
+    };
+    inner
+        .write()
+        .await
+        .agent_releases
+        .insert(release.id, release);
+    (agent, version, runtime_environment)
+}
+
+async fn insert_promoted_agent_version_for_test(
+    state: &AppState,
+    version: &AgentVersion,
+    environment: &str,
+) {
+    let now = Utc::now();
+    let release = AgentRelease {
+        id: Uuid::new_v4(),
+        agent_id: version.agent_id,
+        agent_version_id: version.id,
+        environment: environment.to_string(),
+        status: "promoted".to_string(),
+        eval_run_id: None,
+        eval_score: Some(1.0),
+        min_score: 1.0,
+        requested_by: Some("test".to_string()),
+        requested_at: Some(now),
+        request_reason: None,
+        approver_subject: None,
+        decision_by: Some("test".to_string()),
+        decided_at: Some(now),
+        decision_reason: Some("test release".to_string()),
+        promoted_by: Some("test".to_string()),
+        promoted_at: Some(now),
+        automation_policy: json!({}),
+        created_at: now,
+    };
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test requires memory store");
+    };
+    inner
+        .write()
+        .await
+        .agent_releases
+        .insert(release.id, release);
+}
+
+async fn promote_replacement_agent_version_for_test(
+    state: &AppState,
+    agent: &Agent,
+    environment: &str,
+) -> AgentVersion {
+    let mut changed_agent = agent.clone();
+    changed_agent.system_prompt = "Promoted replacement prompt".to_string();
+    let next_version = state
+        .list_agent_versions(agent.id)
+        .await
+        .expect("list agent versions")
+        .len() as i32
+        + 1;
+    state
+        .insert_agent_version(&changed_agent, next_version, json!({}))
+        .await
+        .expect("insert replacement version");
+    let replacement = state
+        .current_agent_version(agent.id)
+        .await
+        .expect("load replacement version");
+    let now = Utc::now() + chrono::Duration::seconds(1);
+    let replacement_release = AgentRelease {
+        id: Uuid::new_v4(),
+        agent_id: agent.id,
+        agent_version_id: replacement.id,
+        environment: environment.to_string(),
+        status: "promoted".to_string(),
+        eval_run_id: None,
+        eval_score: Some(1.0),
+        min_score: 1.0,
+        requested_by: Some("test".to_string()),
+        requested_at: Some(now),
+        request_reason: None,
+        approver_subject: None,
+        decision_by: Some("test".to_string()),
+        decided_at: Some(now),
+        decision_reason: Some("replacement release".to_string()),
+        promoted_by: Some("test".to_string()),
+        promoted_at: Some(now),
+        automation_policy: json!({}),
+        created_at: now,
+    };
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test requires memory store");
+    };
+    inner
+        .write()
+        .await
+        .agent_releases
+        .insert(replacement_release.id, replacement_release);
+    replacement
+}
+
+#[tokio::test]
+async fn production_session_binds_promoted_agent_version() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+    let _release_enforcement = EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+    let _release_environment =
+        EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT", "production");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let (agent, promoted_version, environment) =
+        seed_promoted_agent_for_test(&state, "production").await;
+    let mut changed_agent = agent.clone();
+    changed_agent.system_prompt = "Unreleased prompt".to_string();
+    state
+        .insert_agent_version(&changed_agent, 2, json!({}))
+        .await
+        .expect("insert unreleased version");
+    let unreleased_version = state
+        .current_agent_version(agent.id)
+        .await
+        .expect("version 2");
+    assert_ne!(promoted_version.id, unreleased_version.id);
+
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: Some(environment.id),
+            title: "production version binding".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create production session");
+    assert_eq!(session.agent_version_id, Some(promoted_version.id));
+}
+
+#[tokio::test]
+async fn production_session_rejects_agent_without_promoted_release() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+    let _release_enforcement = EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+    let _release_environment =
+        EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT", "production");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let environment = state
+        .list_environments()
+        .await
+        .expect("list environments")
+        .into_iter()
+        .next()
+        .expect("seeded environment");
+
+    let error = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: Some(environment.id),
+            title: "unreleased production session".to_string(),
+            message: None,
+        })
+        .await
+        .expect_err("production session must require a promoted release");
+    assert!(error.message.contains("promoted release"));
+}
+
+#[tokio::test]
+async fn production_session_requires_bound_environment() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+    let _release_enforcement = EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+    let _release_environment =
+        EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT", "production");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let (agent, _, _) = seed_promoted_agent_for_test(&state, "production").await;
+
+    let error = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "missing production environment".to_string(),
+            message: None,
+        })
+        .await
+        .expect_err("production session must require an environment");
+    assert!(error.message.contains("bound environment"));
+}
+
+#[tokio::test]
+async fn production_session_rejects_environment_release_mismatch() {
+    let _env = env_lock().lock().expect("env lock");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let (agent, _, environment) = seed_promoted_agent_for_test(&state, "production").await;
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test requires memory store");
+    };
+    inner
+        .write()
+        .await
+        .environments
+        .get_mut(&environment.id)
+        .expect("seeded environment")
+        .worker_queue_binding["release_environment"] = json!("staging");
+
+    let error = {
+        let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+        let _release_enforcement =
+            EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+        let _release_environment =
+            EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT", "production");
+        state
+            .create_session(CreateSession {
+                agent_id: agent.id,
+                environment_id: Some(environment.id),
+                title: "mismatched release environment".to_string(),
+                message: None,
+            })
+            .await
+            .expect_err("runtime must reject an environment from another release channel")
+    };
+    assert!(
+        error
+            .message
+            .contains("does not match runtime release environment")
+    );
+}
+
+#[tokio::test]
+async fn environment_rejects_invalid_release_channel_binding() {
+    let app = test_app().await;
+    let (status, error) = request_value(
+        app,
+        json_request_with_headers(
+            "POST",
+            "/api/environments",
+            json!({
+                "name": "Invalid Release Binding",
+                "environment_type": "self_hosted",
+                "worker_queue_binding": {"release_environment": "   "},
+                "release_state": "active",
+                "status": "enabled"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error["error"],
+        "worker_queue_binding.release_environment must be a non-empty string"
+    );
+}
+
+#[tokio::test]
+async fn active_production_environment_requires_release_channel_binding() {
+    let _env = env_lock().lock().expect("env lock");
+    let app = test_app().await;
+    let (status, error) = {
+        let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+        let _release_enforcement =
+            EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+        request_value(
+            app,
+            json_request_with_headers(
+                "POST",
+                "/api/environments",
+                json!({
+                    "name": "Missing Release Binding",
+                    "environment_type": "self_hosted",
+                    "release_state": "active",
+                    "status": "enabled"
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await
+    };
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error["error"],
+        "active production environment requires worker_queue_binding.release_environment"
+    );
+}
+
+#[tokio::test]
+async fn production_direct_session_requires_governed_workflow() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+    let _release_enforcement = EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+    let _release_environment =
+        EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT", "production");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let app = build_router(state);
+
+    let (status, error) = request_value(
+        app,
+        json_request_with_headers(
+            "POST",
+            "/api/sessions",
+            json!({
+                "agent_id": "11111111-1111-4111-8111-111111111111",
+                "title": "ungoverned production session"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(error["error"].as_str().is_some_and(|message| {
+        message.contains("WorkflowRun") && message.contains("TaskGrant")
+    }));
+}
+
+#[tokio::test]
+async fn production_rejects_direct_agent_release_promotion() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+    let _release_enforcement = EnvVarGuard::remove("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT");
+    let app = test_app().await;
+    let agents: Vec<Agent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/agents")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let agent = agents.first().expect("seeded agent");
+
+    let (status, error) = request_value(
+        app,
+        json_request_with_headers(
+            "POST",
+            &format!("/api/agents/{}/releases", agent.id),
+            json!({
+                "eval_run_id": Uuid::new_v4(),
+                "environment": "production"
+            }),
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        error["error"],
+        "production agent releases require a release request and independent approval"
+    );
+}
+
+#[tokio::test]
+async fn production_release_approval_requires_configured_controller() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+    let _release_enforcement = EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let version = state
+        .current_agent_version(agent.id)
+        .await
+        .expect("agent version");
+    let now = Utc::now();
+    let release = AgentRelease {
+        id: Uuid::new_v4(),
+        agent_id: agent.id,
+        agent_version_id: version.id,
+        environment: "production".to_string(),
+        status: "pending_approval".to_string(),
+        eval_run_id: None,
+        eval_score: Some(1.0),
+        min_score: 1.0,
+        requested_by: Some("release-requester".to_string()),
+        requested_at: Some(now),
+        request_reason: Some("production release".to_string()),
+        approver_subject: Some("release-approver".to_string()),
+        decision_by: None,
+        decided_at: None,
+        decision_reason: None,
+        promoted_by: None,
+        promoted_at: None,
+        automation_policy: json!({}),
+        created_at: now,
+    };
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test uses memory store");
+    };
+    inner
+        .write()
+        .await
+        .agent_releases
+        .insert(release.id, release.clone());
+    let app = build_router(state);
+
+    let (status, error) = request_value(
+        app,
+        Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/api/agents/{}/releases/{}/approve",
+                agent.id, release.id
+            ))
+            .header("x-mandoforge-subject", "release-approver")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error["error"],
+        "agent release controller is required but not configured"
+    );
+}
+
+#[tokio::test]
+async fn production_session_loop_requires_active_task_grant() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+    let _release_enforcement = EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+    let _release_environment =
+        EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT", "production");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let (agent, _, environment) = seed_promoted_agent_for_test(&state, "production").await;
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: Some(environment.id),
+            title: "production grant enforcement".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create promoted production session");
+    let job = enqueue_session_loop(&state, session.id, None, "test grant enforcement")
+        .await
+        .expect("enqueue session loop");
+
+    let error = run_session_loop(&state, &job)
+        .await
+        .expect_err("production loop must require a TaskGrant");
+    assert!(error.message.contains("active TaskGrant"));
+}
+
+#[tokio::test]
+async fn production_session_remains_runnable_after_replacement_promotion() {
+    let _env = env_lock().lock().expect("env lock");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let (agent, _, environment) = seed_promoted_agent_for_test(&state, "production").await;
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: Some(environment.id),
+            title: "stale production version".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create production session");
+    promote_replacement_agent_version_for_test(&state, &agent, "production").await;
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test requires memory store");
+    };
+    {
+        let mut store = inner.write().await;
+        store
+            .environments
+            .get_mut(&environment.id)
+            .expect("seeded environment")
+            .worker_queue_binding["release_environment"] = json!("production");
+    }
+    {
+        let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+        let _release_enforcement =
+            EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+        let _release_environment =
+            EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT", "production");
+        state
+            .ensure_session_runnable(session.id)
+            .await
+            .expect("a later promotion must not invalidate an existing pinned session");
+    }
+}
+
+#[tokio::test]
+async fn production_rollback_revokes_sessions_pinned_to_rolled_back_version() {
+    let _env = env_lock().lock().expect("env lock");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let (agent, _, environment) = seed_promoted_agent_for_test(&state, "production").await;
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: Some(environment.id),
+            title: "stale manager handoff".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create manager session");
+    let pinned_version_id = session.agent_version_id.expect("pinned agent version");
+    promote_replacement_agent_version_for_test(&state, &agent, "production").await;
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test requires memory store");
+    };
+    inner
+        .write()
+        .await
+        .environments
+        .get_mut(&environment.id)
+        .expect("seeded environment")
+        .worker_queue_binding["release_environment"] = json!("production");
+
+    let release = state
+        .list_agent_releases(agent.id)
+        .await
+        .expect("agent releases")
+        .into_iter()
+        .find(|release| {
+            release.agent_version_id == pinned_version_id && release.status == "promoted"
+        })
+        .expect("pinned version release");
+    state
+        .rollback_agent_release(agent.id, release.id)
+        .await
+        .expect("rollback pinned version");
+
+    let error = {
+        let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+        let _release_enforcement =
+            EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+        let _release_environment =
+            EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT", "production");
+        state
+            .ensure_session_runnable(session.id)
+            .await
+            .expect_err("rolling back the pinned release must revoke the session")
+    };
+    assert!(
+        error
+            .message
+            .contains("pinned agent version no longer has a promoted release")
+    );
+}
+
+#[tokio::test]
+async fn terminal_handoff_can_close_after_source_agent_is_disabled() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+    let _release_enforcement = EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+    let _release_environment =
+        EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT", "production");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let (agent, _, environment) = seed_promoted_agent_for_test(&state, "production").await;
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: Some(environment.id),
+            title: "terminal handoff after disable".to_string(),
+            message: None,
+        })
+        .await
+        .expect("production session");
+    let now = Utc::now();
+    let handoff = state
+        .create_agent_handoff_event(AgentHandoffEvent {
+            id: Uuid::new_v4(),
+            source_session_id: session.id,
+            source_agent_id: agent.id,
+            target_agent_id: agent.id,
+            manager_plan_id: None,
+            intent: "close_after_disable".to_string(),
+            payload: json!({}),
+            schema_version: "handoff.v1".to_string(),
+            risk_level: "low".to_string(),
+            approval_required: false,
+            semantic_scopes: json!({}),
+            runtime_profile_id: None,
+            remote_computer_required: false,
+            review_status: "manager_reviewed".to_string(),
+            human_escalation_status: "none".to_string(),
+            status: "accepted".to_string(),
+            audit_trace_id: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .expect("accepted handoff");
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test requires memory store");
+    };
+    inner
+        .write()
+        .await
+        .agents
+        .get_mut(&agent.id)
+        .expect("source agent")
+        .release_state = "disabled".to_string();
+
+    let completed: AgentHandoffEvent = request_json(
+        build_router(state),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/agent-handoffs/{}/complete", handoff.id),
+            json!({"reason": "close terminal governance state"}),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    assert_eq!(completed.status, "completed");
+}
+
+#[tokio::test]
+async fn production_handoff_uses_promoted_target_version_runtime_snapshot() {
+    let _env = env_lock().lock().expect("env lock");
+    let setup_provider = EnvVarGuard::remove("MANDOFORGE_PROVIDER_RUNTIME_ENV");
+    let setup_enforcement = EnvVarGuard::remove("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT");
+    let setup_release_environment = EnvVarGuard::remove("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let profile_v1 = state
+        .create_agent_runtime_profile(CreateAgentRuntimeProfile {
+            name: "promoted-handoff-runtime-v1".to_string(),
+            runtime_type: "codex_cli".to_string(),
+            command: "/usr/local/bin/codex".to_string(),
+            default_args: vec!["exec".to_string(), "--json".to_string()],
+            env: json!({}),
+            timeout_seconds: Some(300),
+            remote_computer_required: true,
+            status: "enabled".to_string(),
+        })
+        .await
+        .expect("runtime profile v1");
+    let profile_v2 = state
+        .create_agent_runtime_profile(CreateAgentRuntimeProfile {
+            name: "unreleased-handoff-runtime-v2".to_string(),
+            runtime_type: "codex_cli".to_string(),
+            command: "/usr/local/bin/codex".to_string(),
+            default_args: vec!["exec".to_string(), "--json".to_string()],
+            env: json!({}),
+            timeout_seconds: Some(300),
+            remote_computer_required: false,
+            status: "enabled".to_string(),
+        })
+        .await
+        .expect("runtime profile v2");
+    let specialist = state
+        .create_agent(CreateAgent {
+            name: "Promoted Runtime Specialist".to_string(),
+            kind: "specialist".to_string(),
+            provider: "openai-compatible".to_string(),
+            model: "gpt-5.5-mini".to_string(),
+            team_id: None,
+            project_id: None,
+            runtime_profile_id: Some(profile_v1.id),
+            agent_role: "specialist".to_string(),
+            system_prompt: "promoted specialist v1".to_string(),
+            runtime_config: json!({}),
+            tools: vec!["file.read".to_string()],
+            tool_policy: json!({"revision": "v1"}),
+            mcp_server_ids: Vec::new(),
+            skill_ids: Vec::new(),
+            workflow_pack_ids: Vec::new(),
+            remote_computer_profile: json!({"required": true, "revision": "v1"}),
+            semantic_scopes: json!({"workflow_scope": "pinned-v1"}),
+            release_state: "draft".to_string(),
+        })
+        .await
+        .expect("specialist agent");
+    let specialist_v1 = state
+        .current_agent_version(specialist.id)
+        .await
+        .expect("specialist v1");
+    let manager = state
+        .create_agent(CreateAgent {
+            name: "Promoted Runtime Manager".to_string(),
+            kind: "manager".to_string(),
+            provider: "openai-compatible".to_string(),
+            model: "gpt-5.5-mini".to_string(),
+            team_id: None,
+            project_id: None,
+            runtime_profile_id: None,
+            agent_role: "manager".to_string(),
+            system_prompt: "delegate through promoted versions".to_string(),
+            runtime_config: json!({
+                "handoffs": {
+                    "allowed_targets": [{
+                        "target_agent_id": specialist.id,
+                        "intents": ["pinned_review"],
+                        "schema_versions": ["handoff.v1"],
+                        "risk_levels": ["low"],
+                        "approval_required": false
+                    }]
+                }
+            }),
+            tools: vec!["file.read".to_string()],
+            tool_policy: json!({}),
+            mcp_server_ids: Vec::new(),
+            skill_ids: Vec::new(),
+            workflow_pack_ids: Vec::new(),
+            remote_computer_profile: json!({}),
+            semantic_scopes: json!({"workflow_scope": "pinned-v1"}),
+            release_state: "draft".to_string(),
+        })
+        .await
+        .expect("manager agent");
+    let manager_v1 = state
+        .current_agent_version(manager.id)
+        .await
+        .expect("manager v1");
+    let environment = state
+        .create_environment(CreateEnvironment {
+            name: "Promoted Handoff Production".to_string(),
+            environment_type: "self_hosted".to_string(),
+            runtime_profile_id: None,
+            remote_computer_profile: json!({}),
+            codex_app_server_profile: json!({}),
+            worker_queue_binding: json!({"release_environment": "production"}),
+            state_mounts: json!({}),
+            network_policy: json!({}),
+            vault_requirements: json!({}),
+            mcp_requirements: json!({}),
+            release_state: "active".to_string(),
+            status: "enabled".to_string(),
+        })
+        .await
+        .expect("production environment");
+    insert_promoted_agent_version_for_test(&state, &specialist_v1, "production").await;
+    insert_promoted_agent_version_for_test(&state, &manager_v1, "production").await;
+
+    let mut specialist_v2_draft = specialist.clone();
+    specialist_v2_draft.runtime_profile_id = Some(profile_v2.id);
+    specialist_v2_draft.system_prompt = "unreleased specialist v2".to_string();
+    specialist_v2_draft.tools = vec!["shell.exec".to_string()];
+    specialist_v2_draft.remote_computer_profile = json!({"required": false, "revision": "v2"});
+    specialist_v2_draft.semantic_scopes = json!({"workflow_scope": "unreleased-v2"});
+    state
+        .insert_agent_version(&specialist_v2_draft, 2, json!({}))
+        .await
+        .expect("unreleased specialist v2");
+
+    drop(setup_release_environment);
+    drop(setup_enforcement);
+    drop(setup_provider);
+    let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+    let _release_enforcement = EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+    let _release_environment =
+        EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT", "production");
+    let app = build_router(state.clone());
+    let definition: WorkflowDefinition = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-definitions",
+            json!({
+                "name": "Promoted target handoff",
+                "entrypoint": "promoted-target-handoff",
+                "default_agent_id": manager.id,
+                "default_environment_id": environment.id,
+                "handoff_rules": {
+                    "root_task_grant": {
+                        "semantic_scopes": {"workflow_scope": "pinned-v1"},
+                        "tool_scope": {
+                            "read": ["file.read", "shell.exec"],
+                            "write": [],
+                            "external_write": []
+                        }
+                    }
+                },
+                "release_state": "released"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let run: WorkflowRun = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-runs",
+            json!({"workflow_definition_id": definition.id}),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    let plan: ManagerAgentPlan = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/sessions/{}/manager-plans", run.primary_session_id),
+            json!({
+                "specialist_agent_id": specialist.id,
+                "task_intake": {"goal": "prove promoted runtime pinning"},
+                "decomposition": {"steps": ["delegate"]},
+                "specialist_selection": {"selected_agent_id": specialist.id},
+                "risk_classification": "low"
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    let reviewed: ManagerAgentPlan = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/manager-plans/{}/review", plan.id),
+            json!({"status": "approved", "review": {"status": "approved"}}),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+
+    let (status, error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/sessions/{}/agent-handoffs", run.primary_session_id),
+            json!({
+                "target_agent_id": specialist.id,
+                "manager_plan_id": reviewed.id,
+                "intent": "pinned_review",
+                "payload": {},
+                "schema_version": "handoff.v1",
+                "risk_level": "low",
+                "runtime_profile_id": profile_v2.id
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(error["error"].as_str().is_some_and(|message| {
+        message.contains("must match the promoted target agent version")
+    }));
+
+    let (status, error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/sessions/{}/agent-handoffs", run.primary_session_id),
+            json!({
+                "target_agent_id": specialist.id,
+                "manager_plan_id": reviewed.id,
+                "intent": "pinned_review",
+                "payload": {},
+                "schema_version": "handoff.v1",
+                "risk_level": "low",
+                "remote_computer_required": false
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(
+        error["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("cannot disable"))
+    );
+
+    let handoff: AgentHandoffEvent = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/sessions/{}/agent-handoffs", run.primary_session_id),
+            json!({
+                "target_agent_id": specialist.id,
+                "manager_plan_id": reviewed.id,
+                "intent": "pinned_review",
+                "payload": {},
+                "schema_version": "handoff.v1",
+                "risk_level": "low"
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    assert_eq!(handoff.runtime_profile_id, Some(profile_v1.id));
+    assert_eq!(handoff.semantic_scopes["workflow_scope"], "pinned-v1");
+    assert!(handoff.remote_computer_required);
+    let _: AgentHandoffEvent = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/agent-handoffs/{}/accept", handoff.id),
+            json!({"reason": "approved"}),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    let assignment: AgentHandoffAssignment = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/agent-handoffs/{}/assignment", handoff.id),
+            json!({"assigned_by": "manager"}),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    assert_eq!(assignment.runtime_profile_id, None);
+    assert_eq!(assignment.status, "waiting_remote_computer");
+    let specialist_session = state
+        .get_session(assignment.specialist_session_id)
+        .await
+        .expect("specialist session");
+    assert_eq!(specialist_session.agent_version_id, Some(specialist_v1.id));
+    let packet: ContextPacket = request_json(
+        app,
+        json_request_with_headers(
+            "POST",
+            &format!(
+                "/api/sessions/{}/context-packet",
+                assignment.specialist_session_id
+            ),
+            json!({}),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    assert_eq!(packet.agent.tools, vec!["file.read".to_string()]);
+    assert_eq!(
+        packet.runtime_profile.as_ref().map(|profile| profile.id),
+        Some(profile_v1.id)
+    );
+    assert_eq!(
+        packet.replay_summary["runtime_profile_source"],
+        "agent_version_snapshot"
+    );
+}
+
+#[tokio::test]
+async fn agent_registry_state_tracks_configured_release_environment() {
+    let _env = env_lock().lock().expect("env lock");
+    let _release_environment =
+        EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT", "production");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let agent = state
+        .create_agent(CreateAgent {
+            name: "Release State Agent".to_string(),
+            kind: "orchestrator".to_string(),
+            provider: "openai-compatible".to_string(),
+            model: "gpt-5.5-mini".to_string(),
+            team_id: None,
+            project_id: None,
+            runtime_profile_id: None,
+            agent_role: "specialist".to_string(),
+            system_prompt: "Prove release state activation.".to_string(),
+            runtime_config: json!({}),
+            tools: vec!["file.read".to_string()],
+            tool_policy: json!({}),
+            mcp_server_ids: vec![],
+            skill_ids: vec![],
+            workflow_pack_ids: vec![],
+            remote_computer_profile: json!({}),
+            semantic_scopes: json!({}),
+            release_state: "draft".to_string(),
+        })
+        .await
+        .expect("create draft agent");
+    let dataset = state
+        .create_eval_dataset(CreateEvalDataset {
+            name: "release state activation".to_string(),
+            description: None,
+        })
+        .await
+        .expect("create eval dataset");
+    state
+        .create_eval_case(
+            dataset.id,
+            CreateEvalCase {
+                input: json!({"final_answer": "release ready"}),
+                expected: Some(json!({"contains": ["release"]})),
+                grading_policy: json!({"kind": "final_answer"}),
+            },
+        )
+        .await
+        .expect("create eval case");
+    let run = state
+        .create_eval_run(dataset.id, CreateEvalRun { agent_id: agent.id })
+        .await
+        .expect("create eval run");
+    assert_eq!(run.status, "completed");
+
+    state
+        .create_agent_release(
+            agent.id,
+            CreateAgentRelease {
+                agent_version_id: None,
+                eval_run_id: run.id,
+                environment: "staging".to_string(),
+                min_score: Some(1.0),
+            },
+            "release-admin".to_string(),
+        )
+        .await
+        .expect("promote staging agent release");
+
+    assert_eq!(
+        state
+            .get_agent(agent.id)
+            .await
+            .expect("staging agent")
+            .release_state,
+        "staged"
+    );
+
+    let production_release = state
+        .create_agent_release(
+            agent.id,
+            CreateAgentRelease {
+                agent_version_id: None,
+                eval_run_id: run.id,
+                environment: "production".to_string(),
+                min_score: Some(1.0),
+            },
+            "release-admin".to_string(),
+        )
+        .await
+        .expect("promote production agent release");
+
+    assert_eq!(
+        state
+            .get_agent(agent.id)
+            .await
+            .expect("released agent")
+            .release_state,
+        "active"
+    );
+
+    state
+        .rollback_agent_release(agent.id, production_release.id)
+        .await
+        .expect("rollback production release");
+    assert_eq!(
+        state
+            .get_agent(agent.id)
+            .await
+            .expect("rolled back agent")
+            .release_state,
+        "staged"
+    );
 }
 
 #[tokio::test]
@@ -5942,6 +7635,85 @@ async fn manager_handoff_assignment_creates_specialist_execution_entry() {
     )
     .await;
     assert_eq!(accepted.status, "accepted");
+
+    let environments: Vec<Environment> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/environments")
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let mismatched_session: Session = request_json(
+        app.clone(),
+        json_request(
+            "POST",
+            "/api/sessions",
+            json!({
+                "agent_id": specialist.id,
+                "environment_id": environments.first().expect("seeded environment").id,
+                "title": "wrong environment specialist session"
+            }),
+        ),
+    )
+    .await;
+    let (mismatch_status, mismatch_error) = request_value(
+        app.clone(),
+        json_request(
+            "POST",
+            &format!("/api/agent-handoffs/{}/assignment", handoff.id),
+            json!({
+                "specialist_session_id": mismatched_session.id,
+                "assigned_by": "manager-agent"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(mismatch_status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        mismatch_error["error"],
+        "specialist_session_id must use the same environment as the source session"
+    );
+
+    let sessions_before: Vec<Session> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/sessions")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let (production_status, production_error) = {
+        let _env = env_lock().lock().expect("env lock");
+        let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+        let _release_enforcement =
+            EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+        request_value(
+            app.clone(),
+            json_request(
+                "POST",
+                &format!("/api/agent-handoffs/{}/assignment", handoff.id),
+                json!({"assigned_by": "manager-agent"}),
+            ),
+        )
+        .await
+    };
+    assert_eq!(production_status, StatusCode::FORBIDDEN);
+    assert!(
+        production_error["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("bound environment"))
+    );
+    let sessions_after: Vec<Session> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/sessions")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(sessions_after.len(), sessions_before.len());
 
     let assignment: AgentHandoffAssignment = request_json(
         app.clone(),
@@ -8673,7 +10445,7 @@ async fn semantic_synthesis_run_creates_reflection_artifact_and_review_candidate
     }));
 
     let events: Vec<SessionEvent> = request_json(
-        app,
+        app.clone(),
         Request::builder()
             .uri(format!("/api/sessions/{}/events", session.id))
             .header("x-mandoforge-roles", "admin")
@@ -10417,7 +12189,7 @@ async fn delegated_runtime_workflow_records_external_envelope() {
 
     let session_id = run["primary_session_id"].as_str().expect("session id");
     let events: Vec<SessionEvent> = request_json(
-        app,
+        app.clone(),
         Request::builder()
             .uri(format!("/api/sessions/{session_id}/events"))
             .body(Body::empty())
@@ -13744,7 +15516,9 @@ async fn workflow_fan_out_max_parallel_defers_extra_ready_steps() {
 
 #[tokio::test]
 async fn workflow_handoff_assignment_materializes_step_and_child_grant() {
-    let app = test_app().await;
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let app = build_router(state.clone());
     let specialist: Agent = request_json(
         app.clone(),
         json_request_with_headers(
@@ -13815,6 +15589,10 @@ async fn workflow_handoff_assignment_materializes_step_and_child_grant() {
                 },
                 "handoff_rules": {
                     "root_task_grant": {
+                        "max_turns": 5,
+                        "max_tool_calls": 6,
+                        "max_runtime_seconds": 3600,
+                        "max_cost_usd_micros": 1000,
                         "semantic_scopes": {
                             "domain_scope": "legal",
                             "workflow_scope": "contract-review"
@@ -13924,6 +15702,22 @@ async fn workflow_handoff_assignment_materializes_step_and_child_grant() {
         ),
     )
     .await;
+    state
+        .reserve_task_grant_turn(root_task_grant_id)
+        .await
+        .expect("reserve first manager turn");
+    state
+        .reserve_task_grant_turn(root_task_grant_id)
+        .await
+        .expect("reserve second manager turn");
+    state
+        .reserve_task_grant_tool_call(root_task_grant_id)
+        .await
+        .expect("reserve manager tool call");
+    state
+        .add_task_grant_cost(root_task_grant_id, 250)
+        .await
+        .expect("record manager cost");
     let assignment: AgentHandoffAssignment = request_json(
         app.clone(),
         json_request(
@@ -13957,6 +15751,21 @@ async fn workflow_handoff_assignment_materializes_step_and_child_grant() {
         handoff_step.session_id,
         Some(assignment.specialist_session_id)
     );
+    let specialist_session: Session = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!(
+                "/api/sessions/{}",
+                assignment.specialist_session_id
+            ))
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(
+        handoff_step.agent_version_id,
+        specialist_session.agent_version_id
+    );
     assert!(handoff_step.task_grant_id.is_some());
 
     let grants: Vec<TaskGrant> = request_json(
@@ -13984,6 +15793,14 @@ async fn workflow_handoff_assignment_materializes_step_and_child_grant() {
     );
     assert_eq!(child_grant.agent_class.as_deref(), Some("specialist"));
     assert_eq!(handoff_step.task_grant_id, Some(child_grant.id));
+    assert_eq!(child_grant.max_turns, Some(3));
+    assert_eq!(child_grant.max_tool_calls, Some(5));
+    assert!(
+        child_grant
+            .max_runtime_seconds
+            .is_some_and(|value| value > 0 && value <= 3600)
+    );
+    assert_eq!(child_grant.max_cost_usd_micros, Some(750));
     assert_eq!(child_grant.tool_scope["read"], json!(["file.read"]));
     assert_eq!(child_grant.tool_scope["write"], json!(["agent_cli.exec"]));
 
@@ -14019,6 +15836,154 @@ async fn workflow_handoff_assignment_materializes_step_and_child_grant() {
             && event.payload["task_grant_id"] == json!(child_grant.id)
             && event.payload["parent_grant_id"] == json!(root_task_grant_id)
     }));
+
+    let completed: AgentHandoffEvent = request_json(
+        app.clone(),
+        json_request(
+            "POST",
+            &format!("/api/agent-handoffs/{}/complete", handoff.id),
+            json!({"reason": "specialist review completed"}),
+        ),
+    )
+    .await;
+    assert_eq!(completed.status, "completed");
+    let closed_grant: TaskGrant = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/task-grants/{}", child_grant.id))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(closed_grant.status, "completed");
+    let closed_steps: Vec<WorkflowStepRun> = request_json(
+        app,
+        Request::builder()
+            .uri(format!(
+                "/api/workflow-runs/{}/steps",
+                run["id"].as_str().unwrap()
+            ))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(
+        closed_steps
+            .into_iter()
+            .find(|step| step.id == handoff_step.id)
+            .expect("closed handoff step")
+            .status,
+        "completed"
+    );
+}
+
+#[tokio::test]
+async fn workflow_run_initialization_failure_is_fail_closed() {
+    let app = test_app().await;
+    let agents: Vec<Agent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/agents")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let agent = agents.first().expect("seeded agent");
+    let definition: WorkflowDefinition = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-definitions",
+            json!({
+                "name": "Fail-closed workflow initialization",
+                "entrypoint": "fail-closed-init",
+                "trigger_type": "manual",
+                "default_agent_id": agent.id,
+                "handoff_rules": {
+                    "root_task_grant": {
+                        "max_turns": 0
+                    }
+                },
+                "release_state": "released"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+
+    let (status, error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-runs",
+            json!({
+                "workflow_definition_id": definition.id,
+                "title": "invalid budget must not leave executable state"
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error["error"],
+        json!("root task grant max_turns must be a positive integer")
+    );
+
+    let runs: Vec<WorkflowRun> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/workflow-runs")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let failed_run = runs
+        .iter()
+        .find(|run| run.workflow_definition_id == definition.id)
+        .expect("failed initialization must retain a diagnostic workflow run");
+    assert_eq!(failed_run.status, "failed");
+    assert_eq!(failed_run.root_task_grant_id, None);
+
+    let sessions: Vec<Session> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/sessions")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let failed_session = sessions
+        .iter()
+        .find(|session| session.id == failed_run.primary_session_id)
+        .expect("failed workflow session must remain inspectable");
+    assert_eq!(failed_session.status, SessionStatus::Failed);
+
+    let grants: Vec<TaskGrant> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/workflow-runs/{}/task-grants", failed_run.id))
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(grants.is_empty());
+    let steps: Vec<WorkflowStepRun> = request_json(
+        app,
+        Request::builder()
+            .uri(format!("/api/workflow-runs/{}/steps", failed_run.id))
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(steps.is_empty());
 }
 
 #[tokio::test]
@@ -14072,8 +16037,32 @@ async fn workflow_step_run_rejects_agent_version_without_agent_boundary() {
     )
     .await;
 
+    let replacement_version: AgentVersion = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/agents/{}/versions", agent.id),
+            json!({
+                "provider": current_version.provider,
+                "model": current_version.model,
+                "runtime_profile_id": current_version.runtime_profile_id,
+                "system_prompt": "replacement version must not leak into the existing workflow session",
+                "tools": current_version.tools,
+                "runtime_config": current_version.runtime_config,
+                "approval_policy": current_version.approval_policy,
+                "mcp_server_ids": current_version.mcp_server_ids,
+                "skill_ids": current_version.skill_ids,
+                "workflow_pack_ids": current_version.workflow_pack_ids,
+                "remote_computer_profile": current_version.remote_computer_profile,
+                "semantic_scopes": current_version.semantic_scopes
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+
     let (status, error) = request_value(
-        app,
+        app.clone(),
         json_request_with_headers(
             "POST",
             &format!("/api/workflow-runs/{}/steps", run["id"].as_str().unwrap()),
@@ -14091,6 +16080,173 @@ async fn workflow_step_run_rejects_agent_version_without_agent_boundary() {
         error["error"],
         "workflow step agent_id is required when agent_version_id is provided"
     );
+
+    let (status, error) = request_value(
+        app,
+        json_request_with_headers(
+            "POST",
+            &format!("/api/workflow-runs/{}/steps", run["id"].as_str().unwrap()),
+            json!({
+                "step_key": "wrong-version",
+                "step_type": "agent",
+                "agent_id": agent.id,
+                "agent_version_id": replacement_version.id
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error["error"],
+        "workflow step agent_version_id must match its session agent version"
+    );
+}
+
+#[tokio::test]
+async fn workflow_step_run_rejects_session_outside_workflow_run() {
+    let app = test_app().await;
+    let agents: Vec<Agent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/agents")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let agent = agents.first().expect("seeded agent");
+    let definition: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-definitions",
+            json!({
+                "name": "Workflow session ownership",
+                "entrypoint": "workflow-session-ownership",
+                "default_agent_id": agent.id,
+                "release_state": "released"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let run: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-runs",
+            json!({"workflow_definition_id": definition["id"]}),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    let foreign_session: Session = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/sessions",
+            json!({
+                "agent_id": agent.id,
+                "title": "unrelated session"
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+
+    let (status, error) = request_value(
+        app,
+        json_request_with_headers(
+            "POST",
+            &format!("/api/workflow-runs/{}/steps", run["id"].as_str().unwrap()),
+            json!({
+                "step_key": "foreign-session",
+                "step_type": "agent",
+                "agent_id": agent.id,
+                "session_id": foreign_session.id
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(error["error"], "session is not part of this workflow run");
+}
+
+#[tokio::test]
+async fn workflow_task_grant_rejects_session_outside_workflow_run() {
+    let app = test_app().await;
+    let agents: Vec<Agent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/agents")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let agent = agents.first().expect("seeded agent");
+    let definition: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-definitions",
+            json!({
+                "name": "Grant session ownership",
+                "entrypoint": "grant-session-ownership",
+                "default_agent_id": agent.id,
+                "release_state": "released"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let run: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-runs",
+            json!({"workflow_definition_id": definition["id"]}),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    let foreign_session: Session = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/sessions",
+            json!({
+                "agent_id": agent.id,
+                "title": "unrelated grant session"
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+
+    let (status, error) = request_value(
+        app,
+        json_request_with_headers(
+            "POST",
+            &format!(
+                "/api/workflow-runs/{}/task-grants",
+                run["id"].as_str().unwrap()
+            ),
+            json!({
+                "parent_grant_id": run["root_task_grant_id"],
+                "session_id": foreign_session.id,
+                "grantee_session_id": foreign_session.id,
+                "grantee_agent_id": agent.id,
+                "objective": "reuse unrelated session"
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(error["error"], "session is not part of this workflow run");
 }
 
 #[tokio::test]
@@ -14302,6 +16458,392 @@ async fn workflow_tool_execution_enforces_task_grant_scope() {
 }
 
 #[tokio::test]
+async fn required_task_grant_for_session_rejects_revoked_expired_and_terminal_root_grants() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let app = build_router(state.clone());
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let definition: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-definitions",
+            json!({
+                "name": "Root grant lifecycle",
+                "entrypoint": "root-grant-lifecycle",
+                "default_agent_id": agent.id,
+                "release_state": "released"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let run: WorkflowRun = request_json(
+        app,
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-runs",
+            json!({
+                "workflow_definition_id": definition["id"],
+                "title": "root grant lifecycle"
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    let root_grant_id = run.root_task_grant_id.expect("root task grant");
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test requires memory store");
+    };
+
+    inner
+        .write()
+        .await
+        .task_grants
+        .get_mut(&root_grant_id)
+        .expect("root task grant")
+        .status = "revoked".to_string();
+    let revoked = active_task_grant_for_session(&state, run.primary_session_id)
+        .await
+        .expect_err("revoked root grant must fail closed");
+    assert!(revoked.message.contains("not active"));
+
+    {
+        let mut store = inner.write().await;
+        let grant = store
+            .task_grants
+            .get_mut(&root_grant_id)
+            .expect("root task grant");
+        grant.status = "active".to_string();
+        grant.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+    }
+    let expired = active_task_grant_for_session(&state, run.primary_session_id)
+        .await
+        .expect_err("expired root grant must fail closed");
+    assert!(expired.message.contains("expired"));
+
+    {
+        let mut store = inner.write().await;
+        let grant = store
+            .task_grants
+            .get_mut(&root_grant_id)
+            .expect("root task grant");
+        grant.status = "active".to_string();
+        grant.expires_at = None;
+        store
+            .workflow_runs
+            .get_mut(&run.id)
+            .expect("workflow run")
+            .status = "completed".to_string();
+    }
+    let terminal = require_active_task_grant_for_session(&state, run.primary_session_id)
+        .await
+        .expect_err("terminal workflow run must fail closed");
+    assert!(terminal.message.contains("workflow run is not active"));
+}
+
+#[tokio::test]
+async fn workflow_root_task_grant_materializes_and_enforces_tool_budget() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let app = build_router(state.clone());
+    let agents: Vec<Agent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/agents")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let agent = agents.first().expect("seeded agent");
+    let definition: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-definitions",
+            json!({
+                "name": "Bounded tool workflow",
+                "entrypoint": "bounded-tool-workflow",
+                "default_agent_id": agent.id,
+                "handoff_rules": {
+                    "root_task_grant": {
+                        "max_turns": 2,
+                        "max_tool_calls": 1,
+                        "max_runtime_seconds": 300,
+                        "max_cost_usd_micros": 500000,
+                        "tool_scope": {
+                            "read": ["file.read"],
+                            "write": [],
+                            "external_write": []
+                        }
+                    }
+                },
+                "release_state": "released"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let run: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-runs",
+            json!({"workflow_definition_id": definition["id"]}),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    let session_id = run["primary_session_id"].as_str().unwrap();
+    let grant_id = run["root_task_grant_id"].as_str().unwrap();
+    let initial: Value = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/task-grants/{grant_id}"))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(initial["max_turns"], 2);
+    assert_eq!(initial["max_tool_calls"], 1);
+    assert_eq!(initial["max_runtime_seconds"], 300);
+    assert_eq!(initial["max_cost_usd_micros"], 500000);
+    assert_eq!(initial["tool_calls_used"], 0);
+
+    let first: Value = request_json(
+        app.clone(),
+        json_request(
+            "POST",
+            "/api/tools/file.read/execute",
+            json!({
+                "session_id": session_id,
+                "task_grant_id": grant_id,
+                "args": {"path": "README.md"}
+            }),
+        ),
+    )
+    .await;
+    assert!(first.get("files").is_some());
+
+    let (status, error) = request_value(
+        app.clone(),
+        json_request(
+            "POST",
+            "/api/tools/file.read/execute",
+            json!({
+                "session_id": session_id,
+                "task_grant_id": grant_id,
+                "args": {"path": "README.md"}
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(error["error"], "task grant tool call budget exhausted");
+
+    let exhausted: Value = request_json(
+        app,
+        Request::builder()
+            .uri(format!("/api/task-grants/{grant_id}"))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(exhausted["tool_calls_used"], 1);
+
+    let grant_id = Uuid::parse_str(grant_id).expect("grant id");
+    let root = state.get_task_grant(grant_id).await.expect("root grant");
+    let mut child = root.clone();
+    child.id = Uuid::new_v4();
+    child.parent_grant_id = Some(root.id);
+    child.turns_used = 0;
+    child.tool_calls_used = 0;
+    child.cost_usd_micros_used = 0;
+    child.created_at = Utc::now();
+    child.updated_at = child.created_at;
+    let child_budget_error = state
+        .create_task_grant(child)
+        .await
+        .expect_err("exhausted parent budget must reject child grant creation");
+    assert_eq!(
+        child_budget_error.message,
+        "task grant tool call budget is exhausted"
+    );
+
+    state
+        .reserve_task_grant_turn(root.id)
+        .await
+        .expect("first turn");
+    state
+        .reserve_task_grant_turn(root.id)
+        .await
+        .expect("second turn");
+    let turn_error = state
+        .reserve_task_grant_turn(root.id)
+        .await
+        .expect_err("third turn must exceed the root budget");
+    assert_eq!(turn_error.message, "task grant turn budget exhausted");
+
+    state
+        .add_task_grant_cost(root.id, 500_000)
+        .await
+        .expect("record task grant cost");
+    let cost_error = state
+        .reserve_task_grant_turn(root.id)
+        .await
+        .expect_err("cost budget must block further turns");
+    assert_eq!(cost_error.message, "task grant cost budget exhausted");
+
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test uses memory store");
+    };
+    {
+        let mut store = inner.write().await;
+        let root = store.task_grants.get_mut(&root.id).expect("root grant");
+        root.max_cost_usd_micros = None;
+        root.max_runtime_seconds = Some(1);
+        root.created_at = Utc::now() - chrono::Duration::seconds(2);
+        root.status = "active".to_string();
+    }
+    let runtime_error = state
+        .reserve_task_grant_turn(root.id)
+        .await
+        .expect_err("runtime budget must expire the grant");
+    assert_eq!(runtime_error.message, "task grant runtime budget expired");
+    assert_eq!(
+        state
+            .get_task_grant(root.id)
+            .await
+            .expect("expired root")
+            .status,
+        "expired"
+    );
+}
+
+#[tokio::test]
+async fn terminal_workflow_run_closes_active_task_grants() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let app = build_router(state.clone());
+    let agent = state
+        .list_agents()
+        .await
+        .expect("agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let definition: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-definitions",
+            json!({
+                "name": "Terminal grant lifecycle",
+                "entrypoint": "terminal-grant-lifecycle",
+                "default_agent_id": agent.id,
+                "release_state": "released"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let run: WorkflowRun = request_json(
+        app,
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-runs",
+            json!({"workflow_definition_id": definition["id"]}),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    let root_grant_id = run.root_task_grant_id.expect("root grant");
+
+    let completed = update_workflow_run_status_and_record(&state, &run, "completed")
+        .await
+        .expect("complete workflow run");
+    assert_eq!(completed.status, "completed");
+    assert_eq!(
+        state
+            .get_task_grant(root_grant_id)
+            .await
+            .expect("closed root grant")
+            .status,
+        "completed"
+    );
+}
+
+#[tokio::test]
+async fn workflow_cost_budget_requires_metered_provider() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let app = build_router(state.clone());
+    let agent = state
+        .list_agents()
+        .await
+        .expect("agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let definition: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-definitions",
+            json!({
+                "name": "Metered provider workflow",
+                "entrypoint": "metered-provider-workflow",
+                "default_agent_id": agent.id,
+                "handoff_rules": {
+                    "root_task_grant": {
+                        "max_turns": 2,
+                        "max_cost_usd_micros": 1000000
+                    }
+                },
+                "release_state": "released"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let run: WorkflowRun = request_json(
+        app,
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-runs",
+            json!({"workflow_definition_id": definition["id"]}),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    let job = enqueue_session_loop(&state, run.primary_session_id, None, "cost metering test")
+        .await
+        .expect("enqueue session loop");
+
+    let error = run_session_loop(&state, &job)
+        .await
+        .expect_err("unpriced provider must fail closed for a cost-bounded grant");
+    assert_eq!(
+        error.message,
+        "task grant cost budget requires a stored provider with pricing"
+    );
+    let grant = state
+        .get_task_grant(run.root_task_grant_id.expect("root grant"))
+        .await
+        .expect("root grant");
+    assert_eq!(grant.turns_used, 1);
+    assert_eq!(grant.cost_usd_micros_used, 0);
+}
+
+#[tokio::test]
 async fn workflow_session_loop_uses_root_task_grant_for_tool_calls() {
     let app = test_app().await;
     let agents: Vec<Agent> = request_json(
@@ -14404,7 +16946,7 @@ async fn workflow_session_loop_uses_root_task_grant_for_tool_calls() {
     }));
 
     let events: Vec<SessionEvent> = request_json(
-        app,
+        app.clone(),
         Request::builder()
             .uri(format!("/api/sessions/{session_id}/events"))
             .header("x-mandoforge-roles", "operator")
@@ -14422,6 +16964,17 @@ async fn workflow_session_loop_uses_root_task_grant_for_tool_calls() {
             "missing task grant check for {tool}"
         );
     }
+    let root_grant: TaskGrant = request_json(
+        app,
+        Request::builder()
+            .uri(format!("/api/task-grants/{root_task_grant_id}"))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(root_grant.turns_used, 1);
+    assert_eq!(root_grant.tool_calls_used, 4);
 }
 
 #[tokio::test]
@@ -14599,6 +17152,7 @@ async fn workflow_context_packet_applies_task_grant_memory_scope() {
                 "model": "gpt-5.5-mini",
                 "tools": [
                     "file.read",
+                    "file.write",
                     "semantic_object.fetch",
                     "semantic_object.search",
                     "semantic_link.expand",
@@ -14622,6 +17176,18 @@ async fn workflow_context_packet_applies_task_grant_memory_scope() {
                 "default_agent_id": agent.id,
                 "handoff_rules": {
                     "root_task_grant": {
+                        "tool_scope": {
+                            "read": ["file.read"],
+                            "write": [],
+                            "external_write": []
+                        },
+                        "connector_scope": {
+                            "mode": "read_only",
+                            "allowed_connector_ids": [],
+                            "allowed_tool_names": [],
+                            "tenant_scope": {},
+                            "side_effect_classes": []
+                        },
                         "memory_scope": {
                             "mode": "snapshot_only",
                             "max_objects": 0
@@ -14667,6 +17233,24 @@ async fn workflow_context_packet_applies_task_grant_memory_scope() {
         "grant max_objects=0 must withhold matching semantic objects"
     );
     assert_eq!(packet.replay_summary["retrieved_object_count"], json!(0));
+    assert_eq!(packet.agent.tools, vec!["file.read".to_string()]);
+    assert_eq!(
+        packet.tool_policy["task_grant_tool_scope"]["read"],
+        json!(["file.read"])
+    );
+    assert_eq!(
+        packet.replay_summary["task_grant_authority"]["task_grant_id"],
+        json!(root_task_grant_id)
+    );
+    assert!(packet.source_refs.iter().any(|source| {
+        source.source_type == "task_grant" && source.source_id == root_task_grant_id
+    }));
+    assert!(
+        packet
+            .policy_reminders
+            .iter()
+            .all(|reminder| reminder.starts_with("file.read:"))
+    );
 
     let events: Vec<SessionEvent> = request_json(
         app,
@@ -14906,7 +17490,7 @@ async fn workflow_memory_writeback_requires_task_grant_writeback_permission() {
             source_event_id: None,
             source_work_item_id: None,
             source_schedule_id: None,
-            status: "queued".to_string(),
+            status: "initializing".to_string(),
             primary_session_id: session.id,
             root_task_grant_id: None,
             input_payload: empty_json_object(),
@@ -14933,6 +17517,10 @@ async fn workflow_memory_writeback_requires_task_grant_writeback_permission() {
         .update_workflow_run_root_task_grant(run.id, root_grant.id)
         .await
         .expect("root task grant binding");
+    let run = state
+        .update_workflow_run_status(run.id, "queued".to_string(), None, None)
+        .await
+        .expect("workflow run activation");
     state
         .append_event(
             "system",
@@ -15740,6 +18328,274 @@ fn session_statuses_use_managed_agent_lifecycle_names() {
 
 async fn test_app() -> Router {
     test_app_with_worker(Arc::new(InlineExecutionWorker)).await
+}
+
+#[tokio::test]
+async fn remote_computer_readiness_separates_agent_sandbox_static_and_live_evidence() {
+    let _env = env_lock().lock().expect("env lock");
+    let evidence_path = std::env::temp_dir().join(format!(
+        "mandoforge-agent-sandbox-missing-{}.json",
+        Uuid::new_v4()
+    ));
+    let _evidence_file = EnvVarGuard::set(
+        "MANDOFORGE_AGENT_SANDBOX_EVIDENCE_FILE",
+        evidence_path.to_string_lossy().as_ref(),
+    );
+    let app = test_app().await;
+
+    let readiness: Value = request_json(
+        app,
+        Request::builder()
+            .uri("/api/remote-computers/readiness")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+
+    assert_eq!(readiness["agent_sandbox"]["status"], "pilot_only");
+    assert_eq!(readiness["agent_sandbox"]["static_contract_ready"], true);
+    assert_eq!(readiness["agent_sandbox"]["production_blocked"], true);
+    assert_eq!(
+        readiness["agent_sandbox"]["runtime_image"],
+        "mandoforge-agent-sandbox-runtime:0.1.1"
+    );
+    assert_eq!(
+        readiness["agent_sandbox"]["tracked_context_builder_present"],
+        true
+    );
+    assert_eq!(
+        readiness["agent_sandbox"]["live_evidence"]["path"],
+        evidence_path.to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        readiness["agent_sandbox"]["live_evidence"]["status"],
+        "missing"
+    );
+    assert_eq!(
+        readiness["agent_sandbox"]["live_evidence"]["present"],
+        false
+    );
+    assert!(
+        readiness["attention_items"]
+            .as_array()
+            .is_some_and(|items| {
+                items.iter().any(|item| {
+                    item["kind"] == "agent_sandbox_live_evidence_missing"
+                        && item["severity"] == "critical"
+                })
+            })
+    );
+}
+
+#[tokio::test]
+async fn remote_computer_readiness_accepts_complete_fresh_agent_sandbox_evidence() {
+    let _env = env_lock().lock().expect("env lock");
+    let evidence_path = std::env::temp_dir().join(format!(
+        "mandoforge-agent-sandbox-ready-{}.json",
+        Uuid::new_v4()
+    ));
+    fs::write(
+        &evidence_path,
+        json!({
+            "schema_version": 1,
+            "status": "passed",
+            "captured_at": Utc::now().to_rfc3339(),
+            "cluster_context": "docker-desktop",
+            "controller_version": "v0.5.1",
+            "validation_scope": "production_target",
+            "production_checks": complete_agent_sandbox_production_checks(),
+            "checks": complete_agent_sandbox_live_checks()
+        })
+        .to_string(),
+    )
+    .expect("write live evidence");
+    let _evidence_file = EnvVarGuard::set(
+        "MANDOFORGE_AGENT_SANDBOX_EVIDENCE_FILE",
+        evidence_path.to_string_lossy().as_ref(),
+    );
+    let _max_age = EnvVarGuard::set("MANDOFORGE_AGENT_SANDBOX_EVIDENCE_MAX_AGE_HOURS", "24");
+    let app = test_app().await;
+
+    let readiness: Value = request_json(
+        app,
+        Request::builder()
+            .uri("/api/remote-computers/readiness")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+
+    assert_eq!(readiness["agent_sandbox"]["status"], "live_validated");
+    assert_eq!(
+        readiness["agent_sandbox"]["live_evidence"]["status"],
+        "ready"
+    );
+    assert_eq!(
+        readiness["agent_sandbox"]["live_evidence"]["production_ready"],
+        true
+    );
+    assert_eq!(readiness["agent_sandbox"]["production_blocked"], false);
+    fs::remove_file(evidence_path).expect("remove live evidence");
+}
+
+#[tokio::test]
+async fn remote_computer_readiness_keeps_local_agent_sandbox_evidence_pilot_only() {
+    let _env = env_lock().lock().expect("env lock");
+    let evidence_path = std::env::temp_dir().join(format!(
+        "mandoforge-agent-sandbox-local-{}.json",
+        Uuid::new_v4()
+    ));
+    fs::write(
+        &evidence_path,
+        json!({
+            "schema_version": 1,
+            "status": "passed",
+            "captured_at": Utc::now().to_rfc3339(),
+            "cluster_context": "docker-desktop",
+            "controller_version": "v0.5.1",
+            "validation_scope": "local_pilot",
+            "checks": complete_agent_sandbox_live_checks()
+        })
+        .to_string(),
+    )
+    .expect("write local live evidence");
+    let _evidence_file = EnvVarGuard::set(
+        "MANDOFORGE_AGENT_SANDBOX_EVIDENCE_FILE",
+        evidence_path.to_string_lossy().as_ref(),
+    );
+    let app = test_app().await;
+
+    let readiness: Value = request_json(
+        app,
+        Request::builder()
+            .uri("/api/remote-computers/readiness")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+
+    assert_eq!(readiness["agent_sandbox"]["status"], "pilot_only");
+    assert_eq!(
+        readiness["agent_sandbox"]["live_evidence"]["status"],
+        "ready"
+    );
+    assert_eq!(
+        readiness["agent_sandbox"]["live_evidence"]["validation_scope"],
+        "local_pilot"
+    );
+    assert_eq!(
+        readiness["agent_sandbox"]["live_evidence"]["production_ready"],
+        false
+    );
+    assert_eq!(readiness["agent_sandbox"]["production_blocked"], true);
+    assert!(
+        readiness["agent_sandbox"]["blocking_reasons"]
+            .as_array()
+            .is_some_and(|reasons| reasons.iter().any(|reason| {
+                reason
+                    .as_str()
+                    .is_some_and(|value| value.contains("production_target"))
+            }))
+    );
+    fs::remove_file(evidence_path).expect("remove local live evidence");
+}
+
+#[tokio::test]
+async fn remote_computer_readiness_rejects_stale_or_wrong_agent_sandbox_evidence() {
+    let _env = env_lock().lock().expect("env lock");
+    let evidence_path = std::env::temp_dir().join(format!(
+        "mandoforge-agent-sandbox-stale-{}.json",
+        Uuid::new_v4()
+    ));
+    fs::write(
+        &evidence_path,
+        json!({
+            "schema_version": 1,
+            "status": "passed",
+            "captured_at": "2020-01-01T00:00:00Z",
+            "cluster_context": "docker-desktop",
+            "controller_version": "v0.0.0",
+            "validation_scope": "production_target",
+            "checks": complete_agent_sandbox_live_checks()
+        })
+        .to_string(),
+    )
+    .expect("write stale live evidence");
+    let _evidence_file = EnvVarGuard::set(
+        "MANDOFORGE_AGENT_SANDBOX_EVIDENCE_FILE",
+        evidence_path.to_string_lossy().as_ref(),
+    );
+    let _max_age = EnvVarGuard::set("MANDOFORGE_AGENT_SANDBOX_EVIDENCE_MAX_AGE_HOURS", "24");
+    let app = test_app().await;
+
+    let readiness: Value = request_json(
+        app,
+        Request::builder()
+            .uri("/api/remote-computers/readiness")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+
+    assert_eq!(readiness["agent_sandbox"]["status"], "pilot_only");
+    assert_eq!(
+        readiness["agent_sandbox"]["live_evidence"]["status"],
+        "blocked"
+    );
+    assert!(
+        readiness["agent_sandbox"]["live_evidence"]["blocking_reasons"]
+            .as_array()
+            .is_some_and(|reasons| {
+                reasons
+                    .iter()
+                    .any(|reason| reason.as_str().is_some_and(|value| value.contains("stale")))
+                    && reasons.iter().any(|reason| {
+                        reason
+                            .as_str()
+                            .is_some_and(|value| value.contains("controller version"))
+                    })
+            })
+    );
+    fs::remove_file(evidence_path).expect("remove stale live evidence");
+}
+
+fn complete_agent_sandbox_live_checks() -> Value {
+    json!({
+        "controller_ready": true,
+        "claim_bound": true,
+        "pod_ready": true,
+        "runtime_versions": true,
+        "workspace_reuse": true,
+        "cross_session_isolation": true,
+        "cache_scope": true,
+        "network_policy": true,
+        "cancel_cleanup": true,
+        "ttl_cleanup": true,
+        "retry_idempotency": true,
+        "approved_exec": true,
+        "durable_event": true,
+        "artifact": true,
+        "audit_log": true
+    })
+}
+
+fn complete_agent_sandbox_production_checks() -> Value {
+    json!({
+        "target_cluster": true,
+        "rwx_cache": true,
+        "distributed_state_sync": true,
+        "network_enforcement": true,
+        "load_validation": true,
+        "rollback_validation": true
+    })
 }
 
 #[tokio::test]
@@ -17843,6 +20699,7 @@ async fn agent_release_controller_executes_external_rollout_boundary() {
     let payloads = payloads.lock().await;
     assert_eq!(payloads.len(), 1);
     assert_eq!(payloads[0]["type"], "mandoforge.agent_release_rollout");
+    assert_eq!(payloads[0]["idempotency_key"], release.id.to_string());
     assert_eq!(payloads[0]["release_id"], release.id.to_string());
     assert_eq!(payloads[0]["agent_id"], release.agent_id.to_string());
     assert_eq!(payloads[0]["environment"], "prod");
@@ -17939,7 +20796,188 @@ async fn agent_release_required_controller_skips_auto_promotion_when_missing() {
 }
 
 #[tokio::test]
+async fn agent_release_controller_observes_durable_promotion_state_and_failure_is_retryable() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::remove("MANDOFORGE_PROVIDER_RUNTIME_ENV");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let version = state
+        .current_agent_version(agent.id)
+        .await
+        .expect("agent version");
+    let pending_release = |environment: &str| {
+        let now = Utc::now();
+        AgentRelease {
+            id: Uuid::new_v4(),
+            agent_id: agent.id,
+            agent_version_id: version.id,
+            environment: environment.to_string(),
+            status: "pending_approval".to_string(),
+            eval_run_id: None,
+            eval_score: Some(1.0),
+            min_score: 1.0,
+            requested_by: Some("release-requester".to_string()),
+            requested_at: Some(now),
+            request_reason: Some("durable controller ordering".to_string()),
+            approver_subject: Some("release-approver".to_string()),
+            decision_by: None,
+            decided_at: None,
+            decision_reason: None,
+            promoted_by: None,
+            promoted_at: None,
+            automation_policy: json!({}),
+            created_at: now,
+        }
+    };
+    let successful_release = pending_release("prod-success");
+    let failed_release = pending_release("prod-fail");
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test requires memory store");
+    };
+    {
+        let mut store = inner.write().await;
+        store
+            .agent_releases
+            .insert(successful_release.id, successful_release.clone());
+        store
+            .agent_releases
+            .insert(failed_release.id, failed_release.clone());
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("release controller listener");
+    let controller_addr = listener.local_addr().expect("release controller addr");
+    let controller = Router::new()
+        .route(
+            "/agent-release",
+            post(mock_agent_release_controller_requires_in_progress),
+        )
+        .with_state(state.clone());
+    let controller_server = tokio::spawn(async move {
+        axum::serve(listener, controller)
+            .await
+            .expect("mock release controller");
+    });
+    let _controller_url = EnvVarGuard::set(
+        "MANDOFORGE_AGENT_RELEASE_CONTROLLER_URL",
+        format!("http://{controller_addr}/agent-release").as_str(),
+    );
+    let _controller_required =
+        EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_CONTROLLER_REQUIRED", "true");
+    let _controller_token = EnvVarGuard::remove("MANDOFORGE_AGENT_RELEASE_CONTROLLER_TOKEN");
+    let app = build_router(state.clone());
+
+    let promoted: AgentRelease = request_json(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/api/agents/{}/releases/{}/approve",
+                agent.id, successful_release.id
+            ))
+            .header("x-mandoforge-subject", "release-approver")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(promoted.status, "promoted");
+    assert_eq!(promoted.promoted_by.as_deref(), Some("release-approver"));
+
+    let (status, error) = request_value(
+        app,
+        Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/api/agents/{}/releases/{}/approve",
+                agent.id, failed_release.id
+            ))
+            .header("x-mandoforge-subject", "release-approver")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error["error"],
+        "agent release controller did not confirm promotion"
+    );
+    let failed = state
+        .list_all_agent_releases()
+        .await
+        .expect("list releases")
+        .into_iter()
+        .find(|release| release.id == failed_release.id)
+        .expect("failed release");
+    assert_eq!(failed.status, "promotion_failed");
+    assert!(
+        failed
+            .decision_reason
+            .as_deref()
+            .is_some_and(|reason| { reason.contains("did not confirm promotion") })
+    );
+    let pending = state
+        .list_pending_agent_releases()
+        .await
+        .expect("retryable releases");
+    assert!(pending.iter().any(|release| release.id == failed.id));
+    let summary = build_agent_release_rollout_summary(
+        state
+            .list_all_agent_releases()
+            .await
+            .expect("release summary inputs"),
+        Utc::now(),
+    );
+    assert_eq!(summary.pending_count, 1);
+    assert_eq!(summary.by_status["promotion_failed"], 1);
+    assert!(summary.attention_items.iter().any(|item| {
+        item.release_id == failed.id && item.reason.contains("promotion_failed_retryable")
+    }));
+
+    let retry = state
+        .begin_agent_release_promotion(
+            agent.id,
+            failed.id,
+            "release-approver".to_string(),
+            "retry after controller repair".to_string(),
+        )
+        .await
+        .expect("retry promotion");
+    assert_eq!(retry.status, "promotion_in_progress");
+    let idempotent_retry = state
+        .begin_agent_release_promotion(
+            agent.id,
+            failed.id,
+            "release-approver".to_string(),
+            "retry after controller repair".to_string(),
+        )
+        .await
+        .expect("resume promotion");
+    assert_eq!(idempotent_retry.id, retry.id);
+    let recovered = state
+        .complete_agent_release_promotion(agent.id, failed.id, "release-approver".to_string())
+        .await
+        .expect("complete recovered promotion");
+    assert_eq!(recovered.status, "promoted");
+
+    controller_server.abort();
+}
+
+#[tokio::test]
 async fn agent_release_deployment_controller_executes_external_boundary() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::remove("MANDOFORGE_PROVIDER_RUNTIME_ENV");
+    let _controller_required =
+        EnvVarGuard::remove("MANDOFORGE_AGENT_RELEASE_DEPLOYMENT_CONTROLLER_REQUIRED");
     let payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -18177,6 +21215,10 @@ fn agent_release_deployment_readiness_requires_controller_when_configured() {
 
 #[tokio::test]
 async fn agent_release_orchestration_controller_executes_external_boundary() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::remove("MANDOFORGE_PROVIDER_RUNTIME_ENV");
+    let _controller_required =
+        EnvVarGuard::remove("MANDOFORGE_AGENT_RELEASE_ORCHESTRATION_CONTROLLER_REQUIRED");
     let payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -18501,6 +21543,19 @@ fn agent_release_rollback_controller_required_flag_is_fail_closed() {
     };
     assert!(agent_release_rollback_controller_required(&configured));
     assert!(agent_release_rollback_controller_configured(&configured));
+}
+
+#[test]
+fn agent_release_controllers_are_required_by_default_in_production() {
+    let production = |key: &str| match key {
+        "MANDOFORGE_PROVIDER_RUNTIME_ENV" => Some("production".to_string()),
+        _ => None,
+    };
+
+    assert!(agent_release_controller_required(&production));
+    assert!(agent_release_deployment_controller_required(&production));
+    assert!(agent_release_orchestration_controller_required(&production));
+    assert!(agent_release_rollback_controller_required(&production));
 }
 
 #[tokio::test]
@@ -19736,6 +22791,40 @@ async fn mock_agent_release_controller(
             {"name": "promote", "status": "promoted"},
             {"name": "verify", "status": "passed"}
         ]
+    }))
+}
+
+async fn mock_agent_release_controller_requires_in_progress(
+    State(state): State<AppState>,
+    Json(payload): Json<Value>,
+) -> Json<Value> {
+    let release_id = payload["release_id"]
+        .as_str()
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .expect("release id");
+    let release = state
+        .list_all_agent_releases()
+        .await
+        .expect("list agent releases")
+        .into_iter()
+        .find(|release| release.id == release_id)
+        .expect("controller release");
+    if release.status != "promotion_in_progress" {
+        return Json(json!({
+            "status": "blocked",
+            "message": "release state was not persisted before controller invocation"
+        }));
+    }
+    if release.environment == "prod-fail" {
+        return Json(json!({
+            "status": "blocked",
+            "message": "simulated rollout failure"
+        }));
+    }
+    Json(json!({
+        "status": "promoted",
+        "deployment_id": format!("deployment-{release_id}"),
+        "message": "durable promotion state observed"
     }))
 }
 
@@ -27162,6 +30251,7 @@ async fn mcp_commit_write_uses_approval_commit_token_exact_binding() {
                 .get_mut(&root_task_grant_id)
                 .expect("root task grant");
             grant.expires_at = None;
+            grant.status = "active".to_string();
             grant.updated_at = Utc::now();
         }
         StoreBackend::Postgres(_) => panic!("test uses memory store"),
@@ -37499,4 +40589,117 @@ async fn queue_backed_worker_defers_approved_tool_until_job_run() {
     )
     .await;
     assert!(matches!(completed_session.status, SessionStatus::Idle));
+}
+
+#[tokio::test]
+async fn queue_backed_worker_revalidates_task_grant_before_file_write() {
+    let state = test_state_with_worker(Arc::new(QueueBackedExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let app = build_router(state.clone());
+    let agents: Vec<Agent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/agents")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let agent = agents.first().expect("seeded agent");
+    let definition: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-definitions",
+            json!({
+                "name": "Queued grant revalidation",
+                "entrypoint": "queued-grant-revalidation",
+                "default_agent_id": agent.id,
+                "handoff_rules": {
+                    "root_task_grant": {
+                        "tool_scope": {
+                            "read": [],
+                            "write": ["file.write"],
+                            "external_write": []
+                        }
+                    }
+                },
+                "release_state": "released"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let run: WorkflowRun = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-runs",
+            json!({"workflow_definition_id": definition["id"]}),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    let task_grant_id = run.root_task_grant_id.expect("root task grant");
+    let relative_path = format!("expired-grant-{}.md", Uuid::new_v4());
+    let approval_required: Value = request_json(
+        app.clone(),
+        json_request(
+            "POST",
+            "/api/tools/file.write/execute",
+            json!({
+                "session_id": run.primary_session_id,
+                "task_grant_id": task_grant_id,
+                "args": {
+                    "path": relative_path,
+                    "content": "must not be written"
+                }
+            }),
+        ),
+    )
+    .await;
+    let approval_id = approval_required["approval_id"]
+        .as_str()
+        .expect("approval id");
+    let approved: Approval = request_json(
+        app,
+        approve_request(format!("/api/approvals/{approval_id}/approve")),
+    )
+    .await;
+    let job = state
+        .execution_queue
+        .list()
+        .await
+        .expect("execution jobs")
+        .into_iter()
+        .find(|job| job.approval_id == approved.id)
+        .expect("queued file write");
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test uses memory store");
+    };
+    {
+        let mut store = inner.write().await;
+        let grant = store
+            .task_grants
+            .get_mut(&task_grant_id)
+            .expect("root task grant");
+        grant.expires_at = Some(Utc::now() - ChronoDuration::seconds(1));
+        grant.updated_at = Utc::now();
+    }
+
+    let retried = run_execution_job(&state, job.id, "grant-revalidation-worker")
+        .await
+        .expect("expired grant should requeue without writing");
+
+    assert_eq!(retried.status, ExecutionJobStatus::Queued);
+    assert!(
+        retried
+            .last_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("task grant is expired")
+    );
+    let workspace_file = test_workspace_root()
+        .join(run.primary_session_id.to_string())
+        .join(relative_path);
+    assert!(tokio::fs::metadata(workspace_file).await.is_err());
 }

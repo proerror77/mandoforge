@@ -144,6 +144,10 @@ write_summary() {
   local sidecar_replacement_pods_healthy
   local sidecar_checked_pod_count
   local sidecar_checked_pod_detail_count
+  local agent_sandbox_status
+  local agent_sandbox_production_blocked
+  local agent_sandbox_production_ready
+  local agent_sandbox_validation_scope
   local blocked_count
 
   status="$(jq -r '.status // "unknown"' "$readiness_file")"
@@ -153,6 +157,10 @@ write_summary() {
   state_sync_controller_age_hours="$(jq -r '.production_state_sync.latest_controller_age_hours // "none"' "$readiness_file")"
   sidecar_supervision_status="$(jq -r '.sidecar_supervision.status // "unknown"' "$readiness_file")"
   sidecar_recovery_status="$(jq -r '.sidecar_recovery.status // "unknown"' "$readiness_file")"
+  agent_sandbox_status="$(jq -r '.agent_sandbox.status // "missing"' "$readiness_file")"
+  agent_sandbox_production_blocked="$(jq -r 'if ((.agent_sandbox // {}) | has("production_blocked")) then .agent_sandbox.production_blocked else true end' "$readiness_file")"
+  agent_sandbox_production_ready="$(jq -r '.agent_sandbox.live_evidence.production_ready == true' "$readiness_file")"
+  agent_sandbox_validation_scope="$(jq -r '.agent_sandbox.live_evidence.validation_scope // "missing"' "$readiness_file")"
   runner_status="$(jq -r '.status // "unknown"' "$runner_file")"
   runner_configured="$(jq -r '.configured // false' "$runner_file")"
   runner_ready="$(jq -r '(.configured == true) and (((.status // "") == "ready") or ((.status // "") == "dry_run_ready") or ((.status // "") == "live_ready"))' "$runner_file")"
@@ -245,7 +253,9 @@ write_summary() {
   fi
   blocked_count="$(jq -r '[
       .production_state_sync.production_blocked,
-      (.sidecar_recovery.status == "blocked")
+      (.sidecar_recovery.status == "blocked"),
+      (.agent_sandbox.production_blocked != false),
+      (.agent_sandbox.live_evidence.production_ready != true)
     ] | map(select(. == true)) | length' "$readiness_file")"
   if [[ "$runner_ready" != "true" ]]; then
     blocked_count="$((blocked_count + 1))"
@@ -324,6 +334,10 @@ write_summary() {
     echo "production_state_sync_status=$state_sync_status"
     echo "sidecar_supervision_status=$sidecar_supervision_status"
     echo "sidecar_recovery_status=$sidecar_recovery_status"
+    echo "agent_sandbox_status=$agent_sandbox_status"
+    echo "agent_sandbox_production_blocked=$agent_sandbox_production_blocked"
+    echo "agent_sandbox_production_ready=$agent_sandbox_production_ready"
+    echo "agent_sandbox_validation_scope=$agent_sandbox_validation_scope"
     echo "runner_status=$runner_status"
     echo "runner_configured=$runner_configured"
     echo "runner_ready=$runner_ready"
@@ -362,6 +376,15 @@ write_summary() {
     echo
     echo "state_sync_blocking_reasons:"
     jq -r '.production_state_sync.blocking_reasons[]? | "- \(.)"' "$readiness_file"
+    echo
+    echo "agent_sandbox_blocking_reasons:"
+    jq -r '.agent_sandbox.blocking_reasons[]? | "- \(.)"' "$readiness_file"
+    if [[ "$agent_sandbox_production_blocked" != "false" ]]; then
+      echo "- Agent Sandbox readiness remains production-blocked"
+    fi
+    if [[ "$agent_sandbox_production_ready" != "true" ]]; then
+      echo "- Agent Sandbox requires complete production_target live evidence"
+    fi
     if [[ "$runner_ready" != "true" ]]; then
       echo "- remote computer runner is not ready: status=$runner_status configured=$runner_configured message=$runner_message"
     fi

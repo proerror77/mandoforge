@@ -96,58 +96,25 @@ pub(crate) async fn execute_remote_computer_stale_reclaim(
     }
 
     let mut reclaimed_leases = Vec::new();
+    let assignments = state.list_remote_computer_job_assignments().await?;
     for lease in &expired_leases {
+        let assignment = assignments
+            .iter()
+            .find(|assignment| assignment.lease_id == lease.id && assignment.status == "assigned");
+        cleanup_remote_computer_lease_runtime(
+            state,
+            lease,
+            assignment,
+            "expired_lease_reclaim",
+            "released",
+        )
+        .await?;
         let reclaimed = state
-            .update_remote_computer_lease_status(
-                lease.id,
-                "failed",
-                UpdateRemoteComputerLease {
-                    reason: Some("expired lease reclaimed".to_string()),
-                    metadata: Some(json!({
-                        "reclaim_reason": "expired_lease",
-                        "execution_enabled": false
-                    })),
-                },
-            )
-            .await?;
-        // If this was an on-demand Pod, delete it from Kubernetes now that the lease expired.
-        let is_on_demand = lease
-            .metadata
-            .get("on_demand")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        if is_on_demand
-            && let Some(pod_name) = state
-                .list_remote_computers()
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .find(|c| c.id == lease.remote_computer_id)
-                .and_then(|c| c.pod_name)
-        {
-            let config = RemoteComputerRunnerConfig::from_env();
-            let runner = remote_computer_runner_for_config(&config);
-            runner
-                .mutate(
-                    &config,
-                    RemoteComputerRunnerDryRunRequest {
-                        operation: Some("live_delete".to_string()),
-                        remote_computer_id: Some(lease.remote_computer_id),
-                        session_id: lease.session_id,
-                        pod_name: Some(pod_name),
-                        metadata: Some(json!({
-                            "reclaim_reason": "expired_on_demand_lease",
-                            "lease_id": lease.id
-                        })),
-                    },
-                )
-                .await;
-            // Deletion errors are fire-and-forget: the Pod will be garbage-collected
-            // by Kubernetes TTL or a future sweep. We do not propagate the error here
-            // so that the lease reclaim itself always succeeds.
-        }
-        record_remote_computer_lease_event(state, &reclaimed, "remote_computer.lease_reclaimed")
-            .await?;
+            .list_remote_computer_leases()
+            .await?
+            .into_iter()
+            .find(|candidate| candidate.id == lease.id)
+            .ok_or_else(|| AppError::not_found("Remote computer lease not found"))?;
         reclaimed_leases.push(reclaimed);
     }
 

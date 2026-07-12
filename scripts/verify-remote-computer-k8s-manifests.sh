@@ -12,8 +12,14 @@ dry_run_manifests=(
   deploy/k8s/remote-computer-state-contract.yaml
   deploy/k8s/remote-computer-state-juicefs-profile.yaml
   deploy/k8s/remote-computer-warm-pool.yaml
+  deploy/k8s/agent-sandbox-runtime.yaml
+  deploy/k8s/agent-sandbox-egress-networkpolicy.yaml
+  deploy/agent-sandbox-smoke/sandbox-claim.yaml
 )
 runner_source="crates/mandoforge-api/src/remote_computer_runner.rs"
+runtime_protocol_source="crates/mandoforge-api/src/sandbox_runtime_protocol.rs"
+runtime_dockerfile="Dockerfile.agent-sandbox"
+runtime_build_script="scripts/build-agent-sandbox-runtime-image.sh"
 
 for manifest in "${dry_run_manifests[@]}"; do
   if [[ ! -f "$manifest" ]]; then
@@ -25,12 +31,96 @@ done
 k8s_render="$(mktemp -t mandoforge-k8s-render.XXXXXX.out)"
 default_render="$(mktemp -t mandoforge-default-render.XXXXXX.out)"
 pilot_render="$(mktemp -t mandoforge-remote-computer-pilot-render.XXXXXX.out)"
-cleanup() { rm -f "$k8s_render" "$default_render" "$pilot_render"; }
+agent_sandbox_render="$(mktemp -t mandoforge-agent-sandbox-pilot-render.XXXXXX.out)"
+agent_sandbox_smoke_render="$(mktemp -t mandoforge-agent-sandbox-smoke-render.XXXXXX.out)"
+agent_sandbox_cache_render="$(mktemp -t mandoforge-agent-sandbox-cache-render.XXXXXX.out)"
+agent_sandbox_template_render="$(mktemp -t mandoforge-agent-sandbox-template-render.XXXXXX.out)"
+agent_sandbox_warm_pool_render="$(mktemp -t mandoforge-agent-sandbox-warm-pool-render.XXXXXX.out)"
+agent_sandbox_egress_render="$(mktemp -t mandoforge-agent-sandbox-egress-render.XXXXXX.out)"
+agent_sandbox_claim_render="$(mktemp -t mandoforge-agent-sandbox-claim-render.XXXXXX.out)"
+cleanup() {
+  rm -f \
+    "$k8s_render" \
+    "$default_render" \
+    "$pilot_render" \
+    "$agent_sandbox_render" \
+    "$agent_sandbox_smoke_render" \
+    "$agent_sandbox_cache_render" \
+    "$agent_sandbox_template_render" \
+    "$agent_sandbox_warm_pool_render" \
+    "$agent_sandbox_egress_render" \
+    "$agent_sandbox_claim_render"
+}
 trap cleanup EXIT
+
+extract_rendered_resource() {
+  local render_file="$1"
+  local expected_kind="$2"
+  local expected_name="$3"
+  local output_file="$4"
+
+  awk -v expected_kind="$expected_kind" -v expected_name="$expected_name" '
+    function reset_document() {
+      document = ""
+      kind = ""
+      name = ""
+      in_metadata = 0
+    }
+    function emit_document() {
+      if (kind == expected_kind && name == expected_name) {
+        printf "%s", document
+      }
+    }
+    BEGIN { reset_document() }
+    /^---[[:space:]]*$/ {
+      emit_document()
+      reset_document()
+      next
+    }
+    {
+      document = document $0 ORS
+      if ($0 ~ /^kind:[[:space:]]*/) {
+        kind = $0
+        sub(/^kind:[[:space:]]*/, "", kind)
+      }
+      if ($0 == "metadata:") {
+        in_metadata = 1
+        next
+      }
+      if ($0 ~ /^[^[:space:]]/ && $0 != "metadata:") {
+        in_metadata = 0
+      }
+      if (in_metadata && $0 ~ /^  name:[[:space:]]*/) {
+        name = $0
+        sub(/^  name:[[:space:]]*/, "", name)
+        in_metadata = 0
+      }
+    }
+    END { emit_document() }
+  ' "$render_file" >"$output_file"
+
+  if [[ ! -s "$output_file" ]]; then
+    echo "render is missing $expected_kind/$expected_name" >&2
+    exit 1
+  fi
+}
 
 kubectl kustomize deploy/k8s >"$k8s_render"
 kubectl kustomize deploy >"$default_render"
 kubectl kustomize deploy/remote-computer-pilot --load-restrictor LoadRestrictionsNone >"$pilot_render"
+kubectl kustomize deploy/agent-sandbox-pilot --load-restrictor LoadRestrictionsNone >"$agent_sandbox_render"
+kubectl kustomize deploy/agent-sandbox-smoke --load-restrictor LoadRestrictionsNone >"$agent_sandbox_smoke_render"
+
+extract_rendered_resource "$agent_sandbox_render" PersistentVolumeClaim \
+  mandoforge-agent-sandbox-mandoforge-cache "$agent_sandbox_cache_render"
+extract_rendered_resource "$agent_sandbox_render" SandboxTemplate \
+  mandoforge-agent-runtime "$agent_sandbox_template_render"
+extract_rendered_resource "$agent_sandbox_render" SandboxWarmPool \
+  mandoforge-agent-runtime "$agent_sandbox_warm_pool_render"
+extract_rendered_resource "$agent_sandbox_render" NetworkPolicy \
+  mandoforge-agent-sandbox-egress "$agent_sandbox_egress_render"
+extract_rendered_resource "$agent_sandbox_smoke_render" SandboxClaim \
+  mandoforge-agent-runtime-smoke "$agent_sandbox_claim_render"
 
 if ! grep -q "claimName: mandoforge-remote-computer-state" "$k8s_render"; then
   echo "base Remote Computer render is missing the mounted state PVC claim" >&2
@@ -77,6 +167,147 @@ if ! awk '
   exit 1
 fi
 
+if grep -Eq 'kind:[[:space:]]*Secret|replace-me|s3\.example\.com' deploy/k8s/agent-sandbox-runtime.yaml; then
+  echo "Agent Sandbox runtime manifest must not include placeholder Secrets" >&2
+  exit 1
+fi
+
+if [[ ! -f "$runtime_dockerfile" ]]; then
+  echo "Agent Sandbox runtime Dockerfile is missing" >&2
+  exit 1
+fi
+
+if [[ ! -x "$runtime_build_script" ]]; then
+  echo "Agent Sandbox tracked-context image builder is missing or not executable" >&2
+  exit 1
+fi
+
+for runtime_contract in \
+  'rust:1.97.0-bookworm@sha256:' \
+  'node:24.18.0-bookworm-slim@sha256:' \
+  'ghcr.io/astral-sh/uv:0.11.28@sha256:' \
+  'sccache --version 0.16.0' \
+  'pnpm@${PNPM_VERSION}' \
+  '@openai/codex@${CODEX_VERSION}' \
+  '@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}' \
+  '/usr/local/bin/mandoforge-sandbox-runtime' \
+  'env PATH=/usr/local/bin:/usr/bin:/bin rustc --version' \
+  'env PATH=/usr/local/bin:/usr/bin:/bin claude --version' \
+  'MANDOFORGE_SOURCE_TREE' \
+  '.mandoforge-tracked-context' \
+  'git config --system --add safe.directory /opt/mandoforge-source' \
+  'git -C /opt/mandoforge-source init'; do
+  if ! grep -Fq "$runtime_contract" "$runtime_dockerfile"; then
+    echo "Agent Sandbox runtime image is missing pinned contract: $runtime_contract" >&2
+    exit 1
+  fi
+done
+
+for build_contract in \
+  'git diff --quiet --' \
+  'git checkout-index --all --force' \
+  'git write-tree' \
+  'MANDOFORGE_SOURCE_TREE'; do
+  if ! grep -Fq "$build_contract" "$runtime_build_script"; then
+    echo "Agent Sandbox image builder is missing tracked-context contract: $build_contract" >&2
+    exit 1
+  fi
+done
+
+if ! grep -q 'image: mandoforge-agent-sandbox-runtime:0.1.1' "$agent_sandbox_template_render" \
+  || grep -q 'mandoforge-adoption-api:latest' deploy/k8s/agent-sandbox-runtime.yaml; then
+  echo "Agent Sandbox template must use the dedicated pinned runtime image" >&2
+  exit 1
+fi
+
+if grep -q "kind: SandboxClaim" "$agent_sandbox_render"; then
+  echo "Agent Sandbox pilot render must not create live SandboxClaim resources" >&2
+  exit 1
+fi
+
+if grep -Eq 'kind:[[:space:]]*Secret|replace-me|s3\.example\.com|mandoforge-agent-remote-computer-warm-pool|remote-computer-state-juicefs' "$agent_sandbox_render"; then
+  echo "Agent Sandbox pilot render must not inherit Remote Computer pilot secrets, JuiceFS, or legacy warm-pool resources" >&2
+  exit 1
+fi
+
+if ! grep -q "kind: SandboxClaim" "$agent_sandbox_claim_render"; then
+  echo "Agent Sandbox smoke render is missing the live SandboxClaim example" >&2
+  exit 1
+fi
+
+if ! grep -q "apiVersion: extensions.agents.x-k8s.io/v1beta1" "$agent_sandbox_template_render" \
+  || ! grep -q "apiVersion: extensions.agents.x-k8s.io/v1beta1" "$agent_sandbox_warm_pool_render" \
+  || ! grep -q "apiVersion: extensions.agents.x-k8s.io/v1beta1" "$agent_sandbox_claim_render"; then
+  echo "Agent Sandbox pilot must use the current v1beta1 extensions API" >&2
+  exit 1
+fi
+
+if ! grep -q "networkPolicyManagement: Unmanaged" "$agent_sandbox_template_render"; then
+  echo "Agent Sandbox template must delegate egress isolation to the reviewed MandoForge policies" >&2
+  exit 1
+fi
+
+if ! grep -q "volumeClaimTemplates:" "$agent_sandbox_template_render" \
+  || ! grep -q "name: workspace-data" "$agent_sandbox_template_render"; then
+  echo "Agent Sandbox pilot must define the per-sandbox workspace PVC template" >&2
+  exit 1
+fi
+
+if ! grep -q "claimName: mandoforge-agent-sandbox-mandoforge-cache" "$agent_sandbox_template_render" \
+  || ! grep -q "mandoforge.io/cache-scope: single-project-pilot" "$agent_sandbox_cache_render" \
+  || ! grep -q "CARGO_HOME" "$agent_sandbox_template_render" \
+  || ! grep -q "SCCACHE_DIR" "$agent_sandbox_template_render" \
+  || ! grep -q "PNPM_STORE_DIR" "$agent_sandbox_template_render" \
+  || ! grep -q "UV_CACHE_DIR" "$agent_sandbox_template_render"; then
+  echo "Agent Sandbox pilot must mount explicit single-project dependency cache paths" >&2
+  exit 1
+fi
+
+if grep -q "CARGO_TARGET_DIR" deploy/k8s/agent-sandbox-runtime.yaml \
+  || grep -q 'name: agent-state' deploy/k8s/agent-sandbox-runtime.yaml \
+  || grep -q 'name: artifact-discovery' deploy/k8s/agent-sandbox-runtime.yaml \
+  || grep -q 'value: "/workspace/session"' deploy/k8s/agent-sandbox-runtime.yaml \
+  || ! grep -q 'mountPath: /workspace/sessions' "$agent_sandbox_template_render" \
+  || grep -q 'mountPath: /workspace$' "$agent_sandbox_template_render"; then
+  echo "Agent Sandbox mutable target, agent state, sidecar, and workspace paths must remain session-private" >&2
+  exit 1
+fi
+
+if ! grep -q "fsGroup: 1000" "$agent_sandbox_template_render" \
+  || ! grep -q "fsGroupChangePolicy: OnRootMismatch" "$agent_sandbox_template_render"; then
+  echo "Agent Sandbox PVC mounts must be writable by the non-root runtime user" >&2
+  exit 1
+fi
+
+if ! grep -q "sandboxTemplateRef:" "$agent_sandbox_warm_pool_render" \
+  || ! grep -q "type: Recreate" "$agent_sandbox_warm_pool_render" \
+  || ! grep -q "warmPoolRef:" "$agent_sandbox_claim_render"; then
+  echo "Agent Sandbox pilot/smoke overlays must wire WarmPool and Claim with current reference fields" >&2
+  exit 1
+fi
+
+if grep -q "templateRef:" "$agent_sandbox_render" "$agent_sandbox_smoke_render" \
+  || grep -q "warmpool:" "$agent_sandbox_render" "$agent_sandbox_smoke_render"; then
+  echo "Agent Sandbox pilot must not use retired SandboxClaim reference fields" >&2
+  exit 1
+fi
+
+if ! grep -q "name: mandoforge-agent-sandbox-egress" "$agent_sandbox_egress_render" \
+  || ! grep -q "kubernetes.io/metadata.name: kube-system" "$agent_sandbox_egress_render" \
+  || ! grep -q "port: 8787" "$agent_sandbox_egress_render" \
+  || ! grep -q "port: 443" "$agent_sandbox_egress_render" \
+  || ! grep -q "169.254.0.0/16" "$agent_sandbox_egress_render" \
+  || ! grep -q "fc00::/7" "$agent_sandbox_egress_render"; then
+  echo "Agent Sandbox pilot is missing bounded DNS, API, or external HTTPS egress rules" >&2
+  exit 1
+fi
+
+if ! grep -q "shutdownPolicy: Delete" "$agent_sandbox_claim_render" \
+  || ! grep -q "ttlSecondsAfterFinished: 300" "$agent_sandbox_claim_render"; then
+  echo "Agent Sandbox smoke claim must carry explicit cleanup lifecycle fields" >&2
+  exit 1
+fi
+
 for tracking_key in \
   "mandoforge.io/session-id" \
   "mandoforge.io/remote-computer-id" \
@@ -89,15 +320,17 @@ for tracking_key in \
   fi
 done
 
-if ! grep -q "parse_kubernetes_exec_command" "$runner_source" \
-  || ! grep -q "metadata.command array must contain only non-empty string arguments" "$runner_source" \
-  || ! grep -q "command_query" "$runner_source"; then
-  echo "Remote Computer runner must preserve Kubernetes exec argv semantics and validate array commands" >&2
+if ! grep -q "parse_kubernetes_exec_stdin" "$runner_source" \
+  || ! grep -q "SANDBOX_RUNTIME_EXECUTABLE" "$runner_source" \
+  || ! grep -q "stdin=true" "$runner_source" \
+  || ! grep -q "MAX_SANDBOX_RUNTIME_ENVELOPE_BYTES" "$runtime_protocol_source"; then
+  echo "Remote Computer runner must use the bounded fixed-launcher stdin protocol" >&2
   exit 1
 fi
 
-if grep -q 'parts.join(" ")' "$runner_source"; then
-  echo "Remote Computer runner must not collapse metadata.command arrays into shell strings" >&2
+if grep -q "parse_kubernetes_exec_command" "$runner_source" \
+  || grep -q 'command_query' "$runner_source"; then
+  echo "Remote Computer runner must not retain dynamic Kubernetes exec command query construction" >&2
   exit 1
 fi
 

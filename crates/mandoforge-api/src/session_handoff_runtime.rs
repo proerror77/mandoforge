@@ -269,6 +269,7 @@ pub(crate) async fn set_managed_session_status(
     status: SessionStatus,
     reason: &str,
 ) -> Result<Session, AppError> {
+    let terminal = matches!(status, SessionStatus::Terminated | SessionStatus::Failed);
     let session = state.set_session_status(session_id, status).await?;
     set_primary_session_thread_status(
         state,
@@ -289,6 +290,9 @@ pub(crate) async fn set_managed_session_status(
             }),
         )
         .await?;
+    if terminal {
+        cleanup_remote_computer_session_runtimes(state, session_id, reason).await?;
+    }
     Ok(session)
 }
 
@@ -370,6 +374,10 @@ pub(crate) async fn create_agent_handoff_event_for_session(
     input: CreateAgentHandoffEvent,
 ) -> Result<AgentHandoffEvent, AppError> {
     let session = state.get_session(session_id).await?;
+    state.ensure_session_runnable(session.id).await?;
+    if crate::store_entities::agent_release_enforcement_required() {
+        require_active_task_grant_for_session(state, session.id).await?;
+    }
     let source_version = state.agent_version_for_session(session_id).await?;
     let target_agent = state.get_agent(input.target_agent_id).await?;
     if target_agent.agent_role != "specialist" {
@@ -423,19 +431,81 @@ pub(crate) async fn create_agent_handoff_event_for_session(
         input.approval_required,
     )?;
     validate_handoff_payload_schema(&input.payload, rule.get("payload_schema"))?;
+    let target_version = state
+        .runnable_agent_version(input.target_agent_id, session.environment_id)
+        .await?;
     let semantic_scopes = normalize_handoff_semantic_scopes(
         input
             .semantic_scopes
-            .unwrap_or_else(|| target_agent.semantic_scopes.clone()),
+            .unwrap_or_else(|| target_version.semantic_scopes.clone()),
     )?;
-    let runtime_profile_id = input.runtime_profile_id.or(target_agent.runtime_profile_id);
+    if crate::store_entities::agent_release_enforcement_required()
+        && input.runtime_profile_id.is_some()
+        && input.runtime_profile_id != target_version.runtime_profile_id
+    {
+        return Err(AppError::forbidden(
+            "production handoff runtime profile must match the promoted target agent version",
+        ));
+    }
+    let runtime_profile_id = input
+        .runtime_profile_id
+        .or(target_version.runtime_profile_id);
     let runtime_profile = match runtime_profile_id {
+        Some(profile_id)
+            if Some(profile_id) == target_version.runtime_profile_id
+                && target_version
+                    .runtime_profile_snapshot
+                    .as_object()
+                    .is_some_and(|snapshot| !snapshot.is_empty()) =>
+        {
+            Some(
+                serde_json::from_value::<AgentRuntimeProfile>(
+                    target_version.runtime_profile_snapshot.clone(),
+                )
+                .map_err(|error| {
+                    AppError::forbidden(format!(
+                        "target agent version runtime profile snapshot is invalid: {error}"
+                    ))
+                })?,
+            )
+        }
         Some(profile_id) => Some(state.get_agent_runtime_profile(profile_id).await?),
         None => None,
     };
-    let remote_computer_required = input.remote_computer_required.unwrap_or_else(|| {
-        handoff_remote_computer_required(&target_agent, runtime_profile.as_ref())
-    });
+    let mut governed_remote_computer_required = target_version
+        .remote_computer_profile
+        .get("required")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || runtime_profile
+            .as_ref()
+            .is_some_and(|profile| profile.remote_computer_required);
+    if let Some(environment_id) = session.environment_id {
+        let environment = state.get_environment(environment_id).await?;
+        governed_remote_computer_required |= environment.environment_type == "remote_computer"
+            || environment
+                .remote_computer_profile
+                .get("required")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+        if let Some(profile_id) = environment.runtime_profile_id {
+            governed_remote_computer_required |= state
+                .get_agent_runtime_profile(profile_id)
+                .await?
+                .remote_computer_required;
+        }
+    }
+    if crate::store_entities::agent_release_enforcement_required()
+        && governed_remote_computer_required
+        && input.remote_computer_required == Some(false)
+    {
+        return Err(AppError::forbidden(
+            "production handoff cannot disable the governed Remote Computer requirement",
+        ));
+    }
+    let remote_computer_required = input
+        .remote_computer_required
+        .unwrap_or(governed_remote_computer_required);
     let review_status = normalize_handoff_review_status(
         input
             .review_status
@@ -493,8 +563,15 @@ pub(crate) async fn materialize_workflow_handoff_assignment(
     else {
         return Ok(None);
     };
+    if let Some(reason) = workflow_run_execution_denial(&run.status) {
+        return Err(AppError::forbidden(reason));
+    }
+    let specialist_version = state
+        .agent_version_for_session(specialist_session.id)
+        .await?;
     let step_id = Uuid::new_v4();
     let now = Utc::now();
+    let remaining_budgets = task_grant_remaining_budgets(&parent_grant, now)?;
     let objective = manager_plan
         .task_intake
         .get("goal")
@@ -522,13 +599,16 @@ pub(crate) async fn materialize_workflow_handoff_assignment(
         risk_level: handoff.risk_level.clone(),
         status: "active".to_string(),
         expires_at: parent_grant.expires_at,
-        max_turns: parent_grant.max_turns,
-        max_tool_calls: parent_grant.max_tool_calls,
-        max_runtime_seconds: parent_grant.max_runtime_seconds,
-        max_cost_usd_micros: parent_grant.max_cost_usd_micros,
+        max_turns: remaining_budgets.max_turns,
+        max_tool_calls: remaining_budgets.max_tool_calls,
+        max_runtime_seconds: remaining_budgets.max_runtime_seconds,
+        max_cost_usd_micros: remaining_budgets.max_cost_usd_micros,
+        turns_used: 0,
+        tool_calls_used: 0,
+        cost_usd_micros_used: 0,
         semantic_scopes: handoff.semantic_scopes.clone(),
         memory_scope: child_handoff_memory_scope(&parent_grant.memory_scope),
-        tool_scope: child_tool_scope_for_agent(&parent_grant.tool_scope, target_agent),
+        tool_scope: child_tool_scope_for_tools(&parent_grant.tool_scope, &specialist_version.tools),
         connector_scope: parent_grant.connector_scope.clone(),
         approval_policy: parent_grant.approval_policy.clone(),
         external_effects: parent_grant.external_effects.clone(),
@@ -542,52 +622,49 @@ pub(crate) async fn materialize_workflow_handoff_assignment(
     validate_task_grant_scope_objects(&child_grant)?;
     ensure_child_task_grant_within_parent(&parent_grant, &child_grant)?;
 
-    let agent_version_id = Some(state.current_agent_version(target_agent.id).await?.id);
-    let step = state
-        .create_workflow_step_run(WorkflowStepRun {
-            id: step_id,
-            workflow_run_id: run.id,
-            step_key: handoff.intent.clone(),
-            step_type: "handoff".to_string(),
-            agent_id: Some(target_agent.id),
-            agent_version_id,
-            session_id: Some(specialist_session.id),
-            thread_id: Some(child_thread.id),
-            handoff_id: Some(handoff.id),
-            task_grant_id: None,
-            environment_id: specialist_session.environment_id,
-            status: if assignment.status == "waiting_remote_computer" {
-                "requires_action".to_string()
-            } else {
-                "queued".to_string()
-            },
-            input_payload: json!({
-                "agent_handoff_assignment_id": assignment.id,
-                "agent_handoff_event_id": handoff.id,
-                "manager_plan_id": manager_plan.id,
-                "payload": handoff.payload.clone(),
-                "semantic_scopes": handoff.semantic_scopes.clone(),
-                "remote_computer_required": assignment.remote_computer_required
-            }),
-            output_payload: empty_json_object(),
-            artifact_ids: Vec::new(),
-            approval_ids: Vec::new(),
-            tool_call_ids: Vec::new(),
-            claimed_by_worker: None,
-            lease_expires_at: None,
-            context_packet_id: None,
-            started_at: None,
-            completed_at: None,
-            scheduled_at: None,
-            created_at: now,
-            updated_at: now,
-        })
+    let agent_version_id = specialist_session.agent_version_id;
+    let step = WorkflowStepRun {
+        id: step_id,
+        workflow_run_id: run.id,
+        step_key: handoff.intent.clone(),
+        step_type: "handoff".to_string(),
+        agent_id: Some(target_agent.id),
+        agent_version_id,
+        session_id: Some(specialist_session.id),
+        thread_id: Some(child_thread.id),
+        handoff_id: Some(handoff.id),
+        task_grant_id: Some(child_grant.id),
+        environment_id: specialist_session.environment_id,
+        status: if assignment.status == "waiting_remote_computer" {
+            "requires_action".to_string()
+        } else {
+            "queued".to_string()
+        },
+        input_payload: json!({
+            "agent_handoff_assignment_id": assignment.id,
+            "agent_handoff_event_id": handoff.id,
+            "manager_plan_id": manager_plan.id,
+            "payload": handoff.payload.clone(),
+            "semantic_scopes": handoff.semantic_scopes.clone(),
+            "remote_computer_required": assignment.remote_computer_required
+        }),
+        output_payload: empty_json_object(),
+        artifact_ids: Vec::new(),
+        approval_ids: Vec::new(),
+        tool_call_ids: Vec::new(),
+        claimed_by_worker: None,
+        lease_expires_at: None,
+        context_packet_id: None,
+        started_at: None,
+        completed_at: None,
+        scheduled_at: None,
+        created_at: now,
+        updated_at: now,
+    };
+    let (step, child_grant) = state
+        .create_workflow_step_run_with_task_grant(step, child_grant)
         .await?;
-    let child_grant = state.create_task_grant(child_grant).await?;
     record_task_grant_issued(state, &child_grant, run.primary_session_id).await?;
-    let step = state
-        .update_workflow_step_run_task_grant(step.id, child_grant.id)
-        .await?;
     record_workflow_step_run_created(state, &run, &step).await?;
     Ok(Some((step, child_grant)))
 }
@@ -602,12 +679,8 @@ pub(crate) fn child_handoff_memory_scope(parent: &Value) -> Value {
     memory_scope
 }
 
-pub(crate) fn child_tool_scope_for_agent(parent: &Value, agent: &Agent) -> Value {
-    let agent_tools = agent
-        .tools
-        .iter()
-        .map(String::as_str)
-        .collect::<HashSet<_>>();
+pub(crate) fn child_tool_scope_for_tools(parent: &Value, tools: &[String]) -> Value {
+    let agent_tools = tools.iter().map(String::as_str).collect::<HashSet<_>>();
     let mut scope = serde_json::Map::new();
     for key in ["read", "write", "external_write"] {
         let values = parent
@@ -658,6 +731,15 @@ pub(crate) async fn transition_agent_handoff_event(
         Some(current.source_session_id),
     )
     .await?;
+    let terminal_transition = matches!(next_status, "completed" | "failed" | "rejected");
+    if !terminal_transition {
+        state
+            .ensure_session_runnable(current.source_session_id)
+            .await?;
+    }
+    if crate::store_entities::agent_release_enforcement_required() && !terminal_transition {
+        require_active_task_grant_for_session(&state, current.source_session_id).await?;
+    }
     ensure_agent_handoff_transition(&current.status, next_status)?;
     let event_type = format!("agent_handoff.{next_status}");
     let audit =
@@ -665,6 +747,9 @@ pub(crate) async fn transition_agent_handoff_event(
     let updated = state
         .update_agent_handoff_event_status(current.id, next_status, Some(audit.id))
         .await?;
+    if matches!(next_status, "completed" | "failed") {
+        close_workflow_handoff_step(&state, &current, next_status).await?;
+    }
     if matches!(next_status, "completed" | "failed")
         && let Some(thread) = state.session_thread_for_handoff(current.id).await?
     {
@@ -698,6 +783,42 @@ pub(crate) async fn transition_agent_handoff_event(
         }
     }
     Ok(Json(updated))
+}
+
+async fn close_workflow_handoff_step(
+    state: &AppState,
+    handoff: &AgentHandoffEvent,
+    handoff_status: &str,
+) -> Result<(), AppError> {
+    for run in state.list_workflow_runs().await? {
+        let Some(step) = state
+            .list_workflow_step_runs(run.id)
+            .await?
+            .into_iter()
+            .find(|step| step.handoff_id == Some(handoff.id))
+        else {
+            continue;
+        };
+        if workflow_step_status_terminal(&step.status) {
+            return Ok(());
+        }
+        let previous_status = step.status.clone();
+        let now = Utc::now();
+        let mut next = step;
+        next.status = if handoff_status == "completed" {
+            "completed".to_string()
+        } else {
+            "failed".to_string()
+        };
+        next.started_at = next.started_at.or(Some(now));
+        next.completed_at = Some(now);
+        next.updated_at = now;
+        let updated = state.update_workflow_step_run(next).await?;
+        record_workflow_step_run_updated(state, &run, &updated, &previous_status).await?;
+        advance_workflow_graph_after_step_update(state, &run, &updated).await?;
+        return Ok(());
+    }
+    Ok(())
 }
 
 pub(crate) async fn record_agent_handoff_audit_and_event(

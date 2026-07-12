@@ -11,8 +11,9 @@ use crate::{
     CreateRemoteComputerJobAssignment, CreateRemoteComputerLease,
     CreateRemoteComputerSidecarHeartbeat, CreateRemoteComputerStateLock,
     ReleaseRemoteComputerStateLock, RemoteComputer, RemoteComputerAttachment,
-    RemoteComputerJobAssignment, RemoteComputerLease, RemoteComputerSidecarHeartbeat,
-    RemoteComputerStateLock, UpdateRemoteComputerAttachment, UpdateRemoteComputerLease,
+    RemoteComputerJobAssignment, RemoteComputerLease, RemoteComputerRuntimeIdentity,
+    RemoteComputerSidecarHeartbeat, RemoteComputerStateLock, RemoteComputerSubstrate,
+    UpdateRemoteComputerAttachment, UpdateRemoteComputerLease,
 };
 
 impl AppState {
@@ -149,6 +150,163 @@ impl AppState {
                 .execute(pool)
                 .await?;
                 Ok(result.rows_affected() > 0)
+            }
+        }
+    }
+
+    pub(crate) async fn rebind_on_demand_remote_computer(
+        &self,
+        remote_computer_id: Uuid,
+        identity: &RemoteComputerRuntimeIdentity,
+        metadata: serde_json::Value,
+    ) -> Result<RemoteComputer, AppError> {
+        let now = Utc::now();
+        let profile = match identity.substrate {
+            RemoteComputerSubstrate::AgentSandbox => "agent-sandbox",
+            RemoteComputerSubstrate::KubernetesPod => "workspace-write",
+        };
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let has_active_lease = store.remote_computer_leases.values().any(|lease| {
+                    lease.remote_computer_id == remote_computer_id && lease.status == "leased"
+                });
+                if has_active_lease {
+                    return Err(AppError::bad_request(
+                        "Remote computer cannot be rebound while it has an active lease",
+                    ));
+                }
+                let computer = store
+                    .remote_computers
+                    .get_mut(&remote_computer_id)
+                    .ok_or_else(|| AppError::not_found("Remote computer not found"))?;
+                if computer.status != "attention"
+                    || !computer
+                        .metadata
+                        .get("on_demand")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+                {
+                    return Err(AppError::bad_request(
+                        "Only an attention on-demand Remote Computer can be rebound",
+                    ));
+                }
+                computer.name = identity.resource_name.clone();
+                computer.profile = profile.to_string();
+                computer.status = "available".to_string();
+                computer.namespace = identity.namespace.clone();
+                computer.pod_name = Some(identity.pod_name.clone());
+                computer.metadata = metadata;
+                computer.updated_at = now;
+                Ok(computer.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    r#"UPDATE remote_computers
+                     SET name = $1,
+                         profile = $2,
+                         status = 'available',
+                         namespace = $3,
+                         pod_name = $4,
+                         metadata = $5,
+                         updated_at = $6
+                     WHERE tenant_id = $7
+                       AND id = $8
+                       AND status = 'attention'
+                       AND metadata @> '{"on_demand": true}'::jsonb
+                       AND NOT EXISTS (
+                         SELECT 1
+                         FROM remote_computer_leases
+                         WHERE tenant_id = $7
+                           AND remote_computer_id = $8
+                           AND status = 'leased'
+                       )
+                     RETURNING id, name, profile, status, namespace, pod_name, workspace_path, state_mount_path, metadata, created_at, updated_at"#,
+                )
+                .bind(&identity.resource_name)
+                .bind(profile)
+                .bind(&identity.namespace)
+                .bind(&identity.pod_name)
+                .bind(metadata)
+                .bind(now)
+                .bind(self.current_tenant_id())
+                .bind(remote_computer_id)
+                .fetch_optional(pool)
+                .await?;
+                if let Some(row) = row {
+                    return remote_computer_from_row(row);
+                }
+                let exists: Option<(Uuid,)> = sqlx::query_as(
+                    "SELECT id FROM remote_computers WHERE tenant_id = $1 AND id = $2",
+                )
+                .bind(self.current_tenant_id())
+                .bind(remote_computer_id)
+                .fetch_optional(pool)
+                .await?;
+                if exists.is_none() {
+                    return Err(AppError::not_found("Remote computer not found"));
+                }
+                Err(AppError::bad_request(
+                    "Only an unleased attention on-demand Remote Computer can be rebound",
+                ))
+            }
+        }
+    }
+
+    pub(crate) async fn mark_remote_computer_attention_if_unleased(
+        &self,
+        remote_computer_id: Uuid,
+        reason: &str,
+    ) -> Result<RemoteComputer, AppError> {
+        let now = Utc::now();
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                if store.remote_computer_leases.values().any(|lease| {
+                    lease.remote_computer_id == remote_computer_id && lease.status == "leased"
+                }) {
+                    return Err(AppError::bad_request(
+                        "Remote computer still has an active lease",
+                    ));
+                }
+                let computer = store
+                    .remote_computers
+                    .get_mut(&remote_computer_id)
+                    .ok_or_else(|| AppError::not_found("Remote computer not found"))?;
+                computer.status = "attention".to_string();
+                computer.metadata["runtime_attention_reason"] = json!(reason);
+                computer.updated_at = now;
+                Ok(computer.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE remote_computers
+                     SET status = 'attention',
+                         metadata = metadata || jsonb_build_object('runtime_attention_reason', $1::text),
+                         updated_at = $2
+                     WHERE tenant_id = $3
+                       AND id = $4
+                       AND NOT EXISTS (
+                         SELECT 1
+                         FROM remote_computer_leases
+                         WHERE tenant_id = $3
+                           AND remote_computer_id = $4
+                           AND status = 'leased'
+                       )
+                     RETURNING id, name, profile, status, namespace, pod_name, workspace_path, state_mount_path, metadata, created_at, updated_at",
+                )
+                .bind(reason)
+                .bind(now)
+                .bind(self.current_tenant_id())
+                .bind(remote_computer_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| {
+                    AppError::bad_request(
+                        "Remote computer cannot be marked attention while actively leased",
+                    )
+                })?;
+                remote_computer_from_row(row)
             }
         }
     }

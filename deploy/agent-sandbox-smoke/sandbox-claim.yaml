@@ -1,0 +1,14 @@
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxClaim
+metadata:
+  name: mandoforge-agent-runtime-smoke
+  labels:
+    app.kubernetes.io/name: mandoforge
+    mandoforge.io/runtime-substrate: agent-sandbox
+    mandoforge.io/smoke: "true"
+spec:
+  warmPoolRef:
+    name: mandoforge-agent-runtime
+  lifecycle:
+    shutdownPolicy: Delete
+    ttlSecondsAfterFinished: 300

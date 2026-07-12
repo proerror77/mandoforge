@@ -106,6 +106,8 @@ pub(crate) struct ProviderGovernanceSummary {
 pub(crate) struct ProviderRuntimeStatus {
     pub(crate) mode: String,
     pub(crate) production_mode: bool,
+    pub(crate) agent_release_enforcement_required: bool,
+    pub(crate) agent_release_environment: Option<String>,
     pub(crate) contract: String,
 }
 

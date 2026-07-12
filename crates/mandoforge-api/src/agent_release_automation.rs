@@ -30,7 +30,9 @@ where
     let mut controller_failed_count = 0usize;
     let mut results = Vec::new();
     for release in releases {
-        if release_automation_is_expired(&release, checked_at) {
+        if release.status != "promotion_in_progress"
+            && release_automation_is_expired(&release, checked_at)
+        {
             let rejected = state
                 .automate_agent_release_decision(
                     release.agent_id,
@@ -82,14 +84,32 @@ where
                     }));
                     continue;
                 }
+                let in_progress = state
+                    .begin_agent_release_promotion(
+                        release.agent_id,
+                        release.id,
+                        "system".to_string(),
+                        "release automation auto-approved".to_string(),
+                    )
+                    .await?;
                 if controller_configured {
                     controller_execution_count += 1;
-                    match execute_agent_release_controller(&lookup, &release, checked_at).await {
+                    match execute_agent_release_controller(&lookup, &in_progress, checked_at).await
+                    {
                         Ok(execution) => {
                             controller_execution = execution;
                             if controller_execution.get("status").and_then(Value::as_str)
                                 != Some("promoted")
                             {
+                                state
+                                    .fail_agent_release_promotion(
+                                        release.agent_id,
+                                        release.id,
+                                        "system".to_string(),
+                                        "agent release controller did not confirm promotion"
+                                            .to_string(),
+                                    )
+                                    .await?;
                                 skipped_count += 1;
                                 controller_failed_count += 1;
                                 results.push(json!({
@@ -103,6 +123,14 @@ where
                             }
                         }
                         Err(error) => {
+                            state
+                                .fail_agent_release_promotion(
+                                    release.agent_id,
+                                    release.id,
+                                    "system".to_string(),
+                                    format!("release controller failed: {}", error.message),
+                                )
+                                .await?;
                             skipped_count += 1;
                             controller_failed_count += 1;
                             results.push(json!({
@@ -121,12 +149,10 @@ where
                     }
                 }
                 let promoted = state
-                    .automate_agent_release_decision(
+                    .complete_agent_release_promotion(
                         release.agent_id,
                         release.id,
-                        "promoted",
                         "system".to_string(),
-                        "release automation auto-approved".to_string(),
                     )
                     .await?;
                 promoted_count += 1;
@@ -228,14 +254,28 @@ pub(crate) fn agent_release_controller_required<F>(lookup: &F) -> bool
 where
     F: Fn(&str) -> Option<String>,
 {
-    lookup("MANDOFORGE_AGENT_RELEASE_CONTROLLER_REQUIRED")
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes"
-            )
-        })
-        .unwrap_or(false)
+    agent_release_controller_required_for(lookup, "MANDOFORGE_AGENT_RELEASE_CONTROLLER_REQUIRED")
+}
+
+fn agent_release_controller_required_for<F>(lookup: &F, key: &str) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let production = lookup("MANDOFORGE_PROVIDER_RUNTIME_ENV").is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "production" | "prod"
+        )
+    });
+    production
+        || lookup(key)
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes"
+                )
+            })
+            .unwrap_or(false)
 }
 
 pub(crate) async fn execute_agent_release_controller<F>(
@@ -261,6 +301,7 @@ where
         .filter(|value| !value.is_empty());
     let payload = json!({
         "type": "mandoforge.agent_release_rollout",
+        "idempotency_key": release.id,
         "release_id": release.id,
         "agent_id": release.agent_id,
         "agent_version_id": release.agent_version_id,
@@ -306,14 +347,10 @@ pub(crate) fn agent_release_deployment_controller_required<F>(lookup: &F) -> boo
 where
     F: Fn(&str) -> Option<String>,
 {
-    lookup("MANDOFORGE_AGENT_RELEASE_DEPLOYMENT_CONTROLLER_REQUIRED")
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes"
-            )
-        })
-        .unwrap_or(false)
+    agent_release_controller_required_for(
+        lookup,
+        "MANDOFORGE_AGENT_RELEASE_DEPLOYMENT_CONTROLLER_REQUIRED",
+    )
 }
 
 pub(crate) fn agent_release_deployment_controller_configured<F>(lookup: &F) -> bool
@@ -422,14 +459,10 @@ pub(crate) fn agent_release_orchestration_controller_required<F>(lookup: &F) -> 
 where
     F: Fn(&str) -> Option<String>,
 {
-    lookup("MANDOFORGE_AGENT_RELEASE_ORCHESTRATION_CONTROLLER_REQUIRED")
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes"
-            )
-        })
-        .unwrap_or(false)
+    agent_release_controller_required_for(
+        lookup,
+        "MANDOFORGE_AGENT_RELEASE_ORCHESTRATION_CONTROLLER_REQUIRED",
+    )
 }
 
 pub(crate) fn agent_release_orchestration_controller_configured<F>(lookup: &F) -> bool
@@ -525,14 +558,10 @@ pub(crate) fn agent_release_rollback_controller_required<F>(lookup: &F) -> bool
 where
     F: Fn(&str) -> Option<String>,
 {
-    lookup("MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_REQUIRED")
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes"
-            )
-        })
-        .unwrap_or(false)
+    agent_release_controller_required_for(
+        lookup,
+        "MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_REQUIRED",
+    )
 }
 
 pub(crate) fn agent_release_rollback_controller_configured<F>(lookup: &F) -> bool
@@ -1188,7 +1217,7 @@ pub(crate) fn build_agent_release_rollout_summary(
             .or_insert(0) += 1;
 
         match release.status.as_str() {
-            "pending_approval" => {
+            "pending_approval" | "promotion_in_progress" | "promotion_failed" => {
                 pending_count += 1;
                 let auto_approve = release
                     .automation_policy
@@ -1203,12 +1232,21 @@ pub(crate) fn build_agent_release_rollout_summary(
                 let activate_after = release_automation_time(release, "activate_after");
                 let expires_at = release_automation_time(release, "expires_at");
                 let mut reasons = Vec::new();
-                if expires_at.is_some_and(|expires_at| now > expires_at) {
-                    expired_pending_count += 1;
-                    reasons.push("expired_pending".to_string());
-                } else if expires_at.is_some_and(|expires_at| expires_at <= expiring_soon_cutoff) {
-                    expiring_soon_count += 1;
-                    reasons.push("expiring_soon".to_string());
+                if release.status == "promotion_in_progress" {
+                    reasons.push("promotion_reconciliation_in_progress".to_string());
+                } else {
+                    if release.status == "promotion_failed" {
+                        reasons.push("promotion_failed_retryable".to_string());
+                    }
+                    if expires_at.is_some_and(|expires_at| now > expires_at) {
+                        expired_pending_count += 1;
+                        reasons.push("expired_pending".to_string());
+                    } else if expires_at
+                        .is_some_and(|expires_at| expires_at <= expiring_soon_cutoff)
+                    {
+                        expiring_soon_count += 1;
+                        reasons.push("expiring_soon".to_string());
+                    }
                 }
                 if release
                     .requested_at
@@ -1217,12 +1255,14 @@ pub(crate) fn build_agent_release_rollout_summary(
                     stale_pending_count += 1;
                     reasons.push("stale_pending".to_string());
                 }
-                match release_automation_due_decision(release, now) {
-                    ReleaseAutomationDecision::Promote => {
-                        reasons.push("automation_ready".to_string());
-                    }
-                    ReleaseAutomationDecision::Skip(reason) => {
-                        reasons.push(reason);
+                if release.status != "promotion_in_progress" {
+                    match release_automation_due_decision(release, now) {
+                        ReleaseAutomationDecision::Promote => {
+                            reasons.push("automation_ready".to_string());
+                        }
+                        ReleaseAutomationDecision::Skip(reason) => {
+                            reasons.push(reason);
+                        }
                     }
                 }
                 attention_items.push(AgentReleaseAttentionItem {

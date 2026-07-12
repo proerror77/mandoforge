@@ -85,6 +85,7 @@ mod remote_computer_supervision_runtime;
 mod request_auth;
 mod runtime_config;
 mod runtime_support;
+mod sandbox_runtime_protocol;
 mod scheduler_runtime;
 mod secrets;
 mod semantic_memory_governance;
@@ -250,8 +251,11 @@ use remote_computer_runner::{
     remote_computer_runner_for_config,
 };
 pub(crate) use remote_computer_runtime::{
-    build_remote_computer_runner_readiness, remote_computer_runner_request_is_exec,
-    remote_computer_runner_response_for_audit,
+    RemoteComputerRuntimeIdentity, RemoteComputerSubstrate, build_remote_computer_runner_readiness,
+    cleanup_remote_computer_lease_runtime, cleanup_remote_computer_session_runtimes,
+    delete_remote_computer_runtime_resource, metadata_with_remote_computer_runtime_identity,
+    remote_computer_runner_request_is_exec, remote_computer_runner_response_for_audit,
+    remote_computer_runtime_identity, required_remote_computer_runtime_identity,
 };
 pub(crate) use remote_computer_sidecars::{
     build_remote_computer_sidecar_recovery_readiness, build_remote_computer_sidecar_supervision,
@@ -285,6 +289,10 @@ pub(crate) use runtime_config::{
     telemetry_exporter_from_env, tenant_runtime_mode_from_env,
 };
 pub(crate) use runtime_support::*;
+pub(crate) use sandbox_runtime_protocol::{
+    SANDBOX_RUNTIME_EXECUTABLE, SANDBOX_RUNTIME_SUBCOMMAND, SandboxRuntimeOperation,
+    SandboxRuntimeRequest, normalize_agent_cli_executable,
+};
 pub(crate) use scheduler_runtime::*;
 use secrets::{
     SecretProvider, SecretProviderConfig, SecretProviderKind, SecretRef, SecretValue,
@@ -313,8 +321,9 @@ pub(crate) use types::agent::{
     AgentReleaseOrchestrationValidationRun, AgentReleaseProductionOpsReadiness,
     AgentReleaseProductionOrchestrationReadiness, AgentReleaseRolloutSummary, AgentRuntimeProfile,
     AgentRuntimeProfileReleaseGate, AgentVersion, CreateAgent, CreateAgentRelease,
-    CreateAgentRuntimeProfile, CreateEnvironment, Environment, RejectAgentReleasePromotion,
-    RequestAgentReleasePromotion, UpdateAgentRuntimeProfile, UpdateEnvironment,
+    CreateAgentRuntimeProfile, CreateAgentVersion, CreateEnvironment, Environment,
+    RejectAgentReleasePromotion, RequestAgentReleasePromotion, UpdateAgentRuntimeProfile,
+    UpdateEnvironment,
 };
 pub(crate) use types::agent_handoff::{
     AgentHandoffAssignment, AgentHandoffEvent, AttachAgentHandoffRemoteComputerAssignment,
@@ -441,6 +450,7 @@ pub(crate) use types::remote_computer::{
     CreateRemoteComputer, CreateRemoteComputerAttachment, CreateRemoteComputerJobAssignment,
     CreateRemoteComputerLease, CreateRemoteComputerSidecarHeartbeat, CreateRemoteComputerStateLock,
     ReleaseRemoteComputerStateLock, RemoteComputer,
+    RemoteComputerAgentSandboxLiveEvidenceReadiness, RemoteComputerAgentSandboxReadiness,
     RemoteComputerArtifactDiscoverySidecarConfigReadiness, RemoteComputerAttachment,
     RemoteComputerAttentionItem, RemoteComputerAutoscalingReadiness,
     RemoteComputerExecutionTransportReadiness, RemoteComputerJobAssignment, RemoteComputerLease,

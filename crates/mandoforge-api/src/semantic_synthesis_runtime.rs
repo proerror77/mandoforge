@@ -195,7 +195,8 @@ pub(crate) async fn ensure_memory_writeback_permitted_for_session(
     session_id: Uuid,
     tool: &str,
 ) -> Result<(), AppError> {
-    if let Some((run, grant)) = active_task_grant_for_session(state, session_id).await? {
+    if let Some((run, grant)) = governing_task_grant_for_memory_writeback(state, session_id).await?
+    {
         if !task_grant_memory_scope_allows_writeback(&grant.memory_scope) {
             let reason = "task grant memory scope does not allow memory writeback";
             record_task_grant_denied(state, session_id, Some(&grant), Some(run.id), tool, reason)

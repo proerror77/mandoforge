@@ -22,6 +22,9 @@ pub(crate) async fn claim_workflow_step_run(
         Some(run.primary_session_id),
     )
     .await?;
+    if let Some(reason) = workflow_run_execution_denial(&run.status) {
+        return Err(AppError::forbidden(reason));
+    }
     let principal = principal_from_request(state, headers).await?;
     let agent = state.get_agent(input.agent_id).await?;
     if current.agent_id != Some(agent.id) {
@@ -66,6 +69,17 @@ pub(crate) async fn claim_workflow_step_run(
     if !task_grant_session_matches(&grant, &run, session_id) {
         return Err(AppError::forbidden(
             "workflow step task grant is not valid for the step session",
+        ));
+    }
+    let session = state.get_session(session_id).await?;
+    if session.agent_id != agent.id {
+        return Err(AppError::forbidden(
+            "workflow step session is not bound to the claiming agent",
+        ));
+    }
+    if current.agent_version_id != session.agent_version_id {
+        return Err(AppError::forbidden(
+            "workflow step agent version does not match its session binding",
         ));
     }
     let lease_seconds = input.lease_seconds.unwrap_or(300);

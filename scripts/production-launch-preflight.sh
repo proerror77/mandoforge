@@ -105,6 +105,24 @@ if ! grep -Eq 'MANDOFORGE_PROVIDER_RUNTIME_ENV:[[:space:]]*"production"' deploy/
   fail "K8s config must force provider runtime production mode"
 fi
 
+if ! grep -Eq 'MANDOFORGE_AGENT_RELEASE_ENVIRONMENT:[[:space:]]*"production"' deploy/k8s/configmap.yaml; then
+  fail "K8s config must bind production sessions to production agent releases"
+fi
+
+if ! grep -Eq 'MANDOFORGE_AGENT_RELEASE_ENFORCEMENT:[[:space:]]*"required"' deploy/k8s/configmap.yaml; then
+  fail "K8s config must require the agent release execution gate"
+fi
+
+for controller_flag in \
+  MANDOFORGE_AGENT_RELEASE_CONTROLLER_REQUIRED \
+  MANDOFORGE_AGENT_RELEASE_DEPLOYMENT_CONTROLLER_REQUIRED \
+  MANDOFORGE_AGENT_RELEASE_ORCHESTRATION_CONTROLLER_REQUIRED \
+  MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_REQUIRED; do
+  if ! grep -Eq "${controller_flag}:[[:space:]]*\"true\"" deploy/k8s/configmap.yaml; then
+    fail "K8s config must require ${controller_flag}"
+  fi
+done
+
 if ! grep -Eq 'MANDOFORGE_ENTERPRISE_PRODUCT_EVIDENCE_DIR:[[:space:]]*"/evidence"' deploy/k8s/configmap.yaml; then
   fail "K8s config must point enterprise readiness at the production evidence PVC mount"
 fi
@@ -151,6 +169,15 @@ if command -v kubectl >/dev/null 2>&1; then
   if ! grep -q 'MANDOFORGE_PROVIDER_RUNTIME_ENV: production' "$render_file"; then
     fail "rendered deploy/k8s output must force provider runtime production mode"
   fi
+  for controller_flag in \
+    MANDOFORGE_AGENT_RELEASE_CONTROLLER_REQUIRED \
+    MANDOFORGE_AGENT_RELEASE_DEPLOYMENT_CONTROLLER_REQUIRED \
+    MANDOFORGE_AGENT_RELEASE_ORCHESTRATION_CONTROLLER_REQUIRED \
+    MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_REQUIRED; do
+    if ! grep -Eq "${controller_flag}:[[:space:]]*\"?true\"?" "$render_file"; then
+      fail "rendered deploy/k8s output must require ${controller_flag}"
+    fi
+  done
   if ! grep -q 'MANDOFORGE_ENTERPRISE_PRODUCT_EVIDENCE_DIR: /evidence' "$render_file" \
     || ! grep -q 'mountPath: /evidence' "$render_file" \
     || ! grep -q 'readOnly: true' "$render_file" \

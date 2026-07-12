@@ -31,10 +31,11 @@ use crate::{
     record_workflow_step_run_created, record_workflow_step_run_updated,
     record_workflow_step_worker_started, require_non_empty, run_session_loop,
     run_workflow_compensation_adapter_step, run_workflow_delegated_runtime_step,
-    set_managed_session_status, update_workflow_step_after_worker_session,
-    validate_task_grant_scope_objects, validate_workflow_execution_binding,
-    validate_workflow_graph_definition, visible_session_ids_for_principal,
-    workflow_definition_step_graph_for_execution, workflow_input_digest,
+    set_managed_session_status, task_grant_session_matches,
+    update_workflow_step_after_worker_session, validate_task_grant_scope_objects,
+    validate_workflow_execution_binding, validate_workflow_graph_definition,
+    visible_session_ids_for_principal, workflow_definition_step_graph_for_execution,
+    workflow_input_digest, workflow_run_execution_denial, workflow_run_owns_session,
     workflow_run_runtime_envelope, workflow_step_is_adapter_owned_compensation,
     workflow_step_status_terminal, workflow_step_worker_message,
     workflow_transition_filter_from_query,
@@ -451,16 +452,6 @@ async fn create_workflow_run(
         .title
         .filter(|title| !title.trim().is_empty())
         .unwrap_or_else(|| format!("Workflow: {}", definition.name));
-    let session = state
-        .create_session(CreateSession {
-            agent_id: definition.default_agent_id,
-            environment_id,
-            title,
-            message: None,
-        })
-        .await?;
-    ensure_primary_session_thread(&state, session.id).await?;
-    let now = Utc::now();
     let input_digest = workflow_input_digest(&input.input_payload);
     let execution_strategy = input
         .execution_strategy
@@ -493,7 +484,26 @@ async fn create_workflow_run(
         external_run_ref.as_deref(),
         &input.runtime_envelope,
     );
-    let run = state
+    let session = state
+        .create_session(CreateSession {
+            agent_id: definition.default_agent_id,
+            environment_id,
+            title,
+            message: None,
+        })
+        .await?;
+    if let Err(error) = ensure_primary_session_thread(&state, session.id).await {
+        let _ = set_managed_session_status(
+            &state,
+            session.id,
+            SessionStatus::Failed,
+            "workflow run initialization failed before primary thread creation",
+        )
+        .await;
+        return Err(error);
+    }
+    let now = Utc::now();
+    let run = match state
         .create_workflow_run(WorkflowRun {
             id: Uuid::new_v4(),
             workflow_definition_id: definition.id,
@@ -501,7 +511,7 @@ async fn create_workflow_run(
             source_event_id: input.source_event_id,
             source_work_item_id: input.source_work_item_id,
             source_schedule_id: input.source_schedule_id,
-            status: "queued".to_string(),
+            status: "initializing".to_string(),
             primary_session_id: session.id,
             root_task_grant_id: None,
             input_payload: input.input_payload,
@@ -519,14 +529,74 @@ async fn create_workflow_run(
             created_at: now,
             updated_at: now,
         })
+        .await
+    {
+        Ok(run) => run,
+        Err(error) => {
+            let _ = set_managed_session_status(
+                &state,
+                session.id,
+                SessionStatus::Failed,
+                "workflow run persistence failed",
+            )
+            .await;
+            return Err(error);
+        }
+    };
+    let initialized = async {
+        let root_grant =
+            issue_root_task_grant_for_workflow_run(&state, &run, &definition, &session).await?;
+        let linked_run = state
+            .update_workflow_run_root_task_grant(run.id, root_grant.id)
+            .await?;
+        materialize_workflow_graph_start_steps(
+            &state,
+            &definition,
+            &linked_run,
+            &session,
+            &root_grant,
+        )
         .await?;
-    let root_grant =
-        issue_root_task_grant_for_workflow_run(&state, &run, &definition, &session).await?;
-    let run = state
-        .update_workflow_run_root_task_grant(run.id, root_grant.id)
-        .await?;
-    materialize_workflow_graph_start_steps(&state, &definition, &run, &session, &root_grant)
-        .await?;
+        state
+            .update_workflow_run_status(run.id, "queued".to_string(), None, None)
+            .await
+    }
+    .await;
+    let run = match initialized {
+        Ok(run) => run,
+        Err(error) => {
+            let failed_at = Utc::now();
+            let _ = state
+                .update_workflow_run_status(run.id, "failed".to_string(), None, Some(failed_at))
+                .await;
+            let _ = state
+                .close_active_task_grants_for_workflow_run(run.id, "cancelled")
+                .await;
+            let _ = set_managed_session_status(
+                &state,
+                session.id,
+                SessionStatus::Failed,
+                "workflow run initialization failed",
+            )
+            .await;
+            let _ = state
+                .append_audit_log(new_audit_log(
+                    Some(session.id),
+                    "system",
+                    Some(run.id),
+                    "workflow_run.initialization_failed",
+                    "workflow_run",
+                    Some(run.id),
+                    json!({
+                        "workflow_definition_id": definition.id,
+                        "primary_session_id": session.id,
+                        "error": error.message
+                    }),
+                ))
+                .await;
+            return Err(error);
+        }
+    };
     state
         .append_event(
             "system",
@@ -670,11 +740,36 @@ async fn create_workflow_step_run(
     let step_key = require_non_empty(input.step_key, "workflow step key")?;
     let step_type = require_non_empty(input.step_type, "workflow step type")?;
     let status = normalize_workflow_run_status(&input.status)?;
-    if let Some(environment_id) = input.environment_id {
-        state.get_environment(environment_id).await?;
+    let session_id = input.session_id.unwrap_or(run.primary_session_id);
+    if !workflow_run_owns_session(&state, &run, session_id).await? {
+        return Err(AppError::forbidden(
+            "session is not part of this workflow run",
+        ));
     }
-    if let Some(session_id) = input.session_id {
-        state.get_session(session_id).await?;
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRun,
+        "session",
+        Some(session_id),
+    )
+    .await?;
+    let session = state.get_session(session_id).await?;
+    if input
+        .environment_id
+        .is_some_and(|environment_id| Some(environment_id) != session.environment_id)
+    {
+        return Err(AppError::bad_request(
+            "workflow step environment must match its session environment",
+        ));
+    }
+    if input
+        .agent_id
+        .is_some_and(|agent_id| agent_id != session.agent_id)
+    {
+        return Err(AppError::bad_request(
+            "workflow step agent must match its session agent",
+        ));
     }
     if let Some(thread_id) = input.thread_id {
         state.get_session_thread(thread_id).await?;
@@ -683,15 +778,10 @@ async fn create_workflow_step_run(
         state.get_agent_handoff_event(handoff_id).await?;
     }
     let agent_version_id = match (input.agent_version_id, input.agent_id) {
-        (Some(agent_version_id), Some(agent_id)) => {
-            state.get_agent(agent_id).await?;
-            let versions = state.list_agent_versions(agent_id).await?;
-            if !versions
-                .iter()
-                .any(|version| version.id == agent_version_id)
-            {
+        (Some(agent_version_id), Some(_)) => {
+            if Some(agent_version_id) != session.agent_version_id {
                 return Err(AppError::bad_request(
-                    "workflow step agent_version_id must belong to agent_id",
+                    "workflow step agent_version_id must match its session agent version",
                 ));
             }
             Some(agent_version_id)
@@ -701,17 +791,17 @@ async fn create_workflow_step_run(
                 "workflow step agent_id is required when agent_version_id is provided",
             ));
         }
-        (None, Some(agent_id)) => {
-            state.get_agent(agent_id).await?;
-            Some(state.current_agent_version(agent_id).await?.id)
-        }
+        (None, Some(_)) => session.agent_version_id,
         (None, None) => None,
     };
     if let Some(task_grant_id) = input.task_grant_id {
         let grant = state.get_task_grant(task_grant_id).await?;
-        if grant.workflow_run_id != run.id || grant.status != "active" {
+        if grant.workflow_run_id != run.id
+            || grant.status != "active"
+            || !task_grant_session_matches(&grant, &run, session_id)
+        {
             return Err(AppError::bad_request(
-                "workflow step task_grant_id must reference an active grant for the workflow run",
+                "workflow step task_grant_id must reference an active grant for the workflow session",
             ));
         }
     }
@@ -724,11 +814,11 @@ async fn create_workflow_step_run(
             step_type,
             agent_id: input.agent_id,
             agent_version_id,
-            session_id: input.session_id,
+            session_id: Some(session_id),
             thread_id: input.thread_id,
             handoff_id: input.handoff_id,
             task_grant_id: input.task_grant_id,
-            environment_id: input.environment_id,
+            environment_id: session.environment_id,
             status,
             input_payload: input.input_payload,
             output_payload: input.output_payload,
@@ -839,6 +929,9 @@ async fn run_workflow_step_run(
 ) -> Result<Json<RunWorkflowStepRunResponse>, AppError> {
     let current = state.get_workflow_step_run(id).await?;
     let run = state.get_workflow_run(current.workflow_run_id).await?;
+    if let Some(reason) = workflow_run_execution_denial(&run.status) {
+        return Err(AppError::forbidden(reason));
+    }
     let session_id = current.session_id.unwrap_or(run.primary_session_id);
     enforce_worker_environment_binding(&state, &headers, session_id, current.environment_id)
         .await?;
@@ -1068,6 +1161,9 @@ async fn create_workflow_task_grant(
         Some(run.primary_session_id),
     )
     .await?;
+    if let Some(reason) = workflow_run_execution_denial(&run.status) {
+        return Err(AppError::forbidden(reason));
+    }
     let principal = principal_from_request(&state, &headers).await?;
     let parent_grant_id = input
         .parent_grant_id
@@ -1095,9 +1191,29 @@ async fn create_workflow_task_grant(
             ));
         }
     }
-    if let Some(session_id) = input.session_id {
-        state.get_session(session_id).await?;
+    let session_id = match (input.session_id, input.grantee_session_id) {
+        (Some(session_id), Some(grantee_session_id)) if session_id != grantee_session_id => {
+            return Err(AppError::bad_request(
+                "task grant session_id and grantee_session_id must match",
+            ));
+        }
+        (Some(session_id), _) | (_, Some(session_id)) => session_id,
+        (None, None) => run.primary_session_id,
+    };
+    if !workflow_run_owns_session(&state, &run, session_id).await? {
+        return Err(AppError::forbidden(
+            "session is not part of this workflow run",
+        ));
     }
+    authorize_request(
+        &state,
+        &headers,
+        Permission::SessionsRun,
+        "session",
+        Some(session_id),
+    )
+    .await?;
+    let session = state.get_session(session_id).await?;
     if let Some(source_event_id) = input.source_event_id {
         ensure_session_event_exists(&state, source_event_id).await?;
     }
@@ -1106,12 +1222,19 @@ async fn create_workflow_task_grant(
     }
     if let Some(agent_id) = input.grantee_agent_id {
         state.get_agent(agent_id).await?;
-    }
-    if let Some(session_id) = input.grantee_session_id {
-        state.get_session(session_id).await?;
+        if agent_id != session.agent_id {
+            return Err(AppError::bad_request(
+                "task grant grantee agent must match its session agent",
+            ));
+        }
     }
     if let Some(context_packet_id) = input.context_packet_id {
-        state.get_context_packet(context_packet_id).await?;
+        let context_packet = state.get_context_packet(context_packet_id).await?;
+        if context_packet.session_id != session_id {
+            return Err(AppError::bad_request(
+                "task grant context packet must belong to its session",
+            ));
+        }
     }
     if let Some(policy_revision_id) = input.policy_revision_id {
         state.get_policy_revision(policy_revision_id).await?;
@@ -1129,13 +1252,13 @@ async fn create_workflow_task_grant(
         id: Uuid::new_v4(),
         workflow_run_id: run.id,
         workflow_step_run_id: input.workflow_step_run_id,
-        session_id: input.session_id.or(Some(run.primary_session_id)),
+        session_id: Some(session_id),
         parent_grant_id: Some(parent.id),
         source_event_id: input.source_event_id,
         source_handoff_id: input.source_handoff_id,
         issuer_subject,
         grantee_agent_id: input.grantee_agent_id,
-        grantee_session_id: input.grantee_session_id,
+        grantee_session_id: input.grantee_session_id.or(Some(session_id)),
         agent_class: input.agent_class.filter(|value| !value.trim().is_empty()),
         objective,
         risk_level: normalize_task_grant_risk_level(&input.risk_level)?,
@@ -1145,6 +1268,9 @@ async fn create_workflow_task_grant(
         max_tool_calls: input.max_tool_calls,
         max_runtime_seconds: input.max_runtime_seconds,
         max_cost_usd_micros: input.max_cost_usd_micros,
+        turns_used: 0,
+        tool_calls_used: 0,
+        cost_usd_micros_used: 0,
         semantic_scopes: input.semantic_scopes,
         memory_scope: input.memory_scope,
         tool_scope: input.tool_scope,

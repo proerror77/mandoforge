@@ -3,7 +3,7 @@ use super::*;
 #[tokio::test]
 async fn provider_runtime_production_mode_blocks_env_fallback() {
     let _lock = env_lock().lock().expect("env lock");
-    let _provider_runtime_env = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+    let _provider_runtime_env = EnvVarGuard::remove("MANDOFORGE_PROVIDER_RUNTIME_ENV");
     let _provider_base_url = EnvVarGuard::remove("MANDOFORGE_PROVIDER_BASE_URL");
     let _provider_api_key = EnvVarGuard::remove("MANDOFORGE_PROVIDER_API_KEY");
     let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
@@ -24,6 +24,8 @@ async fn provider_runtime_production_mode_blocks_env_fallback() {
         })
         .await
         .expect("session");
+    drop(_provider_runtime_env);
+    let _provider_runtime_env = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
 
     let error = match provider_client_for_session(&state, session.id).await {
         Ok(_) => panic!("production mode accepts provider fallback"),
@@ -41,7 +43,7 @@ async fn provider_runtime_production_mode_blocks_env_fallback() {
 #[tokio::test]
 async fn provider_runtime_production_mode_blocks_mock_provider() {
     let _lock = env_lock().lock().expect("env lock");
-    let _provider_runtime_env = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+    let _provider_runtime_env = EnvVarGuard::remove("MANDOFORGE_PROVIDER_RUNTIME_ENV");
     let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
     state.seed_demo_agent().await.expect("seed demo agent");
     state
@@ -70,6 +72,8 @@ async fn provider_runtime_production_mode_blocks_mock_provider() {
         })
         .await
         .expect("session");
+    drop(_provider_runtime_env);
+    let _provider_runtime_env = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
 
     let error = match provider_client_for_session(&state, session.id).await {
         Ok(_) => panic!("production mode accepts mock provider"),
@@ -88,6 +92,9 @@ async fn provider_runtime_production_mode_blocks_mock_provider() {
 async fn provider_runtime_status_reports_production_mode() {
     let _lock = env_lock().lock().expect("env lock");
     let _provider_runtime_env = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+    let _release_enforcement = EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+    let _release_environment =
+        EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT", "production");
     let app = build_router(test_state_with_worker(Arc::new(InlineExecutionWorker)));
 
     let runtime: Value = request_json(
@@ -95,8 +102,8 @@ async fn provider_runtime_status_reports_production_mode() {
         Request::builder()
             .method("GET")
             .uri("/api/providers/runtime")
-            .header("x-mandoforge-subject", "admin-1")
-            .header("x-mandoforge-roles", "admin")
+            .header("x-mandoforge-subject", "operator-1")
+            .header("x-mandoforge-roles", "operator")
             .body(Body::empty())
             .unwrap(),
     )
@@ -104,6 +111,8 @@ async fn provider_runtime_status_reports_production_mode() {
 
     assert_eq!(runtime["mode"], json!("production"));
     assert_eq!(runtime["production_mode"], json!(true));
+    assert_eq!(runtime["agent_release_enforcement_required"], json!(true));
+    assert_eq!(runtime["agent_release_environment"], json!("production"));
     assert!(
         runtime["contract"]
             .as_str()

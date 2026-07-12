@@ -1,7 +1,11 @@
-use chrono::Utc;
+use std::path::PathBuf;
+
+use chrono::{DateTime, Utc};
+use serde_json::Value;
 
 use crate::{
-    AppError, AppState, RemoteComputerArtifactDiscoverySidecarConfigReadiness,
+    AppError, AppState, RemoteComputerAgentSandboxLiveEvidenceReadiness,
+    RemoteComputerAgentSandboxReadiness, RemoteComputerArtifactDiscoverySidecarConfigReadiness,
     RemoteComputerAttentionItem, RemoteComputerAutoscalingReadiness,
     RemoteComputerManifestReadiness, RemoteComputerReadinessReport,
     RemoteComputerStateFilesystemReadiness, RemoteComputerWarmPoolReadiness,
@@ -170,6 +174,7 @@ pub(crate) async fn build_remote_computer_readiness(
     let sidecar_recovery =
         build_remote_computer_sidecar_recovery_readiness(&sidecar_recovery_targets, &runner);
     let execution_transport = build_remote_computer_execution_transport_readiness(state).await?;
+    let agent_sandbox = build_remote_computer_agent_sandbox_readiness();
 
     let event_types = vec![
         "remote_computer.requested".to_string(),
@@ -322,6 +327,31 @@ pub(crate) async fn build_remote_computer_readiness(
             "Remote Computer job handoff can be planned and audited, but approved tools still execute on the existing worker path",
         ));
     }
+    if !agent_sandbox.static_contract_ready {
+        attention_items.push(remote_computer_attention(
+            "agent_sandbox_static_contract_missing",
+            "critical",
+            "Agent Sandbox dedicated image, tracked build context, template, egress, smoke lifecycle, or static verifier contract is incomplete",
+        ));
+    } else if agent_sandbox.live_evidence.status == "missing" {
+        attention_items.push(remote_computer_attention(
+            "agent_sandbox_live_evidence_missing",
+            "critical",
+            "Agent Sandbox static contracts are ready, but no live Claim/Sandbox/Pod lifecycle evidence bundle is present",
+        ));
+    } else if agent_sandbox.live_evidence.status == "ready" && agent_sandbox.production_blocked {
+        attention_items.push(remote_computer_attention(
+            "agent_sandbox_target_evidence_missing",
+            "critical",
+            "Agent Sandbox local live evidence is valid, but production_target evidence is required before production promotion",
+        ));
+    } else if agent_sandbox.production_blocked {
+        attention_items.push(remote_computer_attention(
+            "agent_sandbox_live_evidence_blocked",
+            "critical",
+            "Agent Sandbox live evidence is invalid, incomplete, or failed; keep the runtime pilot-only",
+        ));
+    }
 
     let mut runbook_actions = Vec::new();
     if !state_filesystem.distributed_filesystem_configured {
@@ -384,6 +414,10 @@ pub(crate) async fn build_remote_computer_readiness(
         "run /api/remote-computers/reclaim-stale to clear stale attachment and expired lease records without executing tools"
             .to_string(),
     );
+    runbook_actions.push(
+        "run docs/runbooks/agent-sandbox-runtime-drill.md and archive a complete summary.json before promoting Agent Sandbox beyond pilot_only"
+            .to_string(),
+    );
 
     let critical_count = attention_items
         .iter()
@@ -420,10 +454,358 @@ pub(crate) async fn build_remote_computer_readiness(
         sidecar_recovery,
         runner,
         execution_transport,
+        agent_sandbox,
         event_types,
         attention_items,
         runbook_actions,
     })
+}
+
+const AGENT_SANDBOX_RUNTIME_IMAGE: &str = "mandoforge-agent-sandbox-runtime:0.1.1";
+const DEFAULT_AGENT_SANDBOX_CONTROLLER_VERSION: &str = "v0.5.1";
+const DEFAULT_AGENT_SANDBOX_EVIDENCE_MAX_AGE_HOURS: i64 = 168;
+const AGENT_SANDBOX_REQUIRED_LIVE_CHECKS: &[&str] = &[
+    "controller_ready",
+    "claim_bound",
+    "pod_ready",
+    "runtime_versions",
+    "workspace_reuse",
+    "cross_session_isolation",
+    "cache_scope",
+    "network_policy",
+    "cancel_cleanup",
+    "ttl_cleanup",
+    "retry_idempotency",
+    "approved_exec",
+    "durable_event",
+    "artifact",
+    "audit_log",
+];
+const AGENT_SANDBOX_REQUIRED_PRODUCTION_CHECKS: &[&str] = &[
+    "target_cluster",
+    "rwx_cache",
+    "distributed_state_sync",
+    "network_enforcement",
+    "load_validation",
+    "rollback_validation",
+];
+
+fn build_remote_computer_agent_sandbox_readiness() -> RemoteComputerAgentSandboxReadiness {
+    let runtime_dockerfile_present =
+        project_file_contains(
+            "Dockerfile.agent-sandbox",
+            "/usr/local/bin/mandoforge-sandbox-runtime",
+        ) && project_file_contains("Dockerfile.agent-sandbox", ".mandoforge-tracked-context");
+    let tracked_context_builder_present = project_file_contains(
+        "scripts/build-agent-sandbox-runtime-image.sh",
+        "git checkout-index --all --force",
+    ) && project_file_contains(
+        "scripts/build-agent-sandbox-runtime-image.sh",
+        "git write-tree",
+    );
+    let runtime_manifest_present = project_file_contains(
+        "deploy/k8s/agent-sandbox-runtime.yaml",
+        &format!("image: {AGENT_SANDBOX_RUNTIME_IMAGE}"),
+    ) && project_file_contains(
+        "deploy/k8s/agent-sandbox-runtime.yaml",
+        "value: \"/workspace/sessions\"",
+    ) && project_file_contains(
+        "deploy/k8s/agent-sandbox-runtime.yaml",
+        "readOnlyRootFilesystem: true",
+    );
+    let egress_policy_present = project_file_contains(
+        "deploy/k8s/agent-sandbox-egress-networkpolicy.yaml",
+        "name: mandoforge-agent-sandbox-egress",
+    ) && project_file_contains(
+        "deploy/k8s/agent-sandbox-egress-networkpolicy.yaml",
+        "169.254.0.0/16",
+    );
+    let smoke_claim_present = project_file_contains(
+        "deploy/agent-sandbox-smoke/sandbox-claim.yaml",
+        "shutdownPolicy: Delete",
+    ) && project_file_contains(
+        "deploy/agent-sandbox-smoke/sandbox-claim.yaml",
+        "ttlSecondsAfterFinished: 300",
+    );
+    let static_verifier_present = project_file_contains(
+        "scripts/verify-remote-computer-k8s-manifests.sh",
+        "extract_rendered_resource",
+    ) && project_file_contains(
+        "scripts/verify-remote-computer-k8s-manifests.sh",
+        "agent_sandbox_egress_render",
+    );
+    let static_contract_ready = runtime_dockerfile_present
+        && tracked_context_builder_present
+        && runtime_manifest_present
+        && egress_policy_present
+        && smoke_claim_present
+        && static_verifier_present;
+    let live_evidence = build_agent_sandbox_live_evidence_readiness();
+    let mut blocking_reasons = Vec::new();
+    if !static_contract_ready {
+        blocking_reasons.push("Agent Sandbox static runtime contract is incomplete".to_string());
+    }
+    blocking_reasons.extend(live_evidence.blocking_reasons.iter().cloned());
+    let production_scope_validated = live_evidence.production_ready;
+    if live_evidence.status == "ready" && !production_scope_validated {
+        blocking_reasons.push(
+            "Agent Sandbox production promotion requires validation_scope=production_target"
+                .to_string(),
+        );
+    }
+    let production_blocked = !static_contract_ready || !production_scope_validated;
+    let status = if !static_contract_ready {
+        "blocked"
+    } else if production_blocked {
+        "pilot_only"
+    } else {
+        "live_validated"
+    }
+    .to_string();
+
+    RemoteComputerAgentSandboxReadiness {
+        status,
+        static_contract_ready,
+        production_blocked,
+        runtime_image: AGENT_SANDBOX_RUNTIME_IMAGE.to_string(),
+        runtime_dockerfile_present,
+        tracked_context_builder_present,
+        runtime_manifest_present,
+        egress_policy_present,
+        smoke_claim_present,
+        static_verifier_present,
+        live_evidence,
+        blocking_reasons,
+    }
+}
+
+fn build_agent_sandbox_live_evidence_readiness() -> RemoteComputerAgentSandboxLiveEvidenceReadiness
+{
+    let path = agent_sandbox_evidence_path();
+    let path_display = path.to_string_lossy().to_string();
+    let expected_controller_version = expected_agent_sandbox_controller_version();
+    let max_age_hours = agent_sandbox_evidence_max_age_hours();
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return RemoteComputerAgentSandboxLiveEvidenceReadiness {
+                path: path_display,
+                present: false,
+                valid: false,
+                status: "missing".to_string(),
+                captured_at: None,
+                cluster_context: None,
+                controller_version: None,
+                validation_scope: None,
+                production_checks: Value::Null,
+                production_ready: false,
+                expected_controller_version,
+                max_age_hours,
+                age_hours: None,
+                fresh: false,
+                checks: Value::Null,
+                blocking_reasons: vec![
+                    "Agent Sandbox live evidence summary is missing".to_string(),
+                ],
+            };
+        }
+        Err(error) => {
+            return RemoteComputerAgentSandboxLiveEvidenceReadiness {
+                path: path_display,
+                present: true,
+                valid: false,
+                status: "invalid".to_string(),
+                captured_at: None,
+                cluster_context: None,
+                controller_version: None,
+                validation_scope: None,
+                production_checks: Value::Null,
+                production_ready: false,
+                expected_controller_version,
+                max_age_hours,
+                age_hours: None,
+                fresh: false,
+                checks: Value::Null,
+                blocking_reasons: vec![format!(
+                    "failed to read Agent Sandbox live evidence: {error}"
+                )],
+            };
+        }
+    };
+    let evidence: Value = match serde_json::from_str(&content) {
+        Ok(evidence) => evidence,
+        Err(error) => {
+            return RemoteComputerAgentSandboxLiveEvidenceReadiness {
+                path: path_display,
+                present: true,
+                valid: false,
+                status: "invalid".to_string(),
+                captured_at: None,
+                cluster_context: None,
+                controller_version: None,
+                validation_scope: None,
+                production_checks: Value::Null,
+                production_ready: false,
+                expected_controller_version,
+                max_age_hours,
+                age_hours: None,
+                fresh: false,
+                checks: Value::Null,
+                blocking_reasons: vec![format!(
+                    "failed to parse Agent Sandbox live evidence: {error}"
+                )],
+            };
+        }
+    };
+
+    let mut structural_errors = Vec::new();
+    if evidence.get("schema_version").and_then(Value::as_u64) != Some(1) {
+        structural_errors.push("schema_version must equal 1".to_string());
+    }
+    let declared_status = evidence.get("status").and_then(Value::as_str);
+    if declared_status.is_none() {
+        structural_errors.push("status must be a string".to_string());
+    }
+    let captured_at = evidence
+        .get("captured_at")
+        .and_then(Value::as_str)
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc));
+    if captured_at.is_none() {
+        structural_errors.push("captured_at must be an RFC3339 timestamp".to_string());
+    }
+    let age_hours = captured_at.map(|value| Utc::now().signed_duration_since(value).num_hours());
+    let fresh = age_hours.is_some_and(|age| (-1..=max_age_hours).contains(&age));
+    if let Some(age) = age_hours {
+        if age < -1 {
+            structural_errors
+                .push("live evidence captured_at is too far in the future".to_string());
+        } else if age > max_age_hours {
+            structural_errors.push(format!(
+                "live evidence is stale: age {age}h exceeds {max_age_hours}h"
+            ));
+        }
+    }
+    let cluster_context = non_empty_evidence_string(&evidence, "cluster_context");
+    if cluster_context.is_none() {
+        structural_errors.push("cluster_context must be a non-empty string".to_string());
+    }
+    let controller_version = non_empty_evidence_string(&evidence, "controller_version");
+    if controller_version.is_none() {
+        structural_errors.push("controller_version must be a non-empty string".to_string());
+    } else if controller_version.as_deref() != Some(expected_controller_version.as_str()) {
+        structural_errors.push(format!(
+            "controller version must equal {expected_controller_version}"
+        ));
+    }
+    let validation_scope = non_empty_evidence_string(&evidence, "validation_scope");
+    if !matches!(
+        validation_scope.as_deref(),
+        Some("local_pilot" | "production_target")
+    ) {
+        structural_errors
+            .push("validation_scope must equal local_pilot or production_target".to_string());
+    }
+    let production_checks = evidence
+        .get("production_checks")
+        .cloned()
+        .unwrap_or(Value::Null);
+    if validation_scope.as_deref() == Some("production_target") {
+        if !production_checks.is_object() {
+            structural_errors
+                .push("production_checks must be an object for production_target".to_string());
+        }
+        for check in AGENT_SANDBOX_REQUIRED_PRODUCTION_CHECKS {
+            match production_checks.get(*check).and_then(Value::as_bool) {
+                Some(true) => {}
+                Some(false) => structural_errors.push(format!(
+                    "production check must pass for production_target: {check}"
+                )),
+                None => structural_errors.push(format!(
+                    "production check is missing or not boolean: {check}"
+                )),
+            }
+        }
+    }
+    let checks = evidence.get("checks").cloned().unwrap_or(Value::Null);
+    if !checks.is_object() {
+        structural_errors.push("checks must be an object".to_string());
+    }
+    let mut failed_checks = Vec::new();
+    for check in AGENT_SANDBOX_REQUIRED_LIVE_CHECKS {
+        match checks.get(*check).and_then(Value::as_bool) {
+            Some(true) => {}
+            Some(false) => failed_checks.push(format!("live check failed: {check}")),
+            None => {
+                structural_errors.push(format!("live check is missing or not boolean: {check}"))
+            }
+        }
+    }
+    let valid = structural_errors.is_empty();
+    let ready = valid && declared_status == Some("passed") && failed_checks.is_empty();
+    let production_ready = ready
+        && validation_scope.as_deref() == Some("production_target")
+        && AGENT_SANDBOX_REQUIRED_PRODUCTION_CHECKS
+            .iter()
+            .all(|check| production_checks.get(*check).and_then(Value::as_bool) == Some(true));
+    let mut blocking_reasons = structural_errors;
+    blocking_reasons.extend(failed_checks);
+    if valid && declared_status != Some("passed") {
+        blocking_reasons.push("live evidence status is not passed".to_string());
+    }
+
+    RemoteComputerAgentSandboxLiveEvidenceReadiness {
+        path: path_display,
+        present: true,
+        valid,
+        status: if ready { "ready" } else { "blocked" }.to_string(),
+        captured_at,
+        cluster_context,
+        controller_version,
+        validation_scope,
+        production_checks,
+        production_ready,
+        expected_controller_version,
+        max_age_hours,
+        age_hours,
+        fresh,
+        checks,
+        blocking_reasons,
+    }
+}
+
+fn expected_agent_sandbox_controller_version() -> String {
+    std::env::var("MANDOFORGE_AGENT_SANDBOX_CONTROLLER_VERSION")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_AGENT_SANDBOX_CONTROLLER_VERSION.to_string())
+}
+
+fn agent_sandbox_evidence_max_age_hours() -> i64 {
+    std::env::var("MANDOFORGE_AGENT_SANDBOX_EVIDENCE_MAX_AGE_HOURS")
+        .ok()
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_AGENT_SANDBOX_EVIDENCE_MAX_AGE_HOURS)
+}
+
+fn agent_sandbox_evidence_path() -> PathBuf {
+    std::env::var("MANDOFORGE_AGENT_SANDBOX_EVIDENCE_FILE")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(".mandoforge/agent-sandbox-runtime-evidence/summary.json"))
+}
+
+fn non_empty_evidence_string(evidence: &Value, key: &str) -> Option<String> {
+    evidence
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn remote_computer_manifest_readiness(

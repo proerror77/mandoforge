@@ -1,7 +1,7 @@
 -- Migration: project_github_bindings
 -- Maps a GitHub repo to a WorkflowPack installation, enabling webhook-triggered SWE loops.
 
-CREATE TABLE project_github_bindings (
+CREATE TABLE IF NOT EXISTS project_github_bindings (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id           UUID NOT NULL,
     repo_full_name      TEXT NOT NULL,           -- e.g. "org/repo"
@@ -18,5 +18,5 @@ CREATE TABLE project_github_bindings (
         REFERENCES workflow_pack_installations(id) ON DELETE CASCADE
 );
 
-CREATE INDEX ix_pgb_tenant ON project_github_bindings (tenant_id);
-CREATE INDEX ix_pgb_repo ON project_github_bindings (lower(repo_full_name));
+CREATE INDEX IF NOT EXISTS ix_pgb_tenant ON project_github_bindings (tenant_id);
+CREATE INDEX IF NOT EXISTS ix_pgb_repo ON project_github_bindings (lower(repo_full_name));

@@ -445,6 +445,7 @@ Runtime:
 - `GET /healthz`
 - `GET /api/agents`
 - `GET /api/agents/:id/versions`
+- `POST /api/agents/:id/versions`
 - `POST /api/sessions`
 - `POST /api/sessions/:id/events`
 - `POST /api/sessions/:id/run` (compatibility wrapper for the demo-era run flow)

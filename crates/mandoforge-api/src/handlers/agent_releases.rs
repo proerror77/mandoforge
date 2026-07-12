@@ -13,15 +13,16 @@ use crate::{
     AgentReleaseDeploymentValidationRun, AgentReleaseOrchestrationValidationRun,
     AgentReleaseRolloutSummary, AppError, AppState, AuthorizationRequest, CreateAgentRelease,
     Permission, RejectAgentReleasePromotion, RequestAgentReleasePromotion,
+    agent_release_controller_configured, agent_release_controller_required,
     agent_release_deployment_controller_configured, agent_release_deployment_controller_required,
     agent_release_orchestration_controller_configured,
     agent_release_orchestration_controller_required, agent_release_rollback_controller_configured,
     agent_release_rollback_controller_required, authorize_request,
     build_agent_release_automation_run_summary, build_agent_release_rollout_summary,
-    dedupe_strings, enforce_resource_scope, execute_agent_release_deployment_controller,
-    execute_agent_release_orchestration_controller, execute_agent_release_rollback_controller,
-    execute_due_agent_release_promotions, new_audit_log, normalize_release_automation_policy,
-    optional_trimmed, principal_from_request,
+    dedupe_strings, enforce_resource_scope, execute_agent_release_controller,
+    execute_agent_release_deployment_controller, execute_agent_release_orchestration_controller,
+    execute_agent_release_rollback_controller, execute_due_agent_release_promotions, new_audit_log,
+    normalize_release_automation_policy, optional_trimmed, principal_from_request,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -388,6 +389,11 @@ async fn create_agent_release(
     };
     state.authorizer.authorize(&principal, &request).await?;
     enforce_resource_scope(&state, &principal, &request).await?;
+    if crate::store_entities::agent_release_enforcement_required() {
+        return Err(AppError::forbidden(
+            "production agent releases require a release request and independent approval",
+        ));
+    }
     Ok(Json(
         state
             .create_agent_release(id, input, principal.subject_id)
@@ -487,10 +493,99 @@ async fn decide_agent_release_promotion(
     };
     state.authorizer.authorize(&principal, &request).await?;
     enforce_resource_scope(&state, &principal, &request).await?;
+    let mut controller_execution = Value::Null;
     let release = match decision {
         "approve" => {
+            let lookup = |key: &str| std::env::var(key).ok();
+            let controller_required = agent_release_controller_required(&lookup);
+            let controller_configured = agent_release_controller_configured(&lookup);
+            if controller_required && !controller_configured {
+                return Err(AppError::bad_request(
+                    "agent release controller is required but not configured",
+                ));
+            }
+            let in_progress = state
+                .begin_agent_release_promotion(
+                    agent_id,
+                    release_id,
+                    principal.subject_id.clone(),
+                    "approved".to_string(),
+                )
+                .await?;
+            if controller_configured {
+                controller_execution =
+                    match execute_agent_release_controller(&lookup, &in_progress, Utc::now()).await
+                    {
+                        Ok(execution) => execution,
+                        Err(error) => {
+                            let failure_reason =
+                                format!("release controller failed: {}", error.message);
+                            let failed = state
+                                .fail_agent_release_promotion(
+                                    agent_id,
+                                    release_id,
+                                    principal.subject_id.clone(),
+                                    failure_reason.clone(),
+                                )
+                                .await?;
+                            state
+                                .append_audit_log(new_audit_log(
+                                    None,
+                                    "user",
+                                    None,
+                                    "agent.release_promotion_failed",
+                                    "agent_release",
+                                    Some(failed.id),
+                                    json!({
+                                        "subject": principal.subject_id.clone(),
+                                        "agent_id": agent_id,
+                                        "environment": failed.environment,
+                                        "status": failed.status,
+                                        "reason": failure_reason
+                                    }),
+                                ))
+                                .await?;
+                            return Err(error);
+                        }
+                    };
+                if controller_execution.get("status").and_then(Value::as_str) != Some("promoted") {
+                    let failure_reason =
+                        "agent release controller did not confirm promotion".to_string();
+                    let failed = state
+                        .fail_agent_release_promotion(
+                            agent_id,
+                            release_id,
+                            principal.subject_id.clone(),
+                            failure_reason.clone(),
+                        )
+                        .await?;
+                    state
+                        .append_audit_log(new_audit_log(
+                            None,
+                            "user",
+                            None,
+                            "agent.release_promotion_failed",
+                            "agent_release",
+                            Some(failed.id),
+                            json!({
+                                "subject": principal.subject_id.clone(),
+                                "agent_id": agent_id,
+                                "environment": failed.environment,
+                                "status": failed.status,
+                                "reason": failure_reason,
+                                "controller_execution": controller_execution.clone()
+                            }),
+                        ))
+                        .await?;
+                    return Err(AppError::bad_request(failure_reason));
+                }
+            }
             state
-                .approve_agent_release_promotion(agent_id, release_id, principal.subject_id.clone())
+                .complete_agent_release_promotion(
+                    agent_id,
+                    release_id,
+                    principal.subject_id.clone(),
+                )
                 .await?
         }
         "reject" => {
@@ -525,6 +620,7 @@ async fn decide_agent_release_promotion(
                 "status": release.status,
                 "requested_by": release.requested_by,
                 "decision_by": release.decision_by,
+                "controller_execution": controller_execution,
             }),
         ))
         .await?;

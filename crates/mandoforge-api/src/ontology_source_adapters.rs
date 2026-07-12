@@ -292,7 +292,7 @@ pub fn adapt_csv(
 
 fn detect_csv_delimiter(bytes: &[u8]) -> char {
     let sample = &bytes[..bytes.len().min(4096)];
-    let counts = [b',', b'\t', b'|', b';']
+    let counts = b",\t|;"
         .iter()
         .map(|&d| (d as char, sample.iter().filter(|&&b| b == d).count()))
         .collect::<Vec<_>>();

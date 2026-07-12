@@ -174,6 +174,20 @@ pub(crate) fn normalize_workflow_run_status(value: &str) -> Result<String, AppEr
     }
 }
 
+pub(crate) fn workflow_run_status_allows_execution(status: &str) -> bool {
+    matches!(status, "queued" | "running" | "requires_action")
+}
+
+pub(crate) fn workflow_run_execution_denial(status: &str) -> Option<&'static str> {
+    if workflow_run_status_allows_execution(status) {
+        None
+    } else if matches!(status, "completed" | "failed" | "canceled" | "skipped") {
+        Some("workflow run is not active")
+    } else {
+        Some("workflow run is not executable")
+    }
+}
+
 pub(crate) async fn ensure_session_event_exists(
     state: &AppState,
     event_id: Uuid,
@@ -238,15 +252,162 @@ pub(crate) fn workflow_definition_root_task_grant_scope(
         .unwrap_or_else(default_value)
 }
 
+fn workflow_definition_root_task_grant_value<'a>(
+    definition: &'a WorkflowDefinition,
+    key: &str,
+) -> Option<&'a Value> {
+    definition
+        .handoff_rules
+        .get("root_task_grant")
+        .and_then(|value| value.get(key))
+        .or_else(|| {
+            definition
+                .handoff_rules
+                .get("task_grant_template")
+                .and_then(|value| value.get(key))
+        })
+}
+
+pub(crate) fn workflow_definition_root_task_grant_budget_i32(
+    definition: &WorkflowDefinition,
+    key: &str,
+) -> Result<Option<i32>, AppError> {
+    let Some(value) = workflow_definition_root_task_grant_value(definition, key) else {
+        return Ok(None);
+    };
+    let value = value.as_i64().ok_or_else(|| {
+        AppError::bad_request(format!("root task grant {key} must be a positive integer"))
+    })?;
+    let value = i32::try_from(value).map_err(|_| {
+        AppError::bad_request(format!("root task grant {key} exceeds the supported range"))
+    })?;
+    if value <= 0 {
+        return Err(AppError::bad_request(format!(
+            "root task grant {key} must be a positive integer"
+        )));
+    }
+    Ok(Some(value))
+}
+
+pub(crate) fn workflow_definition_root_task_grant_budget_i64(
+    definition: &WorkflowDefinition,
+    key: &str,
+) -> Result<Option<i64>, AppError> {
+    let Some(value) = workflow_definition_root_task_grant_value(definition, key) else {
+        return Ok(None);
+    };
+    let value = value.as_i64().ok_or_else(|| {
+        AppError::bad_request(format!("root task grant {key} must be a positive integer"))
+    })?;
+    if value <= 0 {
+        return Err(AppError::bad_request(format!(
+            "root task grant {key} must be a positive integer"
+        )));
+    }
+    Ok(Some(value))
+}
+
+pub(crate) fn validate_task_grant_budgets(grant: &TaskGrant) -> Result<(), AppError> {
+    for (field, value) in [
+        ("max_turns", grant.max_turns),
+        ("max_tool_calls", grant.max_tool_calls),
+        ("max_runtime_seconds", grant.max_runtime_seconds),
+    ] {
+        if value.is_some_and(|value| value <= 0) {
+            return Err(AppError::bad_request(format!(
+                "task grant {field} must be positive"
+            )));
+        }
+    }
+    if grant.max_cost_usd_micros.is_some_and(|value| value <= 0) {
+        return Err(AppError::bad_request(
+            "task grant max_cost_usd_micros must be positive",
+        ));
+    }
+    if grant.turns_used < 0 || grant.tool_calls_used < 0 || grant.cost_usd_micros_used < 0 {
+        return Err(AppError::bad_request(
+            "task grant usage counters cannot be negative",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TaskGrantRemainingBudgets {
+    pub(crate) max_turns: Option<i32>,
+    pub(crate) max_tool_calls: Option<i32>,
+    pub(crate) max_runtime_seconds: Option<i32>,
+    pub(crate) max_cost_usd_micros: Option<i64>,
+}
+
+pub(crate) fn task_grant_remaining_budgets(
+    grant: &TaskGrant,
+    now: DateTime<Utc>,
+) -> Result<TaskGrantRemainingBudgets, AppError> {
+    let remaining_i32 = |name: &str, limit: Option<i32>, used: i32| {
+        let Some(limit) = limit else {
+            return Ok(None);
+        };
+        let remaining = limit
+            .checked_sub(used)
+            .ok_or_else(|| AppError::forbidden(format!("task grant {name} budget is exhausted")))?;
+        if remaining <= 0 {
+            return Err(AppError::forbidden(format!(
+                "task grant {name} budget is exhausted"
+            )));
+        }
+        Ok(Some(remaining))
+    };
+    let max_runtime_seconds = match grant.max_runtime_seconds {
+        Some(limit) => {
+            let elapsed = now
+                .signed_duration_since(grant.created_at)
+                .num_seconds()
+                .max(0);
+            let remaining = i64::from(limit)
+                .checked_sub(elapsed)
+                .ok_or_else(|| AppError::forbidden("task grant runtime budget is exhausted"))?;
+            if remaining <= 0 {
+                return Err(AppError::forbidden(
+                    "task grant runtime budget is exhausted",
+                ));
+            }
+            Some(i32::try_from(remaining).map_err(|_| {
+                AppError::bad_request("task grant runtime budget exceeds supported range")
+            })?)
+        }
+        None => None,
+    };
+    let max_cost_usd_micros = match grant.max_cost_usd_micros {
+        Some(limit) => {
+            let remaining = limit
+                .checked_sub(grant.cost_usd_micros_used)
+                .ok_or_else(|| AppError::forbidden("task grant cost budget is exhausted"))?;
+            if remaining <= 0 {
+                return Err(AppError::forbidden("task grant cost budget is exhausted"));
+            }
+            Some(remaining)
+        }
+        None => None,
+    };
+    Ok(TaskGrantRemainingBudgets {
+        max_turns: remaining_i32("turn", grant.max_turns, grant.turns_used)?,
+        max_tool_calls: remaining_i32("tool call", grant.max_tool_calls, grant.tool_calls_used)?,
+        max_runtime_seconds,
+        max_cost_usd_micros,
+    })
+}
+
 pub(crate) fn ensure_child_task_grant_within_parent(
     parent: &TaskGrant,
     child: &TaskGrant,
 ) -> Result<(), AppError> {
+    let remaining = task_grant_remaining_budgets(parent, child.created_at)?;
     let within_parent = child.workflow_run_id == parent.workflow_run_id
-        && limit_within_parent(parent.max_turns, child.max_turns)
-        && limit_within_parent(parent.max_tool_calls, child.max_tool_calls)
-        && limit_within_parent(parent.max_runtime_seconds, child.max_runtime_seconds)
-        && limit_within_parent(parent.max_cost_usd_micros, child.max_cost_usd_micros)
+        && limit_within_parent(remaining.max_turns, child.max_turns)
+        && limit_within_parent(remaining.max_tool_calls, child.max_tool_calls)
+        && limit_within_parent(remaining.max_runtime_seconds, child.max_runtime_seconds)
+        && limit_within_parent(remaining.max_cost_usd_micros, child.max_cost_usd_micros)
         && json_scope_contains(&parent.semantic_scopes, &child.semantic_scopes)
         && json_scope_contains(&parent.memory_scope, &child.memory_scope)
         && json_scope_contains(&parent.tool_scope, &child.tool_scope)
@@ -318,18 +479,6 @@ pub(crate) fn normalize_handoff_semantic_scopes(value: Value) -> Result<Value, A
             "handoff semantic_scopes must be a JSON object",
         ))
     }
-}
-
-pub(crate) fn handoff_remote_computer_required(
-    agent: &Agent,
-    runtime_profile: Option<&AgentRuntimeProfile>,
-) -> bool {
-    agent
-        .remote_computer_profile
-        .get("required")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-        || runtime_profile.is_some_and(|profile| profile.remote_computer_required)
 }
 
 pub(crate) fn default_handoff_review_status(plan: Option<&ManagerAgentPlan>) -> &'static str {
@@ -752,10 +901,12 @@ pub(crate) async fn materialize_workflow_graph_step_with_policy_context(
     let step_key = workflow_graph_step_key(graph_step)?;
     let step_type = workflow_graph_step_type(graph_step);
     let agent_id = workflow_graph_step_agent_id(definition, graph_step)?;
-    let agent_version_id = match agent_id {
-        Some(agent_id) => Some(state.current_agent_version(agent_id).await?.id),
-        None => None,
-    };
+    if agent_id.is_some_and(|agent_id| agent_id != session.agent_id) {
+        return Err(AppError::bad_request(
+            "workflow graph step agent must match its bound session agent",
+        ));
+    }
+    let agent_version_id = agent_id.and(session.agent_version_id);
     let environment_id =
         workflow_graph_step_uuid(graph_step, "environment_id")?.or(session.environment_id);
     let now = Utc::now();

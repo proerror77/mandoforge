@@ -42,30 +42,33 @@ pub(crate) async fn build_context_packet(
             None
         };
     let agent = state.get_agent(session.agent_id).await?;
+    let agent_version = state.agent_version_for_session(session_id).await?;
+    let mut context_agent_version = agent_version.clone();
+    if let Some(grant) = context_task_grant.as_ref() {
+        let effective_tools = task_grant_effective_tools(&agent_version, grant);
+        context_agent_version.tools = effective_tools.clone();
+        context_agent_version.tool_names = effective_tools;
+    }
     let handoff_assignment_context =
         effective_handoff_assignment_context(state, session_id).await?;
     let base_semantic_scopes = handoff_assignment_context
         .as_ref()
         .map(|assignment| assignment.semantic_scopes.clone())
-        .unwrap_or_else(|| agent.semantic_scopes.clone());
+        .unwrap_or_else(|| agent_version.semantic_scopes.clone());
     let effective_semantic_scopes = context_task_grant
         .as_ref()
         .map(|grant| merge_semantic_scopes(&base_semantic_scopes, &grant.semantic_scopes))
         .unwrap_or(base_semantic_scopes);
-    let effective_runtime_profile_id = handoff_assignment_context
-        .as_ref()
-        .and_then(|assignment| assignment.runtime_profile_id)
-        .or(agent.runtime_profile_id);
-    let agent_version = state.agent_version_for_session(session_id).await?;
     let events = state.list_events(session_id).await?;
     let policy = state.policy_for_session(session_id).await;
-    let runtime_profile_lookup = match effective_runtime_profile_id {
-        Some(profile_id) => Some((
-            profile_id,
-            state.get_agent_runtime_profile(profile_id).await,
-        )),
-        None => None,
-    };
+    let (effective_runtime_profile_id, runtime_profile_source, runtime_profile_lookup) =
+        resolve_context_packet_runtime_profile(
+            state,
+            &session,
+            &agent_version,
+            handoff_assignment_context.as_ref(),
+        )
+        .await?;
     let runtime_profile = runtime_profile_lookup
         .as_ref()
         .and_then(|(_, result)| result.as_ref().ok())
@@ -89,9 +92,11 @@ pub(crate) async fn build_context_packet(
         &agent_version,
         runtime_profile.as_ref(),
         runtime_profile_error.map(|(profile_id, _)| profile_id),
+        runtime_profile_source,
         events.len(),
         &retrieved_objects,
         handoff_assignment_context.as_ref(),
+        context_task_grant.as_ref(),
     );
     let last_user_message = events
         .iter()
@@ -102,6 +107,7 @@ pub(crate) async fn build_context_packet(
         .map(str::to_string);
     let freshness_warnings = build_context_freshness_warnings(
         &agent,
+        &context_agent_version,
         &effective_semantic_scopes,
         effective_runtime_profile_id,
         runtime_profile_lookup.as_ref(),
@@ -117,7 +123,19 @@ pub(crate) async fn build_context_packet(
         "created_at": session.created_at,
         "updated_at": session.updated_at,
     });
-    let policy_reminders = build_context_policy_reminders(&policy, &agent_version);
+    let policy_reminders = build_context_policy_reminders(&policy, &context_agent_version);
+    let tool_policy = context_task_grant
+        .as_ref()
+        .map(|grant| {
+            json!({
+                "agent_version_policy": agent_version.approval_policy.clone(),
+                "task_grant_approval_policy": grant.approval_policy.clone(),
+                "task_grant_tool_scope": grant.tool_scope.clone(),
+                "task_grant_connector_scope": grant.connector_scope.clone(),
+                "task_grant_external_effects": grant.external_effects.clone()
+            })
+        })
+        .unwrap_or_else(|| agent_version.approval_policy.clone());
     let replay_summary = json!({
         "version": version,
         "source_ref_count": source_refs.len(),
@@ -130,8 +148,10 @@ pub(crate) async fn build_context_packet(
         } else if handoff_assignment_context.is_some() {
             "agent_handoff_assignment"
         } else {
-            "agent"
+            "agent_version"
         },
+        "runtime_profile_source": runtime_profile_source,
+        "task_grant_authority": context_task_grant.as_ref().map(task_grant_context_authority),
     });
     Ok(ContextPacket {
         id: Uuid::new_v4(),
@@ -147,15 +167,15 @@ pub(crate) async fn build_context_packet(
             kind: agent.kind.clone(),
             agent_role: agent.agent_role.clone(),
             release_state: agent.release_state.clone(),
-            tools: agent.tools.clone(),
-            mcp_server_ids: agent.mcp_server_ids.clone(),
-            skill_ids: agent.skill_ids.clone(),
-            workflow_pack_ids: agent.workflow_pack_ids.clone(),
-            remote_computer_profile: agent.remote_computer_profile.clone(),
+            tools: context_agent_version.tools.clone(),
+            mcp_server_ids: agent_version.mcp_server_ids.clone(),
+            skill_ids: agent_version.skill_ids.clone(),
+            workflow_pack_ids: agent_version.workflow_pack_ids.clone(),
+            remote_computer_profile: agent_version.remote_computer_profile.clone(),
         },
         runtime_profile,
         semantic_scopes: effective_semantic_scopes,
-        tool_policy: agent.tool_policy.clone(),
+        tool_policy,
         policy_reminders,
         freshness_warnings,
         source_refs,
@@ -163,6 +183,45 @@ pub(crate) async fn build_context_packet(
         replay_summary,
         audit_trace_id: None,
         created_at: generated_at,
+    })
+}
+
+pub(crate) fn task_grant_effective_tools(
+    agent_version: &AgentVersion,
+    grant: &TaskGrant,
+) -> Vec<String> {
+    agent_version
+        .tools
+        .iter()
+        .chain(agent_version.tool_names.iter())
+        .filter(|tool| !tool.trim().is_empty() && task_grant_allows_tool(grant, tool))
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+pub(crate) fn task_grant_context_authority(grant: &TaskGrant) -> Value {
+    json!({
+        "task_grant_id": grant.id,
+        "workflow_run_id": grant.workflow_run_id,
+        "workflow_step_run_id": grant.workflow_step_run_id,
+        "parent_grant_id": grant.parent_grant_id,
+        "status": grant.status,
+        "risk_level": grant.risk_level,
+        "tool_scope": grant.tool_scope.clone(),
+        "connector_scope": grant.connector_scope.clone(),
+        "approval_policy": grant.approval_policy.clone(),
+        "external_effects": grant.external_effects.clone(),
+        "budgets": {
+            "max_turns": grant.max_turns,
+            "max_tool_calls": grant.max_tool_calls,
+            "max_runtime_seconds": grant.max_runtime_seconds,
+            "max_cost_usd_micros": grant.max_cost_usd_micros,
+            "turns_used": grant.turns_used,
+            "tool_calls_used": grant.tool_calls_used,
+            "cost_usd_micros_used": grant.cost_usd_micros_used
+        }
     })
 }
 
@@ -176,6 +235,72 @@ pub(crate) async fn effective_handoff_assignment_context(
         .into_iter()
         .filter(|assignment| assignment.specialist_session_id == session_id)
         .max_by_key(|assignment| assignment.created_at))
+}
+
+pub(crate) async fn resolve_context_packet_runtime_profile(
+    state: &AppState,
+    session: &Session,
+    agent_version: &AgentVersion,
+    handoff_assignment: Option<&AgentHandoffAssignment>,
+) -> Result<
+    (
+        Option<Uuid>,
+        Option<&'static str>,
+        Option<(Uuid, Result<AgentRuntimeProfile, AppError>)>,
+    ),
+    AppError,
+> {
+    if let Some(environment_id) = session.environment_id {
+        let environment = state.get_environment(environment_id).await?;
+        if let Some(profile_id) = environment.runtime_profile_id {
+            return Ok((
+                Some(profile_id),
+                Some("environment"),
+                Some((
+                    profile_id,
+                    state.get_agent_runtime_profile(profile_id).await,
+                )),
+            ));
+        }
+    }
+    if let Some(profile_id) =
+        handoff_assignment.and_then(|assignment| assignment.runtime_profile_id)
+    {
+        return Ok((
+            Some(profile_id),
+            Some("handoff"),
+            Some((
+                profile_id,
+                state.get_agent_runtime_profile(profile_id).await,
+            )),
+        ));
+    }
+    let Some(profile_id) = agent_version.runtime_profile_id else {
+        return Ok((None, None, None));
+    };
+    let snapshot_present = agent_version
+        .runtime_profile_snapshot
+        .as_object()
+        .is_some_and(|snapshot| !snapshot.is_empty());
+    let (source, profile) = if snapshot_present {
+        (
+            "agent_version_snapshot",
+            serde_json::from_value::<AgentRuntimeProfile>(
+                agent_version.runtime_profile_snapshot.clone(),
+            )
+            .map_err(|error| {
+                AppError::bad_request(format!(
+                    "agent version runtime profile snapshot is invalid: {error}"
+                ))
+            }),
+        )
+    } else {
+        (
+            "agent_version_profile_fallback",
+            state.get_agent_runtime_profile(profile_id).await,
+        )
+    };
+    Ok((Some(profile_id), Some(source), Some((profile_id, profile))))
 }
 
 pub(crate) fn context_packet_runtime_profile(
@@ -333,6 +458,7 @@ pub(crate) fn build_context_policy_reminders(
 
 pub(crate) fn build_context_freshness_warnings(
     agent: &Agent,
+    agent_version: &AgentVersion,
     effective_semantic_scopes: &Value,
     effective_runtime_profile_id: Option<Uuid>,
     runtime_profile_lookup: Option<&(Uuid, Result<AgentRuntimeProfile, AppError>)>,
@@ -346,13 +472,13 @@ pub(crate) fn build_context_freshness_warnings(
             missing_scopes.join(", ")
         ));
     }
-    if value_is_empty_object(&agent.tool_policy) {
+    if value_is_empty_object(&agent_version.approval_policy) {
         warnings.push(
             "tool_policy is empty; runtime policy reminders are the only tool governance context"
                 .to_string(),
         );
     }
-    if agent.workflow_pack_ids.is_empty() {
+    if agent_version.workflow_pack_ids.is_empty() {
         warnings
             .push("no workflow_pack_ids are bound; domain workflow context is generic".to_string());
     }
@@ -396,9 +522,11 @@ pub(crate) fn build_context_packet_source_refs(
     agent_version: &AgentVersion,
     runtime_profile: Option<&ContextPacketRuntimeProfile>,
     missing_runtime_profile_id: Option<Uuid>,
+    runtime_profile_source: Option<&str>,
     event_count: usize,
     retrieved_objects: &[ContextPacketSemanticObject],
     handoff_assignment_context: Option<&AgentHandoffAssignment>,
+    context_task_grant: Option<&TaskGrant>,
 ) -> Vec<ContextPacketSourceRef> {
     let mut source_refs = vec![
         context_source_ref("session", session.id, "current"),
@@ -427,14 +555,21 @@ pub(crate) fn build_context_packet_source_refs(
         source_refs.push(context_source_ref(
             "agent_runtime_profile",
             profile.id,
-            &format!("status:{}", profile.status),
+            &format!(
+                "source:{}:status:{}",
+                runtime_profile_source.unwrap_or("unknown"),
+                profile.status
+            ),
         ));
     }
     if let Some(profile_id) = missing_runtime_profile_id {
         source_refs.push(context_source_ref(
             "agent_runtime_profile",
             profile_id,
-            "unavailable",
+            &format!(
+                "source:{}:unavailable",
+                runtime_profile_source.unwrap_or("unknown")
+            ),
         ));
     }
     if let Some(assignment) = handoff_assignment_context {
@@ -447,6 +582,13 @@ pub(crate) fn build_context_packet_source_refs(
             "agent_handoff_event",
             assignment.agent_handoff_event_id,
             "assignment_context",
+        ));
+    }
+    if let Some(grant) = context_task_grant {
+        source_refs.push(context_source_ref(
+            "task_grant",
+            grant.id,
+            &format!("status:{}", grant.status),
         ));
     }
     for path in [

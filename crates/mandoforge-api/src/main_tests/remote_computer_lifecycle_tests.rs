@@ -1,6 +1,273 @@
 use super::*;
 
 #[tokio::test]
+async fn terminal_session_releases_active_pooled_remote_computer_lease() {
+    let app = test_app().await;
+    let agents: Vec<Agent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/agents")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let session: Session = request_json(
+        app.clone(),
+        json_request(
+            "POST",
+            "/api/sessions",
+            json!({"agent_id": agents[0].id, "title": "terminal runtime cleanup"}),
+        ),
+    )
+    .await;
+    let computer: RemoteComputer = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/remote-computers",
+            json!({
+                "name": "terminal-pooled-computer",
+                "profile": "workspace-write",
+                "pod_name": "terminal-pooled-pod",
+                "metadata": {"warm_pool": true}
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let lease: RemoteComputerLease = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/remote-computers/{}/leases", computer.id),
+            json!({
+                "session_id": session.id,
+                "worker_id": "terminal-cleanup-worker",
+                "lease_seconds": 900,
+                "metadata": {"on_demand": false}
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    assert_eq!(lease.status, "leased");
+
+    let _: Vec<SessionEvent> = request_json(
+        app.clone(),
+        json_request(
+            "POST",
+            &format!("/api/sessions/{}/events", session.id),
+            json!({
+                "events": [{
+                    "type": "user.interrupt",
+                    "payload": {"reason": "operator stop"}
+                }]
+            }),
+        ),
+    )
+    .await;
+
+    let leases: Vec<RemoteComputerLease> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/remote-computer-leases")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let released = leases
+        .iter()
+        .find(|candidate| candidate.id == lease.id)
+        .expect("released lease");
+    assert_eq!(released.status, "released");
+    let computers: Vec<RemoteComputer> = request_json(
+        app,
+        Request::builder()
+            .uri("/api/remote-computers")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(
+        computers
+            .iter()
+            .find(|candidate| candidate.id == computer.id)
+            .expect("pooled computer")
+            .status,
+        "available"
+    );
+}
+
+#[tokio::test]
+async fn terminal_session_remains_terminal_when_runtime_cleanup_needs_retry() {
+    let _lock = env_lock().lock().expect("env lock");
+    let _mode = EnvVarGuard::set("MANDOFORGE_REMOTE_COMPUTER_RUNNER", "reserved");
+    let _mutation = EnvVarGuard::set("MANDOFORGE_REMOTE_COMPUTER_MUTATION_ENABLED", "false");
+    let _live = EnvVarGuard::set("MANDOFORGE_REMOTE_COMPUTER_LIVE_MUTATION_ENABLED", "false");
+    let app = test_app().await;
+    let agents: Vec<Agent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/agents")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let session: Session = request_json(
+        app.clone(),
+        json_request(
+            "POST",
+            "/api/sessions",
+            json!({"agent_id": agents[0].id, "title": "terminal cleanup retry"}),
+        ),
+    )
+    .await;
+    let identity = RemoteComputerRuntimeIdentity::new(
+        RemoteComputerSubstrate::AgentSandbox,
+        "agent-os-test".to_string(),
+        "terminal-retry-claim".to_string(),
+        "terminal-retry-pod".to_string(),
+        Some("terminal-retry-claim".to_string()),
+        Some("terminal-retry-sandbox".to_string()),
+        None,
+    );
+    let computer: RemoteComputer = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/remote-computers",
+            json!({
+                "name": identity.resource_name,
+                "profile": "agent-sandbox",
+                "namespace": identity.namespace,
+                "pod_name": identity.pod_name,
+                "metadata": metadata_with_remote_computer_runtime_identity(
+                    &json!({"on_demand": true}),
+                    &identity,
+                )
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let lease: RemoteComputerLease = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/remote-computers/{}/leases", computer.id),
+            json!({
+                "session_id": session.id,
+                "worker_id": "terminal-retry-worker",
+                "lease_seconds": 900,
+                "metadata": {"on_demand": true}
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+
+    let response = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            &format!("/api/sessions/{}/events", session.id),
+            json!({
+                "events": [{"type": "user.interrupt", "payload": {"reason": "stop"}}]
+            }),
+        ))
+        .await
+        .expect("interrupt response");
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let persisted_session: Session = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/sessions/{}", session.id))
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(persisted_session.status, SessionStatus::Terminated);
+    let leases: Vec<RemoteComputerLease> = request_json(
+        app,
+        Request::builder()
+            .uri("/api/remote-computer-leases")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(
+        leases
+            .iter()
+            .find(|candidate| candidate.id == lease.id)
+            .expect("retryable lease")
+            .status,
+        "leased"
+    );
+}
+
+#[tokio::test]
+async fn expired_pooled_lease_reclaim_uses_runtime_cleanup_convergence() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let computer = state
+        .create_remote_computer(CreateRemoteComputer {
+            id: None,
+            name: "expired-pooled-computer".to_string(),
+            profile: Some("workspace-write".to_string()),
+            namespace: None,
+            pod_name: Some("expired-pooled-pod".to_string()),
+            workspace_path: None,
+            state_mount_path: None,
+            metadata: Some(json!({"warm_pool": true})),
+        })
+        .await
+        .expect("create computer");
+    let lease = state
+        .create_remote_computer_lease(
+            computer.id,
+            CreateRemoteComputerLease {
+                session_id: None,
+                worker_id: Some("expired-worker".to_string()),
+                lease_seconds: Some(60),
+                metadata: Some(json!({"on_demand": false})),
+            },
+        )
+        .await
+        .expect("create lease");
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test requires memory store");
+    };
+    inner
+        .write()
+        .await
+        .remote_computer_leases
+        .get_mut(&lease.id)
+        .expect("persisted lease")
+        .lease_expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+
+    let run = execute_remote_computer_stale_reclaim(&state)
+        .await
+        .expect("reclaim expired lease");
+    assert_eq!(run.expired_lease_count, 1);
+    assert_eq!(run.reclaimed_lease_count, 1);
+    assert_eq!(run.leases[0].status, "released");
+    assert_eq!(
+        state
+            .list_remote_computers()
+            .await
+            .expect("list computers")
+            .into_iter()
+            .find(|candidate| candidate.id == computer.id)
+            .expect("pooled computer")
+            .status,
+        "available"
+    );
+}
+
+#[tokio::test]
 async fn remote_computer_leases_are_audited_without_executing_tools() {
     let app = test_app().await;
     let agents: Vec<Agent> = request_json(
@@ -1667,7 +1934,19 @@ async fn remote_computer_runner_boundary_is_reserved_and_dry_run_only() {
                     "operation": "exec",
                     "session_id": session.id,
                     "pod_name": "agent-remote-computer-dry-run",
-                    "metadata": {"command": ["sh", "-lc", "pwd"]}
+                    "metadata": {
+                        "sandbox_runtime_request": {
+                            "version": "v1",
+                            "session_id": session.id,
+                            "workspace_path": format!("/workspace/sessions/{}", session.id),
+                            "timeout_seconds": 30,
+                            "environment": {},
+                            "operation": {
+                                "type": "shell",
+                                "command": "pwd && echo SENSITIVE_DRY_RUN_SENTINEL"
+                            }
+                        }
+                    }
                 })
                 .to_string(),
             ))
@@ -1677,7 +1956,25 @@ async fn remote_computer_runner_boundary_is_reserved_and_dry_run_only() {
     assert_eq!(exec_dry_run.status, "reserved");
     assert_eq!(exec_dry_run.operation, "exec");
     assert!(!exec_dry_run.execution_enabled);
-    assert_eq!(exec_dry_run.request["metadata"]["command"][0], "sh");
+    assert_eq!(
+        exec_dry_run.request["metadata"]["sandbox_runtime"]["operation"],
+        "shell"
+    );
+    assert_eq!(
+        exec_dry_run.request["metadata"]["sandbox_runtime"]["redacted"],
+        true
+    );
+    assert!(
+        exec_dry_run.request["metadata"]["sandbox_runtime"]["stdin_bytes"]
+            .as_u64()
+            .is_some_and(|bytes| bytes > 0)
+    );
+    assert!(
+        !exec_dry_run
+            .request
+            .to_string()
+            .contains("SENSITIVE_DRY_RUN_SENTINEL")
+    );
 
     let (exec_mutate_status, exec_mutate_body) = request_value(
         app.clone(),

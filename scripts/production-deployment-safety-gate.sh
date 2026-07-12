@@ -84,6 +84,19 @@ static_contract_check() {
   fi
   grep -Eq 'MANDOFORGE_PROVIDER_RUNTIME_ENV:[[:space:]]*"production"' deploy/k8s/configmap.yaml \
     || fail "K8s config must force provider runtime production mode"
+  grep -Eq 'MANDOFORGE_AGENT_RELEASE_ENVIRONMENT:[[:space:]]*"production"' deploy/k8s/configmap.yaml \
+    || fail "K8s config must bind production sessions to production agent releases"
+  grep -Eq 'MANDOFORGE_AGENT_RELEASE_ENFORCEMENT:[[:space:]]*"required"' deploy/k8s/configmap.yaml \
+    || fail "K8s config must require the agent release execution gate"
+  local controller_flag
+  for controller_flag in \
+    MANDOFORGE_AGENT_RELEASE_CONTROLLER_REQUIRED \
+    MANDOFORGE_AGENT_RELEASE_DEPLOYMENT_CONTROLLER_REQUIRED \
+    MANDOFORGE_AGENT_RELEASE_ORCHESTRATION_CONTROLLER_REQUIRED \
+    MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_REQUIRED; do
+    grep -Eq "${controller_flag}:[[:space:]]*\"true\"" deploy/k8s/configmap.yaml \
+      || fail "K8s config must require ${controller_flag}"
+  done
   grep -Eq 'MANDOFORGE_ENTERPRISE_PRODUCT_EVIDENCE_DIR:[[:space:]]*"/evidence"' deploy/k8s/configmap.yaml \
     || fail "K8s config must point enterprise readiness at the production evidence PVC mount"
   grep -Eq 'MANDOFORGE_REMOTE_COMPUTER_RUNNER:[[:space:]]*"kubernetes"' deploy/k8s/configmap.yaml \
@@ -109,6 +122,14 @@ static_contract_check() {
       || fail "rendered deploy/k8s output must include the secret delivery contract"
     grep -q 'MANDOFORGE_PROVIDER_RUNTIME_ENV: production' "$deploy_render_file" \
       || fail "rendered deploy/k8s output must force provider runtime production mode"
+    for controller_flag in \
+      MANDOFORGE_AGENT_RELEASE_CONTROLLER_REQUIRED \
+      MANDOFORGE_AGENT_RELEASE_DEPLOYMENT_CONTROLLER_REQUIRED \
+      MANDOFORGE_AGENT_RELEASE_ORCHESTRATION_CONTROLLER_REQUIRED \
+      MANDOFORGE_AGENT_RELEASE_ROLLBACK_CONTROLLER_REQUIRED; do
+      grep -Eq "${controller_flag}:[[:space:]]*\"?true\"?" "$deploy_render_file" \
+        || fail "rendered deploy/k8s output must require ${controller_flag}"
+    done
     grep -q 'MANDOFORGE_ENTERPRISE_PRODUCT_EVIDENCE_DIR: /evidence' "$deploy_render_file" \
       || fail "rendered deploy/k8s output must point enterprise readiness at /evidence"
     grep -q 'claimName: mandoforge-stage2-production-evidence' "$deploy_render_file" \

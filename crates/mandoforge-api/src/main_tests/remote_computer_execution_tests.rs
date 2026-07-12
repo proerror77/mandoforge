@@ -1,5 +1,107 @@
 use super::*;
 
+#[tokio::test]
+async fn execution_cancel_converges_assignment_lease_and_repeated_call() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let now = Utc::now();
+    let session = Session {
+        id: Uuid::new_v4(),
+        agent_id: Uuid::new_v4(),
+        agent_version_id: None,
+        environment_id: None,
+        title: "cancel lifecycle".to_string(),
+        status: SessionStatus::Running,
+        created_at: now,
+        updated_at: now,
+    };
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test requires memory store");
+    };
+    inner
+        .write()
+        .await
+        .sessions
+        .insert(session.id, session.clone());
+    let computer = state
+        .create_remote_computer(CreateRemoteComputer {
+            id: None,
+            name: "cancel-pooled-computer".to_string(),
+            profile: Some("workspace-write".to_string()),
+            namespace: None,
+            pod_name: Some("cancel-pooled-pod".to_string()),
+            workspace_path: None,
+            state_mount_path: None,
+            metadata: Some(json!({"warm_pool": true})),
+        })
+        .await
+        .expect("create computer");
+    let lease = state
+        .create_remote_computer_lease(
+            computer.id,
+            CreateRemoteComputerLease {
+                session_id: Some(session.id),
+                worker_id: Some("cancel-worker".to_string()),
+                lease_seconds: Some(60),
+                metadata: Some(json!({"on_demand": false})),
+            },
+        )
+        .await
+        .expect("create lease");
+    let job = state
+        .execution_queue
+        .enqueue(ExecutionJobRequest {
+            session_id: session.id,
+            environment_id: None,
+            approval_id: Uuid::new_v4(),
+            tool_call_id: Uuid::new_v4(),
+            tool_name: "file.write".to_string(),
+            max_attempts: Some(1),
+        })
+        .await
+        .expect("enqueue job");
+    let assignment = state
+        .create_remote_computer_job_assignment(
+            job.id,
+            session.id,
+            CreateRemoteComputerJobAssignment {
+                lease_id: lease.id,
+                assigned_by: Some("cancel-worker".to_string()),
+                metadata: None,
+            },
+        )
+        .await
+        .expect("create assignment");
+
+    let cleanup =
+        handlers::execution_jobs::propagate_remote_computer_execution_cancel(&state, &job)
+            .await
+            .expect("cancel cleanup");
+    assert_eq!(cleanup["assigned"], true);
+    assert_eq!(cleanup["runtime_cleanup"]["lease_status"], "released");
+    let repeated =
+        handlers::execution_jobs::propagate_remote_computer_execution_cancel(&state, &job)
+            .await
+            .expect("repeated cancel cleanup");
+    assert_eq!(repeated["assigned"], false);
+
+    let persisted_assignment = state
+        .list_remote_computer_job_assignments()
+        .await
+        .expect("list assignments")
+        .into_iter()
+        .find(|candidate| candidate.id == assignment.id)
+        .expect("assignment");
+    assert_eq!(persisted_assignment.status, "canceled");
+    let persisted_lease = state
+        .list_remote_computer_leases()
+        .await
+        .expect("list leases")
+        .into_iter()
+        .find(|candidate| candidate.id == lease.id)
+        .expect("lease");
+    assert_eq!(persisted_lease.status, "released");
+}
+
 #[test]
 fn remote_computer_execution_transport_state_is_gate_driven() {
     assert_eq!(

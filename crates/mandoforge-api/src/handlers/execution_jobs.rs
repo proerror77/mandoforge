@@ -5,7 +5,6 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use chrono::Utc;
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
@@ -15,14 +14,13 @@ use uuid::Uuid;
 
 use crate::{
     AppError, AppState, CreateRemoteComputerJobAssignment, ExecutionJobStatus, Permission,
-    RemoteComputerJobAssignment, RemoteComputerRunnerConfig, RemoteComputerRunnerDryRunRequest,
-    Role, SessionLoopJob, SessionStatus, StoreBackend, WorkerLoadValidationRun,
-    WorkerReadinessReport, authorize_collection_request, authorize_execution_job_run,
-    authorize_request, authorize_session_loop_job_run, build_worker_readiness,
+    RemoteComputerJobAssignment, Role, SessionLoopJob, SessionStatus, StoreBackend,
+    WorkerLoadValidationRun, WorkerReadinessReport, authorize_collection_request,
+    authorize_execution_job_run, authorize_request, authorize_session_loop_job_run,
+    build_worker_readiness, cleanup_remote_computer_lease_runtime,
     enforce_worker_environment_binding, enforce_worker_pool_binding, environment_worker_pool,
     execute_worker_load_validation, header_value, new_audit_log,
     reconcile_workflow_steps_after_session_loop_job, record_remote_computer_job_assignment_event,
-    remote_computer_pod_execution_requested_from_env, remote_computer_runner_for_config,
     run_execution_job, run_session_loop, session_accepts_worker_execution,
     set_managed_session_status, visible_session_ids_for_principal,
     worker_environment_scope_required, worker_scope_headers_present,
@@ -511,58 +509,26 @@ pub(crate) async fn propagate_remote_computer_execution_cancel(
     else {
         return Ok(json!({"assigned": false, "pod_delete_attempted": false}));
     };
-    let mut metadata = json!({
-        "execution_job_status": "canceled",
-        "canceled_at": Utc::now(),
-    });
-    let mut pod_delete_attempted = false;
-    let mut pod_delete_status = None;
-    let mut pod_delete_message = None;
-    if remote_computer_pod_execution_requested_from_env() {
-        let remote_computer = state
-            .list_remote_computers()
-            .await?
-            .into_iter()
-            .find(|computer| computer.id == assignment.remote_computer_id)
-            .ok_or_else(|| AppError::not_found("Remote computer not found"))?;
-        if let Some(pod_name) = remote_computer.pod_name.clone() {
-            let config = RemoteComputerRunnerConfig::from_env();
-            let response = remote_computer_runner_for_config(&config)
-                .mutate(
-                    &config,
-                    RemoteComputerRunnerDryRunRequest {
-                        operation: Some("live_delete".to_string()),
-                        remote_computer_id: Some(remote_computer.id),
-                        session_id: Some(job.session_id),
-                        pod_name: Some(pod_name.clone()),
-                        metadata: Some(json!({
-                            "execution_job_id": job.id,
-                            "tool_call_id": job.tool_call_id,
-                            "cancel_reason": "execution_job_cancel",
-                        })),
-                    },
-                )
-                .await;
-            pod_delete_attempted = response.live_mutation_attempted;
-            pod_delete_status = Some(response.status.clone());
-            pod_delete_message = Some(response.message.clone());
-            metadata["pod_delete"] = json!({
-                "attempted": response.live_mutation_attempted,
-                "status": response.status,
-                "message": response.message,
-                "pod_name": pod_name,
-            });
-            if response.status != "mutation_ok" {
-                return Err(AppError::bad_request(format!(
-                    "Remote Computer Pod cancellation failed: {}",
-                    response.message
-                )));
-            }
-        }
-    }
+    let lease = state
+        .list_remote_computer_leases()
+        .await?
+        .into_iter()
+        .find(|lease| lease.id == assignment.lease_id)
+        .ok_or_else(|| AppError::not_found("Remote computer lease not found"))?;
+    let cleanup = cleanup_remote_computer_lease_runtime(
+        state,
+        &lease,
+        Some(&assignment),
+        "execution_job_cancel",
+        "canceled",
+    )
+    .await?;
     let updated = state
-        .update_remote_computer_job_assignment_status(assignment.id, "canceled", metadata)
-        .await?;
+        .list_remote_computer_job_assignments()
+        .await?
+        .into_iter()
+        .find(|candidate| candidate.id == assignment.id)
+        .ok_or_else(|| AppError::not_found("Remote computer job assignment not found"))?;
     record_remote_computer_job_assignment_event(
         state,
         &updated,
@@ -575,8 +541,6 @@ pub(crate) async fn propagate_remote_computer_execution_cancel(
         "assignment_id": updated.id,
         "remote_computer_id": updated.remote_computer_id,
         "lease_id": updated.lease_id,
-        "pod_delete_attempted": pod_delete_attempted,
-        "pod_delete_status": pod_delete_status,
-        "pod_delete_message": pod_delete_message,
+        "runtime_cleanup": cleanup,
     }))
 }

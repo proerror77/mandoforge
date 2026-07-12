@@ -2,8 +2,8 @@ use crate::api::{Agent, Session};
 use crate::components::{FlowMeter, KeyMetrics, Panel, Rows, RuntimePipeline, VersionBlock};
 use crate::state::{ConsoleData, UiLang};
 use crate::{
-    compact_json, effective_selected, is_active_status, label_or, orbit_point, position_style,
-    session_title, short_id, status_tone,
+    compact_json, is_active_status, label_or, orbit_point, position_style, session_title, short_id,
+    status_tone,
 };
 use yew::prelude::*;
 
@@ -26,6 +26,30 @@ pub(crate) struct AgentsProps {
 pub(crate) fn AgentsView(props: &AgentsProps) -> Html {
     let data = &props.data;
     let lang = props.lang;
+    let runnable_agents = data
+        .agents
+        .data
+        .iter()
+        .filter(|agent| agent.is_runnable())
+        .collect::<Vec<_>>();
+    let runnable_environments = data
+        .environments
+        .data
+        .iter()
+        .filter(|environment| environment.is_runnable_for_release(data.agent_release_environment()))
+        .collect::<Vec<_>>();
+    let selected_agent_id = runnable_agents
+        .iter()
+        .find(|agent| agent.id == props.selected_agent_id)
+        .or_else(|| runnable_agents.first())
+        .map(|agent| agent.id.clone())
+        .unwrap_or_default();
+    let selected_environment_id = runnable_environments
+        .iter()
+        .find(|environment| environment.id == props.selected_environment_id)
+        .map(|environment| environment.id.clone())
+        .unwrap_or_default();
+    let direct_session_launch_allowed = data.direct_session_launch_allowed();
     html! {
         <div class="page-stack">
             <section class="page-purpose">
@@ -47,10 +71,10 @@ pub(crate) fn AgentsView(props: &AgentsProps) -> Html {
                         <select
                             id="managed-agent-select"
                             name="managed-agent-select"
-                            value={effective_selected(&props.selected_agent_id, data.agents.data.first().map(|agent| agent.id.as_str()))}
+                            value={selected_agent_id}
                             onchange={props.on_agent.clone()}
                         >
-                            { for data.agents.data.iter().map(|agent| html! {
+                            { for runnable_agents.iter().map(|agent| html! {
                                 <option value={agent.id.clone()}>{ format!("{} / {}", agent.name, label_or(&agent.agent_role, "agent")) }</option>
                             }) }
                         </select>
@@ -60,11 +84,11 @@ pub(crate) fn AgentsView(props: &AgentsProps) -> Html {
                         <select
                             id="managed-agent-environment"
                             name="managed-agent-environment"
-                            value={props.selected_environment_id.clone()}
+                            value={selected_environment_id}
                             onchange={props.on_environment.clone()}
                         >
                             <option value="">{ lang.text("Default environment", "默认环境") }</option>
-                            { for data.environments.data.iter().map(|environment| html! {
+                            { for runnable_environments.iter().map(|environment| html! {
                                 <option value={environment.id.clone()}>{ format!("{} / {}", environment.name, label_or(&environment.status, "status")) }</option>
                             }) }
                         </select>
@@ -83,7 +107,7 @@ pub(crate) fn AgentsView(props: &AgentsProps) -> Html {
                         placeholder={lang.text("Describe the task for the selected agent", "描述要交给所选智能体的任务")}
                         oninput={props.on_task_message.clone()}
                     />
-                    <button disabled={data.agents.data.is_empty()} onclick={props.on_start_task.clone()}>{ lang.text("Start task", "启动任务") }</button>
+                    <button disabled={runnable_agents.is_empty() || !direct_session_launch_allowed} onclick={props.on_start_task.clone()}>{ lang.text("Start task", "启动任务") }</button>
                     <small>{ lang.text(
                         "Creates POST /api/sessions with an initial message; runtime queues the session loop.",
                         "创建 POST /api/sessions 初始消息，并由运行时排入 session loop。"

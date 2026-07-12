@@ -1,0 +1,111 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mandoforge-agent-sandbox-mandoforge-cache
+  labels:
+    mandoforge.io/profile: agent-sandbox-mandoforge-cache
+    mandoforge.io/cache-scope: single-project-pilot
+    mandoforge.io/project: mandoforge
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: mandoforge-agent-runtime
+  labels:
+    app.kubernetes.io/name: mandoforge
+    mandoforge.io/runtime-substrate: agent-sandbox
+spec:
+  networkPolicyManagement: Unmanaged
+  podTemplate:
+    metadata:
+      labels:
+        app: mandoforge-agent-remote-computer
+        mandoforge.io/runtime-substrate: agent-sandbox
+        mandoforge.io/runtime-image: dedicated
+    spec:
+      serviceAccountName: mandoforge-remote-computer
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: remote-computer
+          image: mandoforge-agent-sandbox-runtime:0.1.1
+          imagePullPolicy: IfNotPresent
+          command: ["sleep", "infinity"]
+          env:
+            - name: MANDOFORGE_REMOTE_COMPUTER_MODE
+              value: "agent-sandbox"
+            - name: MANDOFORGE_WORKSPACE_ROOT
+              value: "/workspace/sessions"
+            - name: CARGO_HOME
+              value: "/cache/project/cargo"
+            - name: SCCACHE_DIR
+              value: "/cache/project/sccache"
+            - name: PNPM_STORE_DIR
+              value: "/cache/project/pnpm"
+            - name: UV_CACHE_DIR
+              value: "/cache/project/uv"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: workspace-data
+              mountPath: /workspace/sessions
+            # ponytail: single-project pilot cache; create one PVC per repo or tenant before shared use.
+            - name: project-cache
+              mountPath: /cache/project
+            - name: runtime-tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+      volumes:
+        - name: project-cache
+          persistentVolumeClaim:
+            claimName: mandoforge-agent-sandbox-mandoforge-cache
+        - name: runtime-tmp
+          emptyDir:
+            sizeLimit: 1Gi
+  volumeClaimTemplates:
+    - metadata:
+        name: workspace-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 20Gi
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: mandoforge-agent-runtime
+  labels:
+    app.kubernetes.io/name: mandoforge
+    mandoforge.io/runtime-substrate: agent-sandbox
+spec:
+  replicas: 1
+  sandboxTemplateRef:
+    name: mandoforge-agent-runtime
+  updateStrategy:
+    type: Recreate

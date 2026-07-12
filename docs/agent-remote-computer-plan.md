@@ -70,12 +70,13 @@ Covered today:
 - A mounted state-contract ConfigMap now defines the `/agent-state` layout for Memory, Notes, Skills, artifacts, lock files, and manifests. The contract records the current conflict rule: one active writer per session workspace, with shared Memory/Notes/Skills kept read-mostly until a lock-aware sync manager is configured.
 - A JuiceFS CSI example manifest documents the target shared `/agent-state` provider shape, but it is not included in the default kustomization and must be configured explicitly before use.
 - A warm-pool Deployment example documents the cold-start mitigation shape, but it is not included in the default kustomization and does not yet assign sessions to prestarted Pods. It now keeps the same fail-closed artifact discovery sidecar shape as the regular Remote Computer Pod template so prewarmed Pods do not diverge from the eventual session Pod contract.
+- An Agent Sandbox pilot overlay (`deploy/agent-sandbox-pilot`) documents the preferred next substrate: MandoForge keeps the session/policy/approval/audit/runtime-event source of truth, while Kubernetes SIG Agent Sandbox owns the lower-level `SandboxTemplate` and `SandboxWarmPool` lifecycle. The pilot uses per-sandbox PVCs for workspace and agent state so Codex/Claude CLI context does not bleed between sessions, plus an explicit single-project MandoForge cache PVC for Cargo, pnpm, uv, and sccache paths to reduce repeated dependency and build work without creating a cross-project shared cache. The separate `deploy/agent-sandbox-smoke` overlay is the only one that creates a live `SandboxClaim` example.
 - A KEDA ScaledObject example documents the queue-pressure scaling shape for the warm pool, but it is not included in the default kustomization and depends on production metrics work.
 - The production-state gate is currently green only for the single-node local-hostpath Whiskey pilot; multi-node distributed Memory/Notes/Skills promotion still needs a shared filesystem and a live state-sync runner proof.
 - `remote_computers` and `remote_computer_leases` persist control-plane lease state.
 - Lease lifecycle APIs write `remote_computer.*` session events and audit logs without executing tools.
 - `RemoteComputerRunner` exists as a reserved/fail-closed boundary with Admin-only readiness, dry-run, and explicit mutate endpoints.
-- `KubernetesRemoteComputerRunner` exists as an explicit `MANDOFORGE_REMOTE_COMPUTER_RUNNER=kubernetes` adapter skeleton. It validates template/client config, including kubeconfig or API-server-plus-bearer-token inputs, can perform a read-only `/version` probe, reports Pod create/delete intent, and can call the Kubernetes Pod create/delete API only when both mutation gates are explicitly enabled.
+- `KubernetesRemoteComputerRunner` exists as an explicit `MANDOFORGE_REMOTE_COMPUTER_RUNNER=kubernetes` adapter skeleton. It validates template/client config, including kubeconfig or API-server-plus-bearer-token inputs, can perform a read-only `/version` probe, reports Pod create/delete intent, and can call the Kubernetes Pod create/delete API only when both mutation gates are explicitly enabled. It also supports `MANDOFORGE_REMOTE_COMPUTER_RUNNER=agent-sandbox` for the same execution transport: create a `SandboxClaim`, resolve the bound Sandbox Pod from the `agents.x-k8s.io/pod-name` annotation, persist the claim identity in Remote Computer metadata, and reuse Kubernetes `pods/exec`.
 - Kubernetes dry-runs return the planned API path, namespace, pod name, and template path so future live calls have an auditable request plan before mutation is enabled.
 - Kubernetes live mutation is gated by both `MANDOFORGE_REMOTE_COMPUTER_MUTATION_ENABLED` and `MANDOFORGE_REMOTE_COMPUTER_LIVE_MUTATION_ENABLED`; it remains Admin-only.
 - `remote_computer_session_attachments` persists session-to-lease attach/release state and stale attach detection without moving tool execution into Pods.
@@ -85,6 +86,28 @@ Covered today:
 - `/api/scheduler/due-plan` and `/api/scheduler/run-due` include Remote Computer stale reclaim in the aggregate operations path.
 - **On-demand Pod provisioning** (`provision_remote_computer_pod_for_job`): when no warm-pool Remote Computer is available, the execution engine creates a Kubernetes Pod, polls until Running phase, persists the DB record with a unique pod-name index (`remote_computers(tenant_id, pod_name)`), and leases it to the job. Requires `MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT=kubernetes` plus the triple mutation gate. Pod-ready polling is configurable via `MANDOFORGE_REMOTE_COMPUTER_POD_READY_TIMEOUT_SECONDS` (default 60s) and `MANDOFORGE_REMOTE_COMPUTER_POD_READY_POLL_INTERVAL_MS` (default 2000ms).
 - Stale reclaim now issues a `live_delete` mutation for expired on-demand Pod leases, preventing orphaned Pods.
+- The dedicated Agent Sandbox runtime image is built from a clean Git-index
+  context and includes pinned Rust, Node, pnpm, uv, sccache, Codex CLI, Claude
+  Code, and the fixed MandoForge launcher. The runtime is non-root, has a
+  read-only root filesystem, mounts only `/workspace/sessions` from the private
+  workspace PVC, and mounts dependency caches under `/cache/project`.
+- `GET /api/remote-computers/readiness` now separates static Agent Sandbox
+  contracts from live lifecycle evidence. Static readiness without a fresh,
+  complete `.mandoforge/agent-sandbox-runtime-evidence/summary.json` remains
+  `pilot_only`; malformed, stale, wrong-controller, or failed evidence remains
+  production-blocking.
+- A live Docker Desktop drill against Agent Sandbox controller `v0.5.1` proved
+  WarmPool Claim binding, generated Sandbox/Pod resolution, runtime versions,
+  same-session lease/workspace reuse, cross-Sandbox workspace isolation,
+  project-cache persistence, NetworkPolicy behavior, idempotent retry, TTL
+  cleanup, and terminal-session cleanup. It also proved the governed MandoForge
+  path from pending approval through Postgres-backed execution job, Pod exec,
+  durable events, artifact, and audit records. This is local pilot evidence,
+  not multi-node or production storage evidence.
+- Out-of-cluster runners can use
+  `MANDOFORGE_REMOTE_COMPUTER_CA_CERT_PATH` with a short-lived
+  `mandoforge-worker` ServiceAccount token. Runtime Pods keep token automount
+  disabled and do not receive runner permissions.
 
 Not covered today:
 
@@ -95,6 +118,15 @@ Not covered today:
 - Warm-pool Remote Computer records can be claimed by the worker when present, but there is not yet a production controller that registers and recycles prewarmed Pods automatically.
 - The artifact discovery sidecar is present but disabled by default; there is still no production artifact/state sync daemon running against real leased Pods.
 - No production KEDA/HPA queue-depth scaling for remote computer pools; the KEDA manifest is an opt-in example only.
+- Agent Sandbox has a successful local lifecycle drill, but production
+  promotion still requires the drill on the target cluster, a real RWX/shared
+  cache provider, distributed state-sync proof, target-CNI enforcement, load
+  evidence, and an operator-owned controller upgrade/rollback process.
+- Standard Kubernetes `NetworkPolicy` cannot express an FQDN allowlist and may
+  not block traffic to node or host-network endpoints. The pilot allows
+  external TCP 443 and relies on an uncredentialed runtime Pod; production
+  deployments that require domain or API-server egress enforcement need a
+  Cilium FQDN/host policy, egress proxy, or equivalent.
 
 ## Target Components
 
@@ -240,18 +272,19 @@ Stage 3 should make Remote Computer the primary sandbox substrate.
 2. Execute `shell.exec`, `codex.exec`, `file.write`, and `agent_cli.exec` inside the leased Pod behind explicit Kubernetes transport gates. The initial implementation is present; hardening remains around state sync, artifact sidecar session injection, and live-cluster operational runbooks.
 3. Add artifact and event sync from Pod to MandoForge.
 4. Add warm pool controller.
-5. Wire the KEDA queue-depth and pool-pressure example to real Prometheus metrics and an opt-in overlay.
-6. Add hard sandbox profiles:
+5. Harden the Agent Sandbox runner adapter with live cluster evidence, claim cleanup sweeps, state-sync proof, and production lifecycle validation.
+6. Wire the KEDA queue-depth and pool-pressure example to real Prometheus metrics and an opt-in overlay.
+7. Add hard sandbox profiles:
    - `read-only`
    - `workspace-write`
    - `network-limited`
    - `codex-workspace`
    - `gvisor-isolated`
    - `firecracker-isolated` later
-7. Promote the JuiceFS CSI and warm-pool examples into opt-in overlays once secret handling, namespace selection, state sync conflict rules, and Pod assignment are implemented.
-8. Add conflict policy for shared Memory/Notes/Skills writes.
-9. Add per-team/project Pod security and network policies.
-10. Add remote computer replay view in the Session Timeline.
+8. Promote the JuiceFS CSI, warm-pool, and Agent Sandbox examples into opt-in overlays once secret handling, namespace selection, state sync conflict rules, cache partitioning, and Pod/Sandbox assignment are implemented.
+9. Add conflict policy for shared Memory/Notes/Skills writes.
+10. Add per-team/project Pod security and network policies.
+11. Add remote computer replay view in the Session Timeline.
 
 Stage 3 acceptance:
 
@@ -279,7 +312,7 @@ Harden Remote Computer session lifecycle and state/artifact sync
 
 Concrete deliverables:
 
-- Add a warm-pool controller that registers prewarmed Pods as available Remote Computers, resets dirty workspaces, and refills the pool.
+- Add a warm-pool or Agent Sandbox claim controller that registers prewarmed Pods as available Remote Computers, resets dirty workspaces, and refills the pool.
 - Promote artifact discovery from disabled sidecar skeleton to assignment-aware session sidecar injection.
 - Add session terminal cleanup that releases or deletes Pods based on on-demand vs warm-pool origin.
 - Add live-cluster runbooks and tests proving Pod replacement, stale cleanup, and artifact sync do not bypass Tool Router, Policy Engine, or Approval Engine.

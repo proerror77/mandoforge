@@ -9,15 +9,19 @@ use uuid::Uuid;
 
 use crate::{
     Agent, AgentRuntimeProfile, AgentRuntimeProfileReleaseGate, AgentVersion, AppError, AppState,
-    AuthorizationRequest, CreateAgent, CreateAgentRuntimeProfile, CreateEnvironment, Environment,
-    Permission, UpdateAgentRuntimeProfile, UpdateEnvironment, authorize_request,
-    evaluate_agent_runtime_profile_release_gate, new_audit_log, principal_from_request,
+    AuthorizationRequest, CreateAgent, CreateAgentRuntimeProfile, CreateAgentVersion,
+    CreateEnvironment, Environment, Permission, UpdateAgentRuntimeProfile, UpdateEnvironment,
+    authorize_request, evaluate_agent_runtime_profile_release_gate, new_audit_log,
+    principal_from_request,
 };
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route("/api/agents", get(list_agents).post(create_agent))
-        .route("/api/agents/{id}/versions", get(list_agent_versions))
+        .route(
+            "/api/agents/{id}/versions",
+            get(list_agent_versions).post(create_agent_version),
+        )
         .route(
             "/api/agents/{id}/versions/{version}",
             get(get_agent_version),
@@ -73,7 +77,26 @@ async fn create_agent(
     Json(input): Json<CreateAgent>,
 ) -> Result<Json<Agent>, AppError> {
     authorize_request(&state, &headers, Permission::AgentsWrite, "agents", None).await?;
-    Ok(Json(state.create_agent(input).await?))
+    let principal = principal_from_request(&state, &headers).await?;
+    let agent = state.create_agent(input).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "agent.created",
+            "agent",
+            Some(agent.id),
+            json!({
+                "subject": principal.subject_id,
+                "provider": agent.provider,
+                "model": agent.model,
+                "release_state": agent.release_state,
+                "runtime_profile_id": agent.runtime_profile_id,
+            }),
+        ))
+        .await?;
+    Ok(Json(agent))
 }
 
 async fn list_agent_versions(
@@ -83,6 +106,36 @@ async fn list_agent_versions(
 ) -> Result<Json<Vec<AgentVersion>>, AppError> {
     authorize_request(&state, &headers, Permission::AgentsRead, "agent", Some(id)).await?;
     Ok(Json(state.list_agent_versions(id).await?))
+}
+
+async fn create_agent_version(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(input): Json<CreateAgentVersion>,
+) -> Result<Json<AgentVersion>, AppError> {
+    authorize_request(&state, &headers, Permission::AgentsWrite, "agent", Some(id)).await?;
+    let principal = principal_from_request(&state, &headers).await?;
+    let version = state.create_agent_version(id, input).await?;
+    state
+        .append_audit_log(new_audit_log(
+            None,
+            "user",
+            None,
+            "agent.version_created",
+            "agent",
+            Some(id),
+            json!({
+                "subject": principal.subject_id,
+                "agent_version_id": version.id,
+                "version": version.version,
+                "provider": version.provider,
+                "model": version.model,
+                "runtime_profile_id": version.runtime_profile_id,
+            }),
+        ))
+        .await?;
+    Ok(Json(version))
 }
 
 async fn get_agent_version(

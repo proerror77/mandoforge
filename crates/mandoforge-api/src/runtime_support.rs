@@ -69,12 +69,3 @@ pub(crate) fn env_i64(key: &str) -> Option<i64> {
         .ok()
         .and_then(|value| value.trim().parse::<i64>().ok())
 }
-
-pub(crate) fn remote_computer_pod_execution_requested_from_env() -> bool {
-    let mode = std::env::var("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT")
-        .ok()
-        .map(|value| value.trim().to_ascii_lowercase())
-        .unwrap_or_default();
-    env_bool("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_ENABLED")
-        && matches!(mode.as_str(), "kubernetes" | "k8s")
-}
