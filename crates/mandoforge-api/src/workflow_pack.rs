@@ -224,10 +224,10 @@ pub struct OnboardingContract {
 }
 
 #[derive(Debug, Deserialize)]
-struct AgentFileContract {
-    id: String,
-    role: AgentRole,
-    instructions: String,
+pub(crate) struct AgentFileContract {
+    pub(crate) id: String,
+    pub(crate) role: AgentRole,
+    pub(crate) instructions: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1470,7 +1470,7 @@ impl WorkflowPackManifest {
 }
 
 impl AgentRole {
-    fn as_slug(&self) -> &'static str {
+    pub(crate) fn as_slug(&self) -> &'static str {
         match self {
             AgentRole::Reader => "reader",
             AgentRole::Analyzer => "analyzer",

@@ -11125,6 +11125,42 @@ async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() 
         staged_workflow_definition["step_graph"]["steps"][0]["workflow_agent_ref"],
         json!("reader")
     );
+    let reader_binding = staged_bindings
+        .iter()
+        .find(|binding| {
+            binding["binding_type"] == json!("agent") && binding["binding_key"] == json!("reader")
+        })
+        .expect("reader agent binding");
+    let analyzer_binding = staged_bindings
+        .iter()
+        .find(|binding| {
+            binding["binding_type"] == json!("agent") && binding["binding_key"] == json!("analyzer")
+        })
+        .expect("analyzer agent binding");
+    let reader_agent_id = reader_binding["materialized_payload"]["agent_id"]
+        .as_str()
+        .expect("reader agent id");
+    let analyzer_agent_id = analyzer_binding["materialized_payload"]["agent_id"]
+        .as_str()
+        .expect("analyzer agent id");
+    assert!(reader_binding["target_id"].as_str().is_some());
+    assert!(analyzer_binding["target_id"].as_str().is_some());
+    assert_eq!(
+        reader_binding["materialized_payload"]["agent_version_id"],
+        reader_binding["target_id"]
+    );
+    assert_eq!(
+        staged_workflow_definition["default_agent_id"],
+        json!(reader_agent_id)
+    );
+    assert_eq!(
+        staged_workflow_definition["step_graph"]["steps"][0]["agent_id"],
+        json!(reader_agent_id)
+    );
+    assert_eq!(
+        staged_workflow_definition["step_graph"]["steps"][0]["agent_version_id"],
+        reader_binding["target_id"]
+    );
     assert!(staged_bindings.iter().any(|binding| {
         binding["binding_type"] == json!("agent")
             && binding["binding_key"] == json!("reader")
@@ -11193,7 +11229,9 @@ async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() 
             && object["runtime_kind"] == json!("generic_provider_deployment")
             && object["object_key"] == json!("agent:reader:provider-deployment")
             && object["status"] == json!("staged")
-            && object["spec"]["agent_id"] == json!("reader")
+            && object["spec"]["agent_ref"] == json!("reader")
+            && object["spec"]["agent_id"] == json!(reader_agent_id)
+            && object["spec"]["agent_version_id"] == reader_binding["target_id"]
             && object["spec"]["provider_specific_validation"]
                 == json!("deferred_to_provider_adapter")
     }));
@@ -11309,6 +11347,73 @@ async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() 
         json!(profile_onboarding_definition_id)
     );
     assert_eq!(released_pack_run["status"], json!("queued"));
+    let workflow_run_id = released_pack_run["id"].as_str().expect("workflow run id");
+    let primary_session_id = released_pack_run["primary_session_id"]
+        .as_str()
+        .expect("primary session id");
+    let root_task_grant_id = released_pack_run["root_task_grant_id"]
+        .as_str()
+        .expect("root task grant id");
+    let initial_steps: Vec<Value> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/workflow-runs/{workflow_run_id}/steps"))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let reader_step = initial_steps
+        .iter()
+        .find(|step| step["step_key"] == json!("reader"))
+        .expect("reader workflow step");
+    assert_eq!(reader_step["agent_id"], json!(reader_agent_id));
+    assert_eq!(reader_step["session_id"], json!(primary_session_id));
+    let reader_step_id = reader_step["id"].as_str().expect("reader step id");
+    let _: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "PATCH",
+            &format!("/api/workflow-step-runs/{reader_step_id}"),
+            json!({"status": "completed", "output_payload": {"summary": "read"}}),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    let advanced_steps: Vec<Value> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/workflow-runs/{workflow_run_id}/steps"))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let analyzer_step = advanced_steps
+        .iter()
+        .find(|step| step["step_key"] == json!("analyzer"))
+        .expect("analyzer workflow step");
+    assert_eq!(analyzer_step["agent_id"], json!(analyzer_agent_id));
+    assert_eq!(
+        analyzer_step["agent_version_id"],
+        analyzer_binding["target_id"]
+    );
+    assert_ne!(analyzer_step["session_id"], json!(primary_session_id));
+    assert_ne!(analyzer_step["task_grant_id"], json!(root_task_grant_id));
+    let analyzer_grant_id = analyzer_step["task_grant_id"]
+        .as_str()
+        .expect("analyzer task grant id");
+    let analyzer_grant: Value = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/task-grants/{analyzer_grant_id}"))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(analyzer_grant["parent_grant_id"], json!(root_task_grant_id));
+    assert_eq!(analyzer_grant["grantee_agent_id"], json!(analyzer_agent_id));
     assert_eq!(
         released.gate_evidence["evidence"]["eval_run_id"],
         json!("eval-ai-governance-1")

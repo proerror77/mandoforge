@@ -901,16 +901,125 @@ pub(crate) async fn materialize_workflow_graph_step_with_policy_context(
     let step_key = workflow_graph_step_key(graph_step)?;
     let step_type = workflow_graph_step_type(graph_step);
     let agent_id = workflow_graph_step_agent_id(definition, graph_step)?;
-    if agent_id.is_some_and(|agent_id| agent_id != session.agent_id) {
-        return Err(AppError::bad_request(
-            "workflow graph step agent must match its bound session agent",
-        ));
-    }
-    let agent_version_id = agent_id.and(session.agent_version_id);
+    let graph_agent_version_id = workflow_graph_step_agent_version_id(graph_step)?;
     let environment_id =
         workflow_graph_step_uuid(graph_step, "environment_id")?.or(session.environment_id);
     let now = Utc::now();
     let terminal = workflow_step_status_terminal(status);
+    if let Some(agent_id) = agent_id
+        && agent_id != session.agent_id
+    {
+        let agent_version_id = graph_agent_version_id.ok_or_else(|| {
+            AppError::bad_request(
+                "workflow graph steps assigned to another agent must pin agent_version_id",
+            )
+        })?;
+        let child_session = state
+            .create_session_for_agent_version(
+                CreateSession {
+                    agent_id,
+                    environment_id,
+                    title: format!("{} / {}", run.id, step_key),
+                    message: None,
+                },
+                agent_version_id,
+            )
+            .await?;
+        let child_thread = ensure_primary_session_thread(state, child_session.id).await?;
+        let target_agent = state.get_agent(agent_id).await?;
+        let target_version = state.agent_version_for_session(child_session.id).await?;
+        let remaining_budgets = task_grant_remaining_budgets(root_grant, now)?;
+        let step_id = Uuid::new_v4();
+        let child_grant = TaskGrant {
+            id: Uuid::new_v4(),
+            workflow_run_id: run.id,
+            workflow_step_run_id: Some(step_id),
+            session_id: Some(child_session.id),
+            parent_grant_id: Some(root_grant.id),
+            source_event_id: run.source_event_id,
+            source_handoff_id: None,
+            issuer_subject: "system".to_string(),
+            grantee_agent_id: Some(agent_id),
+            grantee_session_id: Some(child_session.id),
+            agent_class: Some(target_agent.agent_role.clone()),
+            objective: graph_step
+                .get("task")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(&step_key)
+                .to_string(),
+            risk_level: normalize_task_grant_risk_level(
+                graph_step
+                    .get("risk_level")
+                    .and_then(Value::as_str)
+                    .unwrap_or("low"),
+            )?,
+            status: "active".to_string(),
+            expires_at: root_grant.expires_at,
+            max_turns: remaining_budgets.max_turns,
+            max_tool_calls: remaining_budgets.max_tool_calls,
+            max_runtime_seconds: remaining_budgets.max_runtime_seconds,
+            max_cost_usd_micros: remaining_budgets.max_cost_usd_micros,
+            turns_used: 0,
+            tool_calls_used: 0,
+            cost_usd_micros_used: 0,
+            semantic_scopes: root_grant.semantic_scopes.clone(),
+            memory_scope: child_handoff_memory_scope(&root_grant.memory_scope),
+            tool_scope: child_tool_scope_for_tools(&root_grant.tool_scope, &target_version.tools),
+            connector_scope: root_grant.connector_scope.clone(),
+            approval_policy: root_grant.approval_policy.clone(),
+            external_effects: root_grant.external_effects.clone(),
+            context_packet_id: None,
+            policy_revision_id: root_grant.policy_revision_id,
+            immutable_args_hash: None,
+            audit_trace_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+        validate_task_grant_scope_objects(&child_grant)?;
+        ensure_child_task_grant_within_parent(root_grant, &child_grant)?;
+        let step = WorkflowStepRun {
+            id: step_id,
+            workflow_run_id: run.id,
+            step_key,
+            step_type,
+            agent_id: Some(agent_id),
+            agent_version_id: Some(agent_version_id),
+            session_id: Some(child_session.id),
+            thread_id: Some(child_thread.id),
+            handoff_id: None,
+            task_grant_id: Some(child_grant.id),
+            environment_id,
+            status: status.to_string(),
+            input_payload: workflow_graph_step_input_payload(run, graph_step, input_context),
+            output_payload,
+            artifact_ids: Vec::new(),
+            approval_ids: Vec::new(),
+            tool_call_ids: Vec::new(),
+            claimed_by_worker: None,
+            lease_expires_at: None,
+            context_packet_id: None,
+            started_at: terminal.then_some(now),
+            completed_at: terminal.then_some(now),
+            scheduled_at,
+            created_at: now,
+            updated_at: now,
+        };
+        let (step, child_grant) = state
+            .create_workflow_step_run_with_task_grant(step, child_grant)
+            .await?;
+        record_task_grant_issued(state, &child_grant, run.primary_session_id).await?;
+        record_workflow_step_run_created(state, run, &step).await?;
+        return Ok(step);
+    }
+    if graph_agent_version_id.is_some_and(|version_id| session.agent_version_id != Some(version_id))
+    {
+        return Err(AppError::bad_request(
+            "workflow graph step agent version must match its bound session version",
+        ));
+    }
+    let agent_version_id = agent_id.and(session.agent_version_id);
     let step = state
         .create_workflow_step_run(WorkflowStepRun {
             id: Uuid::new_v4(),
@@ -1171,6 +1280,15 @@ pub(crate) fn workflow_graph_step_agent_id(
     }
     workflow_graph_step_uuid(graph_step, "agent_id")
         .map(|agent_id| agent_id.or(Some(definition.default_agent_id)))
+}
+
+pub(crate) fn workflow_graph_step_agent_version_id(
+    graph_step: &Value,
+) -> Result<Option<Uuid>, AppError> {
+    if workflow_graph_step_is_adapter_owned_compensation(graph_step) {
+        return Ok(None);
+    }
+    workflow_graph_step_uuid(graph_step, "agent_version_id")
 }
 
 pub(crate) fn workflow_graph_step_dependencies(step: &Value) -> Result<Vec<String>, AppError> {

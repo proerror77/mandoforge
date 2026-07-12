@@ -9,6 +9,12 @@ use uuid::Uuid;
 
 use crate::*;
 
+#[derive(Clone)]
+pub(crate) struct WorkflowPackAgentRuntimeTarget {
+    pub(crate) agent: Agent,
+    pub(crate) version: AgentVersion,
+}
+
 pub(crate) fn load_and_validate_workflow_pack(
     manifest_path: &str,
 ) -> Result<
@@ -290,51 +296,242 @@ pub(crate) async fn workflow_pack_materialized_bindings_with_runtime_targets(
     profile_assets: &[WorkflowPackProfileAsset],
 ) -> Result<Vec<WorkflowPackBinding>, AppError> {
     let mut bindings = workflow_pack_materialized_bindings(installation, profile_assets, "staged")?;
+    let agent_targets = workflow_pack_materialize_agents(state, installation).await?;
     let workflow_definitions =
-        workflow_pack_materialize_workflow_definitions(state, installation).await?;
+        workflow_pack_materialize_workflow_definitions(state, installation, &agent_targets).await?;
     for binding in &mut bindings {
-        if binding.binding_type != "workflow" {
-            continue;
+        match binding.binding_type.as_str() {
+            "agent" => {
+                let Some(target) = agent_targets.get(&binding.binding_key) else {
+                    continue;
+                };
+                binding.target_id = Some(target.version.id);
+                let Value::Object(payload) = &mut binding.materialized_payload else {
+                    continue;
+                };
+                payload.insert("agent_id".to_string(), json!(target.agent.id));
+                payload.insert("agent_version_id".to_string(), json!(target.version.id));
+                payload.insert("version".to_string(), json!(target.version.version));
+                payload.insert(
+                    "release_state".to_string(),
+                    json!(target.agent.release_state),
+                );
+            }
+            "workflow" => {
+                let Some(definition) = workflow_definitions.get(&binding.binding_key) else {
+                    continue;
+                };
+                binding.target_id = Some(definition.id);
+                let Value::Object(payload) = &mut binding.materialized_payload else {
+                    continue;
+                };
+                payload.insert("workflow_definition_id".to_string(), json!(definition.id));
+                payload.insert("release_state".to_string(), json!(definition.release_state));
+                payload.insert(
+                    "execution_strategy".to_string(),
+                    json!(definition.execution_strategy),
+                );
+                payload.insert(
+                    "runtime_adapter".to_string(),
+                    json!(definition.runtime_adapter),
+                );
+                payload.insert("runtime_mode".to_string(), json!(definition.runtime_mode));
+                payload.insert(
+                    "step_count".to_string(),
+                    json!(
+                        definition
+                            .step_graph
+                            .get("steps")
+                            .and_then(Value::as_array)
+                            .map_or(0, Vec::len)
+                    ),
+                );
+            }
+            _ => {}
         }
-        let Some(definition) = workflow_definitions.get(&binding.binding_key) else {
-            continue;
-        };
-        binding.target_id = Some(definition.id);
-        let Value::Object(payload) = &mut binding.materialized_payload else {
-            continue;
-        };
-        payload.insert("workflow_definition_id".to_string(), json!(definition.id));
-        payload.insert("release_state".to_string(), json!(definition.release_state));
-        payload.insert(
-            "execution_strategy".to_string(),
-            json!(definition.execution_strategy),
-        );
-        payload.insert(
-            "runtime_adapter".to_string(),
-            json!(definition.runtime_adapter),
-        );
-        payload.insert("runtime_mode".to_string(), json!(definition.runtime_mode));
-        payload.insert(
-            "step_count".to_string(),
-            json!(
-                definition
-                    .step_graph
-                    .get("steps")
-                    .and_then(Value::as_array)
-                    .map_or(0, Vec::len)
-            ),
-        );
     }
     Ok(bindings)
+}
+
+pub(crate) async fn workflow_pack_materialize_agents(
+    state: &AppState,
+    installation: &WorkflowPackInstallation,
+) -> Result<BTreeMap<String, WorkflowPackAgentRuntimeTarget>, AppError> {
+    let (manifest, package_dir) = workflow_pack_manifest_and_dir_from_installation(installation)?;
+    let default_agent = workflow_pack_materialization_default_agent(state).await?;
+    let base_version = state.current_agent_version(default_agent.id).await?;
+    let semantic_scopes = merge_semantic_scopes(
+        &json!(manifest.semantic_scopes),
+        &json!({"pack_id": manifest.id}),
+    );
+    let agent_ids = manifest
+        .agents
+        .iter()
+        .map(|agent| (agent.id.clone(), Uuid::new_v4()))
+        .collect::<BTreeMap<_, _>>();
+    let mut targets = BTreeMap::new();
+
+    for agent_ref in &manifest.agents {
+        let contract = workflow_pack_load_agent_file(&package_dir, agent_ref)?;
+        let tools = workflow_pack_agent_tools(agent_ref);
+        let tool_policy = workflow_pack_agent_tool_policy(agent_ref);
+        let allowed_targets = agent_ref
+            .handoffs
+            .iter()
+            .map(|handoff| {
+                let target_agent_id = agent_ids.get(&handoff.target_agent).ok_or_else(|| {
+                    AppError::bad_request(format!(
+                        "workflow pack agent {} handoff target {} was not declared",
+                        agent_ref.id, handoff.target_agent
+                    ))
+                })?;
+                Ok(json!({
+                    "target_agent_id": target_agent_id,
+                    "target_agent_ref": handoff.target_agent,
+                    "intents": handoff.intents,
+                    "risk_levels": [workflow_pack_risk_level_slug(&handoff.risk_level)],
+                    "approval_required": handoff.approval_required,
+                    "schema_ref": handoff.schema,
+                }))
+            })
+            .collect::<Result<Vec<_>, AppError>>()?;
+        let runtime_config = workflow_pack_agent_runtime_config(
+            &base_version.runtime_config,
+            installation,
+            agent_ref,
+            allowed_targets,
+        )?;
+        let agent_id = *agent_ids.get(&agent_ref.id).ok_or_else(|| {
+            AppError::bad_request(format!(
+                "workflow pack agent {} has no materialization id",
+                agent_ref.id
+            ))
+        })?;
+        let agent = state
+            .create_agent_with_id(
+                agent_id,
+                CreateAgent {
+                    name: format!("{} / {}", manifest.name, agent_ref.id),
+                    kind: agent_ref.role.as_slug().to_string(),
+                    provider: base_version.provider.clone(),
+                    model: base_version.model.clone(),
+                    team_id: default_agent.team_id,
+                    project_id: default_agent.project_id,
+                    runtime_profile_id: base_version.runtime_profile_id,
+                    agent_role: workflow_pack_runtime_agent_role(agent_ref.role).to_string(),
+                    system_prompt: contract.instructions,
+                    runtime_config,
+                    tools,
+                    tool_policy,
+                    mcp_server_ids: Vec::new(),
+                    skill_ids: Vec::new(),
+                    workflow_pack_ids: vec![manifest.id.clone()],
+                    remote_computer_profile: base_version.remote_computer_profile.clone(),
+                    semantic_scopes: semantic_scopes.clone(),
+                    release_state: "draft".to_string(),
+                },
+            )
+            .await?;
+        let version = state.current_agent_version(agent.id).await?;
+        targets.insert(
+            agent_ref.id.clone(),
+            WorkflowPackAgentRuntimeTarget { agent, version },
+        );
+    }
+    Ok(targets)
+}
+
+pub(crate) fn workflow_pack_load_agent_file(
+    package_dir: &FsPath,
+    agent: &workflow_pack::AgentRef,
+) -> Result<workflow_pack::AgentFileContract, AppError> {
+    let content = std::fs::read_to_string(package_dir.join(&agent.path))
+        .with_context(|| format!("read workflow pack agent {}", agent.path))?;
+    let contract =
+        serde_yaml::from_str::<workflow_pack::AgentFileContract>(&content).map_err(|error| {
+            AppError::bad_request(format!(
+                "workflow pack agent {} is invalid YAML: {error}",
+                agent.path
+            ))
+        })?;
+    if contract.id != agent.id || contract.role != agent.role {
+        return Err(AppError::bad_request(format!(
+            "workflow pack agent {} does not match its manifest declaration",
+            agent.id
+        )));
+    }
+    Ok(contract)
+}
+
+pub(crate) fn workflow_pack_agent_tools(agent: &workflow_pack::AgentRef) -> Vec<String> {
+    agent
+        .tool_scope
+        .read
+        .iter()
+        .chain(&agent.tool_scope.write)
+        .chain(&agent.tool_scope.external_write)
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+pub(crate) fn workflow_pack_agent_tool_policy(agent: &workflow_pack::AgentRef) -> Value {
+    json!({
+        "source": "workflow_pack",
+        "tool_scope": agent.tool_scope,
+        "approval_required_for_external_write": !agent.tool_scope.external_write.is_empty(),
+    })
+}
+
+pub(crate) fn workflow_pack_agent_runtime_config(
+    base: &Value,
+    installation: &WorkflowPackInstallation,
+    agent: &workflow_pack::AgentRef,
+    allowed_targets: Vec<Value>,
+) -> Result<Value, AppError> {
+    let mut runtime_config = base.clone();
+    let object = runtime_config.as_object_mut().ok_or_else(|| {
+        AppError::bad_request("workflow pack base agent runtime_config must be an object")
+    })?;
+    object.insert(
+        "workflow_pack".to_string(),
+        json!({
+            "installation_id": installation.id,
+            "pack_id": installation.pack_id,
+            "pack_version": installation.version,
+            "agent_ref": agent.id,
+            "role": agent.role,
+        }),
+    );
+    object.insert(
+        "handoffs".to_string(),
+        json!({"allowed_targets": allowed_targets}),
+    );
+    Ok(runtime_config)
+}
+
+pub(crate) fn workflow_pack_runtime_agent_role(role: workflow_pack::AgentRole) -> &'static str {
+    match role {
+        workflow_pack::AgentRole::Manager | workflow_pack::AgentRole::Orchestrator => "manager",
+        _ => "specialist",
+    }
+}
+
+pub(crate) fn workflow_pack_risk_level_slug(risk_level: &workflow_pack::RiskLevel) -> &'static str {
+    match risk_level {
+        workflow_pack::RiskLevel::Low => "low",
+        workflow_pack::RiskLevel::Medium => "medium",
+        workflow_pack::RiskLevel::High => "high",
+    }
 }
 
 pub(crate) async fn workflow_pack_materialize_workflow_definitions(
     state: &AppState,
     installation: &WorkflowPackInstallation,
+    agent_targets: &BTreeMap<String, WorkflowPackAgentRuntimeTarget>,
 ) -> Result<BTreeMap<String, WorkflowDefinition>, AppError> {
     let (manifest, package_dir) = workflow_pack_manifest_and_dir_from_installation(installation)?;
-    let default_agent = workflow_pack_materialization_default_agent(state).await?;
-    let default_agent_id = default_agent.id;
     let mut definitions = BTreeMap::new();
     for workflow in &manifest.workflows {
         let workflow_file = workflow_pack_load_workflow_file(&package_dir, workflow)?;
@@ -361,11 +558,21 @@ pub(crate) async fn workflow_pack_materialize_workflow_definitions(
             runtime_adapter.as_deref(),
             &runtime_capability_contract,
         )?;
-        let step_graph = workflow_definition_step_graph_for_execution(
+        let mut step_graph = workflow_definition_step_graph_for_execution(
             &execution_strategy,
             &workflow_pack_workflow_step_graph(workflow, &workflow_file)?,
         );
+        workflow_pack_bind_step_agents(&mut step_graph, workflow, agent_targets)?;
         workflow_graph_start_steps(&step_graph)?;
+        let default_agent_id = agent_targets
+            .get(&workflow.entry_agent)
+            .map(|target| target.agent.id)
+            .ok_or_else(|| {
+                AppError::bad_request(format!(
+                    "workflow pack workflow {} entry agent {} was not materialized",
+                    workflow.id, workflow.entry_agent
+                ))
+            })?;
         let trigger_type = normalize_workflow_trigger_type(
             workflow_file.trigger_type.as_deref().unwrap_or("manual"),
         )?;
@@ -398,6 +605,7 @@ pub(crate) async fn workflow_pack_materialize_workflow_definitions(
                 output_schema_ref: workflow_pack_workflow_output_schema_ref(&workflow_file),
                 step_graph,
                 handoff_rules: workflow_pack_workflow_handoff_rules(
+                    &manifest,
                     workflow,
                     &workflow_file,
                     &semantic_scopes,
@@ -560,7 +768,15 @@ pub(crate) fn workflow_pack_workflow_step_graph(
         } else if let Some(previous_key) = &previous_key {
             graph_step.insert("depends_on".to_string(), json!([previous_key]));
         }
-        for key in ["task", "output_schema", "handoff_intent"] {
+        for key in [
+            "task",
+            "output_schema",
+            "handoff_intent",
+            "required_profiles",
+            "required_schemas",
+            "skills",
+            "risk_level",
+        ] {
             if let Some(value) = step.get(key) {
                 graph_step.insert(key.to_string(), value.clone());
             }
@@ -581,6 +797,38 @@ pub(crate) fn workflow_pack_workflow_step_graph(
         "workflow_id": workflow.id,
         "steps": graph_steps
     }))
+}
+
+pub(crate) fn workflow_pack_bind_step_agents(
+    step_graph: &mut Value,
+    workflow: &workflow_pack::WorkflowRef,
+    agent_targets: &BTreeMap<String, WorkflowPackAgentRuntimeTarget>,
+) -> Result<(), AppError> {
+    let steps = step_graph
+        .get_mut("steps")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| AppError::bad_request("workflow pack step graph must declare steps"))?;
+    for step in steps {
+        if workflow_graph_step_is_adapter_owned_compensation(step) {
+            continue;
+        }
+        let agent_ref = workflow_pack_workflow_step_string(step, "workflow_agent_ref")
+            .or_else(|| workflow_pack_workflow_step_string(step, "agent"))
+            .unwrap_or_else(|| workflow.entry_agent.clone());
+        let target = agent_targets.get(&agent_ref).ok_or_else(|| {
+            AppError::bad_request(format!(
+                "workflow pack workflow {} references unmaterialized agent {}",
+                workflow.id, agent_ref
+            ))
+        })?;
+        let object = step.as_object_mut().ok_or_else(|| {
+            AppError::bad_request("workflow pack graph steps must be JSON objects")
+        })?;
+        object.insert("workflow_agent_ref".to_string(), json!(agent_ref));
+        object.insert("agent_id".to_string(), json!(target.agent.id));
+        object.insert("agent_version_id".to_string(), json!(target.version.id));
+    }
+    Ok(())
 }
 
 pub(crate) fn workflow_pack_workflow_step_key(
@@ -724,6 +972,7 @@ pub(crate) fn workflow_pack_workflow_semantic_scopes(
 }
 
 pub(crate) fn workflow_pack_workflow_handoff_rules(
+    manifest: &workflow_pack::WorkflowPackManifest,
     workflow: &workflow_pack::WorkflowRef,
     workflow_file: &WorkflowPackWorkflowFile,
     semantic_scopes: &Value,
@@ -755,9 +1004,58 @@ pub(crate) fn workflow_pack_workflow_handoff_rules(
             root_task_grant
                 .entry("memory_scope".to_string())
                 .or_insert_with(workflow_pack_root_task_grant_memory_scope);
+            root_task_grant
+                .entry("tool_scope".to_string())
+                .or_insert_with(|| {
+                    workflow_pack_workflow_tool_scope(manifest, workflow, workflow_file)
+                });
         }
     }
     rules
+}
+
+pub(crate) fn workflow_pack_workflow_tool_scope(
+    manifest: &workflow_pack::WorkflowPackManifest,
+    workflow: &workflow_pack::WorkflowRef,
+    workflow_file: &WorkflowPackWorkflowFile,
+) -> Value {
+    let mut agent_refs = BTreeSet::from([workflow.entry_agent.clone()]);
+    for step in &workflow_file.steps {
+        if let Some(agent_ref) = workflow_pack_workflow_step_string(step, "agent") {
+            agent_refs.insert(agent_ref);
+        }
+    }
+    if let Some(steps) = workflow_file
+        .step_graph
+        .as_ref()
+        .and_then(|graph| graph.get("steps"))
+        .and_then(Value::as_array)
+    {
+        for step in steps {
+            if let Some(agent_ref) = workflow_pack_workflow_step_string(step, "workflow_agent_ref")
+                .or_else(|| workflow_pack_workflow_step_string(step, "agent"))
+            {
+                agent_refs.insert(agent_ref);
+            }
+        }
+    }
+    let mut read = BTreeSet::new();
+    let mut write = BTreeSet::new();
+    let mut external_write = BTreeSet::new();
+    for agent in manifest
+        .agents
+        .iter()
+        .filter(|agent| agent_refs.contains(&agent.id))
+    {
+        read.extend(agent.tool_scope.read.iter().cloned());
+        write.extend(agent.tool_scope.write.iter().cloned());
+        external_write.extend(agent.tool_scope.external_write.iter().cloned());
+    }
+    json!({
+        "read": read,
+        "write": write,
+        "external_write": external_write,
+    })
 }
 
 pub(crate) fn workflow_pack_root_task_grant_memory_scope() -> Value {
@@ -1148,7 +1446,9 @@ pub(crate) fn workflow_pack_runtime_objects_from_bindings(
                 status,
                 json!({
                     "binding_id": binding.id,
-                    "agent_id": binding.binding_key.clone(),
+                    "agent_ref": binding.binding_key.clone(),
+                    "agent_id": binding.materialized_payload.get("agent_id").cloned(),
+                    "agent_version_id": binding.materialized_payload.get("agent_version_id").cloned(),
                     "role": binding.materialized_payload.get("role").cloned(),
                     "tool_scope": binding.materialized_payload.get("tool_scope").cloned(),
                     "handoffs": binding.materialized_payload.get("handoffs").cloned(),

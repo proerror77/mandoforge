@@ -205,6 +205,14 @@ impl AppState {
     }
 
     pub(crate) async fn create_agent(&self, input: CreateAgent) -> Result<Agent, AppError> {
+        self.create_agent_with_id(Uuid::new_v4(), input).await
+    }
+
+    pub(crate) async fn create_agent_with_id(
+        &self,
+        agent_id: Uuid,
+        input: CreateAgent,
+    ) -> Result<Agent, AppError> {
         let release_state = normalize_agent_release_state(&input.release_state)?;
         if release_state == "active" && agent_release_enforcement_required() {
             return Err(AppError::bad_request(
@@ -212,7 +220,7 @@ impl AppState {
             ));
         }
         let agent = Agent {
-            id: Uuid::new_v4(),
+            id: agent_id,
             name: input.name,
             kind: input.kind,
             team_id: input.team_id,
@@ -825,6 +833,30 @@ impl AppState {
         let agent_version = self
             .runnable_agent_version(input.agent_id, input.environment_id)
             .await?;
+        self.persist_session(input, agent_version).await
+    }
+
+    pub(crate) async fn create_session_for_agent_version(
+        &self,
+        input: CreateSession,
+        agent_version_id: Uuid,
+    ) -> Result<Session, AppError> {
+        let agent_version = self
+            .runnable_agent_version(input.agent_id, input.environment_id)
+            .await?;
+        if agent_version.id != agent_version_id {
+            return Err(AppError::forbidden(
+                "workflow step agent version is not runnable in the selected environment",
+            ));
+        }
+        self.persist_session(input, agent_version).await
+    }
+
+    async fn persist_session(
+        &self,
+        input: CreateSession,
+        agent_version: AgentVersion,
+    ) -> Result<Session, AppError> {
         let now = Utc::now();
         let session = Session {
             id: Uuid::new_v4(),
