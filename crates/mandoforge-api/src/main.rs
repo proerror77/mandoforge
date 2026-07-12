@@ -129,6 +129,7 @@ mod store_session_loop_jobs;
 mod store_session_threads;
 mod store_tool_calls;
 mod store_usage_rollups;
+mod store_workflow_pack_lifecycle;
 mod store_workflow_packs;
 mod store_workflows;
 mod telemetry_events;

@@ -381,53 +381,6 @@ impl AppState {
         }
     }
 
-    pub(crate) async fn update_workflow_definition_release_states_for_pack_installation(
-        &self,
-        installation_id: uuid::Uuid,
-        release_state: &str,
-    ) -> Result<Vec<WorkflowDefinition>, AppError> {
-        let updated_at = chrono::Utc::now();
-        match &self.store {
-            StoreBackend::Memory(inner) => {
-                let mut store = inner.write().await;
-                let mut definitions = Vec::new();
-                for definition in store.workflow_definitions.values_mut() {
-                    if definition.pack_installation_id == Some(installation_id)
-                        && definition.archived_at.is_none()
-                    {
-                        definition.release_state = release_state.to_string();
-                        definition.updated_at = updated_at;
-                        if release_state == "archived" {
-                            definition.archived_at = Some(updated_at);
-                        }
-                        definitions.push(definition.clone());
-                    }
-                }
-                definitions.sort_by_key(|definition| definition.created_at);
-                Ok(definitions)
-            }
-            StoreBackend::Postgres(pool) => {
-                let rows = sqlx::query(
-                    "UPDATE workflow_definitions
-                     SET release_state = $3,
-                         updated_at = $4,
-                         archived_at = CASE WHEN $3 = 'archived' THEN $4 ELSE archived_at END
-                     WHERE tenant_id = $1
-                       AND pack_installation_id = $2
-                       AND archived_at IS NULL
-                     RETURNING id, pack_installation_id, pack_id, pack_version, name, entrypoint, trigger_type, default_agent_id, default_environment_id, input_schema_ref, output_schema_ref, step_graph, handoff_rules, execution_strategy, runtime_adapter, runtime_mode, runtime_capability_contract, event_ingestion_policy, approval_policy_ref, eval_gate_refs, release_state, created_at, updated_at, archived_at",
-                )
-                .bind(self.current_tenant_id())
-                .bind(installation_id)
-                .bind(release_state)
-                .bind(updated_at)
-                .fetch_all(pool)
-                .await?;
-                rows.into_iter().map(workflow_definition_from_row).collect()
-            }
-        }
-    }
-
     pub(crate) async fn create_workflow_run(
         &self,
         run: WorkflowRun,

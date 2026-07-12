@@ -5259,37 +5259,20 @@ async fn workflow_pack_release_requires_independent_production_agent_promotion()
         .into_iter()
         .next()
         .expect("seeded environment");
-    let installation_id = Uuid::new_v4();
-
-    let error = state
-        .promote_workflow_pack_agent_versions(
-            installation_id,
-            &[(agent.id, version.id)],
-            "production",
-            "pack-release-test",
-            &json!({"eval_gate_status": "passed", "release_gate_status": "passed"}),
-            Utc::now(),
-        )
-        .await
-        .expect_err("pack gates must not bypass production AgentRelease approval");
-    assert!(error.message.contains("independently promoted"));
-    let error = state
-        .promoted_agent_releases_for_targets(&[(agent.id, version.id)], "production")
-        .await
-        .expect_err("pack release must fail before independent promotion");
     assert!(
-        error
-            .message
-            .contains("independently promoted agent version")
+        !state
+            .agent_version_has_promoted_release(agent.id, version.id, "production")
+            .await
+            .expect("check unreleased AgentVersion")
     );
 
     insert_promoted_agent_version_for_test(&state, &version, "production").await;
-    let releases = state
-        .promoted_agent_releases_for_targets(&[(agent.id, version.id)], "production")
-        .await
-        .expect("independently promoted pack AgentVersion");
-    assert_eq!(releases.len(), 1);
-    assert_eq!(releases[0].status, "promoted");
+    assert!(
+        state
+            .agent_version_has_promoted_release(agent.id, version.id, "production")
+            .await
+            .expect("check independently promoted AgentVersion")
+    );
 
     let session = state
         .create_session_for_agent_version(
@@ -5304,6 +5287,212 @@ async fn workflow_pack_release_requires_independent_production_agent_promotion()
         .await
         .expect("independently released pack AgentVersion must run in production");
     assert_eq!(session.agent_version_id, Some(version.id));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_workflow_pack_agent_promotions_are_idempotent() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::remove("MANDOFORGE_PROVIDER_RUNTIME_ENV");
+    let _release_enforcement = EnvVarGuard::remove("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let version = state
+        .current_agent_version(agent.id)
+        .await
+        .expect("seeded agent version");
+    let promoted_at = Utc::now();
+    let caller_count = 32;
+    let installation_ids = (0..caller_count)
+        .map(|caller| {
+            let installation_id = Uuid::new_v4();
+            let installation = WorkflowPackInstallation {
+                id: installation_id,
+                pack_id: format!("concurrent-pack-{caller}"),
+                kind: "WorkflowPack".to_string(),
+                version: "0.1.0".to_string(),
+                manifest_path: format!("packs/concurrent-{caller}/pack.yaml"),
+                manifest: json!({}),
+                validation_report: json!({}),
+                status: "staged".to_string(),
+                eval_gate_status: "pending".to_string(),
+                release_gate_status: "pending".to_string(),
+                gate_evidence: json!({}),
+                staged_at: Some(promoted_at),
+                released_at: None,
+                archived_at: None,
+                created_at: promoted_at,
+                updated_at: promoted_at,
+            };
+            (caller, installation)
+        })
+        .collect::<Vec<_>>();
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test requires memory store");
+    };
+    {
+        let mut store = inner.write().await;
+        for (_, installation) in &installation_ids {
+            store
+                .workflow_pack_installations
+                .insert(installation.id, installation.clone());
+        }
+    }
+    let start = Arc::new(tokio::sync::Barrier::new(caller_count));
+    let mut callers = Vec::with_capacity(caller_count);
+    for (caller, installation) in installation_ids {
+        let caller_state = state.clone();
+        let start = start.clone();
+        callers.push(tokio::spawn(async move {
+            start.wait().await;
+            caller_state
+                .transition_workflow_pack_lifecycle(
+                    crate::store_workflow_pack_lifecycle::WorkflowPackLifecycleTransitionRequest {
+                        installation_id: installation.id,
+                        expected_status: "staged".to_string(),
+                        next_status: "released".to_string(),
+                        eval_gate_status: "passed".to_string(),
+                        release_gate_status: "passed".to_string(),
+                        gate_evidence: json!({
+                            "release_gate_id": "concurrent-pack-release"
+                        }),
+                        staged_at: installation.staged_at,
+                        released_at: Some(promoted_at),
+                        occurred_at: promoted_at,
+                        audit_action: "workflow_pack.released".to_string(),
+                        audit_details: json!({"caller": caller}),
+                        agent_release_transition: crate::store_workflow_pack_lifecycle::WorkflowPackAgentReleaseTransition::PromoteFromPack {
+                            targets: vec![(agent.id, version.id)],
+                            environment: "staging".to_string(),
+                            promoted_by: format!("release-{caller}"),
+                            gate_evidence: json!({
+                                "release_gate_id": "concurrent-pack-release"
+                            }),
+                        },
+                    },
+                )
+                .await
+                .expect("concurrent promotion")
+        }));
+    }
+    for caller in callers {
+        let installation = caller.await.expect("promotion task");
+        assert_eq!(installation.status, "released");
+    }
+    let promoted = state
+        .list_all_agent_releases()
+        .await
+        .expect("list releases")
+        .into_iter()
+        .filter(|release| {
+            release.agent_id == agent.id
+                && release.agent_version_id == version.id
+                && release.environment == "staging"
+                && release.status == "promoted"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(promoted.len(), 1);
+}
+
+#[tokio::test]
+async fn completing_same_target_agent_release_supersedes_previous_promotion() {
+    let _env = env_lock().lock().expect("env lock");
+    let _release_environment = EnvVarGuard::remove("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let version = state
+        .current_agent_version(agent.id)
+        .await
+        .expect("agent version");
+    let now = Utc::now();
+    let previous = AgentRelease {
+        id: Uuid::new_v4(),
+        agent_id: agent.id,
+        agent_version_id: version.id,
+        environment: "production".to_string(),
+        status: "promoted".to_string(),
+        eval_run_id: None,
+        eval_score: Some(1.0),
+        min_score: 1.0,
+        requested_by: Some("previous-approver".to_string()),
+        requested_at: Some(now),
+        request_reason: None,
+        approver_subject: Some("previous-approver".to_string()),
+        decision_by: Some("previous-approver".to_string()),
+        decided_at: Some(now),
+        decision_reason: Some("previous promotion".to_string()),
+        promoted_by: Some("previous-approver".to_string()),
+        promoted_at: Some(now),
+        automation_policy: json!({}),
+        created_at: now,
+    };
+    let replacement = AgentRelease {
+        id: Uuid::new_v4(),
+        status: "promotion_in_progress".to_string(),
+        requested_by: Some("replacement-approver".to_string()),
+        approver_subject: Some("replacement-approver".to_string()),
+        decision_by: Some("replacement-approver".to_string()),
+        decided_at: Some(now),
+        decision_reason: Some("replacement promotion".to_string()),
+        promoted_by: None,
+        promoted_at: None,
+        created_at: now + chrono::Duration::seconds(1),
+        ..previous.clone()
+    };
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test requires memory store");
+    };
+    {
+        let mut store = inner.write().await;
+        store.agent_releases.insert(previous.id, previous.clone());
+        store
+            .agent_releases
+            .insert(replacement.id, replacement.clone());
+    }
+
+    let promoted = state
+        .complete_agent_release_promotion(
+            agent.id,
+            replacement.id,
+            "replacement-approver".to_string(),
+        )
+        .await
+        .expect("complete replacement promotion");
+    assert_eq!(promoted.status, "promoted");
+    let releases = state
+        .list_all_agent_releases()
+        .await
+        .expect("list agent releases");
+    assert!(
+        releases
+            .iter()
+            .any(|release| release.id == previous.id && release.status == "superseded")
+    );
+    assert_eq!(
+        releases
+            .iter()
+            .filter(|release| {
+                release.agent_id == agent.id
+                    && release.agent_version_id == version.id
+                    && release.environment == "production"
+                    && release.status == "promoted"
+            })
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -6192,6 +6381,28 @@ async fn agent_registry_state_tracks_configured_release_environment() {
         "staged"
     );
 
+    let version = state
+        .current_agent_version(agent.id)
+        .await
+        .expect("agent version");
+    let automated_release = crate::store_releases::new_workflow_pack_agent_release(
+        Uuid::new_v4(),
+        agent.id,
+        version.id,
+        "production",
+        "workflow-pack-release",
+        &json!({"release_gate_id": "automated-before-independent-promotion"}),
+        Utc::now(),
+    );
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test requires memory store");
+    };
+    inner
+        .write()
+        .await
+        .agent_releases
+        .insert(automated_release.id, automated_release.clone());
+
     let production_release = state
         .create_agent_release(
             agent.id,
@@ -6205,6 +6416,18 @@ async fn agent_registry_state_tracks_configured_release_environment() {
         )
         .await
         .expect("promote production agent release");
+    assert_ne!(production_release.id, automated_release.id);
+    assert_eq!(
+        state
+            .list_all_agent_releases()
+            .await
+            .expect("list releases")
+            .into_iter()
+            .find(|release| release.id == automated_release.id)
+            .expect("automated release")
+            .status,
+        "superseded"
+    );
 
     assert_eq!(
         state
@@ -11041,7 +11264,9 @@ async fn memory_governance_filters_objects_to_visible_sessions() {
 #[tokio::test]
 async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() {
     let _env = env_lock().lock().expect("env lock");
-    let app = test_app().await;
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let app = build_router(state.clone());
     let manifest_path = ai_governance_manifest_path_string();
     let report: workflow_pack::WorkflowPackValidationReport = request_json(
         app.clone(),
@@ -11419,6 +11644,40 @@ async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() 
         Some("workflow pack release requires passed eval and release gates")
     );
 
+    let automated_release_installation_id = Uuid::new_v4();
+    let automated_releases = [
+        (reader_agent_id, reader_binding),
+        (analyzer_agent_id, analyzer_binding),
+        (writer_agent_id, writer_binding),
+    ]
+    .into_iter()
+    .map(|(agent_id, binding)| {
+        crate::store_releases::new_workflow_pack_agent_release(
+            automated_release_installation_id,
+            Uuid::parse_str(agent_id).expect("workflow pack agent UUID"),
+            Uuid::parse_str(
+                binding["target_id"]
+                    .as_str()
+                    .expect("workflow pack AgentVersion UUID"),
+            )
+            .expect("workflow pack AgentVersion UUID"),
+            "production",
+            "automated-pack-release",
+            &json!({"release_gate_id": "must-not-satisfy-independent-promotion"}),
+            Utc::now(),
+        )
+    })
+    .collect::<Vec<_>>();
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test requires memory store");
+    };
+    {
+        let mut store = inner.write().await;
+        for release in &automated_releases {
+            store.agent_releases.insert(release.id, release.clone());
+        }
+    }
+
     let (status, error) = {
         let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
         let _release_enforcement =
@@ -11460,6 +11719,16 @@ async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() 
     )
     .await;
     assert_eq!(still_staged.status, "staged");
+    {
+        let mut store = inner.write().await;
+        for automated_release in &automated_releases {
+            store
+                .agent_releases
+                .get_mut(&automated_release.id)
+                .expect("automated release")
+                .status = "rolled_back".to_string();
+        }
+    }
 
     let released: WorkflowPackInstallation = request_json(
         app.clone(),
@@ -11978,6 +12247,152 @@ async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() 
         log.action == "workflow_pack.version_created"
             && log.resource_id == Some(updated.id)
             && log.details["details"]["source_installation_id"] == json!(installed.id)
+    }));
+}
+
+#[tokio::test]
+async fn workflow_pack_release_failure_is_atomic() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::remove("MANDOFORGE_PROVIDER_RUNTIME_ENV");
+    let _release_enforcement = EnvVarGuard::remove("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let app = build_router(state.clone());
+    let installed: WorkflowPackInstallation = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-packs/install",
+            json!({"manifest_path": ai_governance_manifest_path_string()}),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let staged: WorkflowPackInstallation = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/workflow-packs/installations/{}/stage", installed.id),
+            json!({"reason": "atomic release regression"}),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    assert_eq!(staged.status, "staged");
+
+    let invalid_version_id = Uuid::new_v4();
+    let definition_id = {
+        let StoreBackend::Memory(inner) = &state.store else {
+            panic!("test requires memory store");
+        };
+        let mut store = inner.write().await;
+        let agent_binding = store
+            .workflow_pack_bindings
+            .values_mut()
+            .find(|binding| {
+                binding.installation_id == installed.id
+                    && binding.binding_type == "agent"
+                    && binding.status == "staged"
+            })
+            .expect("staged agent binding");
+        agent_binding.target_id = Some(invalid_version_id);
+        store
+            .workflow_definitions
+            .values()
+            .find(|definition| definition.pack_installation_id == Some(installed.id))
+            .expect("staged workflow definition")
+            .id
+    };
+
+    let (status, error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/workflow-packs/installations/{}/release", installed.id),
+            json!({
+                "eval_gate_status": "passed",
+                "release_gate_status": "passed",
+                "environment": "staging",
+                "gate_evidence": {"release_gate_id": "must-rollback-entire-transition"}
+            }),
+            &[
+                ("x-mandoforge-subject", "release-admin"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        error["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("unknown agent version"))
+    );
+
+    let installation: WorkflowPackInstallation = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!(
+                "/api/workflow-packs/installations/{}",
+                installed.id
+            ))
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(installation.status, "staged");
+    let bindings: Vec<WorkflowPackBinding> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!(
+                "/api/workflow-packs/installations/{}/bindings",
+                installed.id
+            ))
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(bindings.iter().all(|binding| binding.status == "staged"));
+    let runtime_objects: Vec<WorkflowPackRuntimeObject> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!(
+                "/api/workflow-packs/installations/{}/runtime-objects",
+                installed.id
+            ))
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(
+        runtime_objects
+            .iter()
+            .all(|object| object.status == "staged")
+    );
+    let definition: WorkflowDefinition = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/workflow-definitions/{definition_id}"))
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(definition.release_state, "staged");
+    let audit_logs: Vec<AuditLog> = request_json(
+        app,
+        Request::builder()
+            .uri("/api/audit-logs")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(!audit_logs.iter().any(|log| {
+        log.action == "workflow_pack.released" && log.resource_id == Some(installed.id)
     }));
 }
 
@@ -40513,8 +40928,12 @@ async fn admin_can_create_eval_dataset_cases_and_version_bound_run() {
     assert_eq!(post_rollback_summary.release_count, 5);
     assert_eq!(post_rollback_summary.pending_count, 0);
     assert_eq!(post_rollback_summary.rolled_back_count, 1);
-    assert_eq!(post_rollback_summary.promoted_count, 2);
+    assert_eq!(post_rollback_summary.promoted_count, 1);
     assert_eq!(post_rollback_summary.rejected_count, 2);
+    assert_eq!(
+        post_rollback_summary.by_status.get("superseded").copied(),
+        Some(1)
+    );
 
     let rollback_audit_logs: Vec<AuditLog> = request_json(
         app.clone(),

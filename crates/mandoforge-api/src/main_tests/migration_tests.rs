@@ -70,10 +70,24 @@ async fn migration_paths_include_stage2_migrations_in_order() {
     assert!(names.contains(&"0072_agent_version_runtime_snapshot.sql"));
     assert!(names.contains(&"0073_task_grant_budget_usage.sql"));
     assert!(names.contains(&"0074_task_grant_root_unique.sql"));
+    assert!(names.contains(&"0075_agent_release_promoted_unique.sql"));
     assert!(
         names.windows(2).all(|window| window[0] <= window[1]),
         "migrations should run lexicographically: {names:?}"
     );
+}
+
+#[test]
+fn promoted_agent_release_uniqueness_migration_is_restart_safe() {
+    let migration =
+        include_str!("../../../../db/migrations/0075_agent_release_promoted_unique.sql");
+
+    assert!(migration.contains("row_number() OVER"));
+    assert!(migration.contains("SET status = 'superseded'"));
+    assert!(migration.contains("CREATE UNIQUE INDEX IF NOT EXISTS"));
+    assert!(migration.contains("uq_agent_releases_promoted_target"));
+    assert!(migration.contains("lower(environment)"));
+    assert!(migration.contains("WHERE status = 'promoted'"));
 }
 
 #[test]

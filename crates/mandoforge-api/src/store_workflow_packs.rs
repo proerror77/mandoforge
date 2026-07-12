@@ -161,73 +161,6 @@ impl AppState {
         }
     }
 
-    pub(crate) async fn update_workflow_pack_installation_state(
-        &self,
-        id: Uuid,
-        status: &str,
-        eval_gate_status: &str,
-        release_gate_status: &str,
-        gate_evidence: Value,
-        staged_at: Option<chrono::DateTime<Utc>>,
-        released_at: Option<chrono::DateTime<Utc>>,
-        expected_status: Option<&str>,
-    ) -> Result<WorkflowPackInstallation, AppError> {
-        let updated_at = Utc::now();
-        match &self.store {
-            StoreBackend::Memory(inner) => {
-                let mut store = inner.write().await;
-                let installation = store
-                    .workflow_pack_installations
-                    .get_mut(&id)
-                    .ok_or_else(|| AppError::not_found("workflow pack installation not found"))?;
-                if let Some(expected) = expected_status
-                    && installation.status != expected
-                {
-                    return Err(AppError::bad_request(
-                        "workflow pack installation status conflict: concurrent update detected",
-                    ));
-                }
-                installation.status = status.to_string();
-                installation.eval_gate_status = eval_gate_status.to_string();
-                installation.release_gate_status = release_gate_status.to_string();
-                installation.gate_evidence = gate_evidence;
-                installation.staged_at = staged_at;
-                installation.released_at = released_at;
-                installation.updated_at = updated_at;
-                Ok(installation.clone())
-            }
-            StoreBackend::Postgres(pool) => {
-                let row = sqlx::query(
-                    "UPDATE workflow_pack_installations
-                     SET status = $3, eval_gate_status = $4, release_gate_status = $5, gate_evidence = $6, staged_at = $7, released_at = $8, updated_at = $9
-                     WHERE tenant_id = $1 AND id = $2 AND archived_at IS NULL
-                       AND ($10 IS NULL OR status = $10)
-                     RETURNING id, pack_id, kind, version, manifest_path, manifest, validation_report, status, eval_gate_status, release_gate_status, gate_evidence, staged_at, released_at, archived_at, created_at, updated_at",
-                )
-                .bind(self.current_tenant_id())
-                .bind(id)
-                .bind(status)
-                .bind(eval_gate_status)
-                .bind(release_gate_status)
-                .bind(&gate_evidence)
-                .bind(staged_at)
-                .bind(released_at)
-                .bind(updated_at)
-                .bind(expected_status)
-                .fetch_optional(pool)
-                .await?
-                .ok_or_else(|| {
-                    if expected_status.is_some() {
-                        AppError::bad_request("workflow pack installation status conflict: concurrent update detected")
-                    } else {
-                        AppError::not_found("workflow pack installation not found")
-                    }
-                })?;
-                workflow_pack_installation_from_row(row)
-            }
-        }
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn stage_workflow_pack_runtime_materialization(
         &self,
@@ -473,42 +406,6 @@ impl AppState {
         }
     }
 
-    pub(crate) async fn archive_workflow_pack_installation(
-        &self,
-        id: Uuid,
-    ) -> Result<WorkflowPackInstallation, AppError> {
-        let archived_at = Utc::now();
-        match &self.store {
-            StoreBackend::Memory(inner) => {
-                let mut store = inner.write().await;
-                let installation = store
-                    .workflow_pack_installations
-                    .get_mut(&id)
-                    .filter(|installation| installation.archived_at.is_none())
-                    .ok_or_else(|| AppError::not_found("workflow pack installation not found"))?;
-                installation.status = "archived".to_string();
-                installation.archived_at = Some(archived_at);
-                installation.updated_at = archived_at;
-                Ok(installation.clone())
-            }
-            StoreBackend::Postgres(pool) => {
-                let row = sqlx::query(
-                    "UPDATE workflow_pack_installations
-                     SET status = 'archived', archived_at = $3, updated_at = $3
-                     WHERE tenant_id = $1 AND id = $2 AND archived_at IS NULL
-                     RETURNING id, pack_id, kind, version, manifest_path, manifest, validation_report, status, eval_gate_status, release_gate_status, gate_evidence, staged_at, released_at, archived_at, created_at, updated_at",
-                )
-                .bind(self.current_tenant_id())
-                .bind(id)
-                .bind(archived_at)
-                .fetch_optional(pool)
-                .await?
-                .ok_or_else(|| AppError::not_found("workflow pack installation not found"))?;
-                workflow_pack_installation_from_row(row)
-            }
-        }
-    }
-
     pub(crate) async fn list_workflow_pack_profile_assets(
         &self,
         installation_id: Uuid,
@@ -748,51 +645,6 @@ impl AppState {
         }
     }
 
-    pub(crate) async fn update_workflow_pack_binding_statuses(
-        &self,
-        installation_id: Uuid,
-        status: &str,
-    ) -> Result<Vec<WorkflowPackBinding>, AppError> {
-        let updated_at = Utc::now();
-        match &self.store {
-            StoreBackend::Memory(inner) => {
-                let mut store = inner.write().await;
-                let mut bindings = Vec::new();
-                for binding in store.workflow_pack_bindings.values_mut() {
-                    if binding.installation_id == installation_id && binding.status != "superseded"
-                    {
-                        binding.status = status.to_string();
-                        binding.updated_at = updated_at;
-                        bindings.push(binding.clone());
-                    }
-                }
-                bindings.sort_by(|left, right| {
-                    left.binding_type
-                        .cmp(&right.binding_type)
-                        .then(left.binding_key.cmp(&right.binding_key))
-                });
-                Ok(bindings)
-            }
-            StoreBackend::Postgres(pool) => {
-                let rows = sqlx::query(
-                    "UPDATE workflow_pack_bindings
-                     SET status = $3, updated_at = $4
-                     WHERE tenant_id = $1 AND installation_id = $2 AND status <> 'superseded'
-                     RETURNING id, installation_id, pack_id, pack_version, binding_type, binding_key, source_path, target_kind, target_id, status, materialized_payload, created_at, updated_at",
-                )
-                .bind(self.current_tenant_id())
-                .bind(installation_id)
-                .bind(status)
-                .bind(updated_at)
-                .fetch_all(pool)
-                .await?;
-                rows.into_iter()
-                    .map(workflow_pack_binding_from_row)
-                    .collect()
-            }
-        }
-    }
-
     pub(crate) async fn create_workflow_pack_runtime_objects(
         &self,
         objects: Vec<WorkflowPackRuntimeObject>,
@@ -934,50 +786,6 @@ impl AppState {
                 )
                 .bind(self.current_tenant_id())
                 .bind(runtime_kind)
-                .fetch_all(pool)
-                .await?;
-                rows.into_iter()
-                    .map(workflow_pack_runtime_object_from_row)
-                    .collect()
-            }
-        }
-    }
-
-    pub(crate) async fn update_workflow_pack_runtime_object_statuses(
-        &self,
-        installation_id: Uuid,
-        status: &str,
-    ) -> Result<Vec<WorkflowPackRuntimeObject>, AppError> {
-        let updated_at = Utc::now();
-        match &self.store {
-            StoreBackend::Memory(inner) => {
-                let mut store = inner.write().await;
-                let mut objects = Vec::new();
-                for object in store.workflow_pack_runtime_objects.values_mut() {
-                    if object.installation_id == installation_id && object.status != "superseded" {
-                        object.status = status.to_string();
-                        object.updated_at = updated_at;
-                        objects.push(object.clone());
-                    }
-                }
-                objects.sort_by(|left, right| {
-                    left.object_type
-                        .cmp(&right.object_type)
-                        .then(left.object_key.cmp(&right.object_key))
-                });
-                Ok(objects)
-            }
-            StoreBackend::Postgres(pool) => {
-                let rows = sqlx::query(
-                    "UPDATE workflow_pack_runtime_objects
-                     SET status = $3, updated_at = $4
-                     WHERE tenant_id = $1 AND installation_id = $2 AND status <> 'superseded'
-                     RETURNING id, installation_id, binding_id, pack_id, pack_version, object_type, object_key, runtime_kind, status, spec, created_at, updated_at",
-                )
-                .bind(self.current_tenant_id())
-                .bind(installation_id)
-                .bind(status)
-                .bind(updated_at)
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()
