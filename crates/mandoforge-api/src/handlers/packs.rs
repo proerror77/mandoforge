@@ -748,7 +748,8 @@ async fn release_workflow_pack_installation_route(
         .map(str::to_ascii_lowercase)
         .or_else(|| configured_release_environment.clone())
         .unwrap_or_else(|| "production".to_string());
-    if agent_release_enforcement_required() {
+    let release_enforcement_required = agent_release_enforcement_required();
+    if release_enforcement_required {
         let expected_environment = configured_release_environment.as_deref().ok_or_else(|| {
             AppError::forbidden(
                 "production workflow pack release requires MANDOFORGE_AGENT_RELEASE_ENVIRONMENT",
@@ -789,6 +790,15 @@ async fn release_workflow_pack_installation_route(
             Ok((agent_id, agent_version_id))
         })
         .collect::<Result<Vec<_>, AppError>>()?;
+    let independently_promoted_agents = if release_enforcement_required {
+        Some(
+            state
+                .promoted_agent_releases_for_targets(&agent_release_targets, &release_environment)
+                .await?,
+        )
+    } else {
+        None
+    };
     let released_at = Utc::now();
     let gate_evidence = json!({
         "reason": input.reason,
@@ -816,16 +826,21 @@ async fn release_workflow_pack_installation_route(
     let released_runtime_objects = state
         .update_workflow_pack_runtime_object_statuses(id, "released")
         .await?;
-    let released_agents = state
-        .promote_workflow_pack_agent_versions(
-            id,
-            &agent_release_targets,
-            &release_environment,
-            &principal.subject_id,
-            &installation.gate_evidence,
-            released_at,
-        )
-        .await?;
+    let released_agents = match independently_promoted_agents {
+        Some(releases) => releases,
+        None => {
+            state
+                .promote_workflow_pack_agent_versions(
+                    id,
+                    &agent_release_targets,
+                    &release_environment,
+                    &principal.subject_id,
+                    &installation.gate_evidence,
+                    released_at,
+                )
+                .await?
+        }
+    };
     record_workflow_pack_installation_audit(
         &state,
         &installation,

@@ -5233,7 +5233,7 @@ async fn production_session_binds_promoted_agent_version() {
 }
 
 #[tokio::test]
-async fn workflow_pack_release_promotes_and_rolls_back_production_agent_version() {
+async fn workflow_pack_release_requires_independent_production_agent_promotion() {
     let _env = env_lock().lock().expect("env lock");
     let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
     let _release_enforcement = EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
@@ -5261,7 +5261,7 @@ async fn workflow_pack_release_promotes_and_rolls_back_production_agent_version(
         .expect("seeded environment");
     let installation_id = Uuid::new_v4();
 
-    let releases = state
+    let error = state
         .promote_workflow_pack_agent_versions(
             installation_id,
             &[(agent.id, version.id)],
@@ -5271,7 +5271,23 @@ async fn workflow_pack_release_promotes_and_rolls_back_production_agent_version(
             Utc::now(),
         )
         .await
-        .expect("promote pack AgentVersion");
+        .expect_err("pack gates must not bypass production AgentRelease approval");
+    assert!(error.message.contains("independently promoted"));
+    let error = state
+        .promoted_agent_releases_for_targets(&[(agent.id, version.id)], "production")
+        .await
+        .expect_err("pack release must fail before independent promotion");
+    assert!(
+        error
+            .message
+            .contains("independently promoted agent version")
+    );
+
+    insert_promoted_agent_version_for_test(&state, &version, "production").await;
+    let releases = state
+        .promoted_agent_releases_for_targets(&[(agent.id, version.id)], "production")
+        .await
+        .expect("independently promoted pack AgentVersion");
     assert_eq!(releases.len(), 1);
     assert_eq!(releases[0].status, "promoted");
 
@@ -5286,28 +5302,8 @@ async fn workflow_pack_release_promotes_and_rolls_back_production_agent_version(
             version.id,
         )
         .await
-        .expect("released pack AgentVersion must run in production");
+        .expect("independently released pack AgentVersion must run in production");
     assert_eq!(session.agent_version_id, Some(version.id));
-
-    let rolled_back = state
-        .rollback_workflow_pack_agent_releases(installation_id)
-        .await
-        .expect("rollback pack AgentVersion");
-    assert_eq!(rolled_back.len(), 1);
-    assert_eq!(rolled_back[0].status, "rolled_back");
-    let error = state
-        .create_session_for_agent_version(
-            CreateSession {
-                agent_id: agent.id,
-                environment_id: Some(environment.id),
-                title: "rolled back workflow pack session".to_string(),
-                message: None,
-            },
-            version.id,
-        )
-        .await
-        .expect_err("rolled back pack AgentVersion must fail closed");
-    assert!(error.message.contains("promoted release"));
 }
 
 #[tokio::test]
@@ -11044,6 +11040,7 @@ async fn memory_governance_filters_objects_to_visible_sessions() {
 
 #[tokio::test]
 async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() {
+    let _env = env_lock().lock().expect("env lock");
     let app = test_app().await;
     let manifest_path = ai_governance_manifest_path_string();
     let report: workflow_pack::WorkflowPackValidationReport = request_json(
@@ -11421,6 +11418,48 @@ async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() 
         error["error"].as_str(),
         Some("workflow pack release requires passed eval and release gates")
     );
+
+    let (status, error) = {
+        let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+        let _release_enforcement =
+            EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+        let _release_environment =
+            EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT", "production");
+        request_value(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/workflow-packs/installations/{}/release", installed.id),
+                json!({
+                    "eval_gate_status": "passed",
+                    "release_gate_status": "passed",
+                    "environment": "production",
+                    "gate_evidence": {"release_gate_id": "must-not-bypass-agent-release"}
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await
+    };
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        error["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("independently promoted agent version"))
+    );
+    let still_staged: WorkflowPackInstallation = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!(
+                "/api/workflow-packs/installations/{}",
+                installed.id
+            ))
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(still_staged.status, "staged");
 
     let released: WorkflowPackInstallation = request_json(
         app.clone(),

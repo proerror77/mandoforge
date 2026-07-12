@@ -157,6 +157,11 @@ impl AppState {
         gate_evidence: &Value,
         promoted_at: DateTime<Utc>,
     ) -> Result<Vec<AgentRelease>, AppError> {
+        if crate::store_entities::agent_release_enforcement_required() {
+            return Err(AppError::forbidden(
+                "production workflow pack releases require independently promoted AgentRelease records",
+            ));
+        }
         let environment = environment.trim().to_ascii_lowercase();
         if environment.is_empty() {
             return Err(AppError::bad_request(
@@ -264,6 +269,45 @@ impl AppState {
                 }
                 tx.commit().await?;
             }
+        }
+        Ok(promoted)
+    }
+
+    pub(crate) async fn promoted_agent_releases_for_targets(
+        &self,
+        targets: &[(Uuid, Uuid)],
+        environment: &str,
+    ) -> Result<Vec<AgentRelease>, AppError> {
+        let environment = environment.trim().to_ascii_lowercase();
+        if environment.is_empty() {
+            return Err(AppError::bad_request(
+                "workflow pack release environment is required",
+            ));
+        }
+        let targets = targets.iter().copied().collect::<BTreeSet<_>>();
+        if targets.is_empty() {
+            return Err(AppError::bad_request(
+                "workflow pack release requires materialized agent versions",
+            ));
+        }
+        let releases = self.list_all_agent_releases().await?;
+        let mut promoted = Vec::with_capacity(targets.len());
+        for (agent_id, agent_version_id) in targets {
+            let release = releases
+                .iter()
+                .find(|release| {
+                    release.agent_id == agent_id
+                        && release.agent_version_id == agent_version_id
+                        && release.environment.eq_ignore_ascii_case(&environment)
+                        && release.status == "promoted"
+                })
+                .cloned()
+                .ok_or_else(|| {
+                    AppError::bad_request(format!(
+                        "workflow pack production release requires independently promoted agent version {agent_version_id} for environment {environment}"
+                    ))
+                })?;
+            promoted.push(release);
         }
         Ok(promoted)
     }
