@@ -15699,6 +15699,23 @@ async fn workflow_step_completion_advances_dependency_graph() {
     let _: Value = request_json(
         app.clone(),
         json_request_with_headers(
+            "POST",
+            &format!("/api/workflow-runs/{run_id}/steps"),
+            json!({
+                "step_key": "untrusted-approval-block",
+                "step_type": "agent",
+                "session_id": run["primary_session_id"],
+                "task_grant_id": root_task_grant_id,
+                "status": "requires_action",
+                "output_payload": {"block_reason": "handoff_approval_required"}
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    let _: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
             "PATCH",
             &format!("/api/workflow-step-runs/{draft_step_id}"),
             json!({
