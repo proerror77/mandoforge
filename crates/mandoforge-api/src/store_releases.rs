@@ -1,5 +1,7 @@
+use std::collections::BTreeSet;
+
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -139,6 +141,166 @@ impl AppState {
                 );
                 let rows = sqlx::query(&sql)
                     .bind(self.current_tenant_id())
+                    .fetch_all(pool)
+                    .await?;
+                rows.into_iter().map(agent_release_from_row).collect()
+            }
+        }
+    }
+
+    pub(crate) async fn promote_workflow_pack_agent_versions(
+        &self,
+        installation_id: Uuid,
+        targets: &[(Uuid, Uuid)],
+        environment: &str,
+        promoted_by: &str,
+        gate_evidence: &Value,
+        promoted_at: DateTime<Utc>,
+    ) -> Result<Vec<AgentRelease>, AppError> {
+        let environment = environment.trim().to_ascii_lowercase();
+        if environment.is_empty() {
+            return Err(AppError::bad_request(
+                "workflow pack release environment is required",
+            ));
+        }
+        let targets = targets.iter().copied().collect::<BTreeSet<_>>();
+        if targets.is_empty() {
+            return Err(AppError::bad_request(
+                "workflow pack release requires materialized agent versions",
+            ));
+        }
+        for (agent_id, agent_version_id) in &targets {
+            let version_exists = self
+                .list_agent_versions(*agent_id)
+                .await?
+                .iter()
+                .any(|version| version.id == *agent_version_id);
+            if !version_exists {
+                return Err(AppError::bad_request(
+                    "workflow pack agent binding targets an unknown agent version",
+                ));
+            }
+        }
+
+        let existing = self.list_all_agent_releases().await?;
+        let mut promoted = Vec::with_capacity(targets.len());
+        let mut created = Vec::new();
+        for (agent_id, agent_version_id) in targets {
+            if let Some(release) = existing.iter().find(|release| {
+                release.agent_id == agent_id
+                    && release.agent_version_id == agent_version_id
+                    && release.environment.eq_ignore_ascii_case(&environment)
+                    && release.status == "promoted"
+            }) {
+                promoted.push(release.clone());
+                continue;
+            }
+            let actor = promoted_by.to_string();
+            let release = AgentRelease {
+                id: Uuid::new_v4(),
+                agent_id,
+                agent_version_id,
+                environment: environment.clone(),
+                status: "promoted".to_string(),
+                eval_run_id: None,
+                eval_score: None,
+                min_score: 1.0,
+                requested_by: Some(actor.clone()),
+                requested_at: Some(promoted_at),
+                request_reason: Some("workflow pack release".to_string()),
+                approver_subject: Some(actor.clone()),
+                decision_by: Some(actor.clone()),
+                decided_at: Some(promoted_at),
+                decision_reason: Some("workflow pack eval and release gates passed".to_string()),
+                promoted_by: Some(actor),
+                promoted_at: Some(promoted_at),
+                automation_policy: json!({
+                    "source": "workflow_pack_release",
+                    "workflow_pack_installation_id": installation_id,
+                    "gate_evidence": gate_evidence,
+                }),
+                created_at: promoted_at,
+            };
+            promoted.push(release.clone());
+            created.push(release);
+        }
+
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                for release in created {
+                    store.agent_releases.insert(release.id, release);
+                }
+            }
+            StoreBackend::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                for release in created {
+                    sqlx::query(
+                        "INSERT INTO agent_releases (id, tenant_id, agent_id, agent_version_id, environment, status, eval_run_id, eval_score, min_score, requested_by, requested_at, request_reason, approver_subject, decision_by, decided_at, decision_reason, promoted_by, promoted_at, automation_policy, created_at)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)",
+                    )
+                    .bind(release.id)
+                    .bind(self.current_tenant_id())
+                    .bind(release.agent_id)
+                    .bind(release.agent_version_id)
+                    .bind(&release.environment)
+                    .bind(&release.status)
+                    .bind(release.eval_run_id)
+                    .bind(release.eval_score)
+                    .bind(release.min_score)
+                    .bind(&release.requested_by)
+                    .bind(release.requested_at)
+                    .bind(&release.request_reason)
+                    .bind(&release.approver_subject)
+                    .bind(&release.decision_by)
+                    .bind(release.decided_at)
+                    .bind(&release.decision_reason)
+                    .bind(&release.promoted_by)
+                    .bind(release.promoted_at)
+                    .bind(&release.automation_policy)
+                    .bind(release.created_at)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                tx.commit().await?;
+            }
+        }
+        Ok(promoted)
+    }
+
+    pub(crate) async fn rollback_workflow_pack_agent_releases(
+        &self,
+        installation_id: Uuid,
+    ) -> Result<Vec<AgentRelease>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let mut releases = Vec::new();
+                for release in store.agent_releases.values_mut() {
+                    if release.status == "promoted"
+                        && release.automation_policy["source"] == "workflow_pack_release"
+                        && release.automation_policy["workflow_pack_installation_id"]
+                            == json!(installation_id)
+                    {
+                        release.status = "rolled_back".to_string();
+                        releases.push(release.clone());
+                    }
+                }
+                Ok(releases)
+            }
+            StoreBackend::Postgres(pool) => {
+                let sql = format!(
+                    "UPDATE agent_releases
+                     SET status = 'rolled_back'
+                     WHERE tenant_id = $1
+                       AND status = 'promoted'
+                       AND automation_policy ->> 'source' = 'workflow_pack_release'
+                       AND automation_policy ->> 'workflow_pack_installation_id' = $2
+                     RETURNING {AGENT_RELEASE_COLUMNS}"
+                );
+                let rows = sqlx::query(&sql)
+                    .bind(self.current_tenant_id())
+                    .bind(installation_id.to_string())
                     .fetch_all(pool)
                     .await?;
                 rows.into_iter().map(agent_release_from_row).collect()

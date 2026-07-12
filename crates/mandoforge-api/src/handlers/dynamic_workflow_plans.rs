@@ -30,7 +30,8 @@ use crate::{
     validate_dynamic_workflow_materialization, validate_dynamic_workflow_phases,
     validate_dynamic_workflow_validation, validate_workflow_execution_binding,
     validate_workflow_graph_definition, visible_session_ids_for_principal, workflow_input_digest,
-    workflow_pack_materialization_default_agent, workflow_run_runtime_envelope, workflow_slug,
+    workflow_pack_materialization_default_agent,
+    workflow_run_runtime_envelope_with_pinned_ontology_release, workflow_slug,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -580,7 +581,8 @@ async fn materialize_dynamic_workflow_plan(
         })
     };
     let input_digest = workflow_input_digest(&input_payload);
-    let runtime_envelope = workflow_run_runtime_envelope(
+    let runtime_envelope = workflow_run_runtime_envelope_with_pinned_ontology_release(
+        &state,
         &workflow_definition,
         &execution_strategy,
         runtime_adapter.as_deref(),
@@ -594,7 +596,8 @@ async fn materialize_dynamic_workflow_plan(
             "validation": plan.validation,
             "analysis": plan.analysis
         }),
-    );
+    )
+    .await?;
     let workflow_run = state
         .create_workflow_run(WorkflowRun {
             id: Uuid::new_v4(),

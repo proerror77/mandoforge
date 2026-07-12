@@ -431,6 +431,11 @@ TaskGrant
 
 Rules:
 
+- In a multi-agent workflow, the root grant's tool scope is the workflow-wide
+  delegation ceiling. It is not a standalone capability expansion: executable
+  tools are always the intersection of that ceiling and the pinned
+  `AgentVersion`, and every specialist child grant narrows the same ceiling to
+  its target version.
 - A child grant can only narrow the parent grant.
 - Approval cannot expand a grant.
 - Worker must revalidate the grant before execution.

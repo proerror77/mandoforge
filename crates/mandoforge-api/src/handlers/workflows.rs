@@ -36,7 +36,8 @@ use crate::{
     validate_workflow_execution_binding, validate_workflow_graph_definition,
     visible_session_ids_for_principal, workflow_definition_agent_version_id,
     workflow_definition_step_graph_for_execution, workflow_input_digest,
-    workflow_run_execution_denial, workflow_run_owns_session, workflow_run_runtime_envelope,
+    workflow_run_execution_denial, workflow_run_owns_session,
+    workflow_run_runtime_envelope_with_pinned_ontology_release,
     workflow_step_is_adapter_owned_compensation, workflow_step_status_terminal,
     workflow_step_worker_message, workflow_transition_filter_from_query,
 };
@@ -476,14 +477,16 @@ async fn create_workflow_run(
     let runtime_event_cursor = input.runtime_event_cursor.and_then(normalize_optional_text);
     let delegation_status =
         (execution_strategy == "delegated_runtime").then_some("submitted".to_string());
-    let runtime_envelope = workflow_run_runtime_envelope(
+    let runtime_envelope = workflow_run_runtime_envelope_with_pinned_ontology_release(
+        &state,
         &definition,
         &execution_strategy,
         runtime_adapter.as_deref(),
         runtime_mode.as_deref(),
         external_run_ref.as_deref(),
         &input.runtime_envelope,
-    );
+    )
+    .await?;
     let session_input = CreateSession {
         agent_id: definition.default_agent_id,
         environment_id,

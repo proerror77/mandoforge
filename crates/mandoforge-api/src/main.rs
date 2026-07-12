@@ -311,6 +311,7 @@ pub(crate) use stage2_readiness::build_stage2_completion_readiness;
 pub(crate) use stage2_readiness::parse_stage2_open_gaps;
 pub(crate) use state::AppState;
 use store_backend::{MemoryStore, StoreBackend};
+pub(crate) use store_entities::configured_agent_release_environment;
 pub(crate) use telemetry_events::telemetry_status_for_event;
 pub(crate) use tenant_isolation_runtime::*;
 pub(crate) use types::agent::{

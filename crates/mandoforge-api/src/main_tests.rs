@@ -5233,6 +5233,84 @@ async fn production_session_binds_promoted_agent_version() {
 }
 
 #[tokio::test]
+async fn workflow_pack_release_promotes_and_rolls_back_production_agent_version() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+    let _release_enforcement = EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+    let _release_environment =
+        EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT", "production");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let version = state
+        .current_agent_version(agent.id)
+        .await
+        .expect("seeded agent version");
+    let environment = state
+        .list_environments()
+        .await
+        .expect("list environments")
+        .into_iter()
+        .next()
+        .expect("seeded environment");
+    let installation_id = Uuid::new_v4();
+
+    let releases = state
+        .promote_workflow_pack_agent_versions(
+            installation_id,
+            &[(agent.id, version.id)],
+            "production",
+            "pack-release-test",
+            &json!({"eval_gate_status": "passed", "release_gate_status": "passed"}),
+            Utc::now(),
+        )
+        .await
+        .expect("promote pack AgentVersion");
+    assert_eq!(releases.len(), 1);
+    assert_eq!(releases[0].status, "promoted");
+
+    let session = state
+        .create_session_for_agent_version(
+            CreateSession {
+                agent_id: agent.id,
+                environment_id: Some(environment.id),
+                title: "workflow pack production session".to_string(),
+                message: None,
+            },
+            version.id,
+        )
+        .await
+        .expect("released pack AgentVersion must run in production");
+    assert_eq!(session.agent_version_id, Some(version.id));
+
+    let rolled_back = state
+        .rollback_workflow_pack_agent_releases(installation_id)
+        .await
+        .expect("rollback pack AgentVersion");
+    assert_eq!(rolled_back.len(), 1);
+    assert_eq!(rolled_back[0].status, "rolled_back");
+    let error = state
+        .create_session_for_agent_version(
+            CreateSession {
+                agent_id: agent.id,
+                environment_id: Some(environment.id),
+                title: "rolled back workflow pack session".to_string(),
+                message: None,
+            },
+            version.id,
+        )
+        .await
+        .expect_err("rolled back pack AgentVersion must fail closed");
+    assert!(error.message.contains("promoted release"));
+}
+
+#[tokio::test]
 async fn production_session_rejects_agent_without_promoted_release() {
     let _env = env_lock().lock().expect("env lock");
     let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
@@ -11352,6 +11430,7 @@ async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() 
             json!({
                 "eval_gate_status": "passed",
                 "release_gate_status": "passed",
+                "environment": "production",
                 "reason": "eval and policy gates passed",
                 "gate_evidence": {
                     "eval_run_id": "eval-ai-governance-1",
@@ -11366,6 +11445,35 @@ async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() 
     assert_eq!(released.eval_gate_status, "passed");
     assert_eq!(released.release_gate_status, "passed");
     assert!(released.released_at.is_some());
+    let reader_releases: Vec<AgentRelease> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/agents/{reader_agent_id}/releases"))
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let reader_pack_version_id = Uuid::parse_str(
+        reader_binding["target_id"]
+            .as_str()
+            .expect("reader binding target id"),
+    )
+    .expect("reader AgentVersion UUID");
+    let reader_pack_release = reader_releases
+        .iter()
+        .find(|release| release.agent_version_id == reader_pack_version_id)
+        .expect("released pack reader AgentVersion promotion");
+    assert_eq!(reader_pack_release.environment, "production");
+    assert_eq!(reader_pack_release.status, "promoted");
+    assert_eq!(
+        reader_pack_release.automation_policy["source"],
+        json!("workflow_pack_release")
+    );
+    assert_eq!(
+        reader_pack_release.automation_policy["workflow_pack_installation_id"],
+        json!(installed.id)
+    );
     let released_bindings: Vec<Value> = request_json(
         app.clone(),
         Request::builder()
@@ -11503,6 +11611,31 @@ async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() 
     let root_task_grant_id = released_pack_run["root_task_grant_id"]
         .as_str()
         .expect("root task grant id");
+    let reader_context: ContextPacket = request_json(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/sessions/{primary_session_id}/context-packet"))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(
+        reader_context
+            .agent
+            .tools
+            .iter()
+            .any(|tool| tool == "semantic_object.search")
+    );
+    assert!(
+        !reader_context
+            .agent
+            .tools
+            .iter()
+            .any(|tool| tool == "ontology_type.lookup" || tool == "artifact.create"),
+        "root delegation ceiling must not expand the pinned reader AgentVersion"
+    );
     let initial_steps: Vec<Value> = request_json(
         app.clone(),
         Request::builder()
@@ -11602,6 +11735,18 @@ async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() 
     assert_eq!(rolled_back.eval_gate_status, "passed");
     assert_eq!(rolled_back.release_gate_status, "passed");
     assert_eq!(rolled_back.released_at, released.released_at);
+    let reader_releases_after_rollback: Vec<AgentRelease> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/agents/{reader_agent_id}/releases"))
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(reader_releases_after_rollback.iter().any(|release| {
+        release.id == reader_pack_release.id && release.status == "rolled_back"
+    }));
     assert_eq!(
         rolled_back.gate_evidence["release"]["evidence"]["eval_run_id"],
         json!("eval-ai-governance-1")
@@ -27652,6 +27797,50 @@ async fn workflow_run_pins_ontology_release_before_context_packet_generation() {
     .expect("render context");
     assert_eq!(
         rendered.ontology_scope["ontology_release"]["id"],
+        json!(initial.id)
+    );
+}
+
+#[tokio::test]
+async fn http_workflow_run_pins_ontology_release_into_root_task_grant() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let initial =
+        ontology_release_candidate_for_test(&state, "commerce-vtest-http-workflow-pin").await;
+    gate_ontology_release_with_actor(&state, initial.id, "test")
+        .await
+        .expect("gate initial release");
+    let initial = promote_ontology_release_with_actor(&state, initial.id, "test")
+        .await
+        .expect("promote initial release");
+    let definition =
+        ontology_release_trigger_workflow_definition_for_test(&state, "commerce").await;
+    let app = build_router(state.clone());
+
+    let run: WorkflowRun = request_json(
+        app,
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-runs",
+            json!({"workflow_definition_id": definition.id}),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+
+    assert_eq!(
+        run.runtime_envelope["ontology_release"]["id"],
+        json!(initial.id)
+    );
+    assert_eq!(
+        run.runtime_envelope["ontology_release"]["pinned_by"],
+        json!("workflow_run_start")
+    );
+    let root_grant = state
+        .get_task_grant(run.root_task_grant_id.expect("root task grant"))
+        .await
+        .expect("root task grant");
+    assert_eq!(
+        root_grant.approval_policy["ontology_release_snapshot"]["id"],
         json!(initial.id)
     );
 }

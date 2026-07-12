@@ -18,7 +18,8 @@ use crate::{
     WorkflowPackOnboardingAssessmentRequest, WorkflowPackProfileAsset,
     WorkflowPackProfileAssetSaveRequest, WorkflowPackReleaseRequest, WorkflowPackRollbackRequest,
     WorkflowPackRuntimeObject, WorkflowPackStageRequest, WorkflowPackUpdateRequest,
-    assess_workflow_pack_connector_quality, assess_workflow_pack_onboarding, authorize_request,
+    agent_release_enforcement_required, assess_workflow_pack_connector_quality,
+    assess_workflow_pack_onboarding, authorize_request, configured_agent_release_environment,
     load_and_validate_workflow_pack, new_audit_log, principal_from_request,
     project_workflow_pack_semantic_layer, record_workflow_pack_installation_audit,
     record_workflow_pack_profile_asset_bootstrap_audit, resolve_workflow_pack_manifest_path,
@@ -721,6 +722,7 @@ async fn release_workflow_pack_installation_route(
         Some(id),
     )
     .await?;
+    let principal = principal_from_request(&state, &headers).await?;
     let current = state.get_workflow_pack_installation(id).await?;
     if current.status != "staged" {
         return Err(AppError::bad_request(
@@ -737,6 +739,56 @@ async fn release_workflow_pack_installation_route(
             "workflow pack release gate_evidence must be a JSON object",
         ));
     }
+    let configured_release_environment = configured_agent_release_environment();
+    let release_environment = input
+        .environment
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+        .or_else(|| configured_release_environment.clone())
+        .unwrap_or_else(|| "production".to_string());
+    if agent_release_enforcement_required() {
+        let expected_environment = configured_release_environment.as_deref().ok_or_else(|| {
+            AppError::forbidden(
+                "production workflow pack release requires MANDOFORGE_AGENT_RELEASE_ENVIRONMENT",
+            )
+        })?;
+        if release_environment != expected_environment {
+            return Err(AppError::bad_request(format!(
+                "workflow pack release environment {release_environment} does not match runtime release environment {expected_environment}"
+            )));
+        }
+    }
+    let staged_bindings = state.list_workflow_pack_bindings(id).await?;
+    let agent_release_targets = staged_bindings
+        .iter()
+        .filter(|binding| binding.binding_type == "agent")
+        .map(|binding| {
+            let agent_id = binding
+                .materialized_payload
+                .get("agent_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    AppError::bad_request(
+                        "workflow pack agent binding is missing materialized agent_id",
+                    )
+                })
+                .and_then(|value| {
+                    Uuid::parse_str(value).map_err(|_| {
+                        AppError::bad_request(
+                            "workflow pack agent binding has invalid materialized agent_id",
+                        )
+                    })
+                })?;
+            let agent_version_id = binding.target_id.ok_or_else(|| {
+                AppError::bad_request(
+                    "workflow pack agent binding is missing materialized agent version",
+                )
+            })?;
+            Ok((agent_id, agent_version_id))
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
     let released_at = Utc::now();
     let gate_evidence = json!({
         "reason": input.reason,
@@ -764,6 +816,16 @@ async fn release_workflow_pack_installation_route(
     let released_runtime_objects = state
         .update_workflow_pack_runtime_object_statuses(id, "released")
         .await?;
+    let released_agents = state
+        .promote_workflow_pack_agent_versions(
+            id,
+            &agent_release_targets,
+            &release_environment,
+            &principal.subject_id,
+            &installation.gate_evidence,
+            released_at,
+        )
+        .await?;
     record_workflow_pack_installation_audit(
         &state,
         &installation,
@@ -775,6 +837,9 @@ async fn release_workflow_pack_installation_route(
             "workflow_definition_count": released_definitions.len(),
             "binding_count": released_bindings.len(),
             "runtime_object_count": released_runtime_objects.len(),
+            "agent_release_environment": release_environment,
+            "agent_release_count": released_agents.len(),
+            "agent_release_ids": released_agents.iter().map(|release| release.id).collect::<Vec<_>>(),
         }),
     )
     .await?;
@@ -837,6 +902,7 @@ async fn rollback_workflow_pack_installation_route(
     let rolled_back_runtime_objects = state
         .update_workflow_pack_runtime_object_statuses(id, "rolled_back")
         .await?;
+    let rolled_back_agent_releases = state.rollback_workflow_pack_agent_releases(id).await?;
     record_workflow_pack_installation_audit(
         &state,
         &installation,
@@ -848,6 +914,8 @@ async fn rollback_workflow_pack_installation_route(
             "workflow_definition_count": rolled_back_definitions.len(),
             "binding_count": rolled_back_bindings.len(),
             "runtime_object_count": rolled_back_runtime_objects.len(),
+            "agent_release_count": rolled_back_agent_releases.len(),
+            "agent_release_ids": rolled_back_agent_releases.iter().map(|release| release.id).collect::<Vec<_>>(),
         }),
     )
     .await?;
@@ -887,6 +955,7 @@ async fn archive_workflow_pack_installation_route(
     let archived_runtime_objects = state
         .update_workflow_pack_runtime_object_statuses(id, "archived")
         .await?;
+    let rolled_back_agent_releases = state.rollback_workflow_pack_agent_releases(id).await?;
     record_workflow_pack_installation_audit(
         &state,
         &installation,
@@ -898,6 +967,8 @@ async fn archive_workflow_pack_installation_route(
             "workflow_definition_count": archived_definitions.len(),
             "binding_count": archived_bindings.len(),
             "runtime_object_count": archived_runtime_objects.len(),
+            "agent_release_count": rolled_back_agent_releases.len(),
+            "agent_release_ids": rolled_back_agent_releases.iter().map(|release| release.id).collect::<Vec<_>>(),
         }),
     )
     .await?;

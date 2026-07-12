@@ -765,6 +765,38 @@ pub(crate) fn workflow_run_runtime_envelope(
     Value::Object(envelope)
 }
 
+pub(crate) async fn workflow_run_runtime_envelope_with_pinned_ontology_release(
+    state: &AppState,
+    definition: &WorkflowDefinition,
+    execution_strategy: &str,
+    runtime_adapter: Option<&str>,
+    runtime_mode: Option<&str>,
+    external_run_ref: Option<&str>,
+    request_envelope: &Value,
+) -> Result<Value, AppError> {
+    let mut runtime_envelope = workflow_run_runtime_envelope(
+        definition,
+        execution_strategy,
+        runtime_adapter,
+        runtime_mode,
+        external_run_ref,
+        request_envelope,
+    );
+    let ontology_scopes =
+        workflow_definition_root_task_grant_scope(definition, "semantic_scopes", empty_json_object);
+    if let Some(mut ontology_release) =
+        active_ontology_release_metadata_for_scopes(state, &ontology_scopes).await?
+    {
+        if let Some(metadata) = ontology_release.as_object_mut() {
+            metadata.insert("pinned_by".to_string(), json!("workflow_run_start"));
+        }
+        if let Some(envelope) = runtime_envelope.as_object_mut() {
+            envelope.insert("ontology_release".to_string(), ontology_release);
+        }
+    }
+    Ok(runtime_envelope)
+}
+
 pub(crate) async fn create_workflow_run_from_definition(
     state: &AppState,
     definition: &WorkflowDefinition,
@@ -808,26 +840,16 @@ pub(crate) async fn create_workflow_run_from_definition(
     let input_digest = workflow_input_digest(&input_payload);
     let delegation_status =
         (execution_strategy == "delegated_runtime").then_some("submitted".to_string());
-    let ontology_scopes =
-        workflow_definition_root_task_grant_scope(definition, "semantic_scopes", empty_json_object);
-    let ontology_release =
-        active_ontology_release_metadata_for_scopes(state, &ontology_scopes).await?;
-    let mut runtime_envelope = workflow_run_runtime_envelope(
+    let runtime_envelope = workflow_run_runtime_envelope_with_pinned_ontology_release(
+        state,
         definition,
         &execution_strategy,
         runtime_adapter.as_deref(),
         runtime_mode.as_deref(),
         None,
         &runtime_envelope_request,
-    );
-    if let Some(mut ontology_release) = ontology_release {
-        if let Some(metadata) = ontology_release.as_object_mut() {
-            metadata.insert("pinned_by".to_string(), json!("workflow_run_start"));
-        }
-        if let Some(envelope) = runtime_envelope.as_object_mut() {
-            envelope.insert("ontology_release".to_string(), ontology_release);
-        }
-    }
+    )
+    .await?;
     let run = state
         .create_workflow_run(WorkflowRun {
             id: Uuid::new_v4(),
