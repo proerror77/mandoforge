@@ -17661,6 +17661,130 @@ async fn workflow_run_initialization_failure_is_fail_closed() {
 }
 
 #[tokio::test]
+async fn workflow_run_initialization_materializes_cross_agent_start_step_atomically() {
+    let app = test_app().await;
+    let agents: Vec<Agent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/agents")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let primary_agent = agents.first().expect("seeded primary agent");
+    let specialist: Agent = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/agents",
+            json!({
+                "name": "Initialization Specialist",
+                "kind": "specialist",
+                "agent_role": "specialist",
+                "provider": "openai-compatible",
+                "model": "gpt-5.5-mini",
+                "tools": ["file.read"]
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let specialist_version: AgentVersion = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/agents/{}/versions/1", specialist.id))
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let definition: WorkflowDefinition = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-definitions",
+            json!({
+                "name": "Cross-agent initialization",
+                "entrypoint": "cross-agent-initialization",
+                "default_agent_id": primary_agent.id,
+                "step_graph": {
+                    "steps": [{
+                        "key": "specialist-start",
+                        "type": "agent",
+                        "agent_id": specialist.id,
+                        "agent_version_id": specialist_version.id,
+                        "start": true
+                    }]
+                },
+                "handoff_rules": {
+                    "root_task_grant": {
+                        "tool_scope": {
+                            "read": ["file.read"],
+                            "write": [],
+                            "external_write": []
+                        }
+                    }
+                },
+                "release_state": "released"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+
+    let run: WorkflowRun = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-runs",
+            json!({
+                "workflow_definition_id": definition.id,
+                "title": "materialize specialist start"
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    assert_eq!(run.status, "queued");
+
+    let steps: Vec<WorkflowStepRun> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/workflow-runs/{}/steps", run.id))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let start_step = steps
+        .iter()
+        .find(|step| step.step_key == "specialist-start")
+        .expect("cross-agent start step");
+    assert_eq!(start_step.status, "queued");
+    assert_eq!(start_step.agent_id, Some(specialist.id));
+    assert_eq!(start_step.agent_version_id, Some(specialist_version.id));
+    assert_ne!(start_step.session_id, Some(run.primary_session_id));
+
+    let grants: Vec<TaskGrant> = request_json(
+        app,
+        Request::builder()
+            .uri(format!("/api/workflow-runs/{}/task-grants", run.id))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let child_grant = grants
+        .iter()
+        .find(|grant| grant.id == start_step.task_grant_id.expect("child grant id"))
+        .expect("cross-agent child grant");
+    assert_eq!(child_grant.parent_grant_id, run.root_task_grant_id);
+    assert_eq!(child_grant.grantee_agent_id, Some(specialist.id));
+    assert_eq!(child_grant.workflow_step_run_id, Some(start_step.id));
+}
+
+#[tokio::test]
 async fn workflow_step_run_rejects_agent_version_without_agent_boundary() {
     let app = test_app().await;
     let agents: Vec<Agent> = request_json(

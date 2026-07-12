@@ -652,7 +652,9 @@ impl AppState {
                     .workflow_runs
                     .get(&step.workflow_run_id)
                     .ok_or_else(|| AppError::not_found("workflow run not found"))?;
-                if !crate::workflow_run_status_allows_execution(&run.status) {
+                if run.status != "initializing"
+                    && !crate::workflow_run_status_allows_execution(&run.status)
+                {
                     return Err(AppError::forbidden("workflow run is not executable"));
                 }
                 if store.workflow_step_runs.contains_key(&step.id) {
@@ -696,7 +698,9 @@ impl AppState {
                 .fetch_optional(&mut *tx)
                 .await?
                 .ok_or_else(|| AppError::not_found("workflow run not found"))?;
-                if !crate::workflow_run_status_allows_execution(&run_status) {
+                if run_status != "initializing"
+                    && !crate::workflow_run_status_allows_execution(&run_status)
+                {
                     return Err(AppError::forbidden("workflow run is not executable"));
                 }
                 if let Some(parent_grant_id) = grant.parent_grant_id {
