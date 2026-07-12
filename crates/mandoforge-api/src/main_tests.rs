@@ -12425,7 +12425,7 @@ async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() 
     assert_eq!(
         error["error"].as_str(),
         Some(
-            "governed or duplicate definition-owned workflow steps cannot be created through the workflow step API"
+            "governed definition-owned workflow steps cannot be created through the workflow step API"
         )
     );
 
@@ -15431,6 +15431,29 @@ async fn workflow_runs_create_primary_session_and_step_runs() {
     assert_eq!(step["session_id"], json!(session_id));
     assert_eq!(step["task_grant_id"], json!(root_task_grant_id));
 
+    let (status, error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/workflow-runs/{}/steps", run["id"].as_str().unwrap()),
+            json!({
+                "step_key": "draft",
+                "step_type": "agent",
+                "agent_id": agent.id,
+                "session_id": session_id,
+                "task_grant_id": root_task_grant_id,
+                "status": "queued"
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        error["error"].as_str(),
+        Some("workflow step key already exists for this workflow run")
+    );
+
     let listed_steps: Vec<Value> = request_json(
         app.clone(),
         Request::builder()
@@ -15461,6 +15484,72 @@ async fn workflow_runs_create_primary_session_and_step_runs() {
     )
     .await;
     assert!(listed_runs.iter().any(|listed| listed["id"] == run["id"]));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn workflow_step_key_reservation_is_atomic() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let workflow_run_id = Uuid::new_v4();
+    let caller_count = 32;
+    let start = Arc::new(tokio::sync::Barrier::new(caller_count));
+    let mut callers = Vec::with_capacity(caller_count);
+
+    for _ in 0..caller_count {
+        let caller_state = state.clone();
+        let start = start.clone();
+        callers.push(tokio::spawn(async move {
+            start.wait().await;
+            let now = Utc::now();
+            caller_state
+                .create_workflow_step_run_if_key_absent(WorkflowStepRun {
+                    id: Uuid::new_v4(),
+                    workflow_run_id,
+                    step_key: "external-review".to_string(),
+                    step_type: "agent".to_string(),
+                    agent_id: None,
+                    agent_version_id: None,
+                    session_id: None,
+                    thread_id: None,
+                    handoff_id: None,
+                    task_grant_id: None,
+                    environment_id: None,
+                    status: "queued".to_string(),
+                    input_payload: json!({}),
+                    output_payload: json!({}),
+                    artifact_ids: Vec::new(),
+                    approval_ids: Vec::new(),
+                    tool_call_ids: Vec::new(),
+                    claimed_by_worker: None,
+                    lease_expires_at: None,
+                    context_packet_id: None,
+                    started_at: None,
+                    completed_at: None,
+                    scheduled_at: None,
+                    created_at: now,
+                    updated_at: now,
+                })
+                .await
+                .expect("reserve workflow step key")
+        }));
+    }
+
+    let mut created_count = 0;
+    for caller in callers {
+        if caller
+            .await
+            .expect("workflow step reservation task")
+            .is_some()
+        {
+            created_count += 1;
+        }
+    }
+    assert_eq!(created_count, 1);
+    let stored = state
+        .list_workflow_step_runs(workflow_run_id)
+        .await
+        .expect("list reserved workflow steps");
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].step_key, "external-review");
 }
 
 #[tokio::test]

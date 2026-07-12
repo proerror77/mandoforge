@@ -16,6 +16,51 @@ use crate::{
 
 const TASK_GRANT_COLUMNS: &str = "id, workflow_run_id, workflow_step_run_id, session_id, parent_grant_id, source_event_id, source_handoff_id, issuer_subject, grantee_agent_id, grantee_session_id, agent_class, objective, risk_level, status, expires_at, max_turns, max_tool_calls, max_runtime_seconds, max_cost_usd_micros, turns_used, tool_calls_used, cost_usd_micros_used, semantic_scopes, memory_scope, tool_scope, connector_scope, approval_policy, external_effects, context_packet_id, policy_revision_id, immutable_args_hash, audit_trace_id, created_at, updated_at";
 
+async fn insert_workflow_step_run<'e, E>(
+    executor: E,
+    tenant_id: Uuid,
+    step: WorkflowStepRun,
+) -> Result<WorkflowStepRun, AppError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let row = sqlx::query(
+        "INSERT INTO workflow_step_runs
+            (id, tenant_id, workflow_run_id, step_key, step_type, agent_id, agent_version_id, session_id, thread_id, handoff_id, task_grant_id, environment_id, status, input_payload, output_payload, artifact_ids, approval_ids, tool_call_ids, claimed_by_worker, lease_expires_at, context_packet_id, started_at, completed_at, scheduled_at, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
+         RETURNING id, workflow_run_id, step_key, step_type, agent_id, agent_version_id, session_id, thread_id, handoff_id, task_grant_id, environment_id, status, input_payload, output_payload, artifact_ids, approval_ids, tool_call_ids, claimed_by_worker, lease_expires_at, context_packet_id, started_at, completed_at, scheduled_at, created_at, updated_at",
+    )
+    .bind(step.id)
+    .bind(tenant_id)
+    .bind(step.workflow_run_id)
+    .bind(&step.step_key)
+    .bind(&step.step_type)
+    .bind(step.agent_id)
+    .bind(step.agent_version_id)
+    .bind(step.session_id)
+    .bind(step.thread_id)
+    .bind(step.handoff_id)
+    .bind(step.task_grant_id)
+    .bind(step.environment_id)
+    .bind(&step.status)
+    .bind(&step.input_payload)
+    .bind(&step.output_payload)
+    .bind(serde_json::to_value(&step.artifact_ids)?)
+    .bind(serde_json::to_value(&step.approval_ids)?)
+    .bind(serde_json::to_value(&step.tool_call_ids)?)
+    .bind(&step.claimed_by_worker)
+    .bind(step.lease_expires_at)
+    .bind(step.context_packet_id)
+    .bind(step.started_at)
+    .bind(step.completed_at)
+    .bind(step.scheduled_at)
+    .bind(step.created_at)
+    .bind(step.updated_at)
+    .fetch_one(executor)
+    .await?;
+    workflow_step_run_from_row(row)
+}
+
 #[derive(Clone, Copy)]
 enum TaskGrantReservation {
     Turn,
@@ -568,41 +613,54 @@ impl AppState {
                 Ok(step)
             }
             StoreBackend::Postgres(pool) => {
-                let row = sqlx::query(
-                    "INSERT INTO workflow_step_runs
-                        (id, tenant_id, workflow_run_id, step_key, step_type, agent_id, agent_version_id, session_id, thread_id, handoff_id, task_grant_id, environment_id, status, input_payload, output_payload, artifact_ids, approval_ids, tool_call_ids, claimed_by_worker, lease_expires_at, context_packet_id, started_at, completed_at, scheduled_at, created_at, updated_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
-                     RETURNING id, workflow_run_id, step_key, step_type, agent_id, agent_version_id, session_id, thread_id, handoff_id, task_grant_id, environment_id, status, input_payload, output_payload, artifact_ids, approval_ids, tool_call_ids, claimed_by_worker, lease_expires_at, context_packet_id, started_at, completed_at, scheduled_at, created_at, updated_at",
+                insert_workflow_step_run(pool, self.current_tenant_id(), step).await
+            }
+        }
+    }
+
+    pub(crate) async fn create_workflow_step_run_if_key_absent(
+        &self,
+        step: WorkflowStepRun,
+    ) -> Result<Option<WorkflowStepRun>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                if store.workflow_step_runs.values().any(|existing| {
+                    existing.workflow_run_id == step.workflow_run_id
+                        && existing.step_key == step.step_key
+                }) {
+                    return Ok(None);
+                }
+                store.workflow_step_runs.insert(step.id, step.clone());
+                Ok(Some(step))
+            }
+            StoreBackend::Postgres(pool) => {
+                let tenant_id = self.current_tenant_id();
+                let lock_key = format!("{tenant_id}:{}:{}", step.workflow_run_id, step.step_key);
+                let mut tx = pool.begin().await?;
+                sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                    .bind(lock_key)
+                    .execute(&mut *tx)
+                    .await?;
+                let exists: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (
+                        SELECT 1
+                        FROM workflow_step_runs
+                        WHERE tenant_id = $1 AND workflow_run_id = $2 AND step_key = $3
+                     )",
                 )
-                .bind(step.id)
-                .bind(self.current_tenant_id())
+                .bind(tenant_id)
                 .bind(step.workflow_run_id)
                 .bind(&step.step_key)
-                .bind(&step.step_type)
-                .bind(step.agent_id)
-                .bind(step.agent_version_id)
-                .bind(step.session_id)
-                .bind(step.thread_id)
-                .bind(step.handoff_id)
-                .bind(step.task_grant_id)
-                .bind(step.environment_id)
-                .bind(&step.status)
-                .bind(&step.input_payload)
-                .bind(&step.output_payload)
-                .bind(serde_json::to_value(&step.artifact_ids)?)
-                .bind(serde_json::to_value(&step.approval_ids)?)
-                .bind(serde_json::to_value(&step.tool_call_ids)?)
-                .bind(&step.claimed_by_worker)
-                .bind(step.lease_expires_at)
-                .bind(step.context_packet_id)
-                .bind(step.started_at)
-                .bind(step.completed_at)
-                .bind(step.scheduled_at)
-                .bind(step.created_at)
-                .bind(step.updated_at)
-                .fetch_one(pool)
+                .fetch_one(&mut *tx)
                 .await?;
-                workflow_step_run_from_row(row)
+                if exists {
+                    tx.commit().await?;
+                    return Ok(None);
+                }
+                let step = insert_workflow_step_run(&mut *tx, tenant_id, step).await?;
+                tx.commit().await?;
+                Ok(Some(step))
             }
         }
     }

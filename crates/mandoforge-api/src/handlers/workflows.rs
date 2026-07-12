@@ -785,14 +785,9 @@ async fn create_workflow_step_run(
             })?,
             None => false,
         };
-        let duplicate = state
-            .list_workflow_step_runs(run.id)
-            .await?
-            .iter()
-            .any(|step| step.step_key == step_key);
-        if isolated_handoff_context || approval_required || duplicate {
+        if isolated_handoff_context || approval_required {
             return Err(AppError::forbidden(
-                "governed or duplicate definition-owned workflow steps cannot be created through the workflow step API",
+                "governed definition-owned workflow steps cannot be created through the workflow step API",
             ));
         }
     }
@@ -865,7 +860,7 @@ async fn create_workflow_step_run(
     }
     let now = Utc::now();
     let step = state
-        .create_workflow_step_run(WorkflowStepRun {
+        .create_workflow_step_run_if_key_absent(WorkflowStepRun {
             id: Uuid::new_v4(),
             workflow_run_id: run.id,
             step_key,
@@ -892,7 +887,10 @@ async fn create_workflow_step_run(
             created_at: now,
             updated_at: now,
         })
-        .await?;
+        .await?
+        .ok_or_else(|| {
+            AppError::conflict("workflow step key already exists for this workflow run")
+        })?;
     record_workflow_step_run_created(&state, &run, &step).await?;
     Ok(Json(step))
 }
