@@ -10,6 +10,10 @@ use crate::{AgentRelease, AgentVersion, AppError, AppState, CreateAgentRelease};
 
 pub(crate) const AGENT_RELEASE_COLUMNS: &str = "id, agent_id, agent_version_id, environment, status, eval_run_id, eval_score, min_score, requested_by, requested_at, request_reason, approver_subject, decision_by, decided_at, decision_reason, promoted_by, promoted_at, automation_policy, created_at";
 
+fn agent_release_is_independent(release: &AgentRelease) -> bool {
+    release.automation_policy["source"] != "workflow_pack_release"
+}
+
 pub(crate) fn new_workflow_pack_agent_release(
     installation_id: Uuid,
     agent_id: Uuid,
@@ -179,6 +183,7 @@ impl AppState {
                         && release.agent_version_id == agent_version_id
                         && release.status == "promoted"
                         && release.environment.eq_ignore_ascii_case(environment)
+                        && agent_release_is_independent(release)
                 }))
             }
             StoreBackend::Postgres(pool) => {
@@ -191,6 +196,7 @@ impl AppState {
                           AND agent_version_id = $3
                           AND lower(environment) = lower($4)
                           AND status = 'promoted'
+                          AND COALESCE(automation_policy ->> 'source', '') <> 'workflow_pack_release'
                     )",
                 )
                 .bind(self.current_tenant_id())
@@ -216,6 +222,7 @@ impl AppState {
             .filter(|release| {
                 release.status == "promoted"
                     && release.environment.eq_ignore_ascii_case(environment)
+                    && agent_release_is_independent(release)
             })
             .max_by_key(|release| {
                 (

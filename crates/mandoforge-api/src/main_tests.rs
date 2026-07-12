@@ -5236,6 +5236,40 @@ async fn production_session_binds_promoted_agent_version() {
 }
 
 #[tokio::test]
+async fn production_session_rejects_pack_generated_promotion() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+    let _release_enforcement = EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+    let _release_environment =
+        EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT", "production");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let (agent, version, environment) = seed_promoted_agent_for_test(&state, "production").await;
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test requires memory store");
+    };
+    for release in inner.write().await.agent_releases.values_mut() {
+        release.automation_policy = json!({"source": "workflow_pack_release"});
+    }
+
+    assert!(
+        !state
+            .agent_version_has_promoted_release(agent.id, version.id, "production")
+            .await
+            .expect("check production admission release")
+    );
+    let error = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: Some(environment.id),
+            title: "pack-generated promotion must not admit production".to_string(),
+            message: None,
+        })
+        .await
+        .expect_err("pack-generated release is not an independent promotion");
+    assert!(error.message.contains("promoted release"));
+}
+
+#[tokio::test]
 async fn workflow_pack_release_requires_independent_production_agent_promotion() {
     let _env = env_lock().lock().expect("env lock");
     let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
