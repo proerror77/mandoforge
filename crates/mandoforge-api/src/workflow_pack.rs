@@ -88,6 +88,8 @@ pub struct AgentRef {
     #[serde(default)]
     pub tool_scope: ToolScope,
     #[serde(default)]
+    pub native_connector_actions: Vec<String>,
+    #[serde(default)]
     pub handoffs: Vec<HandoffRule>,
 }
 
@@ -634,6 +636,7 @@ impl WorkflowPackManifest {
             agent_ids.insert(agent.id.clone());
             declared_roles.insert(agent.role);
         }
+        self.validate_native_connector_action_scopes()?;
         for role in [AgentRole::Reader, AgentRole::Analyzer, AgentRole::Writer] {
             if !declared_roles.contains(&role) {
                 bail!(
@@ -683,6 +686,71 @@ impl WorkflowPackManifest {
         }
 
         Ok(agent_ids)
+    }
+
+    fn validate_native_connector_action_scopes(&self) -> Result<()> {
+        let native_connector_agents = self
+            .agents
+            .iter()
+            .filter(|agent| {
+                agent
+                    .tool_scope
+                    .external_write
+                    .iter()
+                    .any(|tool| tool == "native.connector.call")
+            })
+            .collect::<Vec<_>>();
+        let declared_action_ids = self
+            .actions
+            .iter()
+            .map(|action| action.id.as_str())
+            .collect::<BTreeSet<_>>();
+
+        for agent in &self.agents {
+            let native_connector_enabled = native_connector_agents
+                .iter()
+                .any(|candidate| candidate.id == agent.id);
+            if !native_connector_enabled && !agent.native_connector_actions.is_empty() {
+                bail!(
+                    "agent {} declares native_connector_actions without native.connector.call",
+                    agent.id
+                );
+            }
+            if native_connector_enabled && declared_action_ids.is_empty() {
+                bail!(
+                    "agent {} declares native.connector.call but the pack has no actions",
+                    agent.id
+                );
+            }
+            if native_connector_enabled
+                && native_connector_agents.len() > 1
+                && agent.native_connector_actions.is_empty()
+            {
+                bail!(
+                    "agent {} must declare native_connector_actions when multiple agents can call native connectors",
+                    agent.id
+                );
+            }
+            let mut scoped_actions = BTreeSet::new();
+            for action_id in &agent.native_connector_actions {
+                validate_id("native_connector_actions", action_id)?;
+                if !scoped_actions.insert(action_id.as_str()) {
+                    bail!(
+                        "agent {} declares duplicate native connector action {}",
+                        agent.id,
+                        action_id
+                    );
+                }
+                if !declared_action_ids.contains(action_id.as_str()) {
+                    bail!(
+                        "agent {} native_connector_actions references missing action {}",
+                        agent.id,
+                        action_id
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     fn validate_workflow_file_contract(
@@ -2020,6 +2088,53 @@ release_gates:
     }
 
     #[test]
+    fn rejects_ambiguous_native_connector_action_scope() {
+        let input = std::fs::read_to_string(ecommerce_tmall_manifest_path())
+            .expect("tmall fixture manifest");
+        let mut manifest = WorkflowPackManifest::from_yaml_str(&input).expect("manifest parses");
+        let second_executor = manifest
+            .agents
+            .iter_mut()
+            .find(|agent| agent.id == "response-writer")
+            .expect("response writer");
+        second_executor
+            .tool_scope
+            .external_write
+            .push("native.connector.call".to_string());
+
+        let error = manifest
+            .validate_native_connector_action_scopes()
+            .expect_err("multiple native connector agents need explicit action scopes");
+        assert!(
+            error
+                .to_string()
+                .contains("must declare native_connector_actions when multiple agents")
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_native_connector_action_scope() {
+        let input = std::fs::read_to_string(ecommerce_tmall_manifest_path())
+            .expect("tmall fixture manifest");
+        let mut manifest = WorkflowPackManifest::from_yaml_str(&input).expect("manifest parses");
+        let executor = manifest
+            .agents
+            .iter_mut()
+            .find(|agent| agent.id == "tmall-executor")
+            .expect("tmall executor");
+        executor.native_connector_actions = vec!["missing-action".to_string()];
+
+        let error = manifest
+            .validate_native_connector_action_scopes()
+            .expect_err("unknown native connector actions must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("references missing action missing-action")
+        );
+    }
+
+    #[test]
     fn rejects_tool_scope_policy_mismatch_for_worker_roles() {
         let input = std::fs::read_to_string(fixture_manifest_path()).expect("fixture manifest");
         let input = input.replace(
@@ -2048,6 +2163,7 @@ release_gates:
                 write: vec!["artifact.write".to_string()],
                 ..ToolScope::default()
             },
+            native_connector_actions: vec![],
             handoffs: vec![],
         };
         let reader_error =
@@ -2066,6 +2182,7 @@ release_gates:
                 read: vec!["connector.read".to_string()],
                 ..ToolScope::default()
             },
+            native_connector_actions: vec![],
             handoffs: vec![],
         };
         let analyzer_error =
@@ -2081,6 +2198,7 @@ release_gates:
                 write: vec!["artifact.write".to_string()],
                 external_write: vec!["email.send".to_string()],
             },
+            native_connector_actions: vec![],
             handoffs: vec![],
         };
         let writer_error =

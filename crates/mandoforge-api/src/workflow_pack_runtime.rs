@@ -406,7 +406,7 @@ pub(crate) async fn workflow_pack_materialize_agents(
     for agent_ref in &manifest.agents {
         let contract = workflow_pack_load_agent_file(&package_dir, agent_ref)?;
         let tools = workflow_pack_agent_tools(agent_ref);
-        let tool_policy = workflow_pack_agent_tool_policy(agent_ref);
+        let tool_policy = workflow_pack_agent_tool_policy(&manifest, &package_dir, agent_ref)?;
         let allowed_targets = agent_ref
             .handoffs
             .iter()
@@ -507,13 +507,28 @@ pub(crate) fn workflow_pack_agent_tools(agent: &workflow_pack::AgentRef) -> Vec<
         .collect()
 }
 
-pub(crate) fn workflow_pack_agent_tool_policy(agent: &workflow_pack::AgentRef) -> Value {
-    json!({
+pub(crate) fn workflow_pack_agent_tool_policy(
+    manifest: &workflow_pack::WorkflowPackManifest,
+    package_dir: &FsPath,
+    agent: &workflow_pack::AgentRef,
+) -> Result<Value, AppError> {
+    let mut policy = json!({
         "source": "workflow_pack",
         "tool_scope": agent.tool_scope,
         "runtime_tool_scope": workflow_pack_runtime_tool_scope(&agent.tool_scope),
         "approval_required_for_external_write": !agent.tool_scope.external_write.is_empty(),
-    })
+    });
+    let action_ids = workflow_pack_native_connector_action_ids_for_agent(manifest, agent)?;
+    if !action_ids.is_empty() {
+        let (connector_scope, external_effects) =
+            workflow_pack_external_connector_grant(manifest, package_dir, &action_ids)?;
+        let object = policy
+            .as_object_mut()
+            .expect("workflow pack agent policy must be an object");
+        object.insert("connector_scope".to_string(), connector_scope);
+        object.insert("external_effects".to_string(), external_effects);
+    }
+    Ok(policy)
 }
 
 pub(crate) fn workflow_pack_runtime_tools_for_scope(scope: &str) -> Vec<String> {
@@ -1217,15 +1232,26 @@ pub(crate) fn workflow_pack_workflow_handoff_rules(
     package_dir: &FsPath,
 ) -> Result<Value, AppError> {
     let tool_scope = workflow_pack_workflow_tool_scope(manifest, workflow, workflow_file);
-    let external_connector_grant = tool_scope["external_write"]
-        .as_array()
-        .is_some_and(|tools| {
-            tools
-                .iter()
-                .any(|tool| tool.as_str() == Some("native.connector.call"))
-        })
-        .then(|| workflow_pack_external_connector_grant(manifest, package_dir))
-        .transpose()?;
+    let workflow_agent_refs = workflow_pack_workflow_agent_refs(manifest, workflow, workflow_file);
+    let mut native_connector_action_ids = BTreeSet::new();
+    for agent in manifest
+        .agents
+        .iter()
+        .filter(|agent| workflow_agent_refs.contains(&agent.id))
+    {
+        native_connector_action_ids.extend(workflow_pack_native_connector_action_ids_for_agent(
+            manifest, agent,
+        )?);
+    }
+    let external_connector_grant = if native_connector_action_ids.is_empty() {
+        None
+    } else {
+        Some(workflow_pack_external_connector_grant(
+            manifest,
+            package_dir,
+            &native_connector_action_ids,
+        )?)
+    };
     let mut rules = if workflow_file.handoff_rules.is_object() {
         workflow_file.handoff_rules.clone()
     } else {
@@ -1253,26 +1279,80 @@ pub(crate) fn workflow_pack_workflow_handoff_rules(
             root_task_grant
                 .entry("memory_scope".to_string())
                 .or_insert_with(workflow_pack_root_task_grant_memory_scope);
-            root_task_grant
-                .entry("tool_scope".to_string())
-                .or_insert_with(|| tool_scope.clone());
+            workflow_pack_insert_or_validate_root_scope(
+                root_task_grant,
+                "tool_scope",
+                &tool_scope,
+                false,
+            )?;
             if let Some((connector_scope, external_effects)) = &external_connector_grant {
-                root_task_grant
-                    .entry("connector_scope".to_string())
-                    .or_insert_with(|| connector_scope.clone());
-                root_task_grant
-                    .entry("external_effects".to_string())
-                    .or_insert_with(|| external_effects.clone());
+                workflow_pack_insert_or_validate_root_scope(
+                    root_task_grant,
+                    "connector_scope",
+                    connector_scope,
+                    true,
+                )?;
+                workflow_pack_insert_or_validate_root_scope(
+                    root_task_grant,
+                    "external_effects",
+                    external_effects,
+                    false,
+                )?;
             }
         }
     }
     Ok(rules)
 }
 
+fn workflow_pack_insert_or_validate_root_scope(
+    root_task_grant: &mut serde_json::Map<String, Value>,
+    key: &str,
+    generated_scope: &Value,
+    require_native_bindings: bool,
+) -> Result<(), AppError> {
+    let Some(explicit_scope) = root_task_grant.get(key) else {
+        root_task_grant.insert(key.to_string(), generated_scope.clone());
+        return Ok(());
+    };
+    if !explicit_scope.is_object() {
+        return Err(AppError::bad_request(format!(
+            "workflow pack root task grant {key} must be an object"
+        )));
+    }
+    if require_native_bindings
+        && explicit_scope
+            .get("native_operation_bindings")
+            .and_then(Value::as_array)
+            .is_none()
+    {
+        return Err(AppError::bad_request(
+            "workflow pack root task grant connector_scope must preserve native_operation_bindings",
+        ));
+    }
+    if !json_scope_contains(generated_scope, explicit_scope) {
+        return Err(AppError::bad_request(format!(
+            "workflow pack root task grant {key} cannot expand generated agent scope"
+        )));
+    }
+    Ok(())
+}
+
 fn workflow_pack_external_connector_grant(
     manifest: &workflow_pack::WorkflowPackManifest,
     package_dir: &FsPath,
+    action_ids: &BTreeSet<String>,
 ) -> Result<(Value, Value), AppError> {
+    for action_id in action_ids {
+        if !manifest
+            .actions
+            .iter()
+            .any(|action| action.id == *action_id)
+        {
+            return Err(AppError::bad_request(format!(
+                "workflow pack native connector scope references missing action {action_id}"
+            )));
+        }
+    }
     let writable_connector_ids = manifest
         .connectors
         .iter()
@@ -1289,20 +1369,40 @@ fn workflow_pack_external_connector_grant(
     }
 
     let mut native_operation_bindings = BTreeSet::new();
-    for action in &manifest.actions {
+    for action in manifest
+        .actions
+        .iter()
+        .filter(|action| action_ids.contains(&action.id))
+    {
         let action_type = workflow_pack_load_action_type_file(package_dir, action)?;
-        let Some(connector_id) = workflow_pack_value_string(&action_type, "connector_id") else {
-            continue;
-        };
+        let connector_id =
+            workflow_pack_value_string(&action_type, "connector_id").ok_or_else(|| {
+                AppError::bad_request(format!(
+                    "workflow pack native connector action {} is missing connector_id",
+                    action.id
+                ))
+            })?;
         if !writable_connector_ids.contains(&connector_id) {
-            continue;
+            return Err(AppError::bad_request(format!(
+                "workflow pack native connector action {} does not target a writable native connector",
+                action.id
+            )));
         }
-        if let (Some(operation_id), Some(side_effect_class)) = (
-            workflow_pack_value_string(&action_type, "operation_id"),
-            workflow_pack_value_string(&action_type, "side_effect_class"),
-        ) {
-            native_operation_bindings.insert((connector_id, operation_id, side_effect_class));
-        }
+        let operation_id =
+            workflow_pack_value_string(&action_type, "operation_id").ok_or_else(|| {
+                AppError::bad_request(format!(
+                    "workflow pack native connector action {} is missing operation_id",
+                    action.id
+                ))
+            })?;
+        let side_effect_class = workflow_pack_value_string(&action_type, "side_effect_class")
+            .ok_or_else(|| {
+                AppError::bad_request(format!(
+                    "workflow pack native connector action {} is missing side_effect_class",
+                    action.id
+                ))
+            })?;
+        native_operation_bindings.insert((connector_id, operation_id, side_effect_class));
     }
     if native_operation_bindings.is_empty() {
         return Err(AppError::bad_request(
@@ -1350,11 +1450,50 @@ fn workflow_pack_external_connector_grant(
     ))
 }
 
-pub(crate) fn workflow_pack_workflow_tool_scope(
+fn workflow_pack_native_connector_action_ids_for_agent(
+    manifest: &workflow_pack::WorkflowPackManifest,
+    agent: &workflow_pack::AgentRef,
+) -> Result<BTreeSet<String>, AppError> {
+    if !agent
+        .tool_scope
+        .external_write
+        .iter()
+        .any(|tool| tool == "native.connector.call")
+    {
+        return Ok(BTreeSet::new());
+    }
+    if !agent.native_connector_actions.is_empty() {
+        return Ok(agent.native_connector_actions.iter().cloned().collect());
+    }
+    let native_connector_agent_count = manifest
+        .agents
+        .iter()
+        .filter(|candidate| {
+            candidate
+                .tool_scope
+                .external_write
+                .iter()
+                .any(|tool| tool == "native.connector.call")
+        })
+        .count();
+    if native_connector_agent_count != 1 {
+        return Err(AppError::bad_request(format!(
+            "workflow pack agent {} must declare native_connector_actions when multiple agents can call native connectors",
+            agent.id
+        )));
+    }
+    Ok(manifest
+        .actions
+        .iter()
+        .map(|action| action.id.clone())
+        .collect())
+}
+
+fn workflow_pack_workflow_agent_refs(
     manifest: &workflow_pack::WorkflowPackManifest,
     workflow: &workflow_pack::WorkflowRef,
     workflow_file: &WorkflowPackWorkflowFile,
-) -> Value {
+) -> BTreeSet<String> {
     let mut agent_refs = BTreeSet::from([workflow.entry_agent.clone()]);
     for step in &workflow_file.steps {
         if let Some(agent_ref) = workflow_pack_workflow_step_string(step, "agent") {
@@ -1394,6 +1533,15 @@ pub(crate) fn workflow_pack_workflow_tool_scope(
             break;
         }
     }
+    agent_refs
+}
+
+pub(crate) fn workflow_pack_workflow_tool_scope(
+    manifest: &workflow_pack::WorkflowPackManifest,
+    workflow: &workflow_pack::WorkflowRef,
+    workflow_file: &WorkflowPackWorkflowFile,
+) -> Value {
+    let agent_refs = workflow_pack_workflow_agent_refs(manifest, workflow, workflow_file);
     let mut read = BTreeSet::new();
     let mut write = BTreeSet::new();
     let mut external_write = BTreeSet::new();
@@ -1523,6 +1671,7 @@ pub(crate) fn workflow_pack_materialized_bindings(
             json!({
                 "role": &agent.role,
                 "tool_scope": &agent.tool_scope,
+                "native_connector_actions": &agent.native_connector_actions,
                 "handoffs": &agent.handoffs,
                 "source_digest": workflow_pack_source_digest(&package_dir, &agent.path)?,
             }),

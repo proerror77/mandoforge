@@ -1086,6 +1086,11 @@ pub(crate) async fn materialize_workflow_graph_step_with_policy_context(
             .find(|version| version.id == agent_version_id)
             .ok_or_else(|| AppError::not_found("workflow step agent version not found"))?;
         let remaining_budgets = task_grant_remaining_budgets(root_grant, now)?;
+        let (connector_scope, external_effects) = child_connector_scopes_for_agent_version(
+            &root_grant.connector_scope,
+            &root_grant.external_effects,
+            &target_version,
+        )?;
         let step_id = Uuid::new_v4();
         let mut child_grant = TaskGrant {
             id: Uuid::new_v4(),
@@ -1119,9 +1124,9 @@ pub(crate) async fn materialize_workflow_graph_step_with_policy_context(
             semantic_scopes: root_grant.semantic_scopes.clone(),
             memory_scope: child_handoff_memory_scope(&root_grant.memory_scope),
             tool_scope: child_tool_scope_for_tools(&root_grant.tool_scope, &target_version.tools),
-            connector_scope: root_grant.connector_scope.clone(),
+            connector_scope,
             approval_policy: root_grant.approval_policy.clone(),
-            external_effects: root_grant.external_effects.clone(),
+            external_effects,
             context_packet_id: None,
             policy_revision_id: root_grant.policy_revision_id,
             immutable_args_hash: None,

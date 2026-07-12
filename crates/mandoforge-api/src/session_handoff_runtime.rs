@@ -572,6 +572,11 @@ pub(crate) async fn materialize_workflow_handoff_assignment(
     let step_id = Uuid::new_v4();
     let now = Utc::now();
     let remaining_budgets = task_grant_remaining_budgets(&parent_grant, now)?;
+    let (connector_scope, external_effects) = child_connector_scopes_for_agent_version(
+        &parent_grant.connector_scope,
+        &parent_grant.external_effects,
+        &specialist_version,
+    )?;
     let objective = manager_plan
         .task_intake
         .get("goal")
@@ -609,9 +614,9 @@ pub(crate) async fn materialize_workflow_handoff_assignment(
         semantic_scopes: handoff.semantic_scopes.clone(),
         memory_scope: child_handoff_memory_scope(&parent_grant.memory_scope),
         tool_scope: child_tool_scope_for_tools(&parent_grant.tool_scope, &specialist_version.tools),
-        connector_scope: parent_grant.connector_scope.clone(),
+        connector_scope,
         approval_policy: parent_grant.approval_policy.clone(),
-        external_effects: parent_grant.external_effects.clone(),
+        external_effects,
         context_packet_id: None,
         policy_revision_id: parent_grant.policy_revision_id,
         immutable_args_hash: None,
@@ -706,6 +711,196 @@ pub(crate) fn child_tool_scope_for_tools(parent: &Value, tools: &[String]) -> Va
         scope.insert(key.to_string(), Value::Array(values));
     }
     Value::Object(scope)
+}
+
+pub(crate) fn child_connector_scopes_for_agent_version(
+    parent_connector_scope: &Value,
+    parent_external_effects: &Value,
+    agent_version: &AgentVersion,
+) -> Result<(Value, Value), AppError> {
+    if !agent_version
+        .tools
+        .iter()
+        .any(|tool| tool == "native.connector.call")
+    {
+        return Ok((
+            parent_connector_scope.clone(),
+            parent_external_effects.clone(),
+        ));
+    }
+
+    let Some(agent_connector_scope) = agent_version.approval_policy.get("connector_scope") else {
+        return Ok(deny_child_native_connector_scope(
+            parent_connector_scope,
+            parent_external_effects,
+        ));
+    };
+    if !agent_connector_scope.is_object() {
+        return Err(AppError::bad_request(
+            "agent version connector_scope policy must be an object",
+        ));
+    }
+    if agent_connector_scope.get("mode").and_then(Value::as_str) != Some("commit_write") {
+        return Ok(deny_child_native_connector_scope(
+            parent_connector_scope,
+            parent_external_effects,
+        ));
+    }
+    let agent_external_effects = agent_version
+        .approval_policy
+        .get("external_effects")
+        .unwrap_or(&Value::Null);
+    if !agent_external_effects.is_null() && !agent_external_effects.is_object() {
+        return Err(AppError::bad_request(
+            "agent version external_effects policy must be an object",
+        ));
+    }
+
+    let mut child_connector_scope = parent_connector_scope.clone();
+    let child_object = child_connector_scope.as_object_mut().ok_or_else(|| {
+        AppError::bad_request("parent task grant connector_scope must be an object")
+    })?;
+    let parent_bindings = native_operation_bindings(parent_connector_scope)?;
+    let agent_bindings = native_operation_bindings(agent_connector_scope)?;
+    let retained_bindings = match (parent_bindings.as_ref(), agent_bindings.as_ref()) {
+        (Some(parent), Some(agent)) => agent
+            .iter()
+            .filter(|binding| {
+                parent.contains(binding)
+                    && native_operation_binding_within_scope(binding, parent_connector_scope)
+                    && native_operation_binding_within_scope(binding, agent_connector_scope)
+            })
+            .cloned()
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+
+    let connector_ids = retained_bindings
+        .iter()
+        .filter_map(|binding| binding.get("connector_id").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+    let operation_ids = retained_bindings
+        .iter()
+        .filter_map(|binding| binding.get("operation").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+    let side_effect_classes = retained_bindings
+        .iter()
+        .filter_map(|binding| binding.get("side_effect_class").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+
+    child_object.insert("allowed_connector_ids".to_string(), json!(connector_ids));
+    child_object.insert("allowed_tool_names".to_string(), json!(operation_ids));
+    child_object.insert(
+        "side_effect_classes".to_string(),
+        json!(side_effect_classes),
+    );
+    if parent_bindings.is_some() {
+        child_object.insert(
+            "native_operation_bindings".to_string(),
+            Value::Array(retained_bindings),
+        );
+    }
+    if let (Some(parent_tenant_scope), Some(agent_tenant_scope)) = (
+        parent_connector_scope.get("tenant_scope"),
+        agent_connector_scope.get("tenant_scope"),
+    ) && agent_tenant_scope
+        .as_object()
+        .is_some_and(|scope| !scope.is_empty())
+        && json_scope_contains(parent_tenant_scope, agent_tenant_scope)
+    {
+        child_object.insert("tenant_scope".to_string(), agent_tenant_scope.clone());
+    }
+
+    let child_external_effects = intersect_external_effects(
+        parent_external_effects,
+        agent_external_effects,
+        &side_effect_classes,
+    )?;
+    Ok((child_connector_scope, child_external_effects))
+}
+
+fn deny_child_native_connector_scope(
+    parent_connector_scope: &Value,
+    parent_external_effects: &Value,
+) -> (Value, Value) {
+    let mut connector_scope = parent_connector_scope.clone();
+    if let Some(object) = connector_scope.as_object_mut() {
+        for key in [
+            "allowed_connector_ids",
+            "allowed_tool_names",
+            "side_effect_classes",
+        ] {
+            object.insert(key.to_string(), json!([]));
+        }
+        if object.contains_key("native_operation_bindings") {
+            object.insert("native_operation_bindings".to_string(), json!([]));
+        }
+    }
+    let external_effects = parent_external_effects
+        .as_object()
+        .map(|effects| {
+            Value::Object(
+                effects
+                    .keys()
+                    .map(|key| (key.clone(), json!(false)))
+                    .collect(),
+            )
+        })
+        .unwrap_or_else(empty_json_object);
+    (connector_scope, external_effects)
+}
+
+fn native_operation_bindings(scope: &Value) -> Result<Option<Vec<Value>>, AppError> {
+    let Some(bindings) = scope.get("native_operation_bindings") else {
+        return Ok(None);
+    };
+    let bindings = bindings.as_array().ok_or_else(|| {
+        AppError::bad_request("connector_scope native_operation_bindings must be an array")
+    })?;
+    Ok(Some(bindings.clone()))
+}
+
+fn native_operation_binding_within_scope(binding: &Value, scope: &Value) -> bool {
+    let Some(connector_id) = binding.get("connector_id").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(operation) = binding.get("operation").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(side_effect_class) = binding.get("side_effect_class").and_then(Value::as_str) else {
+        return false;
+    };
+    json_string_array_contains(scope.get("allowed_connector_ids"), connector_id)
+        && json_string_array_contains(scope.get("allowed_tool_names"), operation)
+        && json_string_array_contains(scope.get("side_effect_classes"), side_effect_class)
+}
+
+fn intersect_external_effects(
+    parent: &Value,
+    agent: &Value,
+    allowed_side_effects: &BTreeSet<String>,
+) -> Result<Value, AppError> {
+    let parent = parent
+        .as_object()
+        .ok_or_else(|| AppError::bad_request("parent external_effects must be an object"))?;
+    let agent = agent.as_object();
+    Ok(Value::Object(
+        parent
+            .iter()
+            .map(|(key, value)| {
+                let allowed = value.as_bool() == Some(true)
+                    && allowed_side_effects.contains(key.as_str())
+                    && agent
+                        .and_then(|effects| effects.get(key))
+                        .and_then(Value::as_bool)
+                        == Some(true);
+                (key.clone(), json!(allowed))
+            })
+            .collect(),
+    ))
 }
 
 pub(crate) async fn transition_agent_handoff_event(

@@ -205,6 +205,11 @@
             }
           }
         },
+        "native_connector_actions": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/slug" }
+        },
         "handoffs": {
           "type": "array",
           "items": { "$ref": "#/$defs/handoff_rule" }

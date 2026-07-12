@@ -1922,6 +1922,7 @@ fn workflow_pack_manifest_summary_labels_connector_kinds() {
                 write: Vec::new(),
                 external_write: vec!["native.connector.call".to_string()],
             },
+            native_connector_actions: vec!["action".to_string()],
             handoffs: vec![workflow_pack::HandoffRule {
                 target_agent: "agent".to_string(),
                 intents: vec!["review".to_string()],
@@ -11583,6 +11584,97 @@ fn workflow_pack_external_write_scope_materializes_connector_grant() {
 }
 
 #[test]
+fn workflow_pack_external_write_scope_respects_agent_action_scope() {
+    let package_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("packs/ecommerce-tmall");
+    let manifest_input =
+        std::fs::read_to_string(package_dir.join("package.yaml")).expect("fixture manifest");
+    let mut manifest = workflow_pack::WorkflowPackManifest::from_yaml_str(&manifest_input)
+        .expect("manifest parses");
+    let executor_index = manifest
+        .agents
+        .iter()
+        .position(|agent| agent.id == "tmall-executor")
+        .expect("tmall executor");
+    manifest.agents[executor_index].native_connector_actions = vec!["refund-agree".to_string()];
+    let workflow = manifest
+        .workflows
+        .iter()
+        .find(|workflow| workflow.id == "after-sales-triage")
+        .expect("after-sales workflow");
+    let workflow_file =
+        workflow_pack_load_workflow_file(&package_dir, workflow).expect("workflow file");
+    let semantic_scopes =
+        workflow_pack_workflow_semantic_scopes(&manifest, &workflow_file).expect("semantic scopes");
+
+    let rules = workflow_pack_workflow_handoff_rules(
+        &manifest,
+        workflow,
+        &workflow_file,
+        &semantic_scopes,
+        &package_dir,
+    )
+    .expect("handoff rules");
+    let root_grant = &rules["root_task_grant"];
+    assert_eq!(
+        root_grant["connector_scope"]["allowed_tool_names"],
+        json!(["refund-agree"])
+    );
+    assert_eq!(
+        root_grant["connector_scope"]["native_operation_bindings"],
+        json!([{
+            "connector_id": "tmall-top",
+            "operation": "refund-agree",
+            "side_effect_class": "marketplace_refund_write"
+        }])
+    );
+
+    let policy =
+        workflow_pack_agent_tool_policy(&manifest, &package_dir, &manifest.agents[executor_index])
+            .expect("executor policy");
+    assert_eq!(
+        policy["connector_scope"]["allowed_tool_names"],
+        json!(["refund-agree"])
+    );
+    assert_eq!(
+        policy["external_effects"],
+        json!({"marketplace_refund_write": true})
+    );
+
+    let mut expanded_workflow_file = workflow_file.clone();
+    expanded_workflow_file.handoff_rules = json!({
+        "root_task_grant": {
+            "connector_scope": {
+                "mode": "commit_write",
+                "allowed_connector_ids": ["tmall-top"],
+                "allowed_tool_names": ["refund-refuse"],
+                "tenant_scope": {},
+                "side_effect_classes": ["marketplace_refund_write"],
+                "native_operation_bindings": [{
+                    "connector_id": "tmall-top",
+                    "operation": "refund-refuse",
+                    "side_effect_class": "marketplace_refund_write"
+                }]
+            }
+        }
+    });
+    let error = workflow_pack_workflow_handoff_rules(
+        &manifest,
+        workflow,
+        &expanded_workflow_file,
+        &semantic_scopes,
+        &package_dir,
+    )
+    .expect_err("explicit root connector scope cannot expand agent action scope");
+    assert!(
+        error
+            .message
+            .contains("connector_scope cannot expand generated agent scope")
+    );
+}
+
+#[test]
 fn governed_handoff_back_to_primary_agent_requires_isolated_context() {
     let primary_agent_id = Uuid::new_v4();
 
@@ -18179,7 +18271,25 @@ async fn workflow_run_initialization_materializes_cross_agent_start_step_atomica
                 "agent_role": "specialist",
                 "provider": "openai-compatible",
                 "model": "gpt-5.5-mini",
-                "tools": ["file.read"]
+                "tools": ["file.read", "native.connector.call"],
+                "tool_policy": {
+                    "connector_scope": {
+                        "mode": "commit_write",
+                        "allowed_connector_ids": ["specialist-connector"],
+                        "allowed_tool_names": ["specialist-operation"],
+                        "tenant_scope": {"workspace_id": "workflow-test"},
+                        "side_effect_classes": ["specialist_write"],
+                        "native_operation_bindings": [{
+                            "connector_id": "specialist-connector",
+                            "operation": "specialist-operation",
+                            "side_effect_class": "specialist_write"
+                        }]
+                    },
+                    "external_effects": {
+                        "specialist_write": true,
+                        "unrelated_write": false
+                    }
+                }
             }),
             &[("x-mandoforge-roles", "admin")],
         ),
@@ -18217,7 +18327,39 @@ async fn workflow_run_initialization_materializes_cross_agent_start_step_atomica
                         "tool_scope": {
                             "read": ["file.read"],
                             "write": [],
-                            "external_write": []
+                            "external_write": ["native.connector.call"]
+                        },
+                        "connector_scope": {
+                            "mode": "commit_write",
+                            "allowed_connector_ids": [
+                                "specialist-connector",
+                                "unrelated-connector"
+                            ],
+                            "allowed_tool_names": [
+                                "specialist-operation",
+                                "unrelated-operation"
+                            ],
+                            "tenant_scope": {"workspace_id": "workflow-test"},
+                            "side_effect_classes": [
+                                "specialist_write",
+                                "unrelated_write"
+                            ],
+                            "native_operation_bindings": [
+                                {
+                                    "connector_id": "specialist-connector",
+                                    "operation": "specialist-operation",
+                                    "side_effect_class": "specialist_write"
+                                },
+                                {
+                                    "connector_id": "unrelated-connector",
+                                    "operation": "unrelated-operation",
+                                    "side_effect_class": "unrelated_write"
+                                }
+                            ]
+                        },
+                        "external_effects": {
+                            "specialist_write": true,
+                            "unrelated_write": true
                         }
                     }
                 },
@@ -18270,6 +18412,10 @@ async fn workflow_run_initialization_materializes_cross_agent_start_step_atomica
             .expect("valid request"),
     )
     .await;
+    let root_grant = grants
+        .iter()
+        .find(|grant| Some(grant.id) == run.root_task_grant_id)
+        .expect("root task grant");
     let child_grant = grants
         .iter()
         .find(|grant| grant.id == start_step.task_grant_id.expect("child grant id"))
@@ -18277,6 +18423,81 @@ async fn workflow_run_initialization_materializes_cross_agent_start_step_atomica
     assert_eq!(child_grant.parent_grant_id, run.root_task_grant_id);
     assert_eq!(child_grant.grantee_agent_id, Some(specialist.id));
     assert_eq!(child_grant.workflow_step_run_id, Some(start_step.id));
+    assert_eq!(
+        child_grant.connector_scope["allowed_connector_ids"],
+        json!(["specialist-connector"])
+    );
+    assert_eq!(
+        child_grant.connector_scope["allowed_tool_names"],
+        json!(["specialist-operation"])
+    );
+    assert_eq!(
+        child_grant.connector_scope["native_operation_bindings"],
+        json!([{
+            "connector_id": "specialist-connector",
+            "operation": "specialist-operation",
+            "side_effect_class": "specialist_write"
+        }])
+    );
+    assert_eq!(
+        child_grant.external_effects,
+        json!({
+            "specialist_write": true,
+            "unrelated_write": false
+        })
+    );
+    assert!(
+        task_grant_connector_invocation_denial(
+            child_grant,
+            "native.connector.call",
+            &json!({
+                "connector_id": "specialist-connector",
+                "operation": "specialist-operation",
+                "side_effect_class": "specialist_write"
+            }),
+        )
+        .expect("specialist connector scope is valid")
+        .is_none()
+    );
+    assert!(
+        task_grant_connector_invocation_denial(
+            child_grant,
+            "native.connector.call",
+            &json!({
+                "connector_id": "unrelated-connector",
+                "operation": "unrelated-operation",
+                "side_effect_class": "unrelated_write"
+            }),
+        )
+        .expect("unrelated connector request is valid")
+        .is_some()
+    );
+
+    let mut read_only_version = specialist_version.clone();
+    read_only_version.approval_policy["connector_scope"]["mode"] = json!("read_only");
+    let (read_only_scope, read_only_effects) = child_connector_scopes_for_agent_version(
+        &root_grant.connector_scope,
+        &root_grant.external_effects,
+        &read_only_version,
+    )
+    .expect("read-only target policy is valid");
+    assert_eq!(read_only_scope["native_operation_bindings"], json!([]));
+    assert_eq!(read_only_effects["specialist_write"], json!(false));
+
+    let mut legacy_root_scope = root_grant.connector_scope.clone();
+    legacy_root_scope
+        .as_object_mut()
+        .expect("legacy root connector scope")
+        .remove("native_operation_bindings");
+    let (legacy_scope, legacy_effects) = child_connector_scopes_for_agent_version(
+        &legacy_root_scope,
+        &root_grant.external_effects,
+        &specialist_version,
+    )
+    .expect("legacy root scope is valid");
+    assert_eq!(legacy_scope["allowed_connector_ids"], json!([]));
+    assert_eq!(legacy_scope["allowed_tool_names"], json!([]));
+    assert_eq!(legacy_effects["specialist_write"], json!(false));
 }
 
 #[tokio::test]
