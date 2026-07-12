@@ -208,6 +208,33 @@ impl AppState {
                         .then(left.object_key.cmp(&right.object_key))
                 });
 
+                if matches!(request.next_status.as_str(), "rolled_back" | "archived") {
+                    let owned_version_ids = store
+                        .workflow_pack_bindings
+                        .values()
+                        .filter(|binding| {
+                            binding.installation_id == request.installation_id
+                                && binding.binding_type == "agent"
+                        })
+                        .filter_map(|binding| binding.target_id)
+                        .collect::<BTreeSet<_>>();
+                    let owned_agent_ids = store
+                        .agent_versions
+                        .iter()
+                        .filter(|(_, versions)| {
+                            versions
+                                .iter()
+                                .any(|version| owned_version_ids.contains(&version.id))
+                        })
+                        .map(|(agent_id, _)| *agent_id)
+                        .collect::<Vec<_>>();
+                    for agent_id in owned_agent_ids {
+                        if let Some(agent) = store.agents.get_mut(&agent_id) {
+                            agent.release_state = "disabled".to_string();
+                        }
+                    }
+                }
+
                 let mut agent_releases = match &release_transition {
                     PreparedAgentReleaseTransition::RequirePromoted { .. } => required_releases,
                     PreparedAgentReleaseTransition::PromoteFromPack {
@@ -426,6 +453,25 @@ impl AppState {
                     .into_iter()
                     .map(workflow_pack_binding_from_row)
                     .collect::<Result<Vec<_>, _>>()?;
+
+                if matches!(request.next_status.as_str(), "rolled_back" | "archived") {
+                    sqlx::query(
+                        "UPDATE agents AS agents
+                         SET release_state = 'disabled'
+                         FROM workflow_pack_bindings AS bindings
+                         INNER JOIN agent_versions AS versions ON versions.id = bindings.target_id
+                         WHERE agents.tenant_id = $1
+                           AND bindings.tenant_id = $1
+                           AND bindings.installation_id = $2
+                           AND bindings.binding_type = 'agent'
+                           AND agents.id = versions.agent_id
+                           AND agents.archived_at IS NULL",
+                    )
+                    .bind(self.current_tenant_id())
+                    .bind(request.installation_id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
 
                 let runtime_object_rows = sqlx::query(
                     "UPDATE workflow_pack_runtime_objects

@@ -12521,6 +12521,21 @@ async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() 
         start_after_rollback_error["error"].as_str(),
         Some("workflow run requires a released workflow definition")
     );
+    let retired_reader = state
+        .get_agent(Uuid::parse_str(reader_agent_id).expect("reader agent UUID"))
+        .await
+        .expect("retired pack reader remains inspectable");
+    assert_eq!(retired_reader.release_state, "disabled");
+    let error = state
+        .create_session(CreateSession {
+            agent_id: retired_reader.id,
+            environment_id: None,
+            title: "rolled back pack agent must not run".to_string(),
+            message: None,
+        })
+        .await
+        .expect_err("rolled back pack agent must be disabled");
+    assert_eq!(error.message, "agent is disabled");
 
     let update_manifest_path = ai_governance_update_manifest_path_string("0.1.1");
     let updated: WorkflowPackInstallation = request_json(
