@@ -41,9 +41,9 @@ use crate::{
     workflow_handoff_rules_is_dynamic_materialization, workflow_input_digest,
     workflow_run_execution_denial, workflow_run_owns_session,
     workflow_run_runtime_envelope_with_pinned_ontology_release,
-    workflow_step_is_adapter_owned_compensation, workflow_step_run_is_handoff_approval_blocked,
-    workflow_step_status_terminal, workflow_step_worker_message,
-    workflow_transition_filter_from_query,
+    workflow_run_status_allows_execution, workflow_step_is_adapter_owned_compensation,
+    workflow_step_run_is_handoff_approval_blocked, workflow_step_status_terminal,
+    workflow_step_worker_message, workflow_transition_filter_from_query,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -765,6 +765,9 @@ async fn create_workflow_step_run(
         Some(run.primary_session_id),
     )
     .await?;
+    if !workflow_run_status_allows_execution(&run.status) {
+        return Err(AppError::forbidden("workflow run is not executable"));
+    }
     let step_key = require_non_empty(input.step_key, "workflow step key")?;
     let definition = state
         .get_workflow_definition(run.workflow_definition_id)

@@ -329,7 +329,9 @@ async fn review_dynamic_workflow_plan(
         ));
     }
     let mut review = input.review;
-    if matches!(status.as_str(), "approved" | "rejected") {
+    let requires_approval_decision = matches!(current.status.as_str(), "approved" | "rejected")
+        || matches!(status.as_str(), "approved" | "rejected");
+    if requires_approval_decision {
         authorize_request(
             &state,
             &headers,
@@ -338,13 +340,15 @@ async fn review_dynamic_workflow_plan(
             Some(current.id),
         )
         .await?;
-        let principal = principal_from_request(&state, &headers).await?;
-        let actor_field = if status == "approved" {
-            "approved_by"
-        } else {
-            "rejected_by"
-        };
-        review[actor_field] = json!(principal.subject_id);
+        if matches!(status.as_str(), "approved" | "rejected") {
+            let principal = principal_from_request(&state, &headers).await?;
+            let actor_field = if status == "approved" {
+                "approved_by"
+            } else {
+                "rejected_by"
+            };
+            review[actor_field] = json!(principal.subject_id);
+        }
     } else {
         authorize_dynamic_workflow_plan_run(&state, &headers, &current).await?;
     }
@@ -363,6 +367,7 @@ async fn review_dynamic_workflow_plan(
     let reviewed = state
         .update_dynamic_workflow_plan_review(
             current.id,
+            &current.status,
             status,
             review,
             current.audit_trace_id,
@@ -377,13 +382,7 @@ async fn review_dynamic_workflow_plan(
     )
     .await?;
     let reviewed = state
-        .update_dynamic_workflow_plan_review(
-            reviewed.id,
-            reviewed.status.clone(),
-            reviewed.review.clone(),
-            Some(audit.id),
-            reviewed_at,
-        )
+        .update_dynamic_workflow_plan_audit_trace(reviewed.id, Some(audit.id), reviewed_at)
         .await?;
     Ok(Json(reviewed))
 }

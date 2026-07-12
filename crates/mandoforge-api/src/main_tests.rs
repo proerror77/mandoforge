@@ -1631,6 +1631,8 @@ mod tenant_worker_controller_tests;
 mod worker_readiness_tests;
 #[path = "main_tests/workflow_pack_lifecycle_postgres_tests.rs"]
 mod workflow_pack_lifecycle_postgres_tests;
+#[path = "main_tests/workflow_store_postgres_tests.rs"]
+mod workflow_store_postgres_tests;
 
 #[tokio::test]
 async fn ontology_release_promote_refreshes_stale_rollback_target() {
@@ -13965,7 +13967,7 @@ async fn dynamic_workflow_plan_decisions_require_an_approver_identity() {
     );
 
     let reviewed: Value = request_json(
-        app,
+        app.clone(),
         json_request_with_headers(
             "POST",
             &format!("/api/dynamic-workflow-plans/{plan_id}/review"),
@@ -13982,6 +13984,38 @@ async fn dynamic_workflow_plan_decisions_require_an_approver_identity() {
     .await;
     assert_eq!(reviewed["status"], json!("approved"));
     assert_eq!(reviewed["review"]["approved_by"], json!("reviewer-1"));
+
+    let (status, error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/dynamic-workflow-plans/{plan_id}/review"),
+            json!({"review": {"note": "operator cannot clear approval"}}),
+            &[
+                ("x-mandoforge-subject", "operator-1"),
+                ("x-mandoforge-roles", "operator"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(
+        error["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("ApprovalsDecide"))
+    );
+    let persisted: Value = request_json(
+        app,
+        Request::builder()
+            .uri(format!("/api/dynamic-workflow-plans/{plan_id}"))
+            .header("x-mandoforge-subject", "operator-1")
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(persisted["status"], json!("approved"));
+    assert_eq!(persisted["review"]["approved_by"], json!("reviewer-1"));
 }
 
 #[tokio::test]
@@ -15780,6 +15814,35 @@ async fn workflow_runs_create_primary_session_and_step_runs() {
 async fn workflow_step_key_reservation_is_atomic() {
     let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
     let workflow_run_id = Uuid::new_v4();
+    let now = Utc::now();
+    state
+        .create_workflow_run(WorkflowRun {
+            id: workflow_run_id,
+            workflow_definition_id: Uuid::new_v4(),
+            pack_installation_id: None,
+            source_event_id: None,
+            source_work_item_id: None,
+            source_schedule_id: None,
+            status: "queued".to_string(),
+            primary_session_id: Uuid::new_v4(),
+            root_task_grant_id: None,
+            input_payload: json!({}),
+            input_digest: "atomic-step-key-reservation".to_string(),
+            execution_strategy: "managed_graph".to_string(),
+            runtime_adapter: None,
+            runtime_mode: None,
+            delegation_status: None,
+            external_run_ref: None,
+            runtime_event_cursor: None,
+            runtime_envelope: json!({}),
+            started_at: None,
+            completed_at: None,
+            audit_trace_id: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .expect("create workflow run for step reservation");
     let caller_count = 32;
     let start = Arc::new(tokio::sync::Barrier::new(caller_count));
     let mut callers = Vec::with_capacity(caller_count);
@@ -15840,6 +15903,35 @@ async fn workflow_step_key_reservation_is_atomic() {
         .expect("list reserved workflow steps");
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].step_key, "external-review");
+
+    state
+        .update_workflow_run_status(
+            workflow_run_id,
+            "completed".to_string(),
+            Some(now),
+            Some(now),
+        )
+        .await
+        .expect("complete workflow run");
+    let mut late_step = stored[0].clone();
+    late_step.id = Uuid::new_v4();
+    late_step.step_key = "late-external-review".to_string();
+    late_step.created_at = Utc::now();
+    late_step.updated_at = late_step.created_at;
+    let error = state
+        .create_workflow_step_run_if_key_absent(late_step.clone())
+        .await
+        .expect_err("terminal workflow run must reject store-level step insertion");
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+    assert_eq!(error.message, "workflow run is not executable");
+    late_step.id = Uuid::new_v4();
+    late_step.step_key = "late-internal-step".to_string();
+    let error = state
+        .create_workflow_step_run(late_step)
+        .await
+        .expect_err("terminal workflow run must reject internal step insertion");
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+    assert_eq!(error.message, "workflow run is not executable");
 }
 
 #[tokio::test]
@@ -19533,7 +19625,7 @@ async fn terminal_workflow_run_closes_active_task_grants() {
     )
     .await;
     let run: WorkflowRun = request_json(
-        app,
+        app.clone(),
         json_request_with_headers(
             "POST",
             "/api/workflow-runs",
@@ -19556,6 +19648,32 @@ async fn terminal_workflow_run_closes_active_task_grants() {
             .status,
         "completed"
     );
+
+    let steps_before = state
+        .list_workflow_step_runs(run.id)
+        .await
+        .expect("steps before terminal append attempt");
+    let (status, error) = request_value(
+        app,
+        json_request_with_headers(
+            "POST",
+            &format!("/api/workflow-runs/{}/steps", run.id),
+            json!({
+                "step_key": "late-terminal-step",
+                "step_type": "agent",
+                "status": "queued"
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(error["error"], json!("workflow run is not executable"));
+    let steps_after = state
+        .list_workflow_step_runs(run.id)
+        .await
+        .expect("steps after terminal append attempt");
+    assert_eq!(steps_after.len(), steps_before.len());
 }
 
 #[tokio::test]

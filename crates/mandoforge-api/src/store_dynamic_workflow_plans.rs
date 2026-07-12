@@ -118,6 +118,7 @@ impl AppState {
     pub(crate) async fn update_dynamic_workflow_plan_review(
         &self,
         id: Uuid,
+        expected_status: &str,
         status: String,
         review: serde_json::Value,
         audit_trace_id: Option<Uuid>,
@@ -130,6 +131,11 @@ impl AppState {
                     .dynamic_workflow_plans
                     .get_mut(&id)
                     .ok_or_else(|| AppError::not_found("dynamic workflow plan not found"))?;
+                if plan.status != expected_status {
+                    return Err(AppError::conflict(
+                        "dynamic workflow plan review changed concurrently",
+                    ));
+                }
                 plan.status = status;
                 plan.review = review;
                 plan.audit_trace_id = audit_trace_id;
@@ -140,23 +146,26 @@ impl AppState {
             StoreBackend::Postgres(pool) => {
                 let row = sqlx::query(
                     "UPDATE dynamic_workflow_plans
-                     SET status = $3,
-                         review = $4,
-                         audit_trace_id = $5,
-                         reviewed_at = $6,
-                         updated_at = $6
-                     WHERE tenant_id = $1 AND id = $2
+                     SET status = $4,
+                         review = $5,
+                         audit_trace_id = $6,
+                         reviewed_at = $7,
+                         updated_at = $7
+                     WHERE tenant_id = $1 AND id = $2 AND status = $3
                      RETURNING id, source_work_item_id, source_session_id, objective, status, phases, agent_fleet_policy, governance, validation, materialization, analysis, review, workflow_definition_id, workflow_run_id, audit_trace_id, created_at, updated_at, reviewed_at, materialized_at",
                 )
                 .bind(self.current_tenant_id())
                 .bind(id)
+                .bind(expected_status)
                 .bind(&status)
                 .bind(&review)
                 .bind(audit_trace_id)
                 .bind(reviewed_at)
                 .fetch_optional(pool)
                 .await?
-                .ok_or_else(|| AppError::not_found("dynamic workflow plan not found"))?;
+                .ok_or_else(|| {
+                    AppError::conflict("dynamic workflow plan review changed concurrently")
+                })?;
                 dynamic_workflow_plan_from_row(row)
             }
         }

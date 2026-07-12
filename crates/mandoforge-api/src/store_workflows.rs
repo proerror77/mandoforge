@@ -605,15 +605,37 @@ impl AppState {
     ) -> Result<WorkflowStepRun, AppError> {
         match &self.store {
             StoreBackend::Memory(inner) => {
-                inner
-                    .write()
-                    .await
-                    .workflow_step_runs
-                    .insert(step.id, step.clone());
+                let mut store = inner.write().await;
+                let run = store
+                    .workflow_runs
+                    .get(&step.workflow_run_id)
+                    .ok_or_else(|| AppError::not_found("workflow run not found"))?;
+                if !crate::workflow_run_status_allows_step_creation(&run.status) {
+                    return Err(AppError::forbidden("workflow run is not executable"));
+                }
+                store.workflow_step_runs.insert(step.id, step.clone());
                 Ok(step)
             }
             StoreBackend::Postgres(pool) => {
-                insert_workflow_step_run(pool, self.current_tenant_id(), step).await
+                let tenant_id = self.current_tenant_id();
+                let mut tx = pool.begin().await?;
+                let run_status: String = sqlx::query_scalar(
+                    "SELECT status
+                     FROM workflow_runs
+                     WHERE tenant_id = $1 AND id = $2
+                     FOR UPDATE",
+                )
+                .bind(tenant_id)
+                .bind(step.workflow_run_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or_else(|| AppError::not_found("workflow run not found"))?;
+                if !crate::workflow_run_status_allows_step_creation(&run_status) {
+                    return Err(AppError::forbidden("workflow run is not executable"));
+                }
+                let step = insert_workflow_step_run(&mut *tx, tenant_id, step).await?;
+                tx.commit().await?;
+                Ok(step)
             }
         }
     }
@@ -625,6 +647,13 @@ impl AppState {
         match &self.store {
             StoreBackend::Memory(inner) => {
                 let mut store = inner.write().await;
+                let run = store
+                    .workflow_runs
+                    .get(&step.workflow_run_id)
+                    .ok_or_else(|| AppError::not_found("workflow run not found"))?;
+                if !crate::workflow_run_status_allows_step_creation(&run.status) {
+                    return Err(AppError::forbidden("workflow run is not executable"));
+                }
                 if store.workflow_step_runs.values().any(|existing| {
                     existing.workflow_run_id == step.workflow_run_id
                         && existing.step_key == step.step_key
@@ -638,6 +667,20 @@ impl AppState {
                 let tenant_id = self.current_tenant_id();
                 let lock_key = format!("{tenant_id}:{}:{}", step.workflow_run_id, step.step_key);
                 let mut tx = pool.begin().await?;
+                let run_status: String = sqlx::query_scalar(
+                    "SELECT status
+                     FROM workflow_runs
+                     WHERE tenant_id = $1 AND id = $2
+                     FOR UPDATE",
+                )
+                .bind(tenant_id)
+                .bind(step.workflow_run_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or_else(|| AppError::not_found("workflow run not found"))?;
+                if !crate::workflow_run_status_allows_step_creation(&run_status) {
+                    return Err(AppError::forbidden("workflow run is not executable"));
+                }
                 sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
                     .bind(lock_key)
                     .execute(&mut *tx)
@@ -710,9 +753,7 @@ impl AppState {
                     .workflow_runs
                     .get(&step.workflow_run_id)
                     .ok_or_else(|| AppError::not_found("workflow run not found"))?;
-                if run.status != "initializing"
-                    && !crate::workflow_run_status_allows_execution(&run.status)
-                {
+                if !crate::workflow_run_status_allows_step_creation(&run.status) {
                     return Err(AppError::forbidden("workflow run is not executable"));
                 }
                 if store.workflow_step_runs.contains_key(&step.id) {
@@ -756,9 +797,7 @@ impl AppState {
                 .fetch_optional(&mut *tx)
                 .await?
                 .ok_or_else(|| AppError::not_found("workflow run not found"))?;
-                if run_status != "initializing"
-                    && !crate::workflow_run_status_allows_execution(&run_status)
-                {
+                if !crate::workflow_run_status_allows_step_creation(&run_status) {
                     return Err(AppError::forbidden("workflow run is not executable"));
                 }
                 if let Some(parent_grant_id) = grant.parent_grant_id {

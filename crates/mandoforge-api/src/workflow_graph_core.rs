@@ -212,6 +212,10 @@ pub(crate) fn workflow_run_status_allows_execution(status: &str) -> bool {
     matches!(status, "queued" | "running" | "requires_action")
 }
 
+pub(crate) fn workflow_run_status_allows_step_creation(status: &str) -> bool {
+    status == "initializing" || workflow_run_status_allows_execution(status)
+}
+
 pub(crate) fn workflow_run_execution_denial(status: &str) -> Option<&'static str> {
     if workflow_run_status_allows_execution(status) {
         None
