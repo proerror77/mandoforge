@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::store_backend::StoreBackend;
 use crate::store_releases::{
-    AGENT_RELEASE_COLUMNS, insert_or_get_promoted_agent_release_tx,
+    AGENT_RELEASE_COLUMNS, insert_or_get_promoted_agent_release_tx, lock_agent_release_target_tx,
     new_workflow_pack_agent_release, require_workflow_pack_agent_version_tx,
 };
 use crate::store_rows::{
@@ -327,13 +327,27 @@ impl AppState {
                         }
                         releases
                     }
-                    PreparedAgentReleaseTransition::PromoteFromPack { targets, .. } => {
+                    PreparedAgentReleaseTransition::PromoteFromPack {
+                        targets,
+                        environment,
+                        ..
+                    } => {
                         for (agent_id, agent_version_id) in targets {
                             require_workflow_pack_agent_version_tx(
                                 &mut tx,
                                 self.current_tenant_id(),
                                 *agent_id,
                                 *agent_version_id,
+                            )
+                            .await?;
+                        }
+                        for (agent_id, agent_version_id) in targets {
+                            lock_agent_release_target_tx(
+                                &mut tx,
+                                self.current_tenant_id(),
+                                *agent_id,
+                                *agent_version_id,
+                                environment,
                             )
                             .await?;
                         }

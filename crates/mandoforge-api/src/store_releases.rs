@@ -144,7 +144,7 @@ pub(crate) async fn insert_or_get_promoted_agent_release_tx(
     agent_release_from_row(row)
 }
 
-async fn lock_agent_release_target_tx(
+pub(crate) async fn lock_agent_release_target_tx(
     tx: &mut Transaction<'_, Postgres>,
     tenant_id: Uuid,
     agent_id: Uuid,
@@ -438,12 +438,39 @@ impl AppState {
                     .execute(&mut *tx)
                     .await?;
                 }
-                let stored = insert_or_get_promoted_agent_release_tx(
+                let mut stored = insert_or_get_promoted_agent_release_tx(
                     &mut tx,
                     self.current_tenant_id(),
                     &release,
                 )
                 .await?;
+                if stored.automation_policy["source"] == "workflow_pack_release" {
+                    let result = sqlx::query(
+                        "UPDATE agent_releases
+                         SET status = 'superseded'
+                         WHERE tenant_id = $1 AND id = $2 AND status = 'promoted'",
+                    )
+                    .bind(self.current_tenant_id())
+                    .bind(stored.id)
+                    .execute(&mut *tx)
+                    .await?;
+                    if result.rows_affected() != 1 {
+                        return Err(AppError::conflict(
+                            "workflow pack AgentRelease changed during independent promotion",
+                        ));
+                    }
+                    stored = insert_or_get_promoted_agent_release_tx(
+                        &mut tx,
+                        self.current_tenant_id(),
+                        &release,
+                    )
+                    .await?;
+                    if stored.automation_policy["source"] == "workflow_pack_release" {
+                        return Err(AppError::conflict(
+                            "independent promotion lost a concurrent AgentRelease race",
+                        ));
+                    }
+                }
                 tx.commit().await?;
                 Ok(stored)
             }

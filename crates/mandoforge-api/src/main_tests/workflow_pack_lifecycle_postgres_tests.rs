@@ -240,5 +240,125 @@ async fn postgres_shared_workflow_pack_release_survives_until_last_rollback() {
         Some(0)
     );
 
+    let dataset = state
+        .create_eval_dataset(CreateEvalDataset {
+            name: format!("Postgres manual release race {}", Uuid::new_v4()),
+            description: None,
+        })
+        .await
+        .expect("create postgres eval dataset");
+    state
+        .create_eval_case(
+            dataset.id,
+            CreateEvalCase {
+                input: json!({"final_answer": "release ready"}),
+                expected: Some(json!({"contains": ["release"]})),
+                grading_policy: json!({"kind": "final_answer"}),
+            },
+        )
+        .await
+        .expect("create postgres eval case");
+    let eval_run = state
+        .create_eval_run(dataset.id, CreateEvalRun { agent_id: agent.id })
+        .await
+        .expect("create postgres eval run");
+    assert_eq!(eval_run.status, "completed");
+
+    let manual_environment = format!("postgres-manual-race-{}", Uuid::new_v4());
+    let automated = crate::store_releases::new_workflow_pack_agent_release(
+        Uuid::new_v4(),
+        agent.id,
+        agent_version.id,
+        &manual_environment,
+        "workflow-pack-release",
+        &json!({"test": "manual-race"}),
+        Utc::now(),
+    );
+    let mut automated_tx = pool.begin().await.expect("begin automated release tx");
+    crate::store_releases::insert_or_get_promoted_agent_release_tx(
+        &mut automated_tx,
+        tenant_id,
+        &automated,
+    )
+    .await
+    .expect("insert uncommitted automated release");
+
+    let manual_state = state.clone();
+    let manual_environment_for_request = manual_environment.clone();
+    let manual_promotion = tokio::spawn(async move {
+        manual_state
+            .create_agent_release(
+                agent.id,
+                CreateAgentRelease {
+                    agent_version_id: Some(agent_version.id),
+                    eval_run_id: eval_run.id,
+                    environment: manual_environment_for_request,
+                    min_score: Some(1.0),
+                },
+                "independent-reviewer".to_string(),
+            )
+            .await
+    });
+    let mut observed_unique_conflict_wait = false;
+    for _ in 0..100 {
+        let waiting: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM pg_stat_activity
+                WHERE wait_event_type = 'Lock'
+                  AND query ILIKE '%INSERT INTO agent_releases%'
+            )",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect postgres lock wait");
+        if waiting {
+            observed_unique_conflict_wait = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        observed_unique_conflict_wait,
+        "manual promotion must reach the uncommitted automated release conflict"
+    );
+    automated_tx
+        .commit()
+        .await
+        .expect("commit automated release");
+    let manual = manual_promotion
+        .await
+        .expect("join manual promotion")
+        .expect("complete independent promotion");
+    assert_ne!(manual.id, automated.id);
+    assert_eq!(manual.status, "promoted");
+    assert_ne!(
+        manual.automation_policy["source"],
+        json!("workflow_pack_release")
+    );
+    let race_releases = state
+        .list_all_agent_releases()
+        .await
+        .expect("list manual race releases")
+        .into_iter()
+        .filter(|release| {
+            release.agent_id == agent.id
+                && release.agent_version_id == agent_version.id
+                && release.environment == manual_environment
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        race_releases
+            .iter()
+            .any(|release| { release.id == automated.id && release.status == "superseded" })
+    );
+    assert_eq!(
+        race_releases
+            .iter()
+            .filter(|release| release.status == "promoted")
+            .count(),
+        1
+    );
+
     pool.close().await;
 }
