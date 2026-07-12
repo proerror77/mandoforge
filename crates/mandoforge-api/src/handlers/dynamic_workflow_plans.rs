@@ -186,7 +186,13 @@ async fn create_dynamic_workflow_plan(
     )
     .await?;
     let plan = state
-        .update_dynamic_workflow_plan_audit_trace(plan.id, Some(audit.id), audit.created_at)
+        .update_dynamic_workflow_plan_audit_trace_if_unchanged(
+            plan.id,
+            &plan.status,
+            plan.updated_at,
+            Some(audit.id),
+            audit.created_at,
+        )
         .await?;
     Ok(Json(plan))
 }
@@ -355,10 +361,7 @@ async fn review_dynamic_workflow_plan(
     if status == "approved" {
         crate::validate_dynamic_workflow_plan_approval_review(&review)?;
     }
-    if matches!(
-        current.status.as_str(),
-        "materializing" | "materialization_failed" | "materialized"
-    ) {
+    if matches!(current.status.as_str(), "materializing" | "materialized") {
         return Err(AppError::bad_request(
             "claimed or materialized dynamic workflow plan cannot be reviewed",
         ));
@@ -382,7 +385,13 @@ async fn review_dynamic_workflow_plan(
     )
     .await?;
     let reviewed = state
-        .update_dynamic_workflow_plan_audit_trace(reviewed.id, Some(audit.id), reviewed_at)
+        .update_dynamic_workflow_plan_audit_trace_if_unchanged(
+            reviewed.id,
+            &reviewed.status,
+            reviewed.updated_at,
+            Some(audit.id),
+            audit.created_at,
+        )
         .await?;
     Ok(Json(reviewed))
 }

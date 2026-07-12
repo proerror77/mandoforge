@@ -171,9 +171,11 @@ impl AppState {
         }
     }
 
-    pub(crate) async fn update_dynamic_workflow_plan_audit_trace(
+    pub(crate) async fn update_dynamic_workflow_plan_audit_trace_if_unchanged(
         &self,
         id: Uuid,
+        expected_status: &str,
+        expected_updated_at: DateTime<Utc>,
         audit_trace_id: Option<Uuid>,
         updated_at: DateTime<Utc>,
     ) -> Result<DynamicWorkflowPlan, AppError> {
@@ -184,6 +186,9 @@ impl AppState {
                     .dynamic_workflow_plans
                     .get_mut(&id)
                     .ok_or_else(|| AppError::not_found("dynamic workflow plan not found"))?;
+                if plan.status != expected_status || plan.updated_at != expected_updated_at {
+                    return Ok(plan.clone());
+                }
                 plan.audit_trace_id = audit_trace_id;
                 plan.updated_at = updated_at;
                 Ok(plan.clone())
@@ -191,19 +196,26 @@ impl AppState {
             StoreBackend::Postgres(pool) => {
                 let row = sqlx::query(
                     "UPDATE dynamic_workflow_plans
-                     SET audit_trace_id = $3,
-                         updated_at = $4
-                     WHERE tenant_id = $1 AND id = $2
+                     SET audit_trace_id = $5,
+                         updated_at = $6
+                     WHERE tenant_id = $1
+                       AND id = $2
+                       AND status = $3
+                       AND updated_at = $4
                      RETURNING id, source_work_item_id, source_session_id, objective, status, phases, agent_fleet_policy, governance, validation, materialization, analysis, review, workflow_definition_id, workflow_run_id, audit_trace_id, created_at, updated_at, reviewed_at, materialized_at",
                 )
                 .bind(self.current_tenant_id())
                 .bind(id)
+                .bind(expected_status)
+                .bind(expected_updated_at)
                 .bind(audit_trace_id)
                 .bind(updated_at)
                 .fetch_optional(pool)
-                .await?
-                .ok_or_else(|| AppError::not_found("dynamic workflow plan not found"))?;
-                dynamic_workflow_plan_from_row(row)
+                .await?;
+                match row {
+                    Some(row) => dynamic_workflow_plan_from_row(row),
+                    None => self.get_dynamic_workflow_plan(id).await,
+                }
             }
         }
     }

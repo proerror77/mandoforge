@@ -14143,6 +14143,166 @@ async fn dynamic_workflow_plan_materialization_claim_is_atomic() {
 }
 
 #[tokio::test]
+async fn failed_dynamic_workflow_materialization_can_be_reapproved_and_reclaimed() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let source_session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "Retryable dynamic workflow plan".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create source session");
+    let app = build_router(state.clone());
+    let plan: DynamicWorkflowPlan = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/dynamic-workflow-plans",
+            json!({
+                "source_session_id": source_session.id,
+                "objective": "Retry a failed dynamic workflow materialization",
+                "phases": [{
+                    "key": "retry",
+                    "agent_count": 1,
+                    "prompt": "Retry only after a new approval decision."
+                }]
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let approved: DynamicWorkflowPlan = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/dynamic-workflow-plans/{}/review", plan.id),
+            json!({"status": "approved", "review": {}}),
+            &[
+                ("x-mandoforge-subject", "first-reviewer"),
+                ("x-mandoforge-roles", "approver"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(approved.status, "approved");
+
+    let first_claim_audit = state
+        .append_audit_log(new_audit_log(
+            None,
+            "system",
+            None,
+            "dynamic_workflow_plan.materialization_claim_requested",
+            "dynamic_workflow_plan",
+            Some(plan.id),
+            json!({"attempt": 1}),
+        ))
+        .await
+        .expect("first materialization claim audit");
+    state
+        .claim_dynamic_workflow_plan_materialization(plan.id, first_claim_audit.id, Utc::now())
+        .await
+        .expect("claim first materialization attempt");
+    let failed = state
+        .fail_dynamic_workflow_plan_materialization(plan.id, first_claim_audit.id, None, Utc::now())
+        .await
+        .expect("fail first materialization attempt");
+    assert_eq!(failed.status, "materialization_failed");
+
+    let (status, error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/dynamic-workflow-plans/{}/review", plan.id),
+            json!({"status": "approved", "review": {}}),
+            &[
+                ("x-mandoforge-subject", "operator-1"),
+                ("x-mandoforge-roles", "operator"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(
+        error["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("ApprovalsDecide"))
+    );
+
+    let reapproved: DynamicWorkflowPlan = request_json(
+        app,
+        json_request_with_headers(
+            "POST",
+            &format!("/api/dynamic-workflow-plans/{}/review", plan.id),
+            json!({"status": "approved", "review": {"reason": "retry transient failure"}}),
+            &[
+                ("x-mandoforge-subject", "retry-reviewer"),
+                ("x-mandoforge-roles", "approver"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(reapproved.status, "approved");
+    assert_eq!(reapproved.review["approved_by"], json!("retry-reviewer"));
+
+    let retry_claim_audit = state
+        .append_audit_log(new_audit_log(
+            None,
+            "system",
+            None,
+            "dynamic_workflow_plan.materialization_claim_requested",
+            "dynamic_workflow_plan",
+            Some(plan.id),
+            json!({"attempt": 2}),
+        ))
+        .await
+        .expect("retry materialization claim audit");
+    let reclaimed = state
+        .claim_dynamic_workflow_plan_materialization(plan.id, retry_claim_audit.id, Utc::now())
+        .await
+        .expect("reclaim reapproved materialization");
+    assert_eq!(reclaimed.status, "materializing");
+    let late_review_audit = state
+        .append_audit_log(new_audit_log(
+            None,
+            "retry-reviewer",
+            None,
+            "dynamic_workflow_plan.reviewed",
+            "dynamic_workflow_plan",
+            Some(plan.id),
+            json!({"status": "approved"}),
+        ))
+        .await
+        .expect("late review audit");
+    let still_claimed = state
+        .update_dynamic_workflow_plan_audit_trace_if_unchanged(
+            plan.id,
+            &reapproved.status,
+            reapproved.updated_at,
+            Some(late_review_audit.id),
+            late_review_audit.created_at,
+        )
+        .await
+        .expect("late review audit attachment converges to current plan");
+    assert_eq!(still_claimed.status, "materializing");
+    assert_eq!(still_claimed.audit_trace_id, Some(retry_claim_audit.id));
+    let retry_failed = state
+        .fail_dynamic_workflow_plan_materialization(plan.id, retry_claim_audit.id, None, Utc::now())
+        .await
+        .expect("active retry claim remains valid after late review audit");
+    assert_eq!(retry_failed.status, "materialization_failed");
+}
+
+#[tokio::test]
 async fn dynamic_workflow_plan_materializes_delegated_runtime_workflow() {
     let app = test_app().await;
 

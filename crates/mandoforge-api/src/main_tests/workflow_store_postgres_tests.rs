@@ -147,6 +147,85 @@ async fn postgres_dynamic_workflow_review_compare_and_set_blocks_stale_status() 
             .status,
         "approved"
     );
+
+    let first_claim_audit = state
+        .append_audit_log(new_audit_log(
+            None,
+            "system",
+            None,
+            "dynamic_workflow_plan.materialization_claim_requested",
+            "dynamic_workflow_plan",
+            Some(plan.id),
+            json!({"attempt": 1}),
+        ))
+        .await
+        .expect("create postgres materialization claim audit");
+    state
+        .claim_dynamic_workflow_plan_materialization(plan.id, first_claim_audit.id, Utc::now())
+        .await
+        .expect("claim postgres materialization");
+    state
+        .fail_dynamic_workflow_plan_materialization(plan.id, first_claim_audit.id, None, Utc::now())
+        .await
+        .expect("fail postgres materialization");
+    let reapproved = state
+        .update_dynamic_workflow_plan_review(
+            plan.id,
+            "materialization_failed",
+            "approved".to_string(),
+            json!({"approved_by": "postgres-retry-reviewer"}),
+            None,
+            Utc::now(),
+        )
+        .await
+        .expect("reapprove failed postgres materialization");
+    assert_eq!(reapproved.status, "approved");
+    let retry_claim_audit = state
+        .append_audit_log(new_audit_log(
+            None,
+            "system",
+            None,
+            "dynamic_workflow_plan.materialization_claim_requested",
+            "dynamic_workflow_plan",
+            Some(plan.id),
+            json!({"attempt": 2}),
+        ))
+        .await
+        .expect("create postgres retry claim audit");
+    let reclaimed = state
+        .claim_dynamic_workflow_plan_materialization(plan.id, retry_claim_audit.id, Utc::now())
+        .await
+        .expect("reclaim reapproved postgres materialization");
+    assert_eq!(reclaimed.status, "materializing");
+    let late_review_audit = state
+        .append_audit_log(new_audit_log(
+            None,
+            "postgres-retry-reviewer",
+            None,
+            "dynamic_workflow_plan.reviewed",
+            "dynamic_workflow_plan",
+            Some(plan.id),
+            json!({"status": "approved"}),
+        ))
+        .await
+        .expect("create late postgres review audit");
+    let still_claimed = state
+        .update_dynamic_workflow_plan_audit_trace_if_unchanged(
+            plan.id,
+            &reapproved.status,
+            reapproved.updated_at,
+            Some(late_review_audit.id),
+            late_review_audit.created_at,
+        )
+        .await
+        .expect("late postgres review audit attachment converges");
+    assert_eq!(still_claimed.status, "materializing");
+    assert_eq!(still_claimed.audit_trace_id, Some(retry_claim_audit.id));
+    let retry_failed = state
+        .fail_dynamic_workflow_plan_materialization(plan.id, retry_claim_audit.id, None, Utc::now())
+        .await
+        .expect("postgres retry claim remains valid after late review audit");
+    assert_eq!(retry_failed.status, "materialization_failed");
 }
 
 #[tokio::test]
