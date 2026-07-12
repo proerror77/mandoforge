@@ -11398,6 +11398,38 @@ steps:
 }
 
 #[test]
+fn workflow_pack_root_tool_scope_includes_reachable_handoff_agents() {
+    let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("packs/ai-governance/package.yaml");
+    let manifest_input = std::fs::read_to_string(manifest_path).expect("fixture manifest");
+    let manifest = workflow_pack::WorkflowPackManifest::from_yaml_str(&manifest_input)
+        .expect("manifest parses");
+    let workflow = manifest
+        .workflows
+        .iter()
+        .find(|workflow| workflow.id == "profile-onboarding")
+        .expect("profile onboarding workflow");
+    let workflow_file: WorkflowPackWorkflowFile = serde_yaml::from_str(
+        r#"
+id: profile-onboarding
+entry_agent: reader
+steps:
+  - agent: reader
+"#,
+    )
+    .expect("workflow file parses");
+
+    let tool_scope = workflow_pack_workflow_tool_scope(&manifest, workflow, &workflow_file);
+    let read = tool_scope["read"].as_array().expect("read tool scope");
+    let write = tool_scope["write"].as_array().expect("write tool scope");
+
+    assert!(read.contains(&json!("file.read")));
+    assert!(read.contains(&json!("ontology_type.lookup")));
+    assert!(write.contains(&json!("artifact.create")));
+}
+
+#[test]
 fn governed_handoff_back_to_primary_agent_requires_isolated_context() {
     let primary_agent_id = Uuid::new_v4();
 

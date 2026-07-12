@@ -1252,6 +1252,24 @@ pub(crate) fn workflow_pack_workflow_tool_scope(
             }
         }
     }
+    loop {
+        let reachable_targets = manifest
+            .agents
+            .iter()
+            .filter(|agent| agent_refs.contains(&agent.id))
+            .flat_map(|agent| {
+                agent
+                    .handoffs
+                    .iter()
+                    .map(|handoff| handoff.target_agent.clone())
+            })
+            .collect::<BTreeSet<_>>();
+        let previous_count = agent_refs.len();
+        agent_refs.extend(reachable_targets);
+        if agent_refs.len() == previous_count {
+            break;
+        }
+    }
     let mut read = BTreeSet::new();
     let mut write = BTreeSet::new();
     let mut external_write = BTreeSet::new();
