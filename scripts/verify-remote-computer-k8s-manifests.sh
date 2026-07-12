@@ -300,7 +300,7 @@ for build_contract in \
   'git checkout-index --all --force' \
   'git write-tree' \
   'MANDOFORGE_SOURCE_TREE' \
-  'mandoforge-agent-sandbox-runtime:0.1.3'; do
+  'mandoforge-agent-sandbox-runtime:0.1.4'; do
   if ! grep -Fq "$build_contract" "$runtime_build_script"; then
     echo "Agent Sandbox image builder is missing tracked-context contract: $build_contract" >&2
     exit 1
