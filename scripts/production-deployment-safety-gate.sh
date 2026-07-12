@@ -20,7 +20,11 @@ fail() {
 }
 
 render_manifest_json() {
-  kubectl patch --local=true --type=merge --patch '{}' -f "$1" -o json
+  local manifest_json
+  if ! manifest_json="$(kubectl patch --local=true --type=merge --patch '{}' -f "$1" -o json)"; then
+    fail "failed to render Kubernetes manifest: $1"
+  fi
+  printf '%s\n' "$manifest_json"
 }
 
 verify_kubernetes_access_contracts() {
@@ -76,9 +80,19 @@ verify_kubernetes_access_contracts() {
     || fail "Agent Sandbox NetworkPolicy must deny ingress and allow only bounded DNS, API, and HTTPS egress"
 
   for worker_manifest in deploy/k8s/worker.yaml deploy/k8s/worker-isolated-pool.yaml; do
-    render_manifest_json "$worker_manifest" \
-      | jq -e '.spec.template.spec.automountServiceAccountToken == false' >/dev/null \
+    local worker_json
+    worker_json="$(render_manifest_json "$worker_manifest")"
+    jq -e '.spec.template.spec.automountServiceAccountToken == false' <<<"$worker_json" >/dev/null \
       || fail "$worker_manifest must set automountServiceAccountToken: false"
+    jq -e '
+      [
+        .spec.template.spec.containers[]?.volumeMounts[]?.mountPath,
+        .spec.template.spec.initContainers[]?.volumeMounts[]?.mountPath
+      ]
+      | index("/var/run/secrets/kubernetes.io/serviceaccount")
+      | not
+    ' <<<"$worker_json" >/dev/null \
+      || fail "$worker_manifest must not mount Kubernetes ServiceAccount credentials"
   done
 }
 
