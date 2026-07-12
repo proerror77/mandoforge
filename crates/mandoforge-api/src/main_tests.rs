@@ -11424,7 +11424,7 @@ step_graph:
       agent_ref: reader
       start: true
     - key: analyze
-      type: agent
+      type: shell
       agent_ref: analyzer
       depends_on: [collect]
       risk_level: low
@@ -11438,6 +11438,11 @@ step_graph:
 steps:
   - agent: reader
   - agent: analyzer
+    task: classify onboarding risk
+    output_schema: schemas/company_profile.schema.json
+    required_profiles: [company]
+    required_schemas: [company-profile]
+    skills: [ai-impact-assessment]
   - agent: writer
 "#,
     )
@@ -11453,6 +11458,14 @@ steps:
     );
     assert_eq!(graph["steps"][1]["risk_level"], json!("medium"));
     assert_eq!(graph["steps"][1]["approval_required"], json!(false));
+    assert_eq!(graph["steps"][1]["type"], json!("agent"));
+    assert_eq!(graph["steps"][1]["task"], json!("classify onboarding risk"));
+    assert_eq!(graph["steps"][1]["required_profiles"], json!(["company"]));
+    assert_eq!(
+        graph["steps"][1]["required_schemas"],
+        json!(["company-profile"])
+    );
+    assert_eq!(graph["steps"][1]["skills"], json!(["ai-impact-assessment"]));
     assert_eq!(
         graph["steps"][2]["handoff_source_agent_ref"],
         json!("analyzer")

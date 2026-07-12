@@ -992,6 +992,12 @@ fn workflow_pack_apply_manifest_governance_to_step_graph(
         })?;
         explicit_step.insert("workflow_agent_ref".to_string(), json!(expected_agent_ref));
         for key in [
+            "type",
+            "task",
+            "output_schema",
+            "required_profiles",
+            "required_schemas",
+            "skills",
             "handoff_source_agent_ref",
             "handoff_intent",
             "risk_level",
