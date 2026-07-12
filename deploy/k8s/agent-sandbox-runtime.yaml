@@ -39,7 +39,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: remote-computer
-          image: ghcr.io/proerror77/mandoforge/mandoforge-agent-sandbox-runtime:0.1.1
+          image: ghcr.io/proerror77/mandoforge/mandoforge-agent-sandbox-runtime@sha256:c8f5a11ebdada0d8d8eb6eee6113f5f04c74dffc6a0b2044feae09f907994fd8
           imagePullPolicy: IfNotPresent
           command: ["sleep", "infinity"]
           env:

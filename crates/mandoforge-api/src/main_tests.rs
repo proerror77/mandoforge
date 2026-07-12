@@ -19930,7 +19930,7 @@ async fn remote_computer_readiness_separates_agent_sandbox_static_and_live_evide
     assert_eq!(readiness["agent_sandbox"]["production_blocked"], true);
     assert_eq!(
         readiness["agent_sandbox"]["runtime_image"],
-        "ghcr.io/proerror77/mandoforge/mandoforge-agent-sandbox-runtime:0.1.1"
+        "ghcr.io/proerror77/mandoforge/mandoforge-agent-sandbox-runtime@sha256:c8f5a11ebdada0d8d8eb6eee6113f5f04c74dffc6a0b2044feae09f907994fd8"
     );
     assert_eq!(
         readiness["agent_sandbox"]["tracked_context_builder_present"],

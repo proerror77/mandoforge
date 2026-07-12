@@ -307,7 +307,7 @@ for build_contract in \
   fi
 done
 
-if ! grep -q 'image: ghcr.io/proerror77/mandoforge/mandoforge-agent-sandbox-runtime:0.1.1' "$agent_sandbox_template_render" \
+if ! grep -q 'image: ghcr.io/proerror77/mandoforge/mandoforge-agent-sandbox-runtime@sha256:c8f5a11ebdada0d8d8eb6eee6113f5f04c74dffc6a0b2044feae09f907994fd8' "$agent_sandbox_template_render" \
   || grep -q 'mandoforge-adoption-api:latest' deploy/k8s/agent-sandbox-runtime.yaml; then
   echo "Agent Sandbox template must use the dedicated pinned runtime image" >&2
   exit 1
