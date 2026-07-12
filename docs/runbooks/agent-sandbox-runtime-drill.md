@@ -16,7 +16,7 @@ must not contain credentials, prompts, file contents, or tenant data.
 - Agent Sandbox controller: `v0.5.1`.
 - Kubernetes API: `agents.x-k8s.io/v1beta1` and
   `extensions.agents.x-k8s.io/v1beta1`.
-- Runtime image: `ghcr.io/proerror77/mandoforge/mandoforge-agent-sandbox-runtime@sha256:c8f5a11ebdada0d8d8eb6eee6113f5f04c74dffc6a0b2044feae09f907994fd8`,
+- Runtime image: `ghcr.io/proerror77/mandoforge/mandoforge-agent-sandbox-runtime@sha256:544137e95674ebc5ce2c4b25d0bb1c01c18cd11e7a296d0d1db872a8daded5bf`,
   published from the Git index by `scripts/build-agent-sandbox-runtime-image.sh`.
 - Environment profile:
 
