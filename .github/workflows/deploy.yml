@@ -10,7 +10,15 @@ on:
       runtime_image_tag:
         description: Agent Sandbox runtime image tag
         required: true
-        default: 0.1.1
+        default: 0.1.2
+      runtime_only:
+        description: Build and publish only the Agent Sandbox runtime image
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
       publish_image:
         description: Push the built image to GHCR
         required: false
@@ -62,6 +70,8 @@ jobs:
       RUNTIME_IMAGE_TAG: ${{ inputs.runtime_image_tag }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - name: Validate image tags
         run: |
           [[ "$IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]
@@ -69,9 +79,11 @@ jobs:
       - name: Build Agent Sandbox runtime image
         run: MANDOFORGE_AGENT_SANDBOX_IMAGE="$RUNTIME_IMAGE_NAME:$RUNTIME_IMAGE_TAG" scripts/build-agent-sandbox-runtime-image.sh --platform linux/amd64
       - uses: dtolnay/rust-toolchain@stable
+        if: inputs.runtime_only != 'true'
         with:
           targets: wasm32-unknown-unknown
       - uses: actions/cache@v4
+        if: inputs.runtime_only != 'true'
         with:
           path: |
             ~/.cargo/registry/index
@@ -84,17 +96,20 @@ jobs:
           restore-keys: |
             deploy-yew-${{ runner.os }}-
       - name: Install Trunk
+        if: inputs.runtime_only != 'true'
         run: |
           if ! command -v trunk >/dev/null 2>&1; then
             cargo install trunk --locked --version 0.21.14
           fi
       - name: Build web UI
+        if: inputs.runtime_only != 'true'
         run: |
           cd web-ui
           trunk build --release --dist ../web
           cd ..
           scripts/verify-static-ui-assets.sh
       - name: Build image
+        if: inputs.runtime_only != 'true'
         run: |
           build_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           echo "MANDOFORGE_BUILD_TIME=$build_time" >> "$GITHUB_ENV"
@@ -106,16 +121,19 @@ jobs:
             -t "$IMAGE_NAME:$IMAGE_TAG" \
             .
       - name: Login to GHCR
-        if: inputs.publish_image == 'true' || inputs.deploy_whiskey == 'true'
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+        if: inputs.runtime_only == 'true' || inputs.publish_image == 'true' || inputs.deploy_whiskey == 'true'
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USERNAME: ${{ github.actor }}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
       - name: Push image
-        if: inputs.publish_image == 'true' || inputs.deploy_whiskey == 'true'
+        if: inputs.runtime_only != 'true' && (inputs.publish_image == 'true' || inputs.deploy_whiskey == 'true')
         run: docker push "$IMAGE_NAME:$IMAGE_TAG"
       - name: Push Agent Sandbox runtime image
-        if: inputs.publish_image == 'true'
+        if: inputs.runtime_only == 'true' || inputs.publish_image == 'true'
         run: docker push "$RUNTIME_IMAGE_NAME:$RUNTIME_IMAGE_TAG"
       - name: Deploy Whiskey
-        if: inputs.deploy_whiskey == 'true'
+        if: inputs.runtime_only != 'true' && inputs.deploy_whiskey == 'true'
         env:
           INPUT_WHISKEY_REMOTE_HOST: ${{ inputs.whiskey_remote_host }}
           INPUT_WHISKEY_REMOTE_USER: ${{ inputs.whiskey_remote_user }}

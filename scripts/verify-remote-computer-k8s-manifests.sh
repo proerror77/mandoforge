@@ -299,7 +299,8 @@ for build_contract in \
   'git diff --quiet --' \
   'git checkout-index --all --force' \
   'git write-tree' \
-  'MANDOFORGE_SOURCE_TREE'; do
+  'MANDOFORGE_SOURCE_TREE' \
+  'mandoforge-agent-sandbox-runtime:0.1.2'; do
   if ! grep -Fq "$build_contract" "$runtime_build_script"; then
     echo "Agent Sandbox image builder is missing tracked-context contract: $build_contract" >&2
     exit 1
@@ -313,9 +314,12 @@ if ! grep -q 'image: ghcr.io/proerror77/mandoforge/mandoforge-agent-sandbox-runt
 fi
 
 for publish_contract in \
+  'runtime_only:' \
   'RUNTIME_IMAGE_NAME: ghcr.io/${{ github.repository }}/mandoforge-agent-sandbox-runtime' \
   'RUNTIME_IMAGE_TAG: ${{ inputs.runtime_image_tag }}' \
   'MANDOFORGE_AGENT_SANDBOX_IMAGE="$RUNTIME_IMAGE_NAME:$RUNTIME_IMAGE_TAG"' \
+  "if: inputs.runtime_only != 'true'" \
+  "if: inputs.runtime_only == 'true' || inputs.publish_image == 'true'" \
   'docker push "$RUNTIME_IMAGE_NAME:$RUNTIME_IMAGE_TAG"'; do
   if ! grep -Fq "$publish_contract" "$runtime_publish_workflow"; then
     echo "Agent Sandbox deploy workflow is missing publish contract: $publish_contract" >&2
