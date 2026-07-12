@@ -20,11 +20,15 @@ fail() {
 }
 
 render_manifest_json() {
-  local manifest_json
-  if ! manifest_json="$(kubectl patch --local=true --type=merge --patch '{}' -f "$1" -o json)"; then
-    fail "failed to render Kubernetes manifest: $1"
+  local manifest_json status
+  if manifest_json="$(kubectl patch --local=true --type=merge --patch '{}' -f "$1" -o json)"; then
+    printf '%s\n' "$manifest_json"
+    return 0
+  else
+    status=$?
+    echo "production deployment safety gate failed: failed to render Kubernetes manifest: $1" >&2
+    return "$status"
   fi
-  printf '%s\n' "$manifest_json"
 }
 
 verify_kubernetes_access_contracts() {
@@ -93,6 +97,14 @@ verify_kubernetes_access_contracts() {
       | not
     ' <<<"$worker_json" >/dev/null \
       || fail "$worker_manifest must not mount Kubernetes ServiceAccount credentials"
+    jq -e '
+      [
+        .spec.template.spec.volumes[]?.projected.sources[]?
+        | select(has("serviceAccountToken"))
+      ]
+      | length == 0
+    ' <<<"$worker_json" >/dev/null \
+      || fail "$worker_manifest must not project Kubernetes ServiceAccount tokens"
   done
 }
 
