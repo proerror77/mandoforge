@@ -996,22 +996,17 @@ pub(crate) fn ontology_action_tool_spec_for_release(
         .and_then(Value::as_str)
         .ok_or_else(|| AppError::forbidden("ontology release action contract digest is missing"))?
         .to_string();
+    if normalized_json_sha256(&tool_spec) != contract_digest {
+        return Err(AppError::forbidden(
+            "ontology release action contract digest does not match its snapshot",
+        ));
+    }
     let tool_spec =
         serde_json::from_value::<OntologyOnboardingToolSpec>(tool_spec).map_err(|error| {
             AppError::bad_request(format!(
                 "ontology release action contract is invalid: {error}"
             ))
         })?;
-    let normalized = serde_json::to_value(&tool_spec).map_err(|error| {
-        AppError::bad_request(format!(
-            "failed to normalize ontology action contract: {error}"
-        ))
-    })?;
-    if normalized_json_sha256(&normalized) != contract_digest {
-        return Err(AppError::forbidden(
-            "ontology release action contract digest does not match its snapshot",
-        ));
-    }
     if release.source_run_id != Some(tool_spec.run_id) {
         return Err(AppError::forbidden(
             "ontology action contract does not belong to the pinned release source run",

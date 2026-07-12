@@ -1443,6 +1443,47 @@ async fn ontology_release_candidate_for_test(state: &AppState, version: &str) ->
     .expect("candidate")
 }
 
+#[tokio::test]
+async fn ontology_release_accepts_legacy_action_snapshot_without_executor() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let mut release = ontology_release_candidate_for_test(&state, "legacy-action-v1").await;
+    let evidence = release
+        .evidence_refs
+        .as_array_mut()
+        .and_then(|items| {
+            items
+                .iter_mut()
+                .find(|item| item.get("tool_spec").is_some())
+        })
+        .expect("action contract evidence");
+    let tool_spec = evidence
+        .get_mut("tool_spec")
+        .and_then(Value::as_object_mut)
+        .expect("action tool spec");
+    tool_spec.remove("executor");
+    let action_name = tool_spec["name"].as_str().expect("action name").to_string();
+    let legacy_digest = normalized_json_sha256(&Value::Object(tool_spec.clone()));
+    evidence["contract_digest"] = json!(legacy_digest);
+
+    let (decoded, digest) = ontology_action_tool_spec_for_release(&release, &action_name)
+        .expect("legacy action contract remains readable");
+    assert_eq!(digest, legacy_digest);
+    assert_eq!(decoded.executor, json!({}));
+
+    release
+        .evidence_refs
+        .as_array_mut()
+        .and_then(|items| {
+            items
+                .iter_mut()
+                .find(|item| item.get("tool_spec").is_some())
+        })
+        .expect("action contract evidence")["tool_spec"]["description"] = json!("tampered");
+    let error = ontology_action_tool_spec_for_release(&release, &action_name)
+        .expect_err("legacy snapshot tampering must still fail closed");
+    assert!(error.message.contains("digest does not match"));
+}
+
 async fn ontology_release_trigger_workflow_definition_for_test(
     state: &AppState,
     domain_scope: &str,
