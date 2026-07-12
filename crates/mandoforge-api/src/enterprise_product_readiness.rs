@@ -1350,6 +1350,7 @@ mod tests {
         assert!(agent_sandbox_network_policy_is_restricted(policy));
 
         let permissive = policy.replace("  ingress: []", "  ingress:\n    - {}");
+        assert_ne!(permissive, policy, "fixture mutation must change ingress");
         assert!(!agent_sandbox_network_policy_is_restricted(&permissive));
     }
 
@@ -1359,6 +1360,7 @@ mod tests {
         assert!(api_agent_sandbox_rbac_is_minimal(rbac));
 
         let expanded = rbac.replace("verbs: [\"get\"]", "verbs: [\"get\", \"list\"]");
+        assert_ne!(expanded, rbac, "fixture mutation must expand RBAC verbs");
         assert!(!api_agent_sandbox_rbac_is_minimal(&expanded));
     }
 
@@ -1366,9 +1368,11 @@ mod tests {
     fn worker_manifest_must_explicitly_disable_service_account_tokens() {
         let worker = include_str!("../../../deploy/k8s/worker.yaml");
         assert!(workload_disables_service_account_token(worker));
-        assert!(!workload_disables_service_account_token(&worker.replace(
+        let token_enabled = worker.replace(
             "automountServiceAccountToken: false",
-            "automountServiceAccountToken: true"
-        )));
+            "automountServiceAccountToken: true",
+        );
+        assert_ne!(token_enabled, worker, "fixture mutation must enable token");
+        assert!(!workload_disables_service_account_token(&token_enabled));
     }
 }
