@@ -993,7 +993,7 @@ pub(crate) fn render_execution_context(
     let context_layers = packet
         .replay_summary
         .get("context_layers")
-        .cloned()
+        .map(compact_rendered_context_layers)
         .unwrap_or_else(empty_json_object);
 
     let mut must_follow = packet
@@ -1114,13 +1114,66 @@ pub(crate) fn rendered_context_task_projection(
     packet: &ContextPacket,
     max_summary_chars: usize,
 ) -> Value {
-    json!({
-        "title": packet.task.get("title").and_then(Value::as_str).map(|value| truncate_for_execution_context(value, max_summary_chars)),
-        "objective": packet.task.get("objective").and_then(Value::as_str).map(|value| truncate_for_execution_context(value, max_summary_chars)),
-        "status": packet.task.get("status").cloned(),
-        "workflow_run_id": packet.task.get("workflow_run_id").cloned(),
-        "workflow_step_run_id": packet.task.get("workflow_step_run_id").cloned(),
-    })
+    let mut task = serde_json::Map::new();
+    for key in ["title", "objective"] {
+        if let Some(value) = packet.task.get(key).and_then(Value::as_str) {
+            task.insert(
+                key.to_string(),
+                Value::String(truncate_for_execution_context(value, max_summary_chars)),
+            );
+        }
+    }
+    for key in ["status", "workflow_run_id", "workflow_step_run_id"] {
+        if let Some(value) = packet.task.get(key).filter(|value| !value.is_null()) {
+            task.insert(key.to_string(), value.clone());
+        }
+    }
+    Value::Object(task)
+}
+
+pub(crate) fn compact_rendered_context_layers(layers: &Value) -> Value {
+    let Some(layers) = layers.as_object() else {
+        return empty_json_object();
+    };
+    Value::Object(
+        layers
+            .iter()
+            .map(|(name, layer)| {
+                let mut layer = compact_non_null_json(layer).unwrap_or_else(empty_json_object);
+                if let Some(layer) = layer.as_object_mut() {
+                    match name.as_str() {
+                        "managed_runtime" => {
+                            layer.remove("session_id");
+                            layer.remove("agent_id");
+                        }
+                        "execution_substrate" => {
+                            layer.remove("tools");
+                        }
+                        _ => {}
+                    }
+                }
+                (name.clone(), layer)
+            })
+            .collect(),
+    )
+}
+
+fn compact_non_null_json(value: &Value) -> Option<Value> {
+    match value {
+        Value::Null => None,
+        Value::Object(object) => Some(Value::Object(
+            object
+                .iter()
+                .filter_map(|(key, value)| {
+                    compact_non_null_json(value).map(|value| (key.clone(), value))
+                })
+                .collect(),
+        )),
+        Value::Array(values) => Some(Value::Array(
+            values.iter().filter_map(compact_non_null_json).collect(),
+        )),
+        _ => Some(value.clone()),
+    }
 }
 
 pub(crate) async fn render_execution_context_for_packet(

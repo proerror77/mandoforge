@@ -197,7 +197,17 @@ fn valid_environment_key(key: &str) -> bool {
 fn launcher_owned_environment_key(key: &str) -> bool {
     matches!(
         key,
-        "HOME" | "PWD" | "PATH" | "CARGO_TARGET_DIR" | "MANDOFORGE_SESSION_ID" | "RUSTC_WRAPPER"
+        "HOME"
+            | "PWD"
+            | "PATH"
+            | "CARGO_HOME"
+            | "CARGO_TARGET_DIR"
+            | "MANDOFORGE_SESSION_ID"
+            | "MANDOFORGE_SHARED_CARGO_CACHE_ROOT"
+            | "PNPM_STORE_DIR"
+            | "RUSTC_WRAPPER"
+            | "SCCACHE_DIR"
+            | "UV_CACHE_DIR"
     ) || key.starts_with("LD_")
         || key.starts_with("DYLD_")
 }
@@ -357,24 +367,33 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_runtime_request_rejects_unknown_fields_and_launcher_owned_cache_wrapper() {
+    fn sandbox_runtime_request_rejects_unknown_fields_and_launcher_owned_cache_paths() {
         let session_id = Uuid::new_v4();
         let unknown = format!(
             r#"{{"version":"v1","session_id":"{session_id}","workspace_path":"/workspace/sessions/{session_id}","timeout_seconds":30,"environment":{{}},"operation":{{"type":"shell","command":"pwd"}},"unexpected":true}}"#
         );
         assert!(parse_sandbox_runtime_request(unknown.as_bytes()).is_err());
 
-        let mut environment = BTreeMap::new();
-        environment.insert("RUSTC_WRAPPER".to_string(), "disabled".to_string());
-        let request = SandboxRuntimeRequest::new(
-            session_id,
-            30,
-            environment,
-            SandboxRuntimeOperation::Shell {
-                command: "cargo check".to_string(),
-            },
-        );
-        assert!(request.validate().is_err());
+        for key in [
+            "CARGO_HOME",
+            "MANDOFORGE_SHARED_CARGO_CACHE_ROOT",
+            "PNPM_STORE_DIR",
+            "RUSTC_WRAPPER",
+            "SCCACHE_DIR",
+            "UV_CACHE_DIR",
+        ] {
+            let mut environment = BTreeMap::new();
+            environment.insert(key.to_string(), "disabled".to_string());
+            let request = SandboxRuntimeRequest::new(
+                session_id,
+                30,
+                environment,
+                SandboxRuntimeOperation::Shell {
+                    command: "cargo check".to_string(),
+                },
+            );
+            assert!(request.validate().is_err(), "{key} must be launcher-owned");
+        }
     }
 
     #[test]

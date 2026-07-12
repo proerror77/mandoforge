@@ -8,7 +8,9 @@ spec:
       app: mandoforge-agent-remote-computer
       mandoforge.io/runtime-substrate: agent-sandbox
   policyTypes:
+    - Ingress
     - Egress
+  ingress: []
   egress:
     - to:
         - namespaceSelector:

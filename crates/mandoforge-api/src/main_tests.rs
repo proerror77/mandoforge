@@ -18464,7 +18464,7 @@ async fn remote_computer_readiness_separates_agent_sandbox_static_and_live_evide
     assert_eq!(readiness["agent_sandbox"]["production_blocked"], true);
     assert_eq!(
         readiness["agent_sandbox"]["runtime_image"],
-        "mandoforge-agent-sandbox-runtime:0.1.1"
+        "ghcr.io/proerror77/mandoforge/mandoforge-agent-sandbox-runtime:0.1.1"
     );
     assert_eq!(
         readiness["agent_sandbox"]["tracked_context_builder_present"],
@@ -27731,7 +27731,22 @@ async fn context_packets_are_versioned_persisted_and_include_semantic_objects() 
     assert_eq!(rendered.context_packet_id, packet_v1.id);
     assert_eq!(rendered.context_packet_version, 1);
     assert_eq!(rendered.ontology_scope["workflow_scope"], "context-os");
-    assert_eq!(rendered.relevant_objects.len(), 1);
+    assert_eq!(
+        rendered
+            .context_layers
+            .as_object()
+            .map(|layers| layers.len()),
+        Some(8)
+    );
+    assert_eq!(
+        rendered.relevant_objects.len(),
+        1,
+        "budget={:?} task={} context_layers={}",
+        rendered.budget,
+        rendered.task,
+        rendered.context_layers
+    );
+    assert!(rendered.budget.estimated_tokens_used <= rendered.budget.max_prompt_tokens);
     assert!(!rendered.full_content_included);
     assert!(rendered.fetchable_object_ids.contains(&semantic_object.id));
     assert!(

@@ -7,6 +7,10 @@ on:
         description: Image tag to build
         required: true
         default: manual
+      runtime_image_tag:
+        description: Agent Sandbox runtime image tag
+        required: true
+        default: 0.1.1
       publish_image:
         description: Push the built image to GHCR
         required: false
@@ -46,6 +50,7 @@ permissions:
 
 env:
   IMAGE_NAME: ghcr.io/${{ github.repository }}/mandoforge-api
+  RUNTIME_IMAGE_NAME: ghcr.io/${{ github.repository }}/mandoforge-agent-sandbox-runtime
 
 jobs:
   build-image:
@@ -54,6 +59,8 @@ jobs:
     environment: stage2-production
     steps:
       - uses: actions/checkout@v6
+      - name: Build Agent Sandbox runtime image
+        run: MANDOFORGE_AGENT_SANDBOX_IMAGE="$RUNTIME_IMAGE_NAME:${{ inputs.runtime_image_tag }}" scripts/build-agent-sandbox-runtime-image.sh --platform linux/amd64
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -97,6 +104,9 @@ jobs:
       - name: Push image
         if: inputs.publish_image == 'true' || inputs.deploy_whiskey == 'true'
         run: docker push "$IMAGE_NAME:${{ inputs.image_tag }}"
+      - name: Push Agent Sandbox runtime image
+        if: inputs.publish_image == 'true'
+        run: docker push "$RUNTIME_IMAGE_NAME:${{ inputs.runtime_image_tag }}"
       - name: Deploy Whiskey
         if: inputs.deploy_whiskey == 'true'
         env:

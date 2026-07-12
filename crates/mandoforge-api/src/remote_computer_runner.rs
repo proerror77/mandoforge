@@ -196,12 +196,11 @@ fn request_runtime_substrate(
     config: &RemoteComputerRunnerConfig,
     request: &RemoteComputerRunnerDryRunRequest,
 ) -> &'static str {
+    if remote_computer_agent_sandbox_requested(config) {
+        return "agent-sandbox";
+    }
     let Some(metadata) = request_metadata(request) else {
-        return if remote_computer_agent_sandbox_requested(config) {
-            "agent-sandbox"
-        } else {
-            "kubernetes-pod"
-        };
+        return "kubernetes-pod";
     };
     if let Some(substrate) = metadata
         .get("runtime_identity")
@@ -222,11 +221,7 @@ fn request_runtime_substrate(
             _ => {}
         }
     }
-    if remote_computer_agent_sandbox_requested(config) {
-        "agent-sandbox"
-    } else {
-        "kubernetes-pod"
-    }
+    "kubernetes-pod"
 }
 
 fn request_agent_sandbox_requested(
@@ -2117,6 +2112,39 @@ mod tests {
             .as_deref(),
             Some("legacy-label-sandbox")
         );
+    }
+
+    #[test]
+    fn agent_sandbox_mode_cannot_be_downgraded_by_request_metadata() {
+        let config = RemoteComputerRunnerConfig {
+            mode: "agent-sandbox".to_string(),
+            namespace: "agent-os".to_string(),
+            pod_template_path: "unused".to_string(),
+            service_account: "mandoforge-remote-computer".to_string(),
+            kubeconfig_path: None,
+            kube_api_url: None,
+            bearer_token_path: None,
+            in_cluster: false,
+            mutation_enabled: false,
+            live_mutation_enabled: false,
+            execution_enabled: false,
+        };
+        let request = RemoteComputerRunnerDryRunRequest {
+            operation: Some("create".to_string()),
+            remote_computer_id: None,
+            session_id: Some(Uuid::new_v4()),
+            pod_name: Some("ignored".to_string()),
+            metadata: Some(json!({
+                "runtime_substrate": "kubernetes-pod",
+                "runtime_identity": {"substrate": "kubernetes-pod"}
+            })),
+        };
+
+        assert_eq!(
+            request_runtime_substrate(&config, &request),
+            "agent-sandbox"
+        );
+        assert!(request_agent_sandbox_requested(&config, &request));
     }
 
     #[test]

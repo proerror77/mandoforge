@@ -1,7 +1,7 @@
 # Agent Sandbox Runtime Drill
 
-This runbook validates the MandoForge Agent Sandbox pilot without changing the
-source-of-truth boundary. MandoForge API/Postgres owns sessions, policy,
+This runbook validates the MandoForge production-default Agent Sandbox
+substrate without changing the source-of-truth boundary. MandoForge API/Postgres owns sessions, policy,
 approvals, execution jobs, leases, events, artifacts, and audit logs. The
 Kubernetes SIG Agent Sandbox controller owns `SandboxClaim`, `Sandbox`, Pod,
 per-sandbox PVC, and warm-pool mechanics only.
@@ -16,7 +16,7 @@ must not contain credentials, prompts, file contents, or tenant data.
 - Agent Sandbox controller: `v0.5.1`.
 - Kubernetes API: `agents.x-k8s.io/v1beta1` and
   `extensions.agents.x-k8s.io/v1beta1`.
-- Runtime image: `mandoforge-agent-sandbox-runtime:0.1.1`, built from the Git
+- Runtime image: `ghcr.io/proerror77/mandoforge/mandoforge-agent-sandbox-runtime:0.1.1`, built from the Git
   index by `scripts/build-agent-sandbox-runtime-image.sh`.
 - Environment profile:
 
@@ -47,10 +47,14 @@ test "$(kubectl config current-context)" = "${EXPECTED_KUBE_CONTEXT:-docker-desk
 kubectl version
 ```
 
-2. Install the pinned upstream controller and extensions manifests, then verify
-   all four CRDs use `v1beta1` and the controller is Ready:
+2. Install the pinned upstream controller bundle, then verify all four CRDs use
+   `v1beta1` and the controller is Ready:
 
 ```bash
+curl -fsSLo /tmp/agent-sandbox-v0.5.1-manifest.yaml https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.5.1/manifest.yaml
+curl -fsSLo /tmp/agent-sandbox-v0.5.1-extensions.yaml https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.5.1/extensions.yaml
+printf '%s  %s\n' 8cfdf0a878f66b91d2e7103e77859d1412d850ce3f5fe5c3fa134c36bd55504a /tmp/agent-sandbox-v0.5.1-manifest.yaml | shasum -a 256 -c -
+printf '%s  %s\n' 7c22b450e24ede3fddbcd5ae0ee7c78ea102d6c30635ff860cc486578a55932e /tmp/agent-sandbox-v0.5.1-extensions.yaml | shasum -a 256 -c -
 kubectl apply -f /tmp/agent-sandbox-v0.5.1-manifest.yaml
 kubectl apply -f /tmp/agent-sandbox-v0.5.1-extensions.yaml
 kubectl -n agent-sandbox-system rollout status deployment/agent-sandbox-controller
@@ -65,22 +69,21 @@ kubectl get crd sandboxes.agents.x-k8s.io \
 ```bash
 scripts/build-agent-sandbox-runtime-image.sh
 scripts/verify-remote-computer-k8s-manifests.sh
-kubectl apply --server-side --dry-run=server -k deploy/agent-sandbox-pilot
+kubectl apply --server-side --dry-run=server -k deploy/k8s
 ```
 
-4. Apply the pilot and worker RBAC:
+4. Apply the default bundle. It contains a dedicated API identity and scoped
+   Agent Sandbox RBAC; queue workers remain uncredentialed:
 
 ```bash
-kubectl apply -k deploy/agent-sandbox-pilot
-kubectl -n agent-os apply \
-  -f deploy/k8s/worker-serviceaccount.yaml \
-  -f deploy/k8s/worker-remote-computer-rbac.yaml
+kubectl apply -k deploy/k8s
 ```
 
 The runtime Pod service account is `mandoforge-remote-computer` with token
-automount disabled. The API/worker runner uses `mandoforge-worker` and only the
-namespace-scoped Pod, `pods/exec`, SandboxClaim, and Sandbox permissions in the
-tracked Role.
+automount disabled. The runner executes in the API process through
+`mandoforge-api`, whose Role permits SandboxClaim lifecycle, Sandbox/Pod lookup,
+and `pods/exec`, but not direct Pod create/delete. Queue workers call the API and
+do not mount Kubernetes credentials.
 
 ### Docker Desktop Storage Override
 
@@ -131,7 +134,9 @@ while `/cache/project` retains a non-sensitive dependency-cache marker.
 The workspace PVC is sandbox-private. Only dependency/tool caches under
 `/cache/project` are shared by the declared project scope. Do not place target
 outputs, prompts, credentials, home directories, or CLI conversation state in
-the shared cache.
+the shared cache. Verify that Cargo `registry` and `git` resolve into the shared
+cache while `.cargo-home/credentials.toml`, `.home`, and `target` remain under
+the session workspace and are absent from a second Sandbox.
 
 ## Network Checks
 
@@ -146,7 +151,7 @@ The tracked policies must prove all of the following from the runtime Pod:
 - External TCP 80 is blocked.
 - The runtime Pod has no service-account token mounted.
 
-Standard Kubernetes `NetworkPolicy` is IP/port based, not FQDN aware. The pilot
+Standard Kubernetes `NetworkPolicy` is IP/port based, not FQDN aware. The runtime
 therefore allows external 443 broadly; use a Cilium FQDN policy, egress proxy,
 or equivalent for domain allowlists. Standard policy implementations can also
 exempt traffic to the node or host-network API endpoint. Keep the runtime Pod
@@ -156,23 +161,23 @@ API-server block is required.
 ## MandoForge Approval And Exec Check
 
 Run MandoForge against Postgres with `MANDOFORGE_EXECUTION_WORKER=queue` and the
-full explicit execution gates. For an out-of-cluster runner, use a short-lived
-worker ServiceAccount token and the cluster CA:
+full explicit execution gates. For an out-of-cluster API process, use a
+short-lived `mandoforge-api` ServiceAccount token and the cluster CA:
 
 ```bash
 kubectl config view --raw --minify \
   -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' \
   | base64 --decode > /tmp/mandoforge-kubernetes-ca.crt
-kubectl -n agent-os create token mandoforge-worker --duration=1h \
-  > /tmp/mandoforge-kubernetes-worker-token
+kubectl -n agent-os create token mandoforge-api --duration=1h \
+  > /tmp/mandoforge-kubernetes-api-token
 chmod 600 \
   /tmp/mandoforge-kubernetes-ca.crt \
-  /tmp/mandoforge-kubernetes-worker-token
+  /tmp/mandoforge-kubernetes-api-token
 
 export MANDOFORGE_REMOTE_COMPUTER_RUNNER=agent-sandbox
 export MANDOFORGE_REMOTE_COMPUTER_NAMESPACE=agent-os
 export MANDOFORGE_REMOTE_COMPUTER_KUBE_API_URL="$(kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.server}')"
-export MANDOFORGE_REMOTE_COMPUTER_BEARER_TOKEN_PATH=/tmp/mandoforge-kubernetes-worker-token
+export MANDOFORGE_REMOTE_COMPUTER_BEARER_TOKEN_PATH=/tmp/mandoforge-kubernetes-api-token
 export MANDOFORGE_REMOTE_COMPUTER_CA_CERT_PATH=/tmp/mandoforge-kubernetes-ca.crt
 export MANDOFORGE_REMOTE_COMPUTER_MUTATION_ENABLED=true
 export MANDOFORGE_REMOTE_COMPUTER_LIVE_MUTATION_ENABLED=true
@@ -249,12 +254,12 @@ runtime.
 
 ## Rollback
 
-1. Stop workers or unset the three mutation/execution gates.
+1. Set the three mutation/execution gates to `false` and restart the API and workers.
 2. Send terminal session events or delete only Claims labeled
-   `mandoforge.io/runtime-substrate=agent-sandbox` in the pilot namespace.
+   `mandoforge.io/runtime-substrate=agent-sandbox` in the validated namespace.
 3. Wait for generated Sandboxes, Pods, and per-sandbox PVCs to disappear.
-4. Delete the `deploy/agent-sandbox-pilot` resources and the local cache PVC.
-5. Remove the short-lived token and CA files.
+4. Delete the smoke overlay. Delete `deploy/k8s` only when the namespace is a disposable drill environment; it is now the default application bundle.
+5. Remove the short-lived API token and CA files.
 6. Keep MandoForge DB events and audit logs; they are the durable history.
 
 Do not delete the controller or CRDs until no other namespace uses them.

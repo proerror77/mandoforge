@@ -4,7 +4,7 @@ metadata:
   name: mandoforge-agent-sandbox-mandoforge-cache
   labels:
     mandoforge.io/profile: agent-sandbox-mandoforge-cache
-    mandoforge.io/cache-scope: single-project-pilot
+    mandoforge.io/cache-scope: single-project
     mandoforge.io/project: mandoforge
 spec:
   accessModes:
@@ -39,7 +39,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: remote-computer
-          image: mandoforge-agent-sandbox-runtime:0.1.1
+          image: ghcr.io/proerror77/mandoforge/mandoforge-agent-sandbox-runtime:0.1.1
           imagePullPolicy: IfNotPresent
           command: ["sleep", "infinity"]
           env:
@@ -47,7 +47,7 @@ spec:
               value: "agent-sandbox"
             - name: MANDOFORGE_WORKSPACE_ROOT
               value: "/workspace/sessions"
-            - name: CARGO_HOME
+            - name: MANDOFORGE_SHARED_CARGO_CACHE_ROOT
               value: "/cache/project/cargo"
             - name: SCCACHE_DIR
               value: "/cache/project/sccache"
@@ -67,7 +67,7 @@ spec:
           volumeMounts:
             - name: workspace-data
               mountPath: /workspace/sessions
-            # ponytail: single-project pilot cache; create one PVC per repo or tenant before shared use.
+            # Single-project dependency cache; create one PVC per repo or tenant before shared use.
             - name: project-cache
               mountPath: /cache/project
             - name: runtime-tmp

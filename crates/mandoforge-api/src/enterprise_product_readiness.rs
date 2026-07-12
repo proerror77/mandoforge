@@ -984,8 +984,18 @@ fn production_deployment_safety_static_ready() -> bool {
     let kustomization = project_file_content("deploy/k8s/kustomization.yaml");
     let secret_example = project_file_content("deploy/k8s/secret.example.yaml");
     let secret_delivery_contract = project_file_content("deploy/k8s/secret-delivery-contract.yaml");
+    let agent_sandbox_controller_contract =
+        project_file_content("deploy/k8s/agent-sandbox-controller-contract.yaml");
+    let agent_sandbox_runtime = project_file_content("deploy/k8s/agent-sandbox-runtime.yaml");
+    let agent_sandbox_network_policy =
+        project_file_content("deploy/k8s/agent-sandbox-egress-networkpolicy.yaml");
+    let api_agent_sandbox_rbac = project_file_content("deploy/k8s/api-agent-sandbox-rbac.yaml");
     let configmap = project_file_content("deploy/k8s/configmap.yaml");
     let api_manifest = project_file_content("deploy/k8s/api.yaml");
+    let worker_manifest = project_file_content("deploy/k8s/worker.yaml");
+    let isolated_worker_manifest = project_file_content("deploy/k8s/worker-isolated-pool.yaml");
+    let isolated_worker_network_policy =
+        project_file_content("deploy/k8s/worker-isolated-pool-networkpolicy.yaml");
     let preflight_present = project_file_is_executable("scripts/production-launch-preflight.sh");
     let deployment_safety_gate_present =
         project_file_is_executable("scripts/production-deployment-safety-gate.sh");
@@ -1006,11 +1016,68 @@ fn production_deployment_safety_static_ready() -> bool {
                 && content.contains("MANDOFORGE_SECRET_NAME: \"mandoforge-secrets\"")
                 && content.contains("MANDOFORGE_SECRET_MUST_NOT_BE_EXAMPLE: \"true\"")
         })
+        && kustomization.as_deref().is_some_and(|content| {
+            content.contains("agent-sandbox-controller-contract.yaml")
+                && content.contains("api-serviceaccount.yaml")
+                && content.contains("api-agent-sandbox-rbac.yaml")
+                && content.contains("agent-sandbox-runtime.yaml")
+                && content.contains("agent-sandbox-egress-networkpolicy.yaml")
+                && !content.contains("agent-remote-computer.yaml")
+        })
+        && agent_sandbox_controller_contract
+            .as_deref()
+            .is_some_and(|content| {
+                content.contains("MANDOFORGE_AGENT_SANDBOX_CONTROLLER_VERSION: \"v0.5.1\"")
+                    && content.contains(
+                        "MANDOFORGE_AGENT_SANDBOX_EXTENSIONS_API: \"extensions.agents.x-k8s.io/v1beta1\"",
+                    )
+                    && content.contains(
+                        "MANDOFORGE_AGENT_SANDBOX_CORE_INSTALL_ASSET: \"manifest.yaml\"",
+                    )
+                    && content.contains(
+                        "MANDOFORGE_AGENT_SANDBOX_CORE_INSTALL_SHA256: \"8cfdf0a878f66b91d2e7103e77859d1412d850ce3f5fe5c3fa134c36bd55504a\"",
+                    )
+                    && content.contains(
+                        "MANDOFORGE_AGENT_SANDBOX_EXTENSIONS_INSTALL_ASSET: \"extensions.yaml\"",
+                    )
+                    && content.contains(
+                        "MANDOFORGE_AGENT_SANDBOX_EXTENSIONS_INSTALL_SHA256: \"7c22b450e24ede3fddbcd5ae0ee7c78ea102d6c30635ff860cc486578a55932e\"",
+                    )
+                    && content.contains("MANDOFORGE_AGENT_SANDBOX_CONTROLLER_REQUIRED: \"true\"")
+            })
+        && agent_sandbox_runtime.as_deref().is_some_and(|content| {
+            content.contains("kind: SandboxTemplate")
+                && content.contains("kind: SandboxWarmPool")
+                && content.contains("automountServiceAccountToken: false")
+        })
+        && agent_sandbox_network_policy
+            .as_deref()
+            .is_some_and(|content| {
+                content.contains("kind: NetworkPolicy")
+                    && content.contains("- Ingress")
+                    && content.contains("- Egress")
+            })
+        && api_agent_sandbox_rbac.as_deref().is_some_and(|content| {
+            content.contains("name: mandoforge-api-agent-sandbox")
+                && content.contains("resources: [\"sandboxclaims\"]")
+                && content.contains("resources: [\"sandboxes\"]")
+                && content.contains("resources: [\"pods/exec\"]")
+                && !content.contains(
+                    "resources: [\"pods\"]\n    verbs: [\"get\", \"list\", \"watch\", \"create\", \"delete\"]",
+                )
+        })
         && configmap.as_deref().is_some_and(|content| {
             content.contains("MANDOFORGE_PROVIDER_RUNTIME_ENV: \"production\"")
-                && content.contains("MANDOFORGE_REMOTE_COMPUTER_RUNNER: \"kubernetes\"")
+                && content.contains("MANDOFORGE_REMOTE_COMPUTER_RUNNER: \"agent-sandbox\"")
                 && content
                     .contains("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT: \"kubernetes\"")
+                && content.contains(
+                    "MANDOFORGE_REMOTE_COMPUTER_TEMPLATE_PATH: \"deploy/k8s/agent-sandbox-runtime.yaml\"",
+                )
+                && content.contains("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_ENABLED: \"false\"")
+                && content.contains("MANDOFORGE_REMOTE_COMPUTER_MUTATION_ENABLED: \"false\"")
+                && content
+                    .contains("MANDOFORGE_REMOTE_COMPUTER_LIVE_MUTATION_ENABLED: \"false\"")
                 && !content.contains("MANDOFORGE_INSECURE_DEV_AUTH: \"true\"")
                 && !content.contains("MANDOFORGE_INSECURE_DEV_AUTH: \"1\"")
                 && !content.contains("MANDOFORGE_TRUST_X_MANDOFORGE_SUBJECT: \"true\"")
@@ -1023,8 +1090,23 @@ fn production_deployment_safety_static_ready() -> bool {
         })
         && api_manifest.as_deref().is_some_and(|content| {
             content.contains("claimName: mandoforge-workspaces")
+                && content.contains("serviceAccountName: mandoforge-api")
+                && content.contains("name: mandoforge-agent-sandbox-controller-contract")
+                && content.contains("mountPath: /var/run/secrets/kubernetes.io/serviceaccount")
                 && !content.contains("emptyDir: {}")
         })
+        && worker_manifest.as_deref().is_some_and(|content| {
+            !content.contains("mountPath: /var/run/secrets/kubernetes.io/serviceaccount")
+        })
+        && isolated_worker_manifest.as_deref().is_some_and(|content| {
+            !content.contains("mountPath: /var/run/secrets/kubernetes.io/serviceaccount")
+        })
+        && isolated_worker_network_policy
+            .as_deref()
+            .is_some_and(|content| {
+                !content.contains("app: agent-remote-computer")
+                    && !content.contains("port: 8080")
+            })
         && preflight_present
         && deployment_safety_gate_present
         && contract_gate_present

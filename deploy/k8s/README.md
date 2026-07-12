@@ -10,13 +10,14 @@ It contains:
 - Worker Deployment for queued execution jobs, with a restricted ServiceAccount, disabled token automount, RuntimeDefault seccomp, dropped capabilities, read-only root filesystem, resource bounds, and a worker NetworkPolicy.
 - Worker HPA skeleton for CPU-based scaling experiments.
 - Worker KEDA ScaledObject for queue-depth scaling experiments.
-- Agent Remote Computer Pod template with zero replicas.
-- Remote Computer service account, RWX state PVC placeholder, state-contract ConfigMap, and deny-by-default NetworkPolicy.
+- Agent Sandbox controller contract pinned to `v0.5.1`, plus the default `SandboxTemplate`, `SandboxWarmPool`, per-sandbox workspace PVC, project dependency cache, and ingress/egress NetworkPolicy.
+- A dedicated API ServiceAccount and namespace-scoped RBAC for SandboxClaim lifecycle, Sandbox/Pod discovery, and `pods/exec`. Queue workers do not receive Kubernetes API credentials.
+- Remote Computer service account, RWX state PVC placeholder, and state-contract ConfigMap. The legacy direct-Pod template remains a reference and is not in the default kustomization.
 - JuiceFS CSI Remote Computer state example, kept outside the default kustomization.
 - Remote Computer warm-pool example, kept outside the default kustomization.
 - Remote Computer KEDA ScaledObject example, kept outside the default kustomization.
 - Remote Computer pilot bundle at `../remote-computer-pilot/kustomization.yaml` that opts into JuiceFS, warm-pool, and Remote Computer KEDA examples together.
-- Agent Sandbox pilot bundle at `../agent-sandbox-pilot/kustomization.yaml` that layers Kubernetes SIG Agent Sandbox `SandboxTemplate` and `SandboxWarmPool` resources over the base Kubernetes manifests. It keeps MandoForge as runtime truth while moving sandbox lifecycle, per-sandbox workspace/state PVCs, and warm-pool allocation to Agent Sandbox.
+- Agent Sandbox compatibility bundle at `../agent-sandbox-pilot/kustomization.yaml`; it now renders the same production-default substrate as `deploy/k8s` and creates no live claim.
 - Agent Sandbox smoke bundle at `../agent-sandbox-smoke/kustomization.yaml` that adds a live `SandboxClaim` example for explicit controller smoke tests.
 - Scheduler CronJob for due policy, approval, release, and MCP automation, using a dedicated ServiceAccount with token automount disabled and Secret-sourced scheduler subject, role, and shared token headers.
 - Postgres StatefulSet and Service.
@@ -25,9 +26,17 @@ It contains:
 - Secret delivery contract ConfigMap documenting that production must supply `mandoforge-secrets` through an external secret manager, External Secrets Operator, SealedSecret, or equivalent controlled path.
 - Durable workspace PVC for API-owned workspaces.
 
-Create a local/dev Secret, then apply locally after building and publishing an image:
+Install the pinned Agent Sandbox controller, create a local/dev Secret, then
+apply locally after building and publishing the runtime and API images:
 
 ```bash
+curl -fsSLo /tmp/agent-sandbox-manifest.yaml https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.5.1/manifest.yaml
+curl -fsSLo /tmp/agent-sandbox-extensions.yaml https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.5.1/extensions.yaml
+printf '%s  %s\n' 8cfdf0a878f66b91d2e7103e77859d1412d850ce3f5fe5c3fa134c36bd55504a /tmp/agent-sandbox-manifest.yaml | shasum -a 256 -c -
+printf '%s  %s\n' 7c22b450e24ede3fddbcd5ae0ee7c78ea102d6c30635ff860cc486578a55932e /tmp/agent-sandbox-extensions.yaml | shasum -a 256 -c -
+kubectl apply -f /tmp/agent-sandbox-manifest.yaml
+kubectl apply -f /tmp/agent-sandbox-extensions.yaml
+kubectl apply -f deploy/k8s/namespace.yaml
 kubectl apply -n agent-os -f deploy/k8s/secret.example.yaml
 kubectl apply -k deploy/k8s
 kubectl -n agent-os port-forward svc/mandoforge-api 8787:8787
@@ -39,7 +48,8 @@ Render the opt-in Remote Computer pilot bundle before applying it to a real clus
 kubectl kustomize deploy/remote-computer-pilot --load-restrictor LoadRestrictionsNone
 ```
 
-Render the opt-in Agent Sandbox pilot bundle only after installing the upstream Agent Sandbox CRDs/controller:
+The historical Agent Sandbox pilot path is now a compatibility alias for the
+default bundle:
 
 ```bash
 kubectl kustomize deploy/agent-sandbox-pilot --load-restrictor LoadRestrictionsNone
@@ -58,7 +68,8 @@ Production notes:
 - Review the workspace PVC storage class, backup policy, and retention policy before long-running workers.
 - Review and adapt the worker NetworkPolicy before enabling shell, Codex, HTTP, or MCP execution in shared clusters.
 - Keep Codex and sandbox execution disabled or tightly constrained before multi-tenant use; the current worker drains jobs through the API execution endpoint.
-- Treat `worker-hpa.yaml` and `worker-keda.yaml` as autoscaling pilot manifests. KEDA is wired to a Prometheus queue-depth query, but you still need production metrics, load validation, and isolation policy before claiming production autoscaling.
+- The checked-in production configuration selects `agent-sandbox` for environment lifecycle but keeps execution, mutation, and live mutation disabled. Enable those three gates only through a reviewed target-cluster rollout with fresh lifecycle evidence.
+- Treat `worker-hpa.yaml` and `worker-keda.yaml` as queue-worker autoscaling manifests. KEDA scales job claimers from queue pressure; it does not decide Workflow authority, approvals, policy, or Sandbox lifecycle. Production metrics and load validation are still required.
 - Treat the Remote Computer manifests as readiness skeletons until the runner gates are enabled. They include the Pod template, warm-pool example, queue scaler, state contract, and a JuiceFS state profile, but they do not by themselves prove production sidecar supervision or distributed Memory/Notes/Skills synchronization.
 - Treat `remote-computer-state-contract.yaml` as the mounted state layout contract for `/agent-state/memory`, `/agent-state/notes`, `/agent-state/skills`, artifacts, locks, and manifests. Its conflict policy is one active writer per session; shared Memory/Notes/Skills must stay read-mostly until a lock-aware sync manager is configured.
 - `remote-computer-artifact-discovery-sidecar.yaml` provides a fail-closed sidecar script for scanning the assigned workspace artifact directory and pushing discovered files through `/api/remote-computers/artifacts/sync`. Keep `MANDOFORGE_ARTIFACT_DISCOVERY_ENABLED=false` until leased Pods receive real `MANDOFORGE_SESSION_ID`, `MANDOFORGE_REMOTE_COMPUTER_ID`, and assignment-aware artifact paths.
@@ -68,8 +79,8 @@ Production notes:
 - Treat `remote-computer-warm-pool.yaml` as an opt-in example. The worker can claim persisted warm-pool Remote Computer records, but a production controller still needs to register prewarmed Pods, reset dirty workspaces, and refill the pool.
 - Treat `remote-computer-keda.yaml` as an opt-in example. It assumes Prometheus metrics that are not production-hardened yet.
 - Treat `../remote-computer-pilot/kustomization.yaml` as the reviewable bundle for enabling those examples together; do not apply it until storage credentials, Prometheus metrics, namespace policy, and state conflict rules have been reviewed.
-- Treat `../agent-sandbox-pilot/kustomization.yaml` as the reviewable bundle for the lower-latency sandbox direction. It requires the upstream Agent Sandbox CRDs and intentionally does not create live `SandboxClaim` resources; render `../agent-sandbox-smoke/kustomization.yaml` only for an explicit allocation smoke test.
-- The Agent Sandbox template uses per-sandbox PVCs for `/workspace` and `/agent-state`, plus a single-project pilot cache PVC for MandoForge Cargo, pnpm, uv, and sccache paths. Create separate cache PVCs per repository, tenant, or worker pool before broad shared-cluster use; do not treat the pilot cache as a multi-project shared cache.
-- To opt into the Agent Sandbox runtime adapter, keep `MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT=kubernetes` and set `MANDOFORGE_REMOTE_COMPUTER_RUNNER=agent-sandbox` after installing the Agent Sandbox CRDs/controller and applying the pilot overlay. The worker creates a `SandboxClaim`, resolves the bound Sandbox Pod from `agents.x-k8s.io/pod-name`, stores the claim name in Remote Computer metadata, and then reuses the existing Kubernetes `pods/exec` transport.
+- The default bundle requires the pinned upstream Agent Sandbox CRDs/controller and intentionally creates no live `SandboxClaim`; render `../agent-sandbox-smoke/kustomization.yaml` only for an explicit allocation smoke test.
+- The Agent Sandbox template uses a per-sandbox PVC for `/workspace/sessions`, plus a single-project cache PVC for Cargo registry/git downloads, pnpm, uv, and sccache. The launcher keeps Cargo credentials, `HOME`, and `CARGO_TARGET_DIR` inside the session workspace. Create separate cache PVCs per repository, tenant, or worker pool before broad shared-cluster use; never put prompts, credentials, CLI conversation state, or target outputs in the shared cache.
+- MandoForge remains authoritative for WorkflowRun, TaskGrant, policy, approval, context, events, artifacts, and audit. The API creates a `SandboxClaim`, Agent Sandbox allocates the Sandbox/Pod/PVC, and the API resolves `agents.x-k8s.io/pod-name` before using Kubernetes `pods/exec`. KEDA only scales queue workers.
 - Replace the scheduler example shared token before production exposure. If `MANDOFORGE_SCHEDULER_TOKEN` is set in the API runtime, `/api/scheduler/run-due` requires the CronJob to send the matching `x-mandoforge-scheduler-token` header in addition to Admin authorization.
 - The bundled OTel Collector exports to the collector `debug` exporter so local clusters have a real OTLP target without external credentials. Its NetworkPolicy allows ingress from the API Pod to OTLP HTTP and health ports only. Replace or extend its exporter pipeline before claiming production collector rollout; keep `MANDOFORGE_OTEL_COLLECTOR_HEALTH_ENDPOINT` pointed at the collector health extension rather than the OTLP HTTP receiver.

@@ -60,18 +60,8 @@ spec:
               cpu: "1"
               memory: 512Mi
           volumeMounts:
-            - name: kube-api-token
-              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
-              readOnly: true
             - name: tmp
               mountPath: /tmp
       volumes:
-        - name: kube-api-token
-          projected:
-            sources:
-              - serviceAccountToken:
-                  path: token
-                  audience: https://kubernetes.default.svc
-                  expirationSeconds: 3600
         - name: tmp
           emptyDir: {}

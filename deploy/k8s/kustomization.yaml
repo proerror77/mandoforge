@@ -4,15 +4,17 @@ namespace: agent-os
 resources:
   - namespace.yaml
   - configmap.yaml
+  - agent-sandbox-controller-contract.yaml
   - secret-delivery-contract.yaml
   - postgres.yaml
   - workspace-pvc.yaml
   - stage2-production-evidence-pvc.yaml
   - otel-collector.yaml
   - otel-collector-networkpolicy.yaml
+  - api-serviceaccount.yaml
+  - api-agent-sandbox-rbac.yaml
   - api.yaml
   - worker-serviceaccount.yaml
-  - worker-remote-computer-rbac.yaml
   - worker.yaml
   - worker-networkpolicy.yaml
   - worker-hpa.yaml
@@ -26,5 +28,5 @@ resources:
   - remote-computer-state-pvc.yaml
   - remote-computer-state-contract.yaml
   - remote-computer-artifact-discovery-sidecar.yaml
-  - agent-remote-computer.yaml
-  - remote-computer-networkpolicy.yaml
+  - agent-sandbox-runtime.yaml
+  - agent-sandbox-egress-networkpolicy.yaml
