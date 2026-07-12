@@ -587,10 +587,7 @@ async fn create_workflow_run(
             &session,
             &root_grant,
         )
-        .await?;
-        state
-            .update_workflow_run_status(run.id, "queued".to_string(), None, None)
-            .await
+        .await
     }
     .await;
     let run = match initialized {

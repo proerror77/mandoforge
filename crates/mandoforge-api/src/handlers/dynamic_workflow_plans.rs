@@ -802,7 +802,7 @@ async fn materialize_claimed_dynamic_workflow_plan(
         let linked_run = state
             .update_workflow_run_root_task_grant(workflow_run.id, root_grant.id)
             .await?;
-        materialize_workflow_graph_start_steps(
+        let workflow_run = materialize_workflow_graph_start_steps(
             state,
             &workflow_definition,
             &linked_run,
@@ -810,9 +810,6 @@ async fn materialize_claimed_dynamic_workflow_plan(
             &root_grant,
         )
         .await?;
-        let workflow_run = state
-            .update_workflow_run_status(linked_run.id, "queued".to_string(), None, None)
-            .await?;
         state
             .append_event(
                 "system",

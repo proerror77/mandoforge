@@ -18404,7 +18404,7 @@ async fn workflow_run_initialization_materializes_cross_agent_start_step_atomica
     assert_ne!(start_step.session_id, Some(run.primary_session_id));
 
     let grants: Vec<TaskGrant> = request_json(
-        app,
+        app.clone(),
         Request::builder()
             .uri(format!("/api/workflow-runs/{}/task-grants", run.id))
             .header("x-mandoforge-roles", "operator")
@@ -18498,6 +18498,117 @@ async fn workflow_run_initialization_materializes_cross_agent_start_step_atomica
     assert_eq!(legacy_scope["allowed_connector_ids"], json!([]));
     assert_eq!(legacy_scope["allowed_tool_names"], json!([]));
     assert_eq!(legacy_effects["specialist_write"], json!(false));
+
+    let approval_definition: WorkflowDefinition = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-definitions",
+            json!({
+                "name": "Approval-blocked cross-agent initialization",
+                "entrypoint": "approval-blocked-cross-agent-initialization",
+                "default_agent_id": primary_agent.id,
+                "step_graph": {
+                    "steps": [{
+                        "key": "specialist-approval-start",
+                        "type": "agent",
+                        "agent_id": specialist.id,
+                        "agent_version_id": specialist_version.id,
+                        "start": true,
+                        "risk_level": "high",
+                        "approval_required": true
+                    }]
+                },
+                "release_state": "released"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let approval_run: WorkflowRun = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-runs",
+            json!({
+                "workflow_definition_id": approval_definition.id,
+                "title": "wait for specialist start approval"
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    assert_eq!(approval_run.status, "requires_action");
+    assert_eq!(approval_run.started_at, None);
+
+    let approval_steps: Vec<WorkflowStepRun> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/workflow-runs/{}/steps", approval_run.id))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let approval_step = approval_steps
+        .iter()
+        .find(|step| step.step_key == "specialist-approval-start")
+        .expect("approval-blocked start step");
+    assert_eq!(approval_step.status, "requires_action");
+    assert_eq!(approval_step.agent_id, Some(specialist.id));
+    assert_eq!(approval_step.agent_version_id, Some(specialist_version.id));
+    assert_eq!(approval_step.session_id, None);
+    assert_eq!(approval_step.task_grant_id, None);
+    assert_eq!(
+        approval_step.output_payload["block_reason"],
+        json!("handoff_approval_required")
+    );
+
+    let approval_grants: Vec<TaskGrant> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!(
+                "/api/workflow-runs/{}/task-grants",
+                approval_run.id
+            ))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(approval_grants.len(), 1);
+    assert_eq!(
+        approval_grants[0].id,
+        approval_run.root_task_grant_id.expect("root task grant id")
+    );
+
+    let persisted_approval_run: WorkflowRun = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/workflow-runs/{}", approval_run.id))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(persisted_approval_run.status, "requires_action");
+    let approval_events: Vec<SessionEvent> = request_json(
+        app,
+        Request::builder()
+            .uri(format!(
+                "/api/sessions/{}/events",
+                approval_run.primary_session_id
+            ))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(approval_events.iter().any(|event| {
+        event.event_type == "workflow.run.created"
+            && event.payload["workflow_run_id"] == json!(approval_run.id)
+            && event.payload["status"] == json!("requires_action")
+    }));
 }
 
 #[tokio::test]

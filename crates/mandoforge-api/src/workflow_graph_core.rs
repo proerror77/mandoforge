@@ -742,7 +742,7 @@ pub(crate) async fn materialize_workflow_graph_start_steps(
     run: &WorkflowRun,
     session: &Session,
     root_grant: &TaskGrant,
-) -> Result<Vec<WorkflowStepRun>, AppError> {
+) -> Result<WorkflowRun, AppError> {
     let start_steps = workflow_graph_start_steps(&definition.step_graph)?;
     let mut materialized = Vec::new();
     for graph_step in start_steps {
@@ -766,7 +766,17 @@ pub(crate) async fn materialize_workflow_graph_start_steps(
         .await?;
         materialized.push(step);
     }
-    Ok(materialized)
+    let status = if materialized
+        .iter()
+        .any(|step| step.status == "requires_action")
+    {
+        "requires_action"
+    } else {
+        "queued"
+    };
+    state
+        .update_workflow_run_status(run.id, status.to_string(), run.started_at, run.completed_at)
+        .await
 }
 
 pub(crate) fn workflow_run_runtime_envelope(
@@ -916,8 +926,7 @@ pub(crate) async fn create_workflow_run_from_definition(
     let run = state
         .update_workflow_run_root_task_grant(run.id, root_grant.id)
         .await?;
-    materialize_workflow_graph_start_steps(state, definition, &run, &session, &root_grant).await?;
-    Ok(run)
+    materialize_workflow_graph_start_steps(state, definition, &run, &session, &root_grant).await
 }
 
 pub(crate) async fn trigger_workflow_run_from_webhook(
