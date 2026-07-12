@@ -1567,6 +1567,7 @@ mod execution_queue_tests;
 mod finance_controller_tests;
 #[path = "main_tests/migration_tests.rs"]
 mod migration_tests;
+
 #[path = "main_tests/observability_controller_tests.rs"]
 mod observability_controller_tests;
 #[path = "main_tests/ontology_release_workflow_trigger_tests.rs"]
@@ -1587,6 +1588,8 @@ mod scheduler_due_run_tests;
 mod tenant_worker_controller_tests;
 #[path = "main_tests/worker_readiness_tests.rs"]
 mod worker_readiness_tests;
+#[path = "main_tests/workflow_pack_lifecycle_postgres_tests.rs"]
+mod workflow_pack_lifecycle_postgres_tests;
 
 #[tokio::test]
 async fn ontology_release_promote_refreshes_stale_rollback_target() {
@@ -5333,6 +5336,10 @@ async fn concurrent_workflow_pack_agent_promotions_are_idempotent() {
             (caller, installation)
         })
         .collect::<Vec<_>>();
+    let released_installation_ids = installation_ids
+        .iter()
+        .map(|(_, installation)| installation.id)
+        .collect::<Vec<_>>();
     let StoreBackend::Memory(inner) = &state.store else {
         panic!("test requires memory store");
     };
@@ -5398,6 +5405,62 @@ async fn concurrent_workflow_pack_agent_promotions_are_idempotent() {
         })
         .collect::<Vec<_>>();
     assert_eq!(promoted.len(), 1);
+    assert_eq!(
+        promoted[0].automation_policy["workflow_pack_installation_ids"]
+            .as_array()
+            .map(Vec::len),
+        Some(caller_count)
+    );
+
+    let first_installation = state
+        .get_workflow_pack_installation(released_installation_ids[0])
+        .await
+        .expect("released workflow pack installation");
+    state
+        .transition_workflow_pack_lifecycle(
+            crate::store_workflow_pack_lifecycle::WorkflowPackLifecycleTransitionRequest {
+                installation_id: first_installation.id,
+                expected_status: "released".to_string(),
+                next_status: "rolled_back".to_string(),
+                eval_gate_status: first_installation.eval_gate_status,
+                release_gate_status: first_installation.release_gate_status,
+                gate_evidence: json!({"rollback": "shared-release-reference"}),
+                staged_at: first_installation.staged_at,
+                released_at: first_installation.released_at,
+                occurred_at: Utc::now(),
+                audit_action: "workflow_pack.rolled_back".to_string(),
+                audit_details: json!({"reason": "shared release regression"}),
+                agent_release_transition: crate::store_workflow_pack_lifecycle::WorkflowPackAgentReleaseTransition::RollbackPackPromotions,
+            },
+        )
+        .await
+        .expect("rollback first shared workflow pack");
+    let shared_release = state
+        .list_all_agent_releases()
+        .await
+        .expect("list shared release")
+        .into_iter()
+        .find(|release| release.id == promoted[0].id)
+        .expect("shared AgentRelease");
+    assert_eq!(shared_release.status, "promoted");
+    let remaining_references = shared_release.automation_policy["workflow_pack_installation_ids"]
+        .as_array()
+        .expect("workflow pack installation references");
+    assert_eq!(remaining_references.len(), caller_count - 1);
+    let rolled_back_installation_id = released_installation_ids[0].to_string();
+    assert!(
+        !remaining_references
+            .iter()
+            .any(|reference| reference.as_str() == Some(rolled_back_installation_id.as_str()))
+    );
+    assert_eq!(
+        state
+            .get_workflow_pack_installation(released_installation_ids[1])
+            .await
+            .expect("second workflow pack remains active")
+            .status,
+        "released"
+    );
 }
 
 #[tokio::test]

@@ -41,6 +41,7 @@ pub(crate) fn new_workflow_pack_agent_release(
         automation_policy: json!({
             "source": "workflow_pack_release",
             "workflow_pack_installation_id": installation_id,
+            "workflow_pack_installation_ids": [installation_id],
             "gate_evidence": gate_evidence,
         }),
         created_at: promoted_at,

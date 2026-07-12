@@ -218,12 +218,25 @@ impl AppState {
                     } => {
                         let mut releases = Vec::with_capacity(targets.len());
                         for (agent_id, agent_version_id) in targets {
-                            if let Some(release) = store.agent_releases.values().find(|release| {
-                                release.agent_id == *agent_id
-                                    && release.agent_version_id == *agent_version_id
-                                    && release.status == "promoted"
-                                    && release.environment.eq_ignore_ascii_case(environment)
-                            }) {
+                            let existing_id = store
+                                .agent_releases
+                                .values()
+                                .find(|release| {
+                                    release.agent_id == *agent_id
+                                        && release.agent_version_id == *agent_version_id
+                                        && release.status == "promoted"
+                                        && release.environment.eq_ignore_ascii_case(environment)
+                                })
+                                .map(|release| release.id);
+                            if let Some(existing_id) = existing_id {
+                                let release = store
+                                    .agent_releases
+                                    .get_mut(&existing_id)
+                                    .expect("promoted AgentRelease selected from store");
+                                add_workflow_pack_release_reference(
+                                    release,
+                                    request.installation_id,
+                                );
                                 releases.push(release.clone());
                                 continue;
                             }
@@ -246,10 +259,16 @@ impl AppState {
                         for release in store.agent_releases.values_mut() {
                             if release.status == "promoted"
                                 && release.automation_policy["source"] == "workflow_pack_release"
-                                && release.automation_policy["workflow_pack_installation_id"]
-                                    == json!(request.installation_id)
+                                && workflow_pack_release_references(release)
+                                    .contains(&request.installation_id)
                             {
-                                release.status = "rolled_back".to_string();
+                                let remaining = remove_workflow_pack_release_reference(
+                                    release,
+                                    request.installation_id,
+                                );
+                                if remaining == 0 {
+                                    release.status = "rolled_back".to_string();
+                                }
                                 releases.push(release.clone());
                             }
                         }
@@ -432,11 +451,18 @@ impl AppState {
                                 gate_evidence,
                                 request.occurred_at,
                             );
+                            let release = insert_or_get_promoted_agent_release_tx(
+                                &mut tx,
+                                self.current_tenant_id(),
+                                &candidate,
+                            )
+                            .await?;
                             releases.push(
-                                insert_or_get_promoted_agent_release_tx(
+                                add_workflow_pack_release_reference_tx(
                                     &mut tx,
                                     self.current_tenant_id(),
-                                    &candidate,
+                                    release,
+                                    request.installation_id,
                                 )
                                 .await?,
                             );
@@ -445,22 +471,62 @@ impl AppState {
                     }
                     PreparedAgentReleaseTransition::RollbackPackPromotions => {
                         let sql = format!(
-                            "UPDATE agent_releases
-                             SET status = 'rolled_back'
+                            "SELECT {AGENT_RELEASE_COLUMNS}
+                             FROM agent_releases
                              WHERE tenant_id = $1
                                AND status = 'promoted'
                                AND automation_policy ->> 'source' = 'workflow_pack_release'
-                               AND automation_policy ->> 'workflow_pack_installation_id' = $2
-                             RETURNING {AGENT_RELEASE_COLUMNS}"
+                               AND (
+                                   (
+                                       jsonb_typeof(automation_policy -> 'workflow_pack_installation_ids') = 'array'
+                                       AND (automation_policy -> 'workflow_pack_installation_ids') ? $2
+                                   )
+                                   OR (
+                                       NOT (automation_policy ? 'workflow_pack_installation_ids')
+                                       AND automation_policy ->> 'workflow_pack_installation_id' = $2
+                                   )
+                               )
+                             FOR UPDATE"
                         );
                         let rows = sqlx::query(&sql)
                             .bind(self.current_tenant_id())
                             .bind(request.installation_id.to_string())
                             .fetch_all(&mut *tx)
                             .await?;
-                        rows.into_iter()
+                        let releases = rows
+                            .into_iter()
                             .map(agent_release_from_row)
-                            .collect::<Result<Vec<_>, _>>()?
+                            .collect::<Result<Vec<_>, _>>()?;
+                        let mut updated = Vec::with_capacity(releases.len());
+                        for mut release in releases {
+                            let remaining = remove_workflow_pack_release_reference(
+                                &mut release,
+                                request.installation_id,
+                            );
+                            if remaining == 0 {
+                                release.status = "rolled_back".to_string();
+                            }
+                            let update_sql = format!(
+                                "UPDATE agent_releases
+                                 SET status = $3, automation_policy = $4
+                                 WHERE tenant_id = $1 AND id = $2 AND status = 'promoted'
+                                 RETURNING {AGENT_RELEASE_COLUMNS}"
+                            );
+                            let row = sqlx::query(&update_sql)
+                                .bind(self.current_tenant_id())
+                                .bind(release.id)
+                                .bind(&release.status)
+                                .bind(&release.automation_policy)
+                                .fetch_optional(&mut *tx)
+                                .await?
+                                .ok_or_else(|| {
+                                    AppError::conflict(
+                                        "workflow pack AgentRelease changed during rollback",
+                                    )
+                                })?;
+                            updated.push(agent_release_from_row(row)?);
+                        }
+                        updated
                     }
                 };
 
@@ -479,6 +545,106 @@ impl AppState {
             }
         }
     }
+}
+
+fn workflow_pack_release_references(release: &AgentRelease) -> BTreeSet<Uuid> {
+    if release.automation_policy["source"] != "workflow_pack_release" {
+        return BTreeSet::new();
+    }
+    if let Some(values) = release
+        .automation_policy
+        .get("workflow_pack_installation_ids")
+        .and_then(Value::as_array)
+    {
+        return values
+            .iter()
+            .filter_map(Value::as_str)
+            .filter_map(|value| Uuid::parse_str(value).ok())
+            .collect();
+    }
+    release
+        .automation_policy
+        .get("workflow_pack_installation_id")
+        .and_then(Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .into_iter()
+        .collect()
+}
+
+fn set_workflow_pack_release_references(release: &mut AgentRelease, references: &BTreeSet<Uuid>) {
+    let Some(policy) = release.automation_policy.as_object_mut() else {
+        return;
+    };
+    policy.insert(
+        "workflow_pack_installation_ids".to_string(),
+        json!(references.iter().copied().collect::<Vec<_>>()),
+    );
+}
+
+fn add_workflow_pack_release_reference(release: &mut AgentRelease, installation_id: Uuid) {
+    if release.automation_policy["source"] != "workflow_pack_release" {
+        return;
+    }
+    let mut references = workflow_pack_release_references(release);
+    references.insert(installation_id);
+    set_workflow_pack_release_references(release, &references);
+}
+
+fn remove_workflow_pack_release_reference(
+    release: &mut AgentRelease,
+    installation_id: Uuid,
+) -> usize {
+    let mut references = workflow_pack_release_references(release);
+    references.remove(&installation_id);
+    set_workflow_pack_release_references(release, &references);
+    references.len()
+}
+
+async fn add_workflow_pack_release_reference_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: Uuid,
+    release: AgentRelease,
+    installation_id: Uuid,
+) -> Result<AgentRelease, AppError> {
+    if release.automation_policy["source"] != "workflow_pack_release" {
+        return Ok(release);
+    }
+    let select_sql = format!(
+        "SELECT {AGENT_RELEASE_COLUMNS}
+         FROM agent_releases
+         WHERE tenant_id = $1 AND id = $2 AND status = 'promoted'
+         FOR UPDATE"
+    );
+    let row = sqlx::query(&select_sql)
+        .bind(tenant_id)
+        .bind(release.id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or_else(|| {
+            AppError::conflict("workflow pack AgentRelease changed during release association")
+        })?;
+    let mut release = agent_release_from_row(row)?;
+    let existing_references = workflow_pack_release_references(&release);
+    if existing_references.contains(&installation_id) {
+        return Ok(release);
+    }
+    add_workflow_pack_release_reference(&mut release, installation_id);
+    let update_sql = format!(
+        "UPDATE agent_releases
+         SET automation_policy = $3
+         WHERE tenant_id = $1 AND id = $2 AND status = 'promoted'
+         RETURNING {AGENT_RELEASE_COLUMNS}"
+    );
+    let row = sqlx::query(&update_sql)
+        .bind(tenant_id)
+        .bind(release.id)
+        .bind(&release.automation_policy)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or_else(|| {
+            AppError::conflict("workflow pack AgentRelease changed during release association")
+        })?;
+    agent_release_from_row(row)
 }
 
 fn prepare_agent_release_transition(

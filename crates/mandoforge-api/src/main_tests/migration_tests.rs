@@ -88,6 +88,10 @@ fn promoted_agent_release_uniqueness_migration_is_restart_safe() {
     assert!(migration.contains("uq_agent_releases_promoted_target"));
     assert!(migration.contains("lower(environment)"));
     assert!(migration.contains("WHERE status = 'promoted'"));
+    assert!(migration.contains("workflow_pack_installation_ids"));
+    assert!(migration.contains("jsonb_build_array"));
+    assert!(migration.contains("jsonb_array_elements_text"));
+    assert!(migration.contains("WHEN automation_policy ->> 'source' = 'workflow_pack_release'"));
 }
 
 #[test]
