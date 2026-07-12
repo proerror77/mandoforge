@@ -1254,7 +1254,7 @@ fn workflow_pack_external_connector_grant(
     manifest: &workflow_pack::WorkflowPackManifest,
     package_dir: &FsPath,
 ) -> Result<(Value, Value), AppError> {
-    let connector_ids = manifest
+    let writable_connector_ids = manifest
         .connectors
         .iter()
         .filter(|connector| {
@@ -1263,34 +1263,55 @@ fn workflow_pack_external_connector_grant(
         })
         .map(|connector| connector.id.clone())
         .collect::<BTreeSet<_>>();
-    if connector_ids.is_empty() {
+    if writable_connector_ids.is_empty() {
         return Err(AppError::bad_request(
             "workflow pack external-write agents require a writable native connector",
         ));
     }
 
-    let mut operation_ids = BTreeSet::new();
-    let mut side_effect_classes = BTreeSet::new();
+    let mut native_operation_bindings = BTreeSet::new();
     for action in &manifest.actions {
         let action_type = workflow_pack_load_action_type_file(package_dir, action)?;
-        if workflow_pack_value_string(&action_type, "connector_id")
-            .is_some_and(|connector_id| connector_ids.contains(&connector_id))
-        {
-            if let Some(operation_id) = workflow_pack_value_string(&action_type, "operation_id") {
-                operation_ids.insert(operation_id);
-            }
-            if let Some(side_effect_class) =
-                workflow_pack_value_string(&action_type, "side_effect_class")
-            {
-                side_effect_classes.insert(side_effect_class);
-            }
+        let Some(connector_id) = workflow_pack_value_string(&action_type, "connector_id") else {
+            continue;
+        };
+        if !writable_connector_ids.contains(&connector_id) {
+            continue;
+        }
+        if let (Some(operation_id), Some(side_effect_class)) = (
+            workflow_pack_value_string(&action_type, "operation_id"),
+            workflow_pack_value_string(&action_type, "side_effect_class"),
+        ) {
+            native_operation_bindings.insert((connector_id, operation_id, side_effect_class));
         }
     }
-    if operation_ids.is_empty() || side_effect_classes.is_empty() {
+    if native_operation_bindings.is_empty() {
         return Err(AppError::bad_request(
             "workflow pack external-write agents require governed action side effects",
         ));
     }
+    let connector_ids = native_operation_bindings
+        .iter()
+        .map(|(connector_id, _, _)| connector_id.clone())
+        .collect::<BTreeSet<_>>();
+    let operation_ids = native_operation_bindings
+        .iter()
+        .map(|(_, operation_id, _)| operation_id.clone())
+        .collect::<BTreeSet<_>>();
+    let side_effect_classes = native_operation_bindings
+        .iter()
+        .map(|(_, _, side_effect_class)| side_effect_class.clone())
+        .collect::<BTreeSet<_>>();
+    let native_operation_bindings = native_operation_bindings
+        .into_iter()
+        .map(|(connector_id, operation, side_effect_class)| {
+            json!({
+                "connector_id": connector_id,
+                "operation": operation,
+                "side_effect_class": side_effect_class,
+            })
+        })
+        .collect::<Vec<_>>();
     let external_effects = Value::Object(
         side_effect_classes
             .iter()
@@ -1304,6 +1325,7 @@ fn workflow_pack_external_connector_grant(
             "allowed_tool_names": operation_ids,
             "tenant_scope": {},
             "side_effect_classes": side_effect_classes,
+            "native_operation_bindings": native_operation_bindings,
         }),
         external_effects,
     ))

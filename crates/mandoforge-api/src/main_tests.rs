@@ -11567,6 +11567,15 @@ fn workflow_pack_external_write_scope_materializes_connector_grant() {
             .as_array()
             .is_some_and(|classes| classes.contains(&json!("marketplace_refund_write")))
     );
+    assert!(
+        root_grant["connector_scope"]["native_operation_bindings"]
+            .as_array()
+            .is_some_and(|bindings| bindings.contains(&json!({
+                "connector_id": "tmall-top",
+                "operation": "refund-agree",
+                "side_effect_class": "marketplace_refund_write"
+            })))
+    );
     assert_eq!(
         root_grant["external_effects"]["marketplace_refund_write"],
         json!(true)
@@ -33028,15 +33037,27 @@ async fn native_connector_commit_write_enforces_side_effect_scope_and_exact_bind
                     },
                     "connector_scope": {
                         "mode": "commit_write",
-                        "allowed_connector_ids": ["ad-platform"],
-                        "allowed_tool_names": ["launch_campaign"],
+                        "allowed_connector_ids": ["ad-platform", "crm-platform"],
+                        "allowed_tool_names": ["launch_campaign", "send_message"],
                         "tenant_scope": {"workspace_id": "growth-prod"},
-                        "side_effect_classes": ["ad_spend_mutation"]
+                        "side_effect_classes": ["ad_spend_mutation", "external_message"],
+                        "native_operation_bindings": [
+                            {
+                                "connector_id": "ad-platform",
+                                "operation": "launch_campaign",
+                                "side_effect_class": "ad_spend_mutation"
+                            },
+                            {
+                                "connector_id": "crm-platform",
+                                "operation": "send_message",
+                                "side_effect_class": "external_message"
+                            }
+                        ]
                     },
                     "external_effects": {
                         "publish": false,
                         "payment": false,
-                        "external_message": false,
+                        "external_message": true,
                         "account_mutation": false,
                         "ad_spend_mutation": true
                     }
@@ -33083,6 +33104,38 @@ async fn native_connector_commit_write_enforces_side_effect_scope_and_exact_bind
                     "task_grant_id": root_task_grant_id,
                     "args": {
                         "connector_id": "ad-platform",
+                        "operation": "send_message",
+                        "side_effect_class": "external_message",
+                        "payload": {"recipient": "customer-1", "message": "hello"}
+                    }
+                })
+                .to_string(),
+            ))
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(
+        denied["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("operation binding")
+    );
+
+    let (status, denied) = request_value(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri("/api/tools/native.connector.call/execute")
+            .header("content-type", "application/json")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::from(
+                json!({
+                    "session_id": run.primary_session_id,
+                    "task_grant_id": root_task_grant_id,
+                    "args": {
+                        "connector_id": "ad-platform",
                         "operation": "launch_campaign",
                         "side_effect_class": "publish",
                         "payload": {"campaign_id": "cmp-1", "daily_budget_usd": 100}
@@ -33098,7 +33151,7 @@ async fn native_connector_commit_write_enforces_side_effect_scope_and_exact_bind
         denied["error"]
             .as_str()
             .unwrap_or_default()
-            .contains("side effect class")
+            .contains("operation binding")
     );
 
     let approval_required: Value = request_json(

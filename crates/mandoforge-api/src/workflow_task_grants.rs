@@ -727,6 +727,27 @@ pub(crate) fn task_grant_connector_invocation_denial(
             "native connector side effects require commit_write connector scope".to_string(),
         ));
     }
+    if let Some(bindings) = grant.connector_scope.get("native_operation_bindings") {
+        let bindings = bindings.as_array().ok_or_else(|| {
+            AppError::bad_request(
+                "task grant connector scope native_operation_bindings must be an array",
+            )
+        })?;
+        let binding_allowed = bindings.iter().any(|binding| {
+            binding.get("connector_id").and_then(Value::as_str)
+                == Some(target.connector_id.as_str())
+                && binding.get("operation").and_then(Value::as_str)
+                    == Some(target.operation.as_str())
+                && binding.get("side_effect_class").and_then(Value::as_str)
+                    == Some(target.side_effect_class.as_str())
+        });
+        if !binding_allowed {
+            return Ok(Some(
+                "task grant connector scope does not allow native connector operation binding"
+                    .to_string(),
+            ));
+        }
+    }
     if !json_string_array_contains(
         grant.connector_scope.get("allowed_connector_ids"),
         &target.connector_id,
