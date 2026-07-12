@@ -582,6 +582,7 @@ pub(crate) struct OntologyOnboardingToolSpec {
     pub(crate) approval_required: bool,
     pub(crate) input_schema: Value,
     pub(crate) effects: Value,
+    pub(crate) executor: Value,
     pub(crate) policy: Value,
     pub(crate) transaction_profile: OntologyActionTransactionProfile,
     pub(crate) execution_mode: String,

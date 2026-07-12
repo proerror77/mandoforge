@@ -801,7 +801,11 @@ pub(crate) async fn create_workflow_run_from_definition(
     let input_digest = workflow_input_digest(&input_payload);
     let delegation_status =
         (execution_strategy == "delegated_runtime").then_some("submitted".to_string());
-    let runtime_envelope = workflow_run_runtime_envelope(
+    let ontology_scopes =
+        workflow_definition_root_task_grant_scope(definition, "semantic_scopes", empty_json_object);
+    let ontology_release =
+        active_ontology_release_metadata_for_scopes(state, &ontology_scopes).await?;
+    let mut runtime_envelope = workflow_run_runtime_envelope(
         definition,
         &execution_strategy,
         runtime_adapter.as_deref(),
@@ -809,6 +813,14 @@ pub(crate) async fn create_workflow_run_from_definition(
         None,
         &runtime_envelope_request,
     );
+    if let Some(mut ontology_release) = ontology_release {
+        if let Some(metadata) = ontology_release.as_object_mut() {
+            metadata.insert("pinned_by".to_string(), json!("workflow_run_start"));
+        }
+        if let Some(envelope) = runtime_envelope.as_object_mut() {
+            envelope.insert("ontology_release".to_string(), ontology_release);
+        }
+    }
     let run = state
         .create_workflow_run(WorkflowRun {
             id: Uuid::new_v4(),

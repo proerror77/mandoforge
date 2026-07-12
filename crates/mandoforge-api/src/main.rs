@@ -501,8 +501,9 @@ pub(crate) use types::tenant::{
 pub(crate) use types::tool_call::ToolCall;
 use types::tools::{
     ApprovalRequestTool, ArtifactCreateTool, ExecuteTool, FileReadTool, McpCallTool,
-    OntologyTypeLookupTool, SemanticLinkExpandTool, SemanticObjectFetchTool,
-    SemanticObjectSearchTool, ShellExecTool, SqlQueryTool, SqlSchemaTool, ToolDescriptor,
+    OntologyActionExecuteTool, OntologyTypeLookupTool, SemanticLinkExpandTool,
+    SemanticObjectFetchTool, SemanticObjectSearchTool, ShellExecTool, SqlQueryTool, SqlSchemaTool,
+    ToolDescriptor,
 };
 pub(crate) use types::usage::{
     AcknowledgeCostAlertRequest, CostAlert, CostAlertAcknowledgement, CostAlertDelivery,

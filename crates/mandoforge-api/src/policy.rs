@@ -91,6 +91,7 @@ impl Default for PolicyConfig {
                     "semantic_object.fetch".to_string(),
                     "semantic_object.search".to_string(),
                     "semantic_link.expand".to_string(),
+                    "ontology.action.execute".to_string(),
                     "ontology_type.lookup".to_string(),
                 ],
             )]),
@@ -312,7 +313,7 @@ fn tool_risk_level(name: &str) -> &'static str {
         | "semantic_object.search"
         | "semantic_link.expand"
         | "ontology_type.lookup" => "low",
-        "file.write" | "sql.query" => "medium",
+        "file.write" | "sql.query" | "ontology.action.execute" => "medium",
         "shell.exec"
         | "codex.exec"
         | "agent_cli.exec"

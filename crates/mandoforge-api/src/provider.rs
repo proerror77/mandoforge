@@ -403,6 +403,7 @@ pub(crate) fn default_provider_tool_names() -> Vec<String> {
         "semantic_object.fetch",
         "semantic_object.search",
         "semantic_link.expand",
+        "ontology.action.execute",
         "ontology_type.lookup",
     ]
     .into_iter()
@@ -529,6 +530,22 @@ fn provider_tool_schemas(allowed_tool_names: &[String]) -> Value {
                         "max_links": {"type": "integer", "minimum": 1, "maximum": 50}
                     },
                     "required": ["context_packet_id", "object_id"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "ontology.action.execute",
+                "description": "Validate an action from the pinned ontology release and create a proposal-only artifact. This never commits external side effects.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "context_packet_id": {"type": "string", "description": "The current rendered_context_packet.context_packet_id."},
+                        "action": {"type": "string", "description": "Published action name from the pinned ontology release."},
+                        "parameters": {"type": "object", "description": "Parameters matching the published action contract."}
+                    },
+                    "required": ["context_packet_id", "action", "parameters"]
                 }
             }
         }),

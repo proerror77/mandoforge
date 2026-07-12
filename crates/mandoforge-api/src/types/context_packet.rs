@@ -79,6 +79,8 @@ pub(crate) struct RenderedExecutionContext {
     pub(crate) session_id: Uuid,
     pub(crate) agent_id: Uuid,
     pub(crate) context_packet_version: i64,
+    pub(crate) task: Value,
+    pub(crate) context_layers: Value,
     pub(crate) ontology_scope: Value,
     pub(crate) role: String,
     pub(crate) must_follow: Vec<String>,

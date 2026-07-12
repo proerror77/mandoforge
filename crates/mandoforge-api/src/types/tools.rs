@@ -20,6 +20,7 @@ pub(crate) struct SemanticObjectFetchTool;
 pub(crate) struct SemanticObjectSearchTool;
 pub(crate) struct SemanticLinkExpandTool;
 pub(crate) struct OntologyTypeLookupTool;
+pub(crate) struct OntologyActionExecuteTool;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ExecuteTool {

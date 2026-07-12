@@ -975,6 +975,51 @@ pub(crate) async fn ontology_onboarding_tool_specs_for_run(
     Ok(specs)
 }
 
+pub(crate) fn ontology_action_tool_spec_for_release(
+    release: &OntologyRelease,
+    action_name: &str,
+) -> Result<(OntologyOnboardingToolSpec, String), AppError> {
+    let evidence_refs = release.evidence_refs.as_array().ok_or_else(|| {
+        AppError::forbidden("ontology release does not contain action contract snapshots")
+    })?;
+    let evidence = evidence_refs
+        .iter()
+        .find(|evidence| evidence["tool_spec"]["name"].as_str() == Some(action_name))
+        .ok_or_else(|| {
+            AppError::forbidden("ontology action is not published by the pinned release")
+        })?;
+    let tool_spec = evidence.get("tool_spec").cloned().ok_or_else(|| {
+        AppError::forbidden("ontology release action contract snapshot is missing")
+    })?;
+    let contract_digest = evidence
+        .get("contract_digest")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::forbidden("ontology release action contract digest is missing"))?
+        .to_string();
+    let tool_spec =
+        serde_json::from_value::<OntologyOnboardingToolSpec>(tool_spec).map_err(|error| {
+            AppError::bad_request(format!(
+                "ontology release action contract is invalid: {error}"
+            ))
+        })?;
+    let normalized = serde_json::to_value(&tool_spec).map_err(|error| {
+        AppError::bad_request(format!(
+            "failed to normalize ontology action contract: {error}"
+        ))
+    })?;
+    if normalized_json_sha256(&normalized) != contract_digest {
+        return Err(AppError::forbidden(
+            "ontology release action contract digest does not match its snapshot",
+        ));
+    }
+    if release.source_run_id != Some(tool_spec.run_id) {
+        return Err(AppError::forbidden(
+            "ontology action contract does not belong to the pinned release source run",
+        ));
+    }
+    Ok((tool_spec, contract_digest))
+}
+
 pub(crate) fn ontology_tool_spec_from_action_proposal(
     run_id: Uuid,
     proposal: &OntologyOnboardingProposalDraft,
@@ -1040,6 +1085,11 @@ pub(crate) fn ontology_tool_spec_from_action_proposal(
             .cloned()
             .unwrap_or_else(|| json!({})),
         effects,
+        executor: proposal
+            .content
+            .get("executor")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
         policy,
         transaction_profile,
         execution_mode: execution_mode.to_string(),
@@ -3856,6 +3906,32 @@ pub(crate) async fn create_ontology_release_candidate_with_actor(
             &entropy[..8]
         )
     });
+    let evidence_refs = proposals
+        .iter()
+        .map(|proposal| {
+            let mut evidence = json!({
+                "proposal_id": proposal.id,
+                "proposal_type": proposal.proposal_type,
+                "review_status": proposal.review_status,
+            });
+            if proposal.proposal_type == "action" {
+                let tool_spec = ontology_tool_spec_from_action_proposal(run.id, proposal)?;
+                evidence["contract_digest"] = json!(normalized_json_sha256(
+                    &serde_json::to_value(&tool_spec).map_err(|error| {
+                        AppError::bad_request(format!(
+                            "failed to snapshot ontology action contract: {error}"
+                        ))
+                    })?
+                ));
+                evidence["tool_spec"] = serde_json::to_value(tool_spec).map_err(|error| {
+                    AppError::bad_request(format!(
+                        "failed to snapshot ontology action contract: {error}"
+                    ))
+                })?;
+            }
+            Ok(evidence)
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
     let release = OntologyRelease {
         id: Uuid::new_v4(),
         version,
@@ -3883,18 +3959,7 @@ pub(crate) async fn create_ontology_release_candidate_with_actor(
         gate_result: json!({}),
         materialized_object_ids: json!(materialized_object_ids),
         materialized_link_ids: json!(materialized_link_ids),
-        evidence_refs: json!(
-            proposals
-                .iter()
-                .map(|proposal| {
-                    json!({
-                        "proposal_id": proposal.id,
-                        "proposal_type": proposal.proposal_type,
-                        "review_status": proposal.review_status,
-                    })
-                })
-                .collect::<Vec<_>>()
-        ),
+        evidence_refs: json!(evidence_refs),
         promoted_by: None,
         promoted_at: None,
         rolled_back_by: None,
@@ -4138,6 +4203,16 @@ pub(crate) async fn gate_ontology_release_with_actor(
             "write-like ontology actions must carry transaction profile evidence".to_string(),
         );
     }
+    let action_contracts_ok = ontology_release_action_contract_snapshots_ready(&release);
+    checks.push(json!({
+        "id": "action_contract_snapshots",
+        "status": if action_contracts_ok { "passed" } else { "failed" },
+    }));
+    if !action_contracts_ok {
+        blockers.push(
+            "ontology release actions must carry immutable tool contract snapshots".to_string(),
+        );
+    }
     if active_release.is_some() && release.rollback_target_release_id.is_none() {
         checks.push(json!({
             "id": "rollback_target",
@@ -4189,6 +4264,20 @@ pub(crate) async fn gate_ontology_release_with_actor(
         ))
         .await?;
     Ok(release)
+}
+
+pub(crate) fn ontology_release_action_contract_snapshots_ready(release: &OntologyRelease) -> bool {
+    let Some(evidence_refs) = release.evidence_refs.as_array() else {
+        return release.action_count == 0;
+    };
+    let action_names = evidence_refs
+        .iter()
+        .filter_map(|evidence| evidence["tool_spec"]["name"].as_str())
+        .collect::<BTreeSet<_>>();
+    action_names.len() == release.action_count.max(0) as usize
+        && action_names
+            .iter()
+            .all(|action_name| ontology_action_tool_spec_for_release(release, action_name).is_ok())
 }
 
 pub(crate) async fn promote_ontology_release_with_actor(

@@ -19,6 +19,19 @@ pub(crate) async fn issue_root_task_grant_for_workflow_run(
     } else {
         grantee_agent.agent_role.clone()
     };
+    let mut approval_policy = workflow_definition_root_task_grant_scope(
+        definition,
+        "approval_policy",
+        default_task_grant_approval_policy,
+    );
+    if let Some(ontology_release) = run.runtime_envelope.get("ontology_release")
+        && let Some(policy) = approval_policy.as_object_mut()
+    {
+        policy.insert(
+            "ontology_release_snapshot".to_string(),
+            ontology_release.clone(),
+        );
+    }
     let grant = TaskGrant {
         id: Uuid::new_v4(),
         workflow_run_id: run.id,
@@ -71,11 +84,7 @@ pub(crate) async fn issue_root_task_grant_for_workflow_run(
             "connector_scope",
             default_task_grant_connector_scope,
         ),
-        approval_policy: workflow_definition_root_task_grant_scope(
-            definition,
-            "approval_policy",
-            default_task_grant_approval_policy,
-        ),
+        approval_policy,
         external_effects: workflow_definition_root_task_grant_scope(
             definition,
             "external_effects",

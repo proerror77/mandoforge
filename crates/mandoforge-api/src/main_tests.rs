@@ -27078,7 +27078,7 @@ async fn rendered_context_pins_active_ontology_release_by_domain_scope() {
     let active = promote_ontology_release_with_actor(&state, release.id, "test")
         .await
         .expect("promote release");
-    let app = build_router(state);
+    let app = build_router(state.clone());
     let admin_headers = [
         ("x-mandoforge-subject", "admin-1"),
         ("x-mandoforge-roles", "admin"),
@@ -27144,6 +27144,14 @@ async fn rendered_context_pins_active_ontology_release_by_domain_scope() {
             .expect("valid request"),
     )
     .await;
+    let replacement =
+        ontology_release_candidate_for_test(&state, "commerce-vtest-runtime-pin-replacement").await;
+    gate_ontology_release_with_actor(&state, replacement.id, "test")
+        .await
+        .expect("gate replacement release");
+    promote_ontology_release_with_actor(&state, replacement.id, "test")
+        .await
+        .expect("promote replacement release");
     let rendered: RenderedExecutionContext = request_json(
         app,
         json_request_with_headers(
@@ -27187,6 +27195,276 @@ async fn rendered_context_pins_active_ontology_release_by_domain_scope() {
             .iter()
             .any(|tool| tool == "codex.exec")
     );
+}
+
+#[tokio::test]
+async fn workflow_run_pins_ontology_release_before_context_packet_generation() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let initial =
+        ontology_release_candidate_for_test(&state, "commerce-vtest-workflow-runtime-pin").await;
+    gate_ontology_release_with_actor(&state, initial.id, "test")
+        .await
+        .expect("gate initial release");
+    let initial = promote_ontology_release_with_actor(&state, initial.id, "test")
+        .await
+        .expect("promote initial release");
+    let definition =
+        ontology_release_trigger_workflow_definition_for_test(&state, "commerce").await;
+    let run = create_workflow_run_from_definition(
+        &state,
+        &definition,
+        "Pinned ontology workflow".to_string(),
+        empty_json_object(),
+        empty_json_object(),
+    )
+    .await
+    .expect("workflow run");
+    assert_eq!(
+        run.runtime_envelope["ontology_release"]["id"],
+        json!(initial.id)
+    );
+    assert_eq!(
+        run.runtime_envelope["ontology_release"]["pinned_by"],
+        json!("workflow_run_start")
+    );
+
+    let replacement = ontology_release_candidate_for_test(
+        &state,
+        "commerce-vtest-workflow-runtime-pin-replacement",
+    )
+    .await;
+    gate_ontology_release_with_actor(&state, replacement.id, "test")
+        .await
+        .expect("gate replacement release");
+    let replacement = promote_ontology_release_with_actor(&state, replacement.id, "test")
+        .await
+        .expect("promote replacement release");
+    assert_ne!(replacement.id, initial.id);
+
+    let packet = build_context_packet(&state, run.primary_session_id)
+        .await
+        .expect("context packet");
+    assert_eq!(
+        packet.replay_summary["ontology_release"]["id"],
+        json!(initial.id)
+    );
+    assert_eq!(
+        packet.replay_summary["task_grant_authority"]["approval_policy"]["ontology_release_snapshot"]
+            ["id"],
+        json!(initial.id)
+    );
+    let layers = packet.replay_summary["context_layers"]
+        .as_object()
+        .expect("eight context layers");
+    assert_eq!(layers.len(), 8);
+    for layer in [
+        "work_surfaces",
+        "collaboration",
+        "manager_agent",
+        "managed_runtime",
+        "governance",
+        "ontology_action_contract",
+        "environment_scheduling",
+        "execution_substrate",
+    ] {
+        assert!(layers.contains_key(layer), "missing context layer {layer}");
+    }
+    assert_eq!(packet.task["workflow_run_id"], json!(run.id));
+    assert!(packet.source_refs.iter().any(|source| {
+        source.source_type == "ontology_release" && source.source_id == initial.id.to_string()
+    }));
+    let rendered = render_execution_context_for_packet(
+        &state,
+        &packet,
+        RenderContextPacketRequest {
+            max_prompt_tokens: None,
+            max_objects: None,
+            max_summary_chars: None,
+            max_policy_reminders: None,
+            allow_full_content: None,
+            allow_on_demand_fetch: None,
+        },
+    )
+    .await
+    .expect("render context");
+    assert_eq!(
+        rendered.ontology_scope["ontology_release"]["id"],
+        json!(initial.id)
+    );
+}
+
+#[tokio::test]
+async fn ontology_action_tool_executes_pinned_contract_as_proposal_only() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let release = ontology_release_candidate_for_test(&state, "commerce-vtest-action-tool").await;
+    gate_ontology_release_with_actor(&state, release.id, "test")
+        .await
+        .expect("gate release");
+    let release = promote_ontology_release_with_actor(&state, release.id, "test")
+        .await
+        .expect("promote release");
+    let agent = state
+        .create_agent(CreateAgent {
+            name: "Ontology Action Agent".to_string(),
+            kind: "specialist".to_string(),
+            provider: "openai-compatible".to_string(),
+            model: "gpt-5.5-mini".to_string(),
+            team_id: None,
+            project_id: None,
+            runtime_profile_id: None,
+            agent_role: "specialist".to_string(),
+            system_prompt: "Execute only pinned ontology action contracts.".to_string(),
+            runtime_config: empty_json_object(),
+            tools: vec!["ontology.action.execute".to_string()],
+            tool_policy: empty_json_object(),
+            mcp_server_ids: Vec::new(),
+            skill_ids: Vec::new(),
+            workflow_pack_ids: Vec::new(),
+            remote_computer_profile: empty_json_object(),
+            semantic_scopes: json!({
+                "domain_scope": "commerce",
+                "workflow_scope": "ontology-action-tool",
+                "share_policy": "tenant_only"
+            }),
+            release_state: "active".to_string(),
+        })
+        .await
+        .expect("agent");
+    let now = Utc::now();
+    let definition = state
+        .create_workflow_definition(WorkflowDefinition {
+            id: Uuid::new_v4(),
+            pack_installation_id: None,
+            pack_id: None,
+            pack_version: None,
+            name: "Ontology action contract workflow".to_string(),
+            entrypoint: "ontology-action-tool".to_string(),
+            trigger_type: "manual".to_string(),
+            default_agent_id: agent.id,
+            default_environment_id: None,
+            input_schema_ref: None,
+            output_schema_ref: None,
+            step_graph: empty_json_object(),
+            handoff_rules: json!({
+                "root_task_grant": {
+                    "semantic_scopes": {
+                        "domain_scope": "commerce",
+                        "workflow_scope": "ontology-action-tool",
+                        "share_policy": "tenant_only"
+                    },
+                    "tool_scope": {
+                        "read": [],
+                        "write": ["ontology.action.execute"],
+                        "external_write": []
+                    }
+                }
+            }),
+            execution_strategy: default_workflow_execution_strategy(),
+            runtime_adapter: None,
+            runtime_mode: None,
+            runtime_capability_contract: empty_json_object(),
+            event_ingestion_policy: default_event_ingestion_policy(),
+            approval_policy_ref: None,
+            eval_gate_refs: Vec::new(),
+            release_state: "released".to_string(),
+            created_at: now,
+            updated_at: now,
+            archived_at: None,
+        })
+        .await
+        .expect("definition");
+    let run = create_workflow_run_from_definition(
+        &state,
+        &definition,
+        "Draft refund proposal".to_string(),
+        empty_json_object(),
+        empty_json_object(),
+    )
+    .await
+    .expect("workflow run");
+    let packet = generate_and_persist_context_packet(&state, run.primary_session_id)
+        .await
+        .expect("context packet");
+    let grant_id = run.root_task_grant_id.expect("root task grant");
+    state
+        .update_task_grant_context_packet(grant_id, packet.id)
+        .await
+        .expect("bind context packet");
+    let (_, _, rendered, provider_tools) =
+        build_provider_context_packet(&state, run.primary_session_id)
+            .await
+            .expect("provider context");
+    let rendered = rendered.expect("rendered context");
+    assert_eq!(rendered["task"]["workflow_run_id"], json!(run.id));
+    assert_eq!(
+        rendered["context_layers"]["ontology_action_contract"]["ontology_release"]["id"],
+        json!(release.id)
+    );
+    assert!(
+        provider_tools
+            .iter()
+            .any(|tool| tool == "ontology.action.execute")
+    );
+    assert!(
+        rendered["available_tools"]
+            .as_array()
+            .is_some_and(|tools| tools.iter().any(|tool| tool == "ontology.action.execute"))
+    );
+    let result = execute_tool_invocation(
+        &state,
+        "ontology.action.execute",
+        ExecuteTool {
+            session_id: run.primary_session_id,
+            task_grant_id: Some(grant_id),
+            args: json!({
+                "context_packet_id": packet.id,
+                "action": "commerce.refund_order",
+                "parameters": {
+                    "order_id": "order-1",
+                    "amount": 12.5,
+                    "reason": "customer request"
+                }
+            }),
+        },
+        ToolInvocationOrigin::ManualRoute,
+    )
+    .await
+    .expect("ontology action proposal");
+
+    assert_eq!(result["status"], json!("proposal_created"));
+    assert_eq!(result["ontology_release_id"], json!(release.id));
+    assert_eq!(result["action"], json!("commerce.refund_order"));
+    assert_eq!(result["execution_mode"], json!("proposal_only"));
+    let artifact_id = result["artifact_id"].as_str().expect("artifact id");
+    let artifacts = state
+        .list_artifacts(run.primary_session_id)
+        .await
+        .expect("artifacts");
+    assert!(artifacts.iter().any(|artifact| {
+        artifact.id.to_string() == artifact_id
+            && artifact.content["status"] == json!("draft")
+            && artifact.content["ontology_release_id"] == json!(release.id)
+    }));
+    let error = execute_tool_invocation(
+        &state,
+        "ontology.action.execute",
+        ExecuteTool {
+            session_id: run.primary_session_id,
+            task_grant_id: Some(grant_id),
+            args: json!({
+                "context_packet_id": packet.id,
+                "action": "commerce.refund_order",
+                "parameters": {
+                    "order_id": "order-2",
+                    "amount": "not-a-number"
+                }
+            }),
+        },
+        ToolInvocationOrigin::ManualRoute,
+    )
+    .await
+    .expect_err("published input contract must reject invalid parameters");
+    assert!(error.message.contains("amount must be decimal"));
 }
 
 #[tokio::test]
