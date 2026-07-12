@@ -12771,6 +12771,130 @@ async fn dynamic_workflow_plan_decisions_require_an_approver_identity() {
 }
 
 #[tokio::test]
+async fn dynamic_workflow_plan_materialization_claim_is_atomic() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let app = build_router(state.clone());
+    let plan: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/dynamic-workflow-plans",
+            json!({
+                "objective": "Claim one approved dynamic workflow exactly once",
+                "phases": [{
+                    "key": "claim",
+                    "agent_count": 1,
+                    "prompt": "Prove the materialization claim is atomic."
+                }]
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let plan_id = Uuid::parse_str(plan["id"].as_str().expect("plan id")).expect("plan uuid");
+    let _: Value = request_json(
+        app,
+        json_request_with_headers(
+            "POST",
+            &format!("/api/dynamic-workflow-plans/{plan_id}/review"),
+            json!({"status": "approved", "review": {}}),
+            &[
+                ("x-mandoforge-subject", "claim-reviewer"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let first_definition_id = Uuid::new_v4();
+    let first_run_id = Uuid::new_v4();
+    let second_definition_id = Uuid::new_v4();
+    let second_run_id = Uuid::new_v4();
+    let first_claim_audit = state
+        .append_audit_log(new_audit_log(
+            None,
+            "system",
+            Some(first_run_id),
+            "dynamic_workflow_plan.materialization_claim_requested",
+            "dynamic_workflow_plan",
+            Some(plan_id),
+            json!({"workflow_run_id": first_run_id}),
+        ))
+        .await
+        .expect("first claim audit");
+    let second_claim_audit = state
+        .append_audit_log(new_audit_log(
+            None,
+            "system",
+            Some(second_run_id),
+            "dynamic_workflow_plan.materialization_claim_requested",
+            "dynamic_workflow_plan",
+            Some(plan_id),
+            json!({"workflow_run_id": second_run_id}),
+        ))
+        .await
+        .expect("second claim audit");
+    let (first, second) = tokio::join!(
+        state.claim_dynamic_workflow_plan_materialization(
+            plan_id,
+            first_claim_audit.id,
+            Utc::now(),
+        ),
+        state.claim_dynamic_workflow_plan_materialization(
+            plan_id,
+            second_claim_audit.id,
+            Utc::now(),
+        )
+    );
+    let (winning_claim_id, winning_definition_id, winning_run_id, losing_error) =
+        match (first, second) {
+            (Ok(_), Err(error)) => (
+                first_claim_audit.id,
+                first_definition_id,
+                first_run_id,
+                error,
+            ),
+            (Err(error), Ok(_)) => (
+                second_claim_audit.id,
+                second_definition_id,
+                second_run_id,
+                error,
+            ),
+            (Ok(_), Ok(_)) => panic!("both materialization claims succeeded"),
+            (Err(first), Err(second)) => {
+                panic!("both materialization claims failed: {first:?}; {second:?}")
+            }
+        };
+    assert_eq!(losing_error.status, StatusCode::CONFLICT);
+    assert!(losing_error.message.contains("already claimed"));
+
+    let completed = state
+        .update_dynamic_workflow_plan_materialized(
+            plan_id,
+            winning_claim_id,
+            winning_definition_id,
+            winning_run_id,
+            None,
+            Utc::now(),
+        )
+        .await
+        .expect("matching claim completes");
+    assert_eq!(completed.status, "materialized");
+    let duplicate = state
+        .update_dynamic_workflow_plan_materialized(
+            plan_id,
+            winning_claim_id,
+            winning_definition_id,
+            winning_run_id,
+            None,
+            Utc::now(),
+        )
+        .await
+        .expect_err("completed materialization cannot finalize twice");
+    assert_eq!(duplicate.status, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
 async fn dynamic_workflow_plan_materializes_delegated_runtime_workflow() {
     let app = test_app().await;
 
@@ -12978,6 +13102,70 @@ async fn dynamic_workflow_plan_materializes_delegated_runtime_workflow() {
         error["error"]
             .as_str()
             .is_some_and(|message| message.contains("released workflow definition"))
+    );
+
+    let (status, error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "PATCH",
+            &format!("/api/workflow-definitions/{workflow_definition_id}"),
+            json!({"release_state": "released"}),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(
+        error["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("publish a Workflow Pack"))
+    );
+
+    let (status, error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "PATCH",
+            &format!("/api/workflow-definitions/{workflow_definition_id}"),
+            json!({"handoff_rules": {"source": "manual"}}),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        error["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("provenance is immutable"))
+    );
+
+    let (status, error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-definitions",
+            json!({
+                "name": "Forged dynamic release",
+                "entrypoint": "forged-dynamic-release",
+                "default_agent_id": pinned_agent_id,
+                "step_graph": {
+                    "steps": [{"key": "run", "type": "agent", "start": true}]
+                },
+                "handoff_rules": {
+                    "source": "dynamic_workflow_plan",
+                    "dynamic_workflow_plan_id": plan_id,
+                    "materialization_approval": {"approved_by": "forged"}
+                },
+                "release_state": "released"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        error["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("only be created from an approved"))
     );
 
     let run_id = materialized["workflow_run"]["id"].as_str().expect("run id");

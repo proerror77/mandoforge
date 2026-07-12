@@ -199,9 +199,118 @@ impl AppState {
         }
     }
 
+    pub(crate) async fn claim_dynamic_workflow_plan_materialization(
+        &self,
+        id: Uuid,
+        claim_audit_id: Uuid,
+        claimed_at: DateTime<Utc>,
+    ) -> Result<DynamicWorkflowPlan, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let plan = store
+                    .dynamic_workflow_plans
+                    .get_mut(&id)
+                    .ok_or_else(|| AppError::not_found("dynamic workflow plan not found"))?;
+                if plan.status != "approved"
+                    || plan.workflow_definition_id.is_some()
+                    || plan.workflow_run_id.is_some()
+                {
+                    return Err(AppError::conflict(
+                        "dynamic workflow plan materialization is already claimed",
+                    ));
+                }
+                plan.status = "materializing".to_string();
+                plan.audit_trace_id = Some(claim_audit_id);
+                plan.updated_at = claimed_at;
+                Ok(plan.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE dynamic_workflow_plans
+                     SET status = 'materializing',
+                         audit_trace_id = $3,
+                         updated_at = $4
+                     WHERE tenant_id = $1
+                       AND id = $2
+                       AND status = 'approved'
+                       AND workflow_definition_id IS NULL
+                       AND workflow_run_id IS NULL
+                     RETURNING id, source_work_item_id, source_session_id, objective, status, phases, agent_fleet_policy, governance, validation, materialization, analysis, review, workflow_definition_id, workflow_run_id, audit_trace_id, created_at, updated_at, reviewed_at, materialized_at",
+                )
+                .bind(self.current_tenant_id())
+                .bind(id)
+                .bind(claim_audit_id)
+                .bind(claimed_at)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| {
+                    AppError::conflict(
+                        "dynamic workflow plan materialization is already claimed",
+                    )
+                })?;
+                dynamic_workflow_plan_from_row(row)
+            }
+        }
+    }
+
+    pub(crate) async fn fail_dynamic_workflow_plan_materialization(
+        &self,
+        id: Uuid,
+        claim_audit_id: Uuid,
+        audit_trace_id: Option<Uuid>,
+        failed_at: DateTime<Utc>,
+    ) -> Result<DynamicWorkflowPlan, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let plan = store
+                    .dynamic_workflow_plans
+                    .get_mut(&id)
+                    .ok_or_else(|| AppError::not_found("dynamic workflow plan not found"))?;
+                if plan.status != "materializing" || plan.audit_trace_id != Some(claim_audit_id) {
+                    return Err(AppError::conflict(
+                        "dynamic workflow materialization failure does not match the active claim",
+                    ));
+                }
+                plan.status = "materialization_failed".to_string();
+                plan.audit_trace_id = audit_trace_id;
+                plan.updated_at = failed_at;
+                Ok(plan.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE dynamic_workflow_plans
+                     SET status = 'materialization_failed',
+                         audit_trace_id = $4,
+                         updated_at = $5
+                     WHERE tenant_id = $1
+                       AND id = $2
+                       AND status = 'materializing'
+                       AND audit_trace_id = $3
+                     RETURNING id, source_work_item_id, source_session_id, objective, status, phases, agent_fleet_policy, governance, validation, materialization, analysis, review, workflow_definition_id, workflow_run_id, audit_trace_id, created_at, updated_at, reviewed_at, materialized_at",
+                )
+                .bind(self.current_tenant_id())
+                .bind(id)
+                .bind(claim_audit_id)
+                .bind(audit_trace_id)
+                .bind(failed_at)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| {
+                    AppError::conflict(
+                        "dynamic workflow materialization failure does not match the active claim",
+                    )
+                })?;
+                dynamic_workflow_plan_from_row(row)
+            }
+        }
+    }
+
     pub(crate) async fn update_dynamic_workflow_plan_materialized(
         &self,
         id: Uuid,
+        claim_audit_id: Uuid,
         workflow_definition_id: Uuid,
         workflow_run_id: Uuid,
         audit_trace_id: Option<Uuid>,
@@ -214,6 +323,11 @@ impl AppState {
                     .dynamic_workflow_plans
                     .get_mut(&id)
                     .ok_or_else(|| AppError::not_found("dynamic workflow plan not found"))?;
+                if plan.status != "materializing" || plan.audit_trace_id != Some(claim_audit_id) {
+                    return Err(AppError::conflict(
+                        "dynamic workflow materialization completion does not match the active claim",
+                    ));
+                }
                 plan.status = "materialized".to_string();
                 plan.workflow_definition_id = Some(workflow_definition_id);
                 plan.workflow_run_id = Some(workflow_run_id);
@@ -226,23 +340,31 @@ impl AppState {
                 let row = sqlx::query(
                     "UPDATE dynamic_workflow_plans
                      SET status = 'materialized',
-                         workflow_definition_id = $3,
-                         workflow_run_id = $4,
-                         audit_trace_id = $5,
-                         materialized_at = $6,
-                         updated_at = $6
-                     WHERE tenant_id = $1 AND id = $2
+                         workflow_definition_id = $4,
+                         workflow_run_id = $5,
+                         audit_trace_id = $6,
+                         materialized_at = $7,
+                         updated_at = $7
+                     WHERE tenant_id = $1
+                       AND id = $2
+                       AND status = 'materializing'
+                       AND audit_trace_id = $3
                      RETURNING id, source_work_item_id, source_session_id, objective, status, phases, agent_fleet_policy, governance, validation, materialization, analysis, review, workflow_definition_id, workflow_run_id, audit_trace_id, created_at, updated_at, reviewed_at, materialized_at",
                 )
                 .bind(self.current_tenant_id())
                 .bind(id)
+                .bind(claim_audit_id)
                 .bind(workflow_definition_id)
                 .bind(workflow_run_id)
                 .bind(audit_trace_id)
                 .bind(materialized_at)
                 .fetch_optional(pool)
                 .await?
-                .ok_or_else(|| AppError::not_found("dynamic workflow plan not found"))?;
+                .ok_or_else(|| {
+                    AppError::conflict(
+                        "dynamic workflow materialization completion does not match the active claim",
+                    )
+                })?;
                 dynamic_workflow_plan_from_row(row)
             }
         }

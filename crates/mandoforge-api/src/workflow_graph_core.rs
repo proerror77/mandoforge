@@ -59,6 +59,40 @@ pub(crate) fn normalize_workflow_release_state(value: &str) -> Result<String, Ap
     }
 }
 
+pub(crate) fn workflow_handoff_rules_is_dynamic_materialization(handoff_rules: &Value) -> bool {
+    handoff_rules
+        .get("source")
+        .and_then(Value::as_str)
+        .is_some_and(|source| source == "dynamic_workflow_plan")
+}
+
+pub(crate) fn validate_dynamic_materialization_provenance_update(
+    current: &Value,
+    proposed: &Value,
+) -> Result<(), AppError> {
+    let current_is_dynamic = workflow_handoff_rules_is_dynamic_materialization(current);
+    let proposed_is_dynamic = workflow_handoff_rules_is_dynamic_materialization(proposed);
+    if current_is_dynamic != proposed_is_dynamic {
+        return Err(AppError::bad_request(
+            "dynamic workflow materialization provenance is immutable",
+        ));
+    }
+    if current_is_dynamic {
+        for field in [
+            "source",
+            "dynamic_workflow_plan_id",
+            "materialization_approval",
+        ] {
+            if current.get(field) != proposed.get(field) {
+                return Err(AppError::bad_request(format!(
+                    "dynamic workflow materialization provenance field {field} is immutable"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn normalize_workflow_execution_strategy(value: &str) -> Result<String, AppError> {
     let normalized = value.trim().to_ascii_lowercase();
     match normalized.as_str() {
