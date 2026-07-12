@@ -461,7 +461,7 @@ pub(crate) async fn build_remote_computer_readiness(
     })
 }
 
-const AGENT_SANDBOX_RUNTIME_IMAGE: &str = "ghcr.io/proerror77/mandoforge/mandoforge-agent-sandbox-runtime@sha256:57b4477d7b9238859c81a5a2ba799acce69907743c12d622fb79e5a8c30badcc";
+const AGENT_SANDBOX_RUNTIME_IMAGE: &str = "ghcr.io/proerror77/mandoforge/mandoforge-agent-sandbox-runtime@sha256:77b6327baca38493fd9d688e6641737ff1f507e5650e7fc6e9f07e5f42e1469a";
 const DEFAULT_AGENT_SANDBOX_CONTROLLER_VERSION: &str = "v0.5.1";
 const DEFAULT_AGENT_SANDBOX_EVIDENCE_MAX_AGE_HOURS: i64 = 168;
 const AGENT_SANDBOX_REQUIRED_LIVE_CHECKS: &[&str] = &[
