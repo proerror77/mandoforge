@@ -8,7 +8,8 @@ GATE_WORKSPACE_ROOT="${GATE_WORKSPACE_ROOT:-.mandoforge/final-gate-workspaces}"
 RUN_DEMO="${RUN_DEMO:-1}"
 RUN_LIVE="${RUN_LIVE:-0}"
 START_LIVE_STACK="${START_LIVE_STACK:-0}"
-DATABASE_URL="${DATABASE_URL:-postgres://mandoforge:mandoforge@127.0.0.1:5432/mandoforge}"
+LIVE_STACK_POSTGRES_PASSWORD="${MANDOFORGE_POSTGRES_PASSWORD:-mandoforge}"
+DATABASE_URL="${DATABASE_URL:-postgres://mandoforge:${LIVE_STACK_POSTGRES_PASSWORD}@127.0.0.1:5432/mandoforge}"
 API_PID=""
 FAKE_CODEX_DIR=""
 STARTED_COMPOSE_POSTGRES=0
@@ -123,6 +124,7 @@ if [[ "$START_LIVE_STACK" == "1" ]]; then
     echo "docker daemon is not available; start Docker before running START_LIVE_STACK=1" >&2
     exit 1
   fi
+  export MANDOFORGE_POSTGRES_PASSWORD="$LIVE_STACK_POSTGRES_PASSWORD"
   docker compose up -d postgres
   STARTED_COMPOSE_POSTGRES=1
   for _ in $(seq 1 60); do
