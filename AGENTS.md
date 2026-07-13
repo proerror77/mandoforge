@@ -25,3 +25,17 @@
 - This repo is the Rust-native Managed Agents / Enterprise Agent OS runtime described in the Stage 1 PRD.
 - Stage 1 is a generic Agent OS Kernel loop: session event log, provider harness, tool router, policy approval, workspace execution, artifacts, audit logs, timeline UI, and final gates.
 - High-risk business actions must stay draft/approval-only until a later production policy explicitly enables execution.
+
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked in GitHub; external PRs are not a triage request surface. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the default Matt Pocock triage label vocabulary. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This is a single-context repository. See `docs/agents/domain.md`.

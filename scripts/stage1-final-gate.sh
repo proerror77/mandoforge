@@ -8,7 +8,8 @@ GATE_WORKSPACE_ROOT="${GATE_WORKSPACE_ROOT:-.mandoforge/final-gate-workspaces}"
 RUN_DEMO="${RUN_DEMO:-1}"
 RUN_LIVE="${RUN_LIVE:-0}"
 START_LIVE_STACK="${START_LIVE_STACK:-0}"
-DATABASE_URL="${DATABASE_URL:-postgres://mandoforge:mandoforge@127.0.0.1:5432/mandoforge}"
+LIVE_STACK_POSTGRES_PASSWORD="${MANDOFORGE_POSTGRES_PASSWORD:-mandoforge}"
+DATABASE_URL="${DATABASE_URL:-postgres://mandoforge:${LIVE_STACK_POSTGRES_PASSWORD}@127.0.0.1:5432/mandoforge}"
 API_PID=""
 FAKE_CODEX_DIR=""
 STARTED_COMPOSE_POSTGRES=0
@@ -76,7 +77,8 @@ SH
 start_gate_api() {
   local log_file="$1"
   shift
-  env "$@" cargo run -p mandoforge-api >"$log_file" 2>&1 &
+  cargo build -p mandoforge-api --bin mandoforge-api --locked
+  env "$@" target/debug/mandoforge-api >"$log_file" 2>&1 &
   API_PID="$!"
 
   for _ in $(seq 1 120); do
@@ -90,7 +92,9 @@ start_gate_api() {
     fi
     sleep 0.5
   done
-  curl -fsS "$GATE_BASE_URL/healthz" >/dev/null
+  echo "stage1 gate API did not become healthy; log follows:" >&2
+  cat "$log_file" >&2
+  return 1
 }
 
 if [[ "$RUN_LIVE" != "1" ]]; then
@@ -103,6 +107,7 @@ if [[ "$RUN_LIVE" != "1" ]]; then
       "MANDOFORGE_WORKSPACE_ROOT=$GATE_WORKSPACE_ROOT" \
       "MANDOFORGE_INSECURE_DEV_AUTH=1" \
       "MANDOFORGE_ALLOW_HOST_SHELL_EXEC=1" \
+      "MANDOFORGE_EXECUTION_WORKER=inline" \
       "PATH=$FAKE_CODEX_DIR:$PATH"
 
     BASE_URL="$GATE_BASE_URL" MANDOFORGE_WORKSPACE_ROOT="$GATE_WORKSPACE_ROOT" ./scripts/agent-os-core-evidence-gate.sh
@@ -120,6 +125,7 @@ if [[ "$START_LIVE_STACK" == "1" ]]; then
     echo "docker daemon is not available; start Docker before running START_LIVE_STACK=1" >&2
     exit 1
   fi
+  export MANDOFORGE_POSTGRES_PASSWORD="$LIVE_STACK_POSTGRES_PASSWORD"
   docker compose up -d postgres
   STARTED_COMPOSE_POSTGRES=1
   for _ in $(seq 1 60); do
@@ -137,6 +143,7 @@ if [[ "$START_LIVE_STACK" == "1" ]]; then
     "MANDOFORGE_WORKSPACE_ROOT=$GATE_WORKSPACE_ROOT" \
     "MANDOFORGE_INSECURE_DEV_AUTH=1" \
     "MANDOFORGE_ALLOW_HOST_SHELL_EXEC=1" \
+    "MANDOFORGE_EXECUTION_WORKER=inline" \
     "DATABASE_URL=$DATABASE_URL" \
     "MANDOFORGE_SHELL_RUNNER=docker" \
     "MANDOFORGE_SHELL_DOCKER_IMAGE=${MANDOFORGE_SHELL_DOCKER_IMAGE:-alpine:3.20}" \

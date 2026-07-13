@@ -2,6 +2,13 @@
 set -euo pipefail
 
 BASE_URL="${BASE_URL:-http://127.0.0.1:8787}"
+SUBJECT="${MANDOFORGE_DOCKER_SHELL_VERIFY_SUBJECT:-docker-shell-runner-verification}"
+ROLES="${MANDOFORGE_DOCKER_SHELL_VERIFY_ROLES:-admin}"
+
+auth_headers=(
+  -H "x-mandoforge-subject: $SUBJECT"
+  -H "x-mandoforge-roles: $ROLES"
+)
 
 if ! command -v jq >/dev/null 2>&1; then
   echo "docker shell runner verification requires jq" >&2
@@ -17,6 +24,7 @@ curl -fsS "$BASE_URL/healthz" >/dev/null
 
 AGENT_ID="$(
   curl -fsS "$BASE_URL/api/agents" \
+    "${auth_headers[@]}" \
     | jq -r 'map(select(.name == "Generic Orchestrator Agent"))[0].id // empty'
 )"
 if [[ -z "$AGENT_ID" || "$AGENT_ID" == "null" ]]; then
@@ -26,6 +34,7 @@ fi
 
 SESSION_ID="$(
   curl -fsS -X POST "$BASE_URL/api/sessions" \
+    "${auth_headers[@]}" \
     -H 'content-type: application/json' \
     -d "$(jq -nc --arg agent_id "$AGENT_ID" '{
       agent_id: $agent_id,
@@ -34,9 +43,14 @@ SESSION_ID="$(
     }')" \
     | jq -r '.id'
 )"
+if [[ -z "$SESSION_ID" || "$SESSION_ID" == "null" ]]; then
+  echo "no session id returned by $BASE_URL/api/sessions" >&2
+  exit 1
+fi
 
 APPROVAL_ID="$(
   curl -fsS -X POST "$BASE_URL/api/tools/shell.exec/execute" \
+    "${auth_headers[@]}" \
     -H 'content-type: application/json' \
     -d "$(jq -nc --arg session_id "$SESSION_ID" '{
       session_id: $session_id,
@@ -46,11 +60,18 @@ APPROVAL_ID="$(
     }')" \
     | jq -r '.approval_id'
 )"
+if [[ -z "$APPROVAL_ID" || "$APPROVAL_ID" == "null" ]]; then
+  echo "no approval id returned by $BASE_URL/api/tools/shell.exec/execute" >&2
+  exit 1
+fi
 
-curl -fsS -X POST "$BASE_URL/api/approvals/$APPROVAL_ID/approve" >/dev/null
+curl -fsS -X POST "$BASE_URL/api/approvals/$APPROVAL_ID/approve" \
+  "${auth_headers[@]}" \
+  >/dev/null
 
 TOOL_CALL="$(
   curl -fsS "$BASE_URL/api/sessions/$SESSION_ID/tool-calls" \
+    "${auth_headers[@]}" \
     | jq -c 'map(select(.tool_name == "shell.exec"))[0]'
 )"
 

@@ -5,6 +5,8 @@ BASE_URL="${BASE_URL:-http://127.0.0.1:8787}"
 WORKSPACE_ROOT="${MANDOFORGE_WORKSPACE_ROOT:-.mandoforge/workspaces}"
 SUBJECT="${MANDOFORGE_STAGE1_DEMO_SUBJECT:-stage1-demo-principal}"
 ROLES="${MANDOFORGE_STAGE1_DEMO_ROLES:-admin}"
+SESSION_LOOP_POLL_ATTEMPTS="${MANDOFORGE_STAGE1_DEMO_POLL_ATTEMPTS:-100}"
+SESSION_LOOP_POLL_INTERVAL="${MANDOFORGE_STAGE1_DEMO_POLL_INTERVAL:-0.2}"
 
 auth_headers=(
   -H "x-mandoforge-subject: $SUBJECT"
@@ -21,7 +23,7 @@ drain_session_loop() {
   local reason="$2"
   local job_id=""
 
-  for _ in $(seq 1 20); do
+  for _ in $(seq 1 "$SESSION_LOOP_POLL_ATTEMPTS"); do
     job_id="$(
       curl -fsS "$BASE_URL/api/session-loop-jobs" \
         "${auth_headers[@]}" \
@@ -32,11 +34,17 @@ drain_session_loop() {
     if [[ -n "$job_id" && "$job_id" != "null" ]]; then
       break
     fi
-    sleep 0.2
+    sleep "$SESSION_LOOP_POLL_INTERVAL"
   done
 
   if [[ -z "$job_id" || "$job_id" == "null" ]]; then
     echo "no queued session loop job for $session_id after $reason" >&2
+    curl -fsS "$BASE_URL/api/session-loop-jobs" "${auth_headers[@]}" \
+      | jq --arg session_id "$session_id" 'map(select(.session_id == $session_id))' >&2
+    curl -fsS "$BASE_URL/api/sessions/$session_id/events" "${auth_headers[@]}" \
+      | jq 'map({event_type, created_at, payload})' >&2
+    curl -fsS "$BASE_URL/api/sessions/$session_id/tool-calls" "${auth_headers[@]}" \
+      | jq 'map({tool_name, status, error})' >&2
     exit 1
   fi
 

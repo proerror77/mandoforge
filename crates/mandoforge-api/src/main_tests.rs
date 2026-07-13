@@ -21361,6 +21361,26 @@ fn builds_docker_shell_runner_args_with_workspace_sandbox() {
 }
 
 #[test]
+fn docker_shell_runner_absolutizes_relative_workspace() {
+    let process = shell_command("docker", FsPath::new(".mandoforge/session"), "pwd")
+        .expect("relative workspace resolves from current directory");
+    let args = process
+        .as_std()
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let mount = args
+        .windows(2)
+        .find(|args| args[0] == "-v")
+        .map(|args| args[1].as_str())
+        .expect("docker args include workspace mount");
+    let host_path = mount
+        .strip_suffix(":/workspace")
+        .expect("workspace mount targets /workspace");
+    assert!(FsPath::new(host_path).is_absolute());
+}
+
+#[test]
 fn session_statuses_use_managed_agent_lifecycle_names() {
     assert_eq!(SessionStatus::Idle.as_str(), "idle");
     assert_eq!(SessionStatus::RequiresAction.as_str(), "requires_action");

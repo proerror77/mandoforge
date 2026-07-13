@@ -59,6 +59,7 @@ jobs:
       - run: node scripts/verify-ui-api-truth-gate.mjs
       - run: STATIC_ONLY=1 scripts/ontology-release-workflow-trigger-gate.sh
       - run: STATIC_ONLY=1 scripts/product-surfaces-production-gate.sh
+      - run: STATIC_ONLY=1 scripts/production-launch-preflight.sh
       - name: Check shell syntax
         shell: bash
         run: |

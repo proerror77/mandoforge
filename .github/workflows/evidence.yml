@@ -91,9 +91,10 @@ jobs:
       - name: Start API
         run: |
           set -euo pipefail
+          cargo build -p mandoforge-api --bin mandoforge-api --locked
           MANDOFORGE_INSECURE_DEV_AUTH=1 \
           MANDOFORGE_EXECUTION_WORKER=inline \
-          cargo run -p mandoforge-api > /tmp/mandoforge-api.log 2>&1 &
+          target/debug/mandoforge-api > /tmp/mandoforge-api.log 2>&1 &
           echo "$!" > /tmp/mandoforge-api.pid
           for _ in $(seq 1 60); do
             if curl -fsS http://127.0.0.1:8787/healthz >/dev/null; then
