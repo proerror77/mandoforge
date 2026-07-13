@@ -2058,7 +2058,9 @@ impl ToolExecutor for ShellExecTool {
             ));
         }
         let runner = shell_runner();
-        let mut process = shell_command(&runner, &workspace, command);
+        let mut process = shell_command(&runner, &workspace, command).map_err(|error| {
+            AppError::bad_request(format!("failed to prepare shell.exec runner: {error}"))
+        })?;
         let output = tokio::time::timeout(Duration::from_secs(30), process.output())
             .await
             .map_err(|_| AppError::bad_request("shell.exec timed out"))?

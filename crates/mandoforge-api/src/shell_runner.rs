@@ -9,36 +9,41 @@ pub(crate) fn shell_runner() -> String {
         .to_string()
 }
 
-pub(crate) fn shell_command(runner: &str, workspace: &FsPath, command: &str) -> Command {
+pub(crate) fn shell_command(
+    runner: &str,
+    workspace: &FsPath,
+    command: &str,
+) -> std::io::Result<Command> {
+    let workspace = std::path::absolute(workspace)?;
     match runner {
         "docker" => {
             let image = std::env::var("MANDOFORGE_SHELL_DOCKER_IMAGE")
                 .unwrap_or_else(|_| "alpine:3.20".to_string());
             let mut process = Command::new("docker");
-            process.args(docker_shell_args(workspace, &image, command));
-            process
+            process.args(docker_shell_args(&workspace, &image, command));
+            Ok(process)
         }
         // bubblewrap: Linux user-namespaces sandbox. Near-zero cold-start (<10ms).
         // Requires `bwrap` (bubblewrap) installed on the host.
         // Set MANDOFORGE_SHELL_RUNNER=bubblewrap to enable.
         "bubblewrap" | "bwrap" => {
             let mut process = Command::new("bwrap");
-            process.args(bubblewrap_args(workspace, command));
-            process
+            process.args(bubblewrap_args(&workspace, command));
+            Ok(process)
         }
         // nsjail: Google's lightweight namespace jail. Fast (<50ms), no daemon needed.
         // Requires `nsjail` installed. Set MANDOFORGE_SHELL_RUNNER=nsjail to enable.
         "nsjail" => {
             let mut process = Command::new("nsjail");
-            process.args(nsjail_args(workspace, command));
-            process
+            process.args(nsjail_args(&workspace, command));
+            Ok(process)
         }
         // host: no sandboxing, runs directly on the host shell.
         // Fastest option — use only for trusted agent workloads on your own infra.
         _ => {
             let mut process = Command::new("sh");
-            process.arg("-c").arg(command).current_dir(workspace);
-            process
+            process.arg("-c").arg(command).current_dir(&workspace);
+            Ok(process)
         }
     }
 }
