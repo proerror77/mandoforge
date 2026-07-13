@@ -34,7 +34,8 @@ render_manifest_json() {
 verify_kubernetes_access_contracts() {
   local role_json network_policy_json worker_manifest
   role_json="$(render_manifest_json deploy/k8s/api-agent-sandbox-rbac.yaml \
-    | jq -cs 'map(select(.kind == "Role" and .metadata.name == "mandoforge-api-agent-sandbox"))[0]')"
+    | jq -cs '[.[] | if .kind == "List" then .items[] else . end
+        | select(.kind == "Role" and .metadata.name == "mandoforge-api-agent-sandbox")][0]')"
   jq -e '
     def exact_rule($group; $resource; $verbs):
       .apiGroups == [$group]
