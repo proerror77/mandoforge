@@ -129,6 +129,7 @@ mod store_session_loop_jobs;
 mod store_session_threads;
 mod store_tool_calls;
 mod store_usage_rollups;
+mod store_workflow_pack_lifecycle;
 mod store_workflow_packs;
 mod store_workflows;
 mod telemetry_events;
@@ -311,6 +312,9 @@ pub(crate) use stage2_readiness::build_stage2_completion_readiness;
 pub(crate) use stage2_readiness::parse_stage2_open_gaps;
 pub(crate) use state::AppState;
 use store_backend::{MemoryStore, StoreBackend};
+pub(crate) use store_entities::{
+    agent_release_enforcement_required, configured_agent_release_environment,
+};
 pub(crate) use telemetry_events::telemetry_status_for_event;
 pub(crate) use tenant_isolation_runtime::*;
 pub(crate) use types::agent::{
@@ -501,8 +505,9 @@ pub(crate) use types::tenant::{
 pub(crate) use types::tool_call::ToolCall;
 use types::tools::{
     ApprovalRequestTool, ArtifactCreateTool, ExecuteTool, FileReadTool, McpCallTool,
-    OntologyTypeLookupTool, SemanticLinkExpandTool, SemanticObjectFetchTool,
-    SemanticObjectSearchTool, ShellExecTool, SqlQueryTool, SqlSchemaTool, ToolDescriptor,
+    OntologyActionExecuteTool, OntologyTypeLookupTool, SemanticLinkExpandTool,
+    SemanticObjectFetchTool, SemanticObjectSearchTool, ShellExecTool, SqlQueryTool, SqlSchemaTool,
+    ToolDescriptor,
 };
 pub(crate) use types::usage::{
     AcknowledgeCostAlertRequest, CostAlert, CostAlertAcknowledgement, CostAlertDelivery,

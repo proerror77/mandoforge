@@ -70,10 +70,17 @@ The validator enforces the initial Stage 3 safety floor:
 - Connector data-quality contracts, when declared, must require at least one sample, a positive freshness window, and non-empty required metadata/content field lists.
 - Reader agents cannot declare write or external-write tool scopes.
 - Writer agents cannot declare external-write tool scopes.
+- Agents that expose `native.connector.call` may narrow their authority with
+  `native_connector_actions`, whose values must reference declared action ids.
+  A pack with more than one native connector Agent must declare this list for
+  every such Agent; ambiguous shared action authority is rejected.
 - Handoffs must target declared agents.
 - Handoffs must declare enum-like intents.
 - Workflow file step references must resolve to declared agents, profiles, schemas, skills, and handoff intents.
 - High-risk handoffs must require approval.
+- Child handoff grants intersect the parent connector scope with the target
+  AgentVersion's exact connector, operation, and side-effect bindings. Missing
+  target bindings fail closed instead of inheriting the root grant wholesale.
 - Eval gate scores must be between `0` and `1`.
 
 This contract does not install or activate packs yet. It blocks unsafe package shape before the later install/stage/release APIs exist.

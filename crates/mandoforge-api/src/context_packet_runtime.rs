@@ -23,6 +23,7 @@ pub(crate) async fn build_context_packet(
     session_id: Uuid,
 ) -> Result<ContextPacket, AppError> {
     let session = state.get_session(session_id).await?;
+    let mut context_workflow_run = None;
     let context_task_grant =
         if let Some((run, grant)) = active_task_grant_for_session(state, session_id).await? {
             if grant.status != "active" {
@@ -37,6 +38,7 @@ pub(crate) async fn build_context_packet(
                 .await?;
                 return Err(AppError::forbidden("task grant is not active"));
             }
+            context_workflow_run = Some(run);
             Some(grant)
         } else {
             None
@@ -59,6 +61,14 @@ pub(crate) async fn build_context_packet(
         .as_ref()
         .map(|grant| merge_semantic_scopes(&base_semantic_scopes, &grant.semantic_scopes))
         .unwrap_or(base_semantic_scopes);
+    let ontology_release = if let Some(snapshot) = context_workflow_run
+        .as_ref()
+        .and_then(|run| run.runtime_envelope.get("ontology_release"))
+    {
+        Some(snapshot.clone())
+    } else {
+        active_ontology_release_metadata_for_scopes(state, &effective_semantic_scopes).await?
+    };
     let events = state.list_events(session_id).await?;
     let policy = state.policy_for_session(session_id).await;
     let (effective_runtime_profile_id, runtime_profile_source, runtime_profile_lookup) =
@@ -86,7 +96,7 @@ pub(crate) async fn build_context_packet(
         );
         record_task_grant_checked(state, grant, session_id, "context_packet").await?;
     }
-    let source_refs = build_context_packet_source_refs(
+    let mut source_refs = build_context_packet_source_refs(
         &session,
         &agent,
         &agent_version,
@@ -98,6 +108,34 @@ pub(crate) async fn build_context_packet(
         handoff_assignment_context.as_ref(),
         context_task_grant.as_ref(),
     );
+    if let Some(run) = context_workflow_run.as_ref() {
+        source_refs.push(context_source_ref(
+            "workflow_run",
+            run.id,
+            "pinned_snapshot",
+        ));
+    }
+    if let Some(step_id) = context_task_grant
+        .as_ref()
+        .and_then(|grant| grant.workflow_step_run_id)
+    {
+        source_refs.push(context_source_ref(
+            "workflow_step_run",
+            step_id,
+            "task_grant_bound",
+        ));
+    }
+    if let Some(release_id) = ontology_release
+        .as_ref()
+        .and_then(|release| release.get("id"))
+        .and_then(Value::as_str)
+    {
+        source_refs.push(ContextPacketSourceRef {
+            source_type: "ontology_release".to_string(),
+            source_id: release_id.to_string(),
+            freshness: "pinned_snapshot".to_string(),
+        });
+    }
     let last_user_message = events
         .iter()
         .rev()
@@ -115,9 +153,20 @@ pub(crate) async fn build_context_packet(
     );
 
     let generated_at = Utc::now();
+    let context_layers = context_packet_layer_projection(
+        &session,
+        &context_agent_version,
+        runtime_profile.as_ref(),
+        context_workflow_run.as_ref(),
+        context_task_grant.as_ref(),
+        ontology_release.as_ref(),
+    );
     let task = json!({
         "title": session.title,
         "status": session.status.as_str(),
+        "objective": context_task_grant.as_ref().map(|grant| grant.objective.as_str()),
+        "workflow_run_id": context_workflow_run.as_ref().map(|run| run.id),
+        "workflow_step_run_id": context_task_grant.as_ref().and_then(|grant| grant.workflow_step_run_id),
         "last_user_message": last_user_message,
         "event_count": events.len(),
         "created_at": session.created_at,
@@ -136,7 +185,7 @@ pub(crate) async fn build_context_packet(
             })
         })
         .unwrap_or_else(|| agent_version.approval_policy.clone());
-    let replay_summary = json!({
+    let mut replay_summary = json!({
         "version": version,
         "source_ref_count": source_refs.len(),
         "retrieved_object_count": retrieved_objects.len(),
@@ -152,7 +201,11 @@ pub(crate) async fn build_context_packet(
         },
         "runtime_profile_source": runtime_profile_source,
         "task_grant_authority": context_task_grant.as_ref().map(task_grant_context_authority),
+        "context_layers": context_layers,
     });
+    if let Some(ontology_release) = ontology_release {
+        replay_summary["ontology_release"] = ontology_release;
+    }
     Ok(ContextPacket {
         id: Uuid::new_v4(),
         session_id,
@@ -222,6 +275,56 @@ pub(crate) fn task_grant_context_authority(grant: &TaskGrant) -> Value {
             "tool_calls_used": grant.tool_calls_used,
             "cost_usd_micros_used": grant.cost_usd_micros_used
         }
+    })
+}
+
+pub(crate) fn context_packet_layer_projection(
+    session: &Session,
+    agent_version: &AgentVersion,
+    runtime_profile: Option<&ContextPacketRuntimeProfile>,
+    workflow_run: Option<&WorkflowRun>,
+    task_grant: Option<&TaskGrant>,
+    ontology_release: Option<&Value>,
+) -> Value {
+    json!({
+        "work_surfaces": {
+            "source_event_id": workflow_run.and_then(|run| run.source_event_id),
+            "source_schedule_id": workflow_run.and_then(|run| run.source_schedule_id),
+        },
+        "collaboration": {
+            "source_work_item_id": workflow_run.and_then(|run| run.source_work_item_id),
+        },
+        "manager_agent": {
+            "source_handoff_id": task_grant.and_then(|grant| grant.source_handoff_id),
+            "issuer_subject": task_grant.map(|grant| grant.issuer_subject.as_str()),
+            "grantee_agent_id": task_grant.and_then(|grant| grant.grantee_agent_id),
+        },
+        "managed_runtime": {
+            "session_id": session.id,
+            "agent_id": session.agent_id,
+            "agent_version_id": session.agent_version_id,
+            "workflow_run_id": workflow_run.map(|run| run.id),
+            "workflow_step_run_id": task_grant.and_then(|grant| grant.workflow_step_run_id),
+        },
+        "governance": {
+            "task_grant_id": task_grant.map(|grant| grant.id),
+            "parent_grant_id": task_grant.and_then(|grant| grant.parent_grant_id),
+            "policy_revision_id": task_grant.and_then(|grant| grant.policy_revision_id),
+            "risk_level": task_grant.map(|grant| grant.risk_level.as_str()),
+        },
+        "ontology_action_contract": {
+            "ontology_release": ontology_release.cloned(),
+        },
+        "environment_scheduling": {
+            "environment_id": session.environment_id,
+        },
+        "execution_substrate": {
+            "runtime_profile_id": runtime_profile.map(|profile| profile.id),
+            "runtime_type": runtime_profile.map(|profile| profile.runtime_type.as_str()),
+            "provider": agent_version.provider,
+            "model": agent_version.model,
+            "tools": agent_version.tools,
+        },
     })
 }
 
@@ -885,6 +988,12 @@ pub(crate) fn render_execution_context(
     let max_policy_reminders = bounded_render_budget(input.max_policy_reminders, 3, 0, 12);
     let allow_on_demand_fetch = input.allow_on_demand_fetch.unwrap_or(true);
     let _allow_full_content = input.allow_full_content.unwrap_or(false);
+    let task = rendered_context_task_projection(packet, max_summary_chars);
+    let context_layers = packet
+        .replay_summary
+        .get("context_layers")
+        .map(compact_rendered_context_layers)
+        .unwrap_or_else(empty_json_object);
 
     let mut must_follow = packet
         .policy_reminders
@@ -912,7 +1021,9 @@ pub(crate) fn render_execution_context(
         ..Default::default()
     };
 
-    let mut estimated_tokens_used = estimate_rendered_context_base_tokens(packet, &must_follow);
+    let mut estimated_tokens_used = estimate_rendered_context_base_tokens(packet, &must_follow)
+        + estimate_tokens(&task.to_string())
+        + estimate_tokens(&context_layers.to_string());
     let mut relevant_objects = Vec::new();
     for object in &packet.retrieved_objects {
         if relevant_objects.len() >= max_objects {
@@ -945,7 +1056,7 @@ pub(crate) fn render_execution_context(
         relevant_objects.push(rendered);
     }
 
-    let available_tools = if allow_on_demand_fetch {
+    let mut available_tools = if allow_on_demand_fetch {
         vec![
             "semantic_object.fetch".to_string(),
             "semantic_object.search".to_string(),
@@ -955,6 +1066,14 @@ pub(crate) fn render_execution_context(
     } else {
         Vec::new()
     };
+    if packet
+        .agent
+        .tools
+        .iter()
+        .any(|tool| tool == "ontology.action.execute")
+    {
+        available_tools.push("ontology.action.execute".to_string());
+    }
     let fetchable_object_ids = if allow_on_demand_fetch {
         packet
             .retrieved_objects
@@ -970,6 +1089,8 @@ pub(crate) fn render_execution_context(
         session_id: packet.session_id,
         agent_id: packet.agent_id,
         context_packet_version: packet.version,
+        task,
+        context_layers,
         ontology_scope: render_ontology_scope(&packet.semantic_scopes),
         role: packet.agent.agent_role.clone(),
         must_follow,
@@ -988,15 +1109,83 @@ pub(crate) fn render_execution_context(
     }
 }
 
+pub(crate) fn rendered_context_task_projection(
+    packet: &ContextPacket,
+    max_summary_chars: usize,
+) -> Value {
+    let mut task = serde_json::Map::new();
+    for key in ["title", "objective"] {
+        if let Some(value) = packet.task.get(key).and_then(Value::as_str) {
+            task.insert(
+                key.to_string(),
+                Value::String(truncate_for_execution_context(value, max_summary_chars)),
+            );
+        }
+    }
+    for key in ["status", "workflow_run_id", "workflow_step_run_id"] {
+        if let Some(value) = packet.task.get(key).filter(|value| !value.is_null()) {
+            task.insert(key.to_string(), value.clone());
+        }
+    }
+    Value::Object(task)
+}
+
+pub(crate) fn compact_rendered_context_layers(layers: &Value) -> Value {
+    let Some(layers) = layers.as_object() else {
+        return empty_json_object();
+    };
+    Value::Object(
+        layers
+            .iter()
+            .map(|(name, layer)| {
+                let mut layer = compact_non_null_json(layer).unwrap_or_else(empty_json_object);
+                if let Some(layer) = layer.as_object_mut() {
+                    match name.as_str() {
+                        "managed_runtime" => {
+                            layer.remove("session_id");
+                            layer.remove("agent_id");
+                        }
+                        "execution_substrate" => {
+                            layer.remove("tools");
+                        }
+                        _ => {}
+                    }
+                }
+                (name.clone(), layer)
+            })
+            .collect(),
+    )
+}
+
+fn compact_non_null_json(value: &Value) -> Option<Value> {
+    match value {
+        Value::Null => None,
+        Value::Object(object) => Some(Value::Object(
+            object
+                .iter()
+                .filter_map(|(key, value)| {
+                    compact_non_null_json(value).map(|value| (key.clone(), value))
+                })
+                .collect(),
+        )),
+        Value::Array(values) => Some(Value::Array(
+            values.iter().filter_map(compact_non_null_json).collect(),
+        )),
+        _ => Some(value.clone()),
+    }
+}
+
 pub(crate) async fn render_execution_context_for_packet(
     state: &AppState,
     packet: &ContextPacket,
     input: RenderContextPacketRequest,
 ) -> Result<RenderedExecutionContext, AppError> {
     let mut rendered = render_execution_context(packet, input);
-    if let Some(release_metadata) =
-        active_ontology_release_metadata_for_scopes(state, &packet.semantic_scopes).await?
-    {
+    let release_metadata = match packet.replay_summary.get("ontology_release") {
+        Some(snapshot) => Some(snapshot.clone()),
+        None => active_ontology_release_metadata_for_scopes(state, &packet.semantic_scopes).await?,
+    };
+    if let Some(release_metadata) = release_metadata {
         if !rendered.ontology_scope.is_object() {
             rendered.ontology_scope = json!({});
         }
@@ -2365,6 +2554,269 @@ impl ToolExecutor for OntologyTypeLookupTool {
     }
 }
 
+#[async_trait]
+impl ToolExecutor for OntologyActionExecuteTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: "ontology.action.execute",
+            risk: "medium",
+            description: "Validate a pinned ontology action contract and create an auditable proposal",
+        }
+    }
+
+    async fn execute(
+        &self,
+        state: &AppState,
+        input: &ExecuteTool,
+        tool_call: &ToolCall,
+    ) -> Result<Value, AppError> {
+        let (packet, grant) = context_packet_and_grant_for_tool_invocation(state, input).await?;
+        let grant = grant.ok_or_else(|| {
+            AppError::forbidden("ontology action execution requires a workflow TaskGrant")
+        })?;
+        let release_snapshot = packet
+            .replay_summary
+            .get("ontology_release")
+            .filter(|release| release.is_object())
+            .ok_or_else(|| AppError::forbidden("context packet has no pinned ontology release"))?;
+        let release_id = release_snapshot
+            .get("id")
+            .and_then(Value::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .ok_or_else(|| {
+                AppError::forbidden("pinned ontology release id is missing or invalid")
+            })?;
+        let grant_release_id = grant
+            .approval_policy
+            .get("ontology_release_snapshot")
+            .and_then(|release| release.get("id"))
+            .and_then(Value::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok());
+        if grant_release_id != Some(release_id) {
+            return Err(AppError::forbidden(
+                "context packet ontology release is outside the TaskGrant authority",
+            ));
+        }
+        let release = state.get_ontology_release(release_id).await?;
+        if matches!(release.status.as_str(), "rolled_back" | "archived") {
+            return Err(AppError::forbidden(
+                "pinned ontology release has been revoked for new action proposals",
+            ));
+        }
+        if release_snapshot.get("version").and_then(Value::as_str) != Some(release.version.as_str())
+            || release_snapshot.get("domain_scope").and_then(Value::as_str)
+                != Some(release.domain_scope.as_str())
+        {
+            return Err(AppError::forbidden(
+                "pinned ontology release metadata does not match the release registry",
+            ));
+        }
+        let action_name = input
+            .args
+            .get("action")
+            .or_else(|| input.args.get("action_name"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| AppError::bad_request("ontology action requires action"))?;
+        let (spec, contract_digest) = ontology_action_tool_spec_for_release(&release, action_name)?;
+        let parameters = input
+            .args
+            .get("parameters")
+            .cloned()
+            .unwrap_or_else(empty_json_object);
+        validate_ontology_action_parameters(&spec.input_schema, &parameters)?;
+        if !spec.read_only && spec.execution_mode != "proposal_only" {
+            return Err(AppError::forbidden(
+                "ontology action side effects are disabled unless the published contract is proposal_only",
+            ));
+        }
+
+        let artifact = state
+            .insert_artifact(Artifact {
+                id: Uuid::new_v4(),
+                session_id: input.session_id,
+                artifact_type: "ontology_action_proposal".to_string(),
+                name: format!("{}-proposal.json", workflow_slug(action_name)),
+                path: None,
+                content: json!({
+                    "status": "draft",
+                    "ontology_release_id": release.id,
+                    "ontology_version": release.version,
+                    "domain_scope": release.domain_scope,
+                    "action": spec.name,
+                    "action_contract_id": spec.id,
+                    "contract_digest": contract_digest,
+                    "target_object": spec.target_object,
+                    "parameters": parameters,
+                    "effects": spec.effects,
+                    "executor": spec.executor,
+                    "approval_required": spec.approval_required,
+                    "transaction_profile": spec.transaction_profile,
+                    "execution_mode": spec.execution_mode,
+                    "commit_status": "blocked_pending_explicit_production_policy",
+                    "context_packet_id": packet.id,
+                    "task_grant_id": grant.id,
+                }),
+                created_at: Utc::now(),
+            })
+            .await?;
+        state
+            .append_event(
+                "system",
+                Some(artifact.id),
+                input.session_id,
+                "artifact.created",
+                json!({
+                    "artifact_id": artifact.id,
+                    "name": artifact.name,
+                    "artifact_type": artifact.artifact_type,
+                    "tool_call_id": tool_call.id,
+                }),
+            )
+            .await?;
+        state
+            .append_audit_log(new_audit_log(
+                Some(input.session_id),
+                "tool",
+                Some(tool_call.id),
+                "artifact.created",
+                "artifact",
+                Some(artifact.id),
+                json!({
+                    "name": artifact.name,
+                    "artifact_type": artifact.artifact_type,
+                    "source": "ontology_action_proposal",
+                }),
+            ))
+            .await?;
+        let details = json!({
+            "artifact_id": artifact.id,
+            "ontology_release_id": release.id,
+            "action": spec.name,
+            "action_contract_id": spec.id,
+            "contract_digest": contract_digest,
+            "execution_mode": spec.execution_mode,
+            "declared_audit_event": spec.audit_event,
+            "tool_call_id": tool_call.id,
+            "task_grant_id": grant.id,
+            "context_packet_id": packet.id,
+        });
+        state
+            .append_event(
+                "system",
+                Some(artifact.id),
+                input.session_id,
+                "ontology_action.proposal_created",
+                details.clone(),
+            )
+            .await?;
+        state
+            .append_audit_log(new_audit_log(
+                Some(input.session_id),
+                "tool",
+                Some(tool_call.id),
+                "ontology_action.proposal_created",
+                "artifact",
+                Some(artifact.id),
+                details,
+            ))
+            .await?;
+        Ok(json!({
+            "status": "proposal_created",
+            "artifact_id": artifact.id,
+            "ontology_release_id": release.id,
+            "action": spec.name,
+            "execution_mode": spec.execution_mode,
+            "approval_required": spec.approval_required,
+            "commit_status": "blocked_pending_explicit_production_policy",
+        }))
+    }
+}
+
+pub(crate) fn validate_ontology_action_parameters(
+    input_schema: &Value,
+    parameters: &Value,
+) -> Result<(), AppError> {
+    let parameters = parameters
+        .as_object()
+        .ok_or_else(|| AppError::bad_request("ontology action parameters must be a JSON object"))?;
+    if input_schema.get("type").and_then(Value::as_str) == Some("object") {
+        let properties = input_schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                AppError::bad_request("ontology action object input_schema must declare properties")
+            })?;
+        for name in parameters.keys() {
+            if !properties.contains_key(name) {
+                return Err(AppError::bad_request(format!(
+                    "ontology action parameter {name} is not declared by the published contract"
+                )));
+            }
+        }
+        return validate_handoff_payload_schema(
+            &Value::Object(parameters.clone()),
+            Some(input_schema),
+        );
+    }
+    let declarations = input_schema.as_object().ok_or_else(|| {
+        AppError::bad_request("ontology action input_schema must be a JSON object")
+    })?;
+    for name in parameters.keys() {
+        if !declarations.contains_key(name) {
+            return Err(AppError::bad_request(format!(
+                "ontology action parameter {name} is not declared by the published contract"
+            )));
+        }
+    }
+    for (name, declaration) in declarations {
+        let (expected_type, required) = match declaration {
+            Value::String(expected_type) => (Some(expected_type.as_str()), true),
+            Value::Object(declaration) => (
+                declaration.get("type").and_then(Value::as_str),
+                declaration
+                    .get("required")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+            ),
+            _ => (None, true),
+        };
+        let Some(value) = parameters.get(name) else {
+            if required {
+                return Err(AppError::bad_request(format!(
+                    "ontology action missing required parameter {name}"
+                )));
+            }
+            continue;
+        };
+        let Some(expected_type) = expected_type else {
+            return Err(AppError::bad_request(format!(
+                "ontology action parameter {name} has no supported type declaration"
+            )));
+        };
+        let matches_type = match expected_type {
+            "string" => value.is_string(),
+            "decimal" | "number" => value.is_number(),
+            "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+            "boolean" => value.is_boolean(),
+            "object" => value.is_object(),
+            "array" => value.is_array(),
+            _ => {
+                return Err(AppError::bad_request(format!(
+                    "ontology action parameter {name} has unsupported type {expected_type}"
+                )));
+            }
+        };
+        if !matches_type {
+            return Err(AppError::bad_request(format!(
+                "ontology action parameter {name} must be {expected_type}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn context_packet_for_tool_invocation(
     state: &AppState,
     input: &ExecuteTool,
@@ -2475,6 +2927,7 @@ pub(crate) fn tool_registry() -> HashMap<&'static str, Box<dyn ToolExecutor>> {
         Box::new(ApprovalRequestTool),
         Box::new(FileReadTool),
         Box::new(McpCallTool),
+        Box::new(OntologyActionExecuteTool),
         Box::new(OntologyTypeLookupTool),
         Box::new(SemanticLinkExpandTool),
         Box::new(SemanticObjectFetchTool),

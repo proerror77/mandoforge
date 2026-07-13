@@ -325,6 +325,8 @@ pub(crate) struct WorkflowPackStageRequest {
 pub(crate) struct WorkflowPackReleaseRequest {
     pub(crate) eval_gate_status: String,
     pub(crate) release_gate_status: String,
+    #[serde(default)]
+    pub(crate) environment: Option<String>,
     #[serde(default = "crate::empty_json_object")]
     pub(crate) gate_evidence: Value,
     #[serde(default)]

@@ -205,6 +205,28 @@ impl AppState {
     }
 
     pub(crate) async fn create_agent(&self, input: CreateAgent) -> Result<Agent, AppError> {
+        self.create_agent_with_id(Uuid::new_v4(), input).await
+    }
+
+    pub(crate) async fn create_agent_with_id(
+        &self,
+        agent_id: Uuid,
+        input: CreateAgent,
+    ) -> Result<Agent, AppError> {
+        let (agent, agent_version) = self.prepare_agent_with_id(agent_id, input).await?;
+        self.persist_prepared_agents_and_workflow_definitions(
+            vec![(agent.clone(), agent_version)],
+            Vec::new(),
+        )
+        .await?;
+        Ok(agent)
+    }
+
+    pub(crate) async fn prepare_agent_with_id(
+        &self,
+        agent_id: Uuid,
+        input: CreateAgent,
+    ) -> Result<(Agent, AgentVersion), AppError> {
         let release_state = normalize_agent_release_state(&input.release_state)?;
         if release_state == "active" && agent_release_enforcement_required() {
             return Err(AppError::bad_request(
@@ -212,7 +234,7 @@ impl AppState {
             ));
         }
         let agent = Agent {
-            id: Uuid::new_v4(),
+            id: agent_id,
             name: input.name,
             kind: input.kind,
             team_id: input.team_id,
@@ -247,43 +269,29 @@ impl AppState {
         if let Some(runtime_profile_id) = agent.runtime_profile_id {
             self.get_agent_runtime_profile(runtime_profile_id).await?;
         }
-        match &self.store {
-            StoreBackend::Memory(inner) => {
-                inner.write().await.agents.insert(agent.id, agent.clone());
-            }
-            StoreBackend::Postgres(pool) => {
-                sqlx::query(
-                    "INSERT INTO agents
-                        (id, tenant_id, name, kind, team_id, project_id, runtime_profile_id, agent_role, provider, model, system_prompt, tools, tool_policy, mcp_server_ids, skill_ids, workflow_pack_ids, remote_computer_profile, semantic_scopes, release_state, created_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)",
-                )
-                .bind(agent.id)
-                .bind(self.current_tenant_id())
-                .bind(&agent.name)
-                .bind(&agent.kind)
-                .bind(agent.team_id)
-                .bind(agent.project_id)
-                .bind(agent.runtime_profile_id)
-                .bind(&agent.agent_role)
-                .bind(&agent.provider)
-                .bind(&agent.model)
-                .bind(&agent.system_prompt)
-                .bind(json!(agent.tools))
-                .bind(&agent.tool_policy)
-                .bind(json!(agent.mcp_server_ids))
-                .bind(json!(agent.skill_ids))
-                .bind(json!(agent.workflow_pack_ids))
-                .bind(&agent.remote_computer_profile)
-                .bind(&agent.semantic_scopes)
-                .bind(&agent.release_state)
-                .bind(agent.created_at)
-                .execute(pool)
-                .await?;
-            }
-        }
-        self.insert_agent_version(&agent, 1, input.runtime_config)
-            .await?;
-        Ok(agent)
+        let agent_version = AgentVersion {
+            id: Uuid::new_v4(),
+            agent_id: agent.id,
+            version: 1,
+            provider: agent.provider.clone(),
+            model: agent.model.clone(),
+            system_prompt: agent.system_prompt.clone(),
+            tools: agent.tools.clone(),
+            tool_names: agent.tools.clone(),
+            runtime_config: input.runtime_config,
+            approval_policy: agent.tool_policy.clone(),
+            runtime_profile_id: agent.runtime_profile_id,
+            runtime_profile_snapshot: self
+                .agent_runtime_profile_snapshot(agent.runtime_profile_id)
+                .await?,
+            mcp_server_ids: agent.mcp_server_ids.clone(),
+            skill_ids: agent.skill_ids.clone(),
+            workflow_pack_ids: agent.workflow_pack_ids.clone(),
+            remote_computer_profile: agent.remote_computer_profile.clone(),
+            semantic_scopes: agent.semantic_scopes.clone(),
+            created_at: agent.created_at,
+        };
+        Ok((agent, agent_version))
     }
 
     pub(crate) async fn insert_agent_version(
@@ -825,6 +833,62 @@ impl AppState {
         let agent_version = self
             .runnable_agent_version(input.agent_id, input.environment_id)
             .await?;
+        self.persist_session(input, agent_version).await
+    }
+
+    pub(crate) async fn create_session_for_agent_version(
+        &self,
+        input: CreateSession,
+        agent_version_id: Uuid,
+    ) -> Result<Session, AppError> {
+        let agent_version = self
+            .runnable_pinned_agent_version(input.agent_id, agent_version_id, input.environment_id)
+            .await?;
+        self.persist_session(input, agent_version).await
+    }
+
+    async fn runnable_pinned_agent_version(
+        &self,
+        agent_id: Uuid,
+        agent_version_id: Uuid,
+        environment_id: Option<Uuid>,
+    ) -> Result<AgentVersion, AppError> {
+        let agent = self.get_agent(agent_id).await?;
+        if agent.release_state == "disabled" {
+            return Err(AppError::forbidden("agent is disabled"));
+        }
+        if let Some(environment_id) = environment_id {
+            self.get_environment(environment_id).await?;
+        }
+        let agent_version = self
+            .list_agent_versions(agent_id)
+            .await?
+            .into_iter()
+            .find(|version| version.id == agent_version_id)
+            .ok_or_else(|| AppError::not_found("pinned agent version not found"))?;
+        if !agent_release_enforcement_required() {
+            return Ok(agent_version);
+        }
+        let (environment, release_environment) =
+            self.governed_runtime_environment(environment_id).await?;
+        self.validate_agent_version_runtime_profile(&agent_version, &environment)
+            .await?;
+        if !self
+            .agent_version_has_promoted_release(agent_id, agent_version_id, &release_environment)
+            .await?
+        {
+            return Err(AppError::forbidden(
+                "pinned agent version has no promoted release for the selected environment",
+            ));
+        }
+        Ok(agent_version)
+    }
+
+    async fn persist_session(
+        &self,
+        input: CreateSession,
+        agent_version: AgentVersion,
+    ) -> Result<Session, AppError> {
         let now = Utc::now();
         let session = Session {
             id: Uuid::new_v4(),

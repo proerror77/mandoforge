@@ -1,4 +1,5 @@
 use chrono::Utc;
+use serde::Deserialize;
 use serde_json::Value;
 use std::path::{Component, Path, PathBuf};
 
@@ -984,8 +985,18 @@ fn production_deployment_safety_static_ready() -> bool {
     let kustomization = project_file_content("deploy/k8s/kustomization.yaml");
     let secret_example = project_file_content("deploy/k8s/secret.example.yaml");
     let secret_delivery_contract = project_file_content("deploy/k8s/secret-delivery-contract.yaml");
+    let agent_sandbox_controller_contract =
+        project_file_content("deploy/k8s/agent-sandbox-controller-contract.yaml");
+    let agent_sandbox_runtime = project_file_content("deploy/k8s/agent-sandbox-runtime.yaml");
+    let agent_sandbox_network_policy =
+        project_file_content("deploy/k8s/agent-sandbox-egress-networkpolicy.yaml");
+    let api_agent_sandbox_rbac = project_file_content("deploy/k8s/api-agent-sandbox-rbac.yaml");
     let configmap = project_file_content("deploy/k8s/configmap.yaml");
     let api_manifest = project_file_content("deploy/k8s/api.yaml");
+    let worker_manifest = project_file_content("deploy/k8s/worker.yaml");
+    let isolated_worker_manifest = project_file_content("deploy/k8s/worker-isolated-pool.yaml");
+    let isolated_worker_network_policy =
+        project_file_content("deploy/k8s/worker-isolated-pool-networkpolicy.yaml");
     let preflight_present = project_file_is_executable("scripts/production-launch-preflight.sh");
     let deployment_safety_gate_present =
         project_file_is_executable("scripts/production-deployment-safety-gate.sh");
@@ -1006,11 +1017,58 @@ fn production_deployment_safety_static_ready() -> bool {
                 && content.contains("MANDOFORGE_SECRET_NAME: \"mandoforge-secrets\"")
                 && content.contains("MANDOFORGE_SECRET_MUST_NOT_BE_EXAMPLE: \"true\"")
         })
+        && kustomization.as_deref().is_some_and(|content| {
+            content.contains("agent-sandbox-controller-contract.yaml")
+                && content.contains("api-serviceaccount.yaml")
+                && content.contains("api-agent-sandbox-rbac.yaml")
+                && content.contains("agent-sandbox-runtime.yaml")
+                && content.contains("agent-sandbox-egress-networkpolicy.yaml")
+                && !content.contains("agent-remote-computer.yaml")
+        })
+        && agent_sandbox_controller_contract
+            .as_deref()
+            .is_some_and(|content| {
+                content.contains("MANDOFORGE_AGENT_SANDBOX_CONTROLLER_VERSION: \"v0.5.1\"")
+                    && content.contains(
+                        "MANDOFORGE_AGENT_SANDBOX_EXTENSIONS_API: \"extensions.agents.x-k8s.io/v1beta1\"",
+                    )
+                    && content.contains(
+                        "MANDOFORGE_AGENT_SANDBOX_CORE_INSTALL_ASSET: \"manifest.yaml\"",
+                    )
+                    && content.contains(
+                        "MANDOFORGE_AGENT_SANDBOX_CORE_INSTALL_SHA256: \"8cfdf0a878f66b91d2e7103e77859d1412d850ce3f5fe5c3fa134c36bd55504a\"",
+                    )
+                    && content.contains(
+                        "MANDOFORGE_AGENT_SANDBOX_EXTENSIONS_INSTALL_ASSET: \"extensions.yaml\"",
+                    )
+                    && content.contains(
+                        "MANDOFORGE_AGENT_SANDBOX_EXTENSIONS_INSTALL_SHA256: \"7c22b450e24ede3fddbcd5ae0ee7c78ea102d6c30635ff860cc486578a55932e\"",
+                    )
+                    && content.contains("MANDOFORGE_AGENT_SANDBOX_CONTROLLER_REQUIRED: \"true\"")
+            })
+        && agent_sandbox_runtime.as_deref().is_some_and(|content| {
+            content.contains("kind: SandboxTemplate")
+                && content.contains("kind: SandboxWarmPool")
+                && content.contains("automountServiceAccountToken: false")
+        })
+        && agent_sandbox_network_policy
+            .as_deref()
+            .is_some_and(agent_sandbox_network_policy_is_restricted)
+        && api_agent_sandbox_rbac
+            .as_deref()
+            .is_some_and(api_agent_sandbox_rbac_is_minimal)
         && configmap.as_deref().is_some_and(|content| {
             content.contains("MANDOFORGE_PROVIDER_RUNTIME_ENV: \"production\"")
-                && content.contains("MANDOFORGE_REMOTE_COMPUTER_RUNNER: \"kubernetes\"")
+                && content.contains("MANDOFORGE_REMOTE_COMPUTER_RUNNER: \"agent-sandbox\"")
                 && content
                     .contains("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT: \"kubernetes\"")
+                && content.contains(
+                    "MANDOFORGE_REMOTE_COMPUTER_TEMPLATE_PATH: \"deploy/k8s/agent-sandbox-runtime.yaml\"",
+                )
+                && content.contains("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_ENABLED: \"false\"")
+                && content.contains("MANDOFORGE_REMOTE_COMPUTER_MUTATION_ENABLED: \"false\"")
+                && content
+                    .contains("MANDOFORGE_REMOTE_COMPUTER_LIVE_MUTATION_ENABLED: \"false\"")
                 && !content.contains("MANDOFORGE_INSECURE_DEV_AUTH: \"true\"")
                 && !content.contains("MANDOFORGE_INSECURE_DEV_AUTH: \"1\"")
                 && !content.contains("MANDOFORGE_TRUST_X_MANDOFORGE_SUBJECT: \"true\"")
@@ -1023,12 +1081,239 @@ fn production_deployment_safety_static_ready() -> bool {
         })
         && api_manifest.as_deref().is_some_and(|content| {
             content.contains("claimName: mandoforge-workspaces")
+                && content.contains("serviceAccountName: mandoforge-api")
+                && content.contains("name: mandoforge-agent-sandbox-controller-contract")
+                && content.contains("mountPath: /var/run/secrets/kubernetes.io/serviceaccount")
                 && !content.contains("emptyDir: {}")
         })
+        && worker_manifest.as_deref().is_some_and(|content| {
+            workload_disables_service_account_token(content)
+                && !content.contains("mountPath: /var/run/secrets/kubernetes.io/serviceaccount")
+        })
+        && isolated_worker_manifest.as_deref().is_some_and(|content| {
+            workload_disables_service_account_token(content)
+                && !content.contains("mountPath: /var/run/secrets/kubernetes.io/serviceaccount")
+        })
+        && isolated_worker_network_policy
+            .as_deref()
+            .is_some_and(|content| {
+                !content.contains("app: agent-remote-computer")
+                    && !content.contains("port: 8080")
+            })
         && preflight_present
         && deployment_safety_gate_present
         && contract_gate_present
         && k8s_manifest_verifier_present
+}
+
+fn yaml_documents(content: &str) -> Option<Vec<Value>> {
+    serde_yaml::Deserializer::from_str(content)
+        .map(Value::deserialize)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()
+}
+
+fn k8s_resource_named<'a>(documents: &'a [Value], kind: &str, name: &str) -> Option<&'a Value> {
+    documents.iter().find(|document| {
+        document.get("kind").and_then(Value::as_str) == Some(kind)
+            && document
+                .get("metadata")
+                .and_then(|metadata| metadata.get("name"))
+                .and_then(Value::as_str)
+                == Some(name)
+    })
+}
+
+fn string_array_equals(value: Option<&Value>, expected: &[&str]) -> bool {
+    value.and_then(Value::as_array).is_some_and(|items| {
+        items.len() == expected.len()
+            && expected
+                .iter()
+                .all(|expected| items.iter().any(|item| item.as_str() == Some(expected)))
+    })
+}
+
+fn network_policy_ports_equal(rule: &Value, expected: &[(&str, u64)]) -> bool {
+    rule.get("ports")
+        .and_then(Value::as_array)
+        .is_some_and(|ports| {
+            ports.len() == expected.len()
+                && expected.iter().all(|(protocol, port)| {
+                    ports.iter().any(|candidate| {
+                        candidate.get("protocol").and_then(Value::as_str) == Some(*protocol)
+                            && candidate.get("port").and_then(Value::as_u64) == Some(*port)
+                    })
+                })
+        })
+}
+
+fn network_policy_dns_rule(rule: &Value) -> bool {
+    let Some(destinations) = rule.get("to").and_then(Value::as_array) else {
+        return false;
+    };
+    destinations.len() == 1
+        && destinations[0]
+            .get("namespaceSelector")
+            .and_then(|selector| selector.get("matchLabels"))
+            .and_then(|labels| labels.get("kubernetes.io/metadata.name"))
+            .and_then(Value::as_str)
+            == Some("kube-system")
+        && destinations[0]
+            .get("podSelector")
+            .and_then(|selector| selector.get("matchLabels"))
+            .and_then(|labels| labels.get("k8s-app"))
+            .and_then(Value::as_str)
+            == Some("kube-dns")
+        && network_policy_ports_equal(rule, &[("UDP", 53), ("TCP", 53)])
+}
+
+fn network_policy_api_rule(rule: &Value) -> bool {
+    let Some(destinations) = rule.get("to").and_then(Value::as_array) else {
+        return false;
+    };
+    destinations.len() == 1
+        && destinations[0]
+            .get("podSelector")
+            .and_then(|selector| selector.get("matchLabels"))
+            .and_then(|labels| labels.get("app"))
+            .and_then(Value::as_str)
+            == Some("mandoforge-api")
+        && network_policy_ports_equal(rule, &[("TCP", 8787)])
+}
+
+fn network_policy_external_https_rule(rule: &Value) -> bool {
+    let Some(destinations) = rule.get("to").and_then(Value::as_array) else {
+        return false;
+    };
+    let ipv4 = destinations.iter().find_map(|destination| {
+        destination
+            .get("ipBlock")
+            .filter(|block| block.get("cidr").and_then(Value::as_str) == Some("0.0.0.0/0"))
+    });
+    let ipv6 = destinations.iter().find_map(|destination| {
+        destination
+            .get("ipBlock")
+            .filter(|block| block.get("cidr").and_then(Value::as_str) == Some("::/0"))
+    });
+    destinations.len() == 2
+        && ipv4.is_some_and(|block| {
+            [
+                "10.0.0.0/8",
+                "127.0.0.0/8",
+                "169.254.0.0/16",
+                "172.16.0.0/12",
+                "192.168.0.0/16",
+            ]
+            .iter()
+            .all(|cidr| {
+                block
+                    .get("except")
+                    .and_then(Value::as_array)
+                    .is_some_and(|items| items.iter().any(|item| item.as_str() == Some(cidr)))
+            })
+        })
+        && ipv6.is_some_and(|block| {
+            ["::1/128", "fc00::/7", "fe80::/10"].iter().all(|cidr| {
+                block
+                    .get("except")
+                    .and_then(Value::as_array)
+                    .is_some_and(|items| items.iter().any(|item| item.as_str() == Some(cidr)))
+            })
+        })
+        && network_policy_ports_equal(rule, &[("TCP", 443)])
+}
+
+fn agent_sandbox_network_policy_is_restricted(content: &str) -> bool {
+    let Some(documents) = yaml_documents(content) else {
+        return false;
+    };
+    let Some(policy) = k8s_resource_named(
+        &documents,
+        "NetworkPolicy",
+        "mandoforge-agent-sandbox-egress",
+    ) else {
+        return false;
+    };
+    let Some(spec) = policy.get("spec") else {
+        return false;
+    };
+    let labels = spec
+        .get("podSelector")
+        .and_then(|selector| selector.get("matchLabels"))
+        .and_then(Value::as_object);
+    let selector_matches = labels.is_some_and(|labels| {
+        labels.len() == 2
+            && labels.get("app").and_then(Value::as_str) == Some("mandoforge-agent-remote-computer")
+            && labels
+                .get("mandoforge.io/runtime-substrate")
+                .and_then(Value::as_str)
+                == Some("agent-sandbox")
+    });
+    let Some(egress) = spec.get("egress").and_then(Value::as_array) else {
+        return false;
+    };
+    selector_matches
+        && string_array_equals(spec.get("policyTypes"), &["Ingress", "Egress"])
+        && spec
+            .get("ingress")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
+        && egress.len() == 3
+        && egress.iter().any(network_policy_dns_rule)
+        && egress.iter().any(network_policy_api_rule)
+        && egress.iter().any(network_policy_external_https_rule)
+}
+
+fn rbac_rule_is_exact(rule: &Value, api_group: &str, resource: &str, verbs: &[&str]) -> bool {
+    string_array_equals(rule.get("apiGroups"), &[api_group])
+        && string_array_equals(rule.get("resources"), &[resource])
+        && string_array_equals(rule.get("verbs"), verbs)
+}
+
+fn api_agent_sandbox_rbac_is_minimal(content: &str) -> bool {
+    let Some(documents) = yaml_documents(content) else {
+        return false;
+    };
+    let Some(role) = k8s_resource_named(&documents, "Role", "mandoforge-api-agent-sandbox") else {
+        return false;
+    };
+    let Some(rules) = role.get("rules").and_then(Value::as_array) else {
+        return false;
+    };
+    rules.len() == 4
+        && rules
+            .iter()
+            .any(|rule| rbac_rule_is_exact(rule, "", "pods", &["get"]))
+        && rules
+            .iter()
+            .any(|rule| rbac_rule_is_exact(rule, "", "pods/exec", &["create", "get"]))
+        && rules.iter().any(|rule| {
+            rbac_rule_is_exact(
+                rule,
+                "extensions.agents.x-k8s.io",
+                "sandboxclaims",
+                &["get", "create", "delete"],
+            )
+        })
+        && rules
+            .iter()
+            .any(|rule| rbac_rule_is_exact(rule, "agents.x-k8s.io", "sandboxes", &["get"]))
+}
+
+fn workload_disables_service_account_token(content: &str) -> bool {
+    let Some(documents) = yaml_documents(content) else {
+        return false;
+    };
+    documents.iter().any(|document| {
+        document.get("kind").and_then(Value::as_str) == Some("Deployment")
+            && document
+                .get("spec")
+                .and_then(|spec| spec.get("template"))
+                .and_then(|template| template.get("spec"))
+                .and_then(|spec| spec.get("automountServiceAccountToken"))
+                .and_then(Value::as_bool)
+                == Some(false)
+    })
 }
 
 fn project_file_content(path: &str) -> Option<String> {
@@ -1053,4 +1338,41 @@ fn project_file_is_executable(path: &str) -> bool {
     project_file_path(path)
         .map(|path| path.is_file())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_sandbox_network_policy_requires_restricted_rule_semantics() {
+        let policy = include_str!("../../../deploy/k8s/agent-sandbox-egress-networkpolicy.yaml");
+        assert!(agent_sandbox_network_policy_is_restricted(policy));
+
+        let permissive = policy.replace("  ingress: []", "  ingress:\n    - {}");
+        assert_ne!(permissive, policy, "fixture mutation must change ingress");
+        assert!(!agent_sandbox_network_policy_is_restricted(&permissive));
+    }
+
+    #[test]
+    fn agent_sandbox_rbac_requires_exact_minimum_permissions() {
+        let rbac = include_str!("../../../deploy/k8s/api-agent-sandbox-rbac.yaml");
+        assert!(api_agent_sandbox_rbac_is_minimal(rbac));
+
+        let expanded = rbac.replace("verbs: [\"get\"]", "verbs: [\"get\", \"list\"]");
+        assert_ne!(expanded, rbac, "fixture mutation must expand RBAC verbs");
+        assert!(!api_agent_sandbox_rbac_is_minimal(&expanded));
+    }
+
+    #[test]
+    fn worker_manifest_must_explicitly_disable_service_account_tokens() {
+        let worker = include_str!("../../../deploy/k8s/worker.yaml");
+        assert!(workload_disables_service_account_token(worker));
+        let token_enabled = worker.replace(
+            "automountServiceAccountToken: false",
+            "automountServiceAccountToken: true",
+        );
+        assert_ne!(token_enabled, worker, "fixture mutation must enable token");
+        assert!(!workload_disables_service_account_token(&token_enabled));
+    }
 }

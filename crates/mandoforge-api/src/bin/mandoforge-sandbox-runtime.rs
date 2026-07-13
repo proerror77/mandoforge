@@ -155,11 +155,13 @@ async fn run_process(
     stdout_limit: usize,
 ) -> Result<ProcessOutput, String> {
     let home = ensure_session_directory(workspace, ".home")?;
+    let cargo_home = prepare_session_cargo_home(workspace, shared_cargo_cache_root()?.as_deref())?;
     let cargo_target = ensure_session_directory(workspace, "target")?;
     process
         .current_dir(workspace)
         .kill_on_drop(true)
         .env("HOME", &home)
+        .env("CARGO_HOME", cargo_home)
         .env("CARGO_TARGET_DIR", cargo_target)
         .env("MANDOFORGE_SESSION_ID", request.session_id.to_string())
         .env("RUSTC_WRAPPER", "sccache")
@@ -228,6 +230,118 @@ async fn run_process(
         stdout_truncated,
         stderr_truncated,
     })
+}
+
+fn shared_cargo_cache_root() -> Result<Option<PathBuf>, String> {
+    let Some(value) = std::env::var("MANDOFORGE_SHARED_CARGO_CACHE_ROOT")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(value);
+    if !path.is_absolute() {
+        return Err("shared Cargo cache root must be absolute".to_string());
+    }
+    Ok(Some(path))
+}
+
+fn prepare_session_cargo_home(
+    workspace: &Path,
+    shared_cache_root: Option<&Path>,
+) -> Result<PathBuf, String> {
+    let cargo_home = ensure_session_directory(workspace, ".cargo-home")?;
+    let Some(shared_cache_root) = shared_cache_root else {
+        return Ok(cargo_home);
+    };
+
+    fs::create_dir_all(shared_cache_root)
+        .map_err(|error| format!("failed to create shared Cargo cache root: {error}"))?;
+    if !is_real_directory(shared_cache_root) {
+        return Err("shared Cargo cache root must be a real directory".to_string());
+    }
+    let shared_cache_root = fs::canonicalize(shared_cache_root)
+        .map_err(|error| format!("failed to resolve shared Cargo cache root: {error}"))?;
+    for cache_name in ["registry", "git"] {
+        let shared_cache = shared_cache_root.join(cache_name);
+        match fs::create_dir(&shared_cache) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(format!(
+                    "failed to create shared Cargo {cache_name} cache: {error}"
+                ));
+            }
+        }
+        if !is_real_directory(&shared_cache) {
+            return Err(format!(
+                "shared Cargo {cache_name} cache must be a real directory"
+            ));
+        }
+        link_shared_cargo_cache(&cargo_home, cache_name, &shared_cache)?;
+    }
+    Ok(cargo_home)
+}
+
+#[cfg(unix)]
+fn link_shared_cargo_cache(
+    cargo_home: &Path,
+    cache_name: &str,
+    shared_cache: &Path,
+) -> Result<(), String> {
+    use std::os::unix::fs::symlink;
+
+    let link = cargo_home.join(cache_name);
+    match fs::symlink_metadata(&link) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            validate_cargo_cache_link(&link, cache_name, shared_cache)?;
+        }
+        Ok(_) => {
+            return Err(format!(
+                "session Cargo {cache_name} cache path must be a symlink"
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if let Err(error) = symlink(shared_cache, &link) {
+                if error.kind() != std::io::ErrorKind::AlreadyExists {
+                    return Err(format!("failed to link shared Cargo cache: {error}"));
+                }
+                validate_cargo_cache_link(&link, cache_name, shared_cache)?;
+            }
+        }
+        Err(error) => {
+            return Err(format!("failed to inspect Cargo cache link: {error}"));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_cargo_cache_link(
+    link: &Path,
+    cache_name: &str,
+    shared_cache: &Path,
+) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(link)
+        .map_err(|error| format!("failed to inspect Cargo cache link: {error}"))?;
+    let target =
+        fs::read_link(link).map_err(|error| format!("failed to read Cargo cache link: {error}"))?;
+    if !metadata.file_type().is_symlink() || target != shared_cache {
+        return Err(format!(
+            "session Cargo {cache_name} cache link has an unexpected target"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn link_shared_cargo_cache(
+    _cargo_home: &Path,
+    _cache_name: &str,
+    _shared_cache: &Path,
+) -> Result<(), String> {
+    Err("shared Cargo cache links require a Unix runtime".to_string())
 }
 
 async fn read_bounded_output<R>(mut reader: R, max_bytes: usize) -> Result<(Vec<u8>, bool), String>
@@ -593,6 +707,36 @@ mod tests {
         let error = ensure_session_directory(&workspace, ".home")
             .expect_err("session state symlink must fail");
         assert!(error.contains("real directory"));
+        fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sandbox_runtime_shares_only_cargo_download_caches() {
+        let root = temp_dir("cargo-cache");
+        let first_workspace = root.join("sessions/first");
+        let second_workspace = root.join("sessions/second");
+        let shared_cache = root.join("cache/cargo");
+        fs::create_dir_all(&first_workspace).expect("first workspace");
+        fs::create_dir_all(&second_workspace).expect("second workspace");
+
+        let first_home = prepare_session_cargo_home(&first_workspace, Some(&shared_cache))
+            .expect("first Cargo home");
+        fs::write(first_home.join("credentials.toml"), "private-token")
+            .expect("private credentials");
+        fs::write(first_home.join("registry/shared-marker"), "cached")
+            .expect("shared registry marker");
+
+        let second_home = prepare_session_cargo_home(&second_workspace, Some(&shared_cache))
+            .expect("second Cargo home");
+        assert!(!second_home.join("credentials.toml").exists());
+        assert_eq!(
+            fs::read_to_string(second_home.join("registry/shared-marker"))
+                .expect("shared registry marker"),
+            "cached"
+        );
+        assert!(second_home.join("registry").is_symlink());
+        assert!(second_home.join("git").is_symlink());
         fs::remove_dir_all(root).expect("remove test directory");
     }
 

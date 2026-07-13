@@ -19,6 +19,96 @@ fail() {
   exit 1
 }
 
+render_manifest_json() {
+  local manifest_json status
+  if manifest_json="$(kubectl patch --local=true --type=merge --patch '{}' -f "$1" -o json)"; then
+    printf '%s\n' "$manifest_json"
+    return 0
+  else
+    status=$?
+    echo "production deployment safety gate failed: failed to render Kubernetes manifest: $1" >&2
+    return "$status"
+  fi
+}
+
+verify_kubernetes_access_contracts() {
+  local role_json network_policy_json worker_manifest
+  role_json="$(render_manifest_json deploy/k8s/api-agent-sandbox-rbac.yaml \
+    | jq -cs '[.[] | if .kind == "List" then .items[] else . end
+        | select(.kind == "Role" and .metadata.name == "mandoforge-api-agent-sandbox")][0]')"
+  jq -e '
+    def exact_rule($group; $resource; $verbs):
+      .apiGroups == [$group]
+      and .resources == [$resource]
+      and (.verbs | sort) == ($verbs | sort);
+    .rules as $rules
+    | ($rules | length) == 4
+      and any($rules[]; exact_rule(""; "pods"; ["get"]))
+      and any($rules[]; exact_rule(""; "pods/exec"; ["create", "get"]))
+      and any($rules[]; exact_rule("extensions.agents.x-k8s.io"; "sandboxclaims"; ["get", "create", "delete"]))
+      and any($rules[]; exact_rule("agents.x-k8s.io"; "sandboxes"; ["get"]))
+  ' <<<"$role_json" >/dev/null \
+    || fail "API Agent Sandbox RBAC must contain only the required resource/verb tuples"
+
+  network_policy_json="$(render_manifest_json deploy/k8s/agent-sandbox-egress-networkpolicy.yaml)"
+  jq -e '
+    def ports_exact($expected):
+      (.ports | sort_by([.protocol, .port])) == ($expected | sort_by([.protocol, .port]));
+    .spec as $spec
+    | $spec.podSelector.matchLabels == {
+        "app": "mandoforge-agent-remote-computer",
+        "mandoforge.io/runtime-substrate": "agent-sandbox"
+      }
+      and ($spec.policyTypes | sort) == (["Ingress", "Egress"] | sort)
+      and $spec.ingress == []
+      and ($spec.egress | length) == 3
+      and any($spec.egress[];
+        (.to | length) == 1
+        and .to[0].namespaceSelector.matchLabels["kubernetes.io/metadata.name"] == "kube-system"
+        and .to[0].podSelector.matchLabels["k8s-app"] == "kube-dns"
+        and ports_exact([{"protocol":"UDP","port":53},{"protocol":"TCP","port":53}]))
+      and any($spec.egress[];
+        (.to | length) == 1
+        and .to[0].podSelector.matchLabels.app == "mandoforge-api"
+        and ports_exact([{"protocol":"TCP","port":8787}]))
+      and any($spec.egress[];
+        (.to | length) == 2
+        and ([.to[].ipBlock.cidr] | sort) == (["0.0.0.0/0", "::/0"] | sort)
+        and any(.to[];
+          .ipBlock.cidr == "0.0.0.0/0"
+          and (["10.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16"] - .ipBlock.except | length) == 0)
+        and any(.to[];
+          .ipBlock.cidr == "::/0"
+          and (["::1/128", "fc00::/7", "fe80::/10"] - .ipBlock.except | length) == 0)
+        and ports_exact([{"protocol":"TCP","port":443}]))
+  ' <<<"$network_policy_json" >/dev/null \
+    || fail "Agent Sandbox NetworkPolicy must deny ingress and allow only bounded DNS, API, and HTTPS egress"
+
+  for worker_manifest in deploy/k8s/worker.yaml deploy/k8s/worker-isolated-pool.yaml; do
+    local worker_json
+    worker_json="$(render_manifest_json "$worker_manifest")"
+    jq -e '.spec.template.spec.automountServiceAccountToken == false' <<<"$worker_json" >/dev/null \
+      || fail "$worker_manifest must set automountServiceAccountToken: false"
+    jq -e '
+      [
+        .spec.template.spec.containers[]?.volumeMounts[]?.mountPath,
+        .spec.template.spec.initContainers[]?.volumeMounts[]?.mountPath
+      ]
+      | index("/var/run/secrets/kubernetes.io/serviceaccount")
+      | not
+    ' <<<"$worker_json" >/dev/null \
+      || fail "$worker_manifest must not mount Kubernetes ServiceAccount credentials"
+    jq -e '
+      [
+        .spec.template.spec.volumes[]?.projected.sources[]?
+        | select(has("serviceAccountToken"))
+      ]
+      | length == 0
+    ' <<<"$worker_json" >/dev/null \
+      || fail "$worker_manifest must not project Kubernetes ServiceAccount tokens"
+  done
+}
+
 require_executable() {
   [[ -x "$1" ]] || fail "missing executable script: $1"
 }
@@ -50,6 +140,15 @@ static_contract_check() {
   [[ -f deploy/k8s/kustomization.yaml ]] || fail "missing deploy/k8s/kustomization.yaml"
   [[ -f deploy/k8s/configmap.yaml ]] || fail "missing deploy/k8s/configmap.yaml"
   [[ -f deploy/k8s/api.yaml ]] || fail "missing deploy/k8s/api.yaml"
+  [[ -f deploy/k8s/api-serviceaccount.yaml ]] || fail "missing deploy/k8s/api-serviceaccount.yaml"
+  [[ -f deploy/k8s/api-agent-sandbox-rbac.yaml ]] || fail "missing deploy/k8s/api-agent-sandbox-rbac.yaml"
+  [[ -f deploy/k8s/agent-sandbox-controller-contract.yaml ]] \
+    || fail "missing deploy/k8s/agent-sandbox-controller-contract.yaml"
+  [[ -f deploy/k8s/agent-sandbox-runtime.yaml ]] || fail "missing deploy/k8s/agent-sandbox-runtime.yaml"
+  [[ -f deploy/k8s/agent-sandbox-egress-networkpolicy.yaml ]] \
+    || fail "missing deploy/k8s/agent-sandbox-egress-networkpolicy.yaml"
+  [[ -f deploy/k8s/worker-isolated-pool-networkpolicy.yaml ]] \
+    || fail "missing deploy/k8s/worker-isolated-pool-networkpolicy.yaml"
   [[ -f deploy/k8s/workspace-pvc.yaml ]] || fail "missing deploy/k8s/workspace-pvc.yaml"
   [[ -f deploy/k8s/secret.example.yaml ]] || fail "missing deploy/k8s/secret.example.yaml"
   [[ -f deploy/k8s/secret-delivery-contract.yaml ]] || fail "missing deploy/k8s/secret-delivery-contract.yaml"
@@ -99,15 +198,77 @@ static_contract_check() {
   done
   grep -Eq 'MANDOFORGE_ENTERPRISE_PRODUCT_EVIDENCE_DIR:[[:space:]]*"/evidence"' deploy/k8s/configmap.yaml \
     || fail "K8s config must point enterprise readiness at the production evidence PVC mount"
-  grep -Eq 'MANDOFORGE_REMOTE_COMPUTER_RUNNER:[[:space:]]*"kubernetes"' deploy/k8s/configmap.yaml \
-    || fail "K8s config must route Remote Computer runner to kubernetes"
+  grep -Eq 'MANDOFORGE_REMOTE_COMPUTER_RUNNER:[[:space:]]*"agent-sandbox"' deploy/k8s/configmap.yaml \
+    || fail "K8s config must route Remote Computer lifecycle to Agent Sandbox"
   grep -Eq 'MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT:[[:space:]]*"kubernetes"' deploy/k8s/configmap.yaml \
     || fail "K8s config must route Remote Computer execution transport to kubernetes"
+  grep -Eq 'MANDOFORGE_REMOTE_COMPUTER_TEMPLATE_PATH:[[:space:]]*"deploy/k8s/agent-sandbox-runtime.yaml"' deploy/k8s/configmap.yaml \
+    || fail "K8s config must not retain the legacy direct-Pod template path"
+
+  local disabled_flag
+  for disabled_flag in \
+    MANDOFORGE_REMOTE_COMPUTER_EXECUTION_ENABLED \
+    MANDOFORGE_REMOTE_COMPUTER_MUTATION_ENABLED \
+    MANDOFORGE_REMOTE_COMPUTER_LIVE_MUTATION_ENABLED; do
+    grep -Eq "${disabled_flag}:[[:space:]]*\"false\"" deploy/k8s/configmap.yaml \
+      || fail "checked-in production config must keep ${disabled_flag} fail-closed"
+  done
+
+  local agent_sandbox_resource
+  for agent_sandbox_resource in \
+    agent-sandbox-controller-contract.yaml \
+    api-serviceaccount.yaml \
+    api-agent-sandbox-rbac.yaml \
+    agent-sandbox-runtime.yaml \
+    agent-sandbox-egress-networkpolicy.yaml; do
+    grep -q "$agent_sandbox_resource" deploy/k8s/kustomization.yaml \
+      || fail "deploy/k8s default kustomization must include $agent_sandbox_resource"
+  done
+  if grep -q 'agent-remote-computer.yaml' deploy/k8s/kustomization.yaml; then
+    fail "deploy/k8s default kustomization must exclude the legacy direct-Pod runtime"
+  fi
+
+  grep -q 'MANDOFORGE_AGENT_SANDBOX_CONTROLLER_VERSION: "v0.5.1"' deploy/k8s/agent-sandbox-controller-contract.yaml \
+    || fail "Agent Sandbox controller contract must pin v0.5.1"
+  grep -q 'MANDOFORGE_AGENT_SANDBOX_EXTENSIONS_API: "extensions.agents.x-k8s.io/v1beta1"' deploy/k8s/agent-sandbox-controller-contract.yaml \
+    || fail "Agent Sandbox controller contract must pin the v1beta1 extensions API"
+  grep -q 'MANDOFORGE_AGENT_SANDBOX_CORE_INSTALL_ASSET: "manifest.yaml"' deploy/k8s/agent-sandbox-controller-contract.yaml \
+    || fail "Agent Sandbox controller contract must pin manifest.yaml"
+  grep -q 'MANDOFORGE_AGENT_SANDBOX_CORE_INSTALL_SHA256: "8cfdf0a878f66b91d2e7103e77859d1412d850ce3f5fe5c3fa134c36bd55504a"' deploy/k8s/agent-sandbox-controller-contract.yaml \
+    || fail "Agent Sandbox controller contract must pin the manifest.yaml digest"
+  grep -q 'MANDOFORGE_AGENT_SANDBOX_EXTENSIONS_INSTALL_ASSET: "extensions.yaml"' deploy/k8s/agent-sandbox-controller-contract.yaml \
+    || fail "Agent Sandbox controller contract must pin extensions.yaml"
+  grep -q 'MANDOFORGE_AGENT_SANDBOX_EXTENSIONS_INSTALL_SHA256: "7c22b450e24ede3fddbcd5ae0ee7c78ea102d6c30635ff860cc486578a55932e"' deploy/k8s/agent-sandbox-controller-contract.yaml \
+    || fail "Agent Sandbox controller contract must pin the extensions.yaml digest"
+  grep -q 'serviceAccountName: mandoforge-api' deploy/k8s/api.yaml \
+    || fail "API deployment must use the mandoforge-api ServiceAccount"
+  grep -q 'name: mandoforge-agent-sandbox-controller-contract' deploy/k8s/api.yaml \
+    || fail "API deployment must load the Agent Sandbox controller contract"
+  grep -q 'mountPath: /var/run/secrets/kubernetes.io/serviceaccount' deploy/k8s/api.yaml \
+    || fail "API deployment must mount its projected Kubernetes API token"
+  grep -q 'name: mandoforge-api-agent-sandbox' deploy/k8s/api-agent-sandbox-rbac.yaml \
+    || fail "API Agent Sandbox RBAC must be present"
+  if grep -A1 'resources: \["pods"\]' deploy/k8s/api-agent-sandbox-rbac.yaml | grep -Eq '"create"|"delete"'; then
+    fail "default API RBAC must not permit legacy direct Pod creation or deletion"
+  fi
+  grep -q 'automountServiceAccountToken: false' deploy/k8s/worker.yaml \
+    || fail "queue worker must explicitly disable ServiceAccount token automount"
+  grep -q 'automountServiceAccountToken: false' deploy/k8s/worker-isolated-pool.yaml \
+    || fail "isolated queue worker must explicitly disable ServiceAccount token automount"
+  if grep -q 'mountPath: /var/run/secrets/kubernetes.io/serviceaccount' deploy/k8s/worker.yaml \
+    || grep -q 'mountPath: /var/run/secrets/kubernetes.io/serviceaccount' deploy/k8s/worker-isolated-pool.yaml; then
+    fail "queue workers must not receive Kubernetes API credentials"
+  fi
+  if grep -q 'app: agent-remote-computer' deploy/k8s/worker-isolated-pool-networkpolicy.yaml \
+    || grep -q 'port: 8080' deploy/k8s/worker-isolated-pool-networkpolicy.yaml; then
+    fail "queue workers must not retain a direct runtime network path"
+  fi
 
   if command -v kubectl >/dev/null 2>&1; then
     local deploy_render_file="$EVIDENCE_DIR/deploy-k8s-render.yaml"
     local deploy_root_render_file="$EVIDENCE_DIR/deploy-root-render.yaml"
 
+    verify_kubernetes_access_contracts
     kubectl kustomize deploy/k8s >"$deploy_render_file"
     kubectl kustomize deploy >"$deploy_root_render_file"
     [[ -s "$deploy_render_file" ]] || fail "kubectl kustomize deploy/k8s produced no output"
@@ -140,8 +301,23 @@ static_contract_check() {
       || fail "rendered deploy/k8s production evidence mount must be read-only"
     grep -q 'claimName: mandoforge-workspaces' "$deploy_render_file" \
       || fail "rendered deploy/k8s output must mount the workspace PVC"
+    if ! grep -q 'MANDOFORGE_REMOTE_COMPUTER_RUNNER: agent-sandbox' "$deploy_render_file" \
+      || ! grep -q 'kind: SandboxTemplate' "$deploy_render_file" \
+      || ! grep -q 'kind: SandboxWarmPool' "$deploy_render_file" \
+      || ! grep -q 'name: mandoforge-agent-sandbox-egress' "$deploy_render_file"; then
+      fail "rendered deploy/k8s output must select and provision the Agent Sandbox substrate"
+    fi
+    if ! grep -q 'serviceAccountName: mandoforge-api' "$deploy_render_file" \
+      || ! grep -q 'name: mandoforge-api-agent-sandbox' "$deploy_render_file"; then
+      fail "rendered deploy/k8s output must include scoped API Agent Sandbox access"
+    fi
+    if grep -q 'name: mandoforge-agent-remote-computer-template' "$deploy_render_file"; then
+      fail "rendered deploy/k8s output must exclude the legacy direct-Pod runtime"
+    fi
+  elif [[ "$STATIC_ONLY" == "1" ]]; then
+    echo "STATIC_ONLY=1: kubectl unavailable; rendered manifest checks were skipped and this result is not production readiness" >&2
   else
-    echo "kubectl not found; skipped production deployment kustomize render validation" >&2
+    fail "kubectl is required for production rendered-manifest validation; use STATIC_ONLY=1 only for non-production static checks"
   fi
 
   grep -q "production-deployment-safety-gate.sh" docs/enterprise-product-completion-contract.md \
@@ -270,9 +446,9 @@ mkdir -p "$EVIDENCE_DIR"
 static_contract_check
 
 if [[ "$STATIC_ONLY" == "1" ]]; then
-  write_summary "static_ready" 0 ""
+  write_summary "static_only_non_production" 0 ""
   cat "$EVIDENCE_DIR/summary.txt"
-  echo "production deployment safety static gate ok"
+  echo "production deployment safety static checks passed; production readiness was not evaluated"
   exit 0
 fi
 

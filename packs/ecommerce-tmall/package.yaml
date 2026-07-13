@@ -247,6 +247,11 @@ agents:
         - artifact.write
       external_write:
         - native.connector.call
+    native_connector_actions:
+      - submit-review-explanation
+      - create-qianniu-workorder
+      - refund-agree
+      - refund-refuse
 connectors:
   - id: tmall-top
     kind: native

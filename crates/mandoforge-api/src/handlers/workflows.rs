@@ -32,13 +32,18 @@ use crate::{
     record_workflow_step_worker_started, require_non_empty, run_session_loop,
     run_workflow_compensation_adapter_step, run_workflow_delegated_runtime_step,
     set_managed_session_status, task_grant_session_matches,
-    update_workflow_step_after_worker_session, validate_task_grant_scope_objects,
-    validate_workflow_execution_binding, validate_workflow_graph_definition,
-    visible_session_ids_for_principal, workflow_definition_step_graph_for_execution,
-    workflow_input_digest, workflow_run_execution_denial, workflow_run_owns_session,
-    workflow_run_runtime_envelope, workflow_step_is_adapter_owned_compensation,
-    workflow_step_status_terminal, workflow_step_worker_message,
-    workflow_transition_filter_from_query,
+    update_workflow_step_after_worker_session, validate_dynamic_materialization_provenance_update,
+    validate_task_grant_scope_objects, validate_workflow_execution_binding,
+    validate_workflow_graph_definition, visible_session_ids_for_principal,
+    workflow_definition_agent_version_id, workflow_definition_step_graph_for_execution,
+    workflow_graph_step_agent_id, workflow_graph_step_by_key,
+    workflow_graph_step_requires_isolated_handoff_context,
+    workflow_handoff_rules_is_dynamic_materialization, workflow_input_digest,
+    workflow_run_execution_denial, workflow_run_owns_session,
+    workflow_run_runtime_envelope_with_pinned_ontology_release,
+    workflow_run_status_allows_execution, workflow_step_is_adapter_owned_compensation,
+    workflow_step_run_is_handoff_approval_blocked, workflow_step_status_terminal,
+    workflow_step_worker_message, workflow_transition_filter_from_query,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -156,6 +161,11 @@ async fn create_workflow_definition(
             "workflow definition handoff_rules must be a JSON object",
         ));
     }
+    if workflow_handoff_rules_is_dynamic_materialization(&input.handoff_rules) {
+        return Err(AppError::bad_request(
+            "dynamic workflow materialization definitions can only be created from an approved dynamic workflow plan",
+        ));
+    }
     let execution_strategy = normalize_workflow_execution_strategy(&input.execution_strategy)?;
     let runtime_adapter = normalize_optional_runtime_adapter(input.runtime_adapter)?;
     let runtime_mode = normalize_optional_runtime_mode(input.runtime_mode)?;
@@ -243,6 +253,8 @@ async fn update_workflow_definition(
     )
     .await?;
     let mut definition = state.get_workflow_definition(id).await?;
+    let dynamic_materialization =
+        workflow_handoff_rules_is_dynamic_materialization(&definition.handoff_rules);
     let mut changed_fields = Vec::new();
 
     if let Some(name) = input.name {
@@ -293,6 +305,10 @@ async fn update_workflow_definition(
                 "workflow definition handoff_rules must be a JSON object",
             ));
         }
+        validate_dynamic_materialization_provenance_update(
+            &definition.handoff_rules,
+            &handoff_rules,
+        )?;
         definition.handoff_rules = handoff_rules;
         changed_fields.push("handoff_rules");
     }
@@ -343,7 +359,13 @@ async fn update_workflow_definition(
         changed_fields.push("eval_gate_refs");
     }
     if let Some(release_state) = input.release_state {
-        definition.release_state = normalize_workflow_release_state(&release_state)?;
+        let release_state = normalize_workflow_release_state(&release_state)?;
+        if dynamic_materialization && release_state == "released" {
+            return Err(AppError::forbidden(
+                "dynamic workflow materializations cannot be released through generic workflow definition updates; publish a Workflow Pack with release gates",
+            ));
+        }
+        definition.release_state = release_state;
         changed_fields.push("release_state");
     }
 
@@ -476,22 +498,31 @@ async fn create_workflow_run(
     let runtime_event_cursor = input.runtime_event_cursor.and_then(normalize_optional_text);
     let delegation_status =
         (execution_strategy == "delegated_runtime").then_some("submitted".to_string());
-    let runtime_envelope = workflow_run_runtime_envelope(
+    let runtime_envelope = workflow_run_runtime_envelope_with_pinned_ontology_release(
+        &state,
         &definition,
         &execution_strategy,
         runtime_adapter.as_deref(),
         runtime_mode.as_deref(),
         external_run_ref.as_deref(),
         &input.runtime_envelope,
-    );
-    let session = state
-        .create_session(CreateSession {
-            agent_id: definition.default_agent_id,
-            environment_id,
-            title,
-            message: None,
-        })
-        .await?;
+    )
+    .await?;
+    let session_input = CreateSession {
+        agent_id: definition.default_agent_id,
+        environment_id,
+        title,
+        message: None,
+    };
+    let session =
+        match workflow_definition_agent_version_id(&definition, definition.default_agent_id)? {
+            Some(agent_version_id) => {
+                state
+                    .create_session_for_agent_version(session_input, agent_version_id)
+                    .await?
+            }
+            None => state.create_session(session_input).await?,
+        };
     if let Err(error) = ensure_primary_session_thread(&state, session.id).await {
         let _ = set_managed_session_status(
             &state,
@@ -556,10 +587,7 @@ async fn create_workflow_run(
             &session,
             &root_grant,
         )
-        .await?;
-        state
-            .update_workflow_run_status(run.id, "queued".to_string(), None, None)
-            .await
+        .await
     }
     .await;
     let run = match initialized {
@@ -737,7 +765,32 @@ async fn create_workflow_step_run(
         Some(run.primary_session_id),
     )
     .await?;
+    if !workflow_run_status_allows_execution(&run.status) {
+        return Err(AppError::forbidden("workflow run is not executable"));
+    }
     let step_key = require_non_empty(input.step_key, "workflow step key")?;
+    let definition = state
+        .get_workflow_definition(run.workflow_definition_id)
+        .await?;
+    if let Some(graph_step) = workflow_graph_step_by_key(&definition.step_graph, &step_key)? {
+        let target_agent_id = workflow_graph_step_agent_id(&definition, graph_step)?;
+        let isolated_handoff_context = workflow_graph_step_requires_isolated_handoff_context(
+            graph_step,
+            target_agent_id,
+            definition.default_agent_id,
+        )?;
+        let approval_required = match graph_step.get("approval_required") {
+            Some(value) => value.as_bool().ok_or_else(|| {
+                AppError::bad_request("workflow graph step approval_required must be boolean")
+            })?,
+            None => false,
+        };
+        if isolated_handoff_context || approval_required {
+            return Err(AppError::forbidden(
+                "governed definition-owned workflow steps cannot be created through the workflow step API",
+            ));
+        }
+    }
     let step_type = require_non_empty(input.step_type, "workflow step type")?;
     let status = normalize_workflow_run_status(&input.status)?;
     let session_id = input.session_id.unwrap_or(run.primary_session_id);
@@ -807,7 +860,7 @@ async fn create_workflow_step_run(
     }
     let now = Utc::now();
     let step = state
-        .create_workflow_step_run(WorkflowStepRun {
+        .create_workflow_step_run_if_key_absent(WorkflowStepRun {
             id: Uuid::new_v4(),
             workflow_run_id: run.id,
             step_key,
@@ -834,7 +887,10 @@ async fn create_workflow_step_run(
             created_at: now,
             updated_at: now,
         })
-        .await?;
+        .await?
+        .ok_or_else(|| {
+            AppError::conflict("workflow step key already exists for this workflow run")
+        })?;
     record_workflow_step_run_created(&state, &run, &step).await?;
     Ok(Json(step))
 }
@@ -855,6 +911,12 @@ async fn update_workflow_step_run(
         Some(run.primary_session_id),
     )
     .await?;
+
+    if workflow_step_run_is_handoff_approval_blocked(&current) {
+        return Err(AppError::forbidden(
+            "approval-gated workflow handoffs cannot be updated through the workflow step API",
+        ));
+    }
 
     let previous_status = current.status.clone();
     let next_status = input

@@ -1443,6 +1443,47 @@ async fn ontology_release_candidate_for_test(state: &AppState, version: &str) ->
     .expect("candidate")
 }
 
+#[tokio::test]
+async fn ontology_release_accepts_legacy_action_snapshot_without_executor() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let mut release = ontology_release_candidate_for_test(&state, "legacy-action-v1").await;
+    let evidence = release
+        .evidence_refs
+        .as_array_mut()
+        .and_then(|items| {
+            items
+                .iter_mut()
+                .find(|item| item.get("tool_spec").is_some())
+        })
+        .expect("action contract evidence");
+    let tool_spec = evidence
+        .get_mut("tool_spec")
+        .and_then(Value::as_object_mut)
+        .expect("action tool spec");
+    tool_spec.remove("executor");
+    let action_name = tool_spec["name"].as_str().expect("action name").to_string();
+    let legacy_digest = normalized_json_sha256(&Value::Object(tool_spec.clone()));
+    evidence["contract_digest"] = json!(legacy_digest);
+
+    let (decoded, digest) = ontology_action_tool_spec_for_release(&release, &action_name)
+        .expect("legacy action contract remains readable");
+    assert_eq!(digest, legacy_digest);
+    assert_eq!(decoded.executor, json!({}));
+
+    release
+        .evidence_refs
+        .as_array_mut()
+        .and_then(|items| {
+            items
+                .iter_mut()
+                .find(|item| item.get("tool_spec").is_some())
+        })
+        .expect("action contract evidence")["tool_spec"]["description"] = json!("tampered");
+    let error = ontology_action_tool_spec_for_release(&release, &action_name)
+        .expect_err("legacy snapshot tampering must still fail closed");
+    assert!(error.message.contains("digest does not match"));
+}
+
 async fn ontology_release_trigger_workflow_definition_for_test(
     state: &AppState,
     domain_scope: &str,
@@ -1567,6 +1608,7 @@ mod execution_queue_tests;
 mod finance_controller_tests;
 #[path = "main_tests/migration_tests.rs"]
 mod migration_tests;
+
 #[path = "main_tests/observability_controller_tests.rs"]
 mod observability_controller_tests;
 #[path = "main_tests/ontology_release_workflow_trigger_tests.rs"]
@@ -1587,6 +1629,10 @@ mod scheduler_due_run_tests;
 mod tenant_worker_controller_tests;
 #[path = "main_tests/worker_readiness_tests.rs"]
 mod worker_readiness_tests;
+#[path = "main_tests/workflow_pack_lifecycle_postgres_tests.rs"]
+mod workflow_pack_lifecycle_postgres_tests;
+#[path = "main_tests/workflow_store_postgres_tests.rs"]
+mod workflow_store_postgres_tests;
 
 #[tokio::test]
 async fn ontology_release_promote_refreshes_stale_rollback_target() {
@@ -1878,6 +1924,7 @@ fn workflow_pack_manifest_summary_labels_connector_kinds() {
                 write: Vec::new(),
                 external_write: vec!["native.connector.call".to_string()],
             },
+            native_connector_actions: vec!["action".to_string()],
             handoffs: vec![workflow_pack::HandoffRule {
                 target_agent: "agent".to_string(),
                 intents: vec!["review".to_string()],
@@ -5233,6 +5280,363 @@ async fn production_session_binds_promoted_agent_version() {
 }
 
 #[tokio::test]
+async fn production_session_rejects_pack_generated_promotion() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+    let _release_enforcement = EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+    let _release_environment =
+        EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT", "production");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let (agent, version, environment) = seed_promoted_agent_for_test(&state, "production").await;
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test requires memory store");
+    };
+    for release in inner.write().await.agent_releases.values_mut() {
+        release.automation_policy = json!({"source": "workflow_pack_release"});
+    }
+
+    assert!(
+        !state
+            .agent_version_has_promoted_release(agent.id, version.id, "production")
+            .await
+            .expect("check production admission release")
+    );
+    let error = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: Some(environment.id),
+            title: "pack-generated promotion must not admit production".to_string(),
+            message: None,
+        })
+        .await
+        .expect_err("pack-generated release is not an independent promotion");
+    assert!(error.message.contains("promoted release"));
+}
+
+#[tokio::test]
+async fn workflow_pack_release_requires_independent_production_agent_promotion() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+    let _release_enforcement = EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+    let _release_environment =
+        EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT", "production");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let version = state
+        .current_agent_version(agent.id)
+        .await
+        .expect("seeded agent version");
+    let environment = state
+        .list_environments()
+        .await
+        .expect("list environments")
+        .into_iter()
+        .next()
+        .expect("seeded environment");
+    assert!(
+        !state
+            .agent_version_has_promoted_release(agent.id, version.id, "production")
+            .await
+            .expect("check unreleased AgentVersion")
+    );
+
+    insert_promoted_agent_version_for_test(&state, &version, "production").await;
+    assert!(
+        state
+            .agent_version_has_promoted_release(agent.id, version.id, "production")
+            .await
+            .expect("check independently promoted AgentVersion")
+    );
+
+    let session = state
+        .create_session_for_agent_version(
+            CreateSession {
+                agent_id: agent.id,
+                environment_id: Some(environment.id),
+                title: "workflow pack production session".to_string(),
+                message: None,
+            },
+            version.id,
+        )
+        .await
+        .expect("independently released pack AgentVersion must run in production");
+    assert_eq!(session.agent_version_id, Some(version.id));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_workflow_pack_agent_promotions_are_idempotent() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::remove("MANDOFORGE_PROVIDER_RUNTIME_ENV");
+    let _release_enforcement = EnvVarGuard::remove("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let version = state
+        .current_agent_version(agent.id)
+        .await
+        .expect("seeded agent version");
+    let promoted_at = Utc::now();
+    let caller_count = 32;
+    let installation_ids = (0..caller_count)
+        .map(|caller| {
+            let installation_id = Uuid::new_v4();
+            let installation = WorkflowPackInstallation {
+                id: installation_id,
+                pack_id: format!("concurrent-pack-{caller}"),
+                kind: "WorkflowPack".to_string(),
+                version: "0.1.0".to_string(),
+                manifest_path: format!("packs/concurrent-{caller}/pack.yaml"),
+                manifest: json!({}),
+                validation_report: json!({}),
+                status: "staged".to_string(),
+                eval_gate_status: "pending".to_string(),
+                release_gate_status: "pending".to_string(),
+                gate_evidence: json!({}),
+                staged_at: Some(promoted_at),
+                released_at: None,
+                archived_at: None,
+                created_at: promoted_at,
+                updated_at: promoted_at,
+            };
+            (caller, installation)
+        })
+        .collect::<Vec<_>>();
+    let released_installation_ids = installation_ids
+        .iter()
+        .map(|(_, installation)| installation.id)
+        .collect::<Vec<_>>();
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test requires memory store");
+    };
+    {
+        let mut store = inner.write().await;
+        for (_, installation) in &installation_ids {
+            store
+                .workflow_pack_installations
+                .insert(installation.id, installation.clone());
+        }
+    }
+    let start = Arc::new(tokio::sync::Barrier::new(caller_count));
+    let mut callers = Vec::with_capacity(caller_count);
+    for (caller, installation) in installation_ids {
+        let caller_state = state.clone();
+        let start = start.clone();
+        callers.push(tokio::spawn(async move {
+            start.wait().await;
+            caller_state
+                .transition_workflow_pack_lifecycle(
+                    crate::store_workflow_pack_lifecycle::WorkflowPackLifecycleTransitionRequest {
+                        installation_id: installation.id,
+                        expected_status: "staged".to_string(),
+                        next_status: "released".to_string(),
+                        eval_gate_status: "passed".to_string(),
+                        release_gate_status: "passed".to_string(),
+                        gate_evidence: json!({
+                            "release_gate_id": "concurrent-pack-release"
+                        }),
+                        staged_at: installation.staged_at,
+                        released_at: Some(promoted_at),
+                        occurred_at: promoted_at,
+                        audit_action: "workflow_pack.released".to_string(),
+                        audit_details: json!({"caller": caller}),
+                        agent_release_transition: crate::store_workflow_pack_lifecycle::WorkflowPackAgentReleaseTransition::PromoteFromPack {
+                            targets: vec![(agent.id, version.id)],
+                            environment: "staging".to_string(),
+                            promoted_by: format!("release-{caller}"),
+                            gate_evidence: json!({
+                                "release_gate_id": "concurrent-pack-release"
+                            }),
+                        },
+                    },
+                )
+                .await
+                .expect("concurrent promotion")
+        }));
+    }
+    for caller in callers {
+        let installation = caller.await.expect("promotion task");
+        assert_eq!(installation.status, "released");
+    }
+    let promoted = state
+        .list_all_agent_releases()
+        .await
+        .expect("list releases")
+        .into_iter()
+        .filter(|release| {
+            release.agent_id == agent.id
+                && release.agent_version_id == version.id
+                && release.environment == "staging"
+                && release.status == "promoted"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(promoted.len(), 1);
+    assert_eq!(
+        promoted[0].automation_policy["workflow_pack_installation_ids"]
+            .as_array()
+            .map(Vec::len),
+        Some(caller_count)
+    );
+
+    let first_installation = state
+        .get_workflow_pack_installation(released_installation_ids[0])
+        .await
+        .expect("released workflow pack installation");
+    state
+        .transition_workflow_pack_lifecycle(
+            crate::store_workflow_pack_lifecycle::WorkflowPackLifecycleTransitionRequest {
+                installation_id: first_installation.id,
+                expected_status: "released".to_string(),
+                next_status: "rolled_back".to_string(),
+                eval_gate_status: first_installation.eval_gate_status,
+                release_gate_status: first_installation.release_gate_status,
+                gate_evidence: json!({"rollback": "shared-release-reference"}),
+                staged_at: first_installation.staged_at,
+                released_at: first_installation.released_at,
+                occurred_at: Utc::now(),
+                audit_action: "workflow_pack.rolled_back".to_string(),
+                audit_details: json!({"reason": "shared release regression"}),
+                agent_release_transition: crate::store_workflow_pack_lifecycle::WorkflowPackAgentReleaseTransition::RollbackPackPromotions,
+            },
+        )
+        .await
+        .expect("rollback first shared workflow pack");
+    let shared_release = state
+        .list_all_agent_releases()
+        .await
+        .expect("list shared release")
+        .into_iter()
+        .find(|release| release.id == promoted[0].id)
+        .expect("shared AgentRelease");
+    assert_eq!(shared_release.status, "promoted");
+    let remaining_references = shared_release.automation_policy["workflow_pack_installation_ids"]
+        .as_array()
+        .expect("workflow pack installation references");
+    assert_eq!(remaining_references.len(), caller_count - 1);
+    let rolled_back_installation_id = released_installation_ids[0].to_string();
+    assert!(
+        !remaining_references
+            .iter()
+            .any(|reference| reference.as_str() == Some(rolled_back_installation_id.as_str()))
+    );
+    assert_eq!(
+        state
+            .get_workflow_pack_installation(released_installation_ids[1])
+            .await
+            .expect("second workflow pack remains active")
+            .status,
+        "released"
+    );
+}
+
+#[tokio::test]
+async fn completing_same_target_agent_release_supersedes_previous_promotion() {
+    let _env = env_lock().lock().expect("env lock");
+    let _release_environment = EnvVarGuard::remove("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let version = state
+        .current_agent_version(agent.id)
+        .await
+        .expect("agent version");
+    let now = Utc::now();
+    let previous = AgentRelease {
+        id: Uuid::new_v4(),
+        agent_id: agent.id,
+        agent_version_id: version.id,
+        environment: "production".to_string(),
+        status: "promoted".to_string(),
+        eval_run_id: None,
+        eval_score: Some(1.0),
+        min_score: 1.0,
+        requested_by: Some("previous-approver".to_string()),
+        requested_at: Some(now),
+        request_reason: None,
+        approver_subject: Some("previous-approver".to_string()),
+        decision_by: Some("previous-approver".to_string()),
+        decided_at: Some(now),
+        decision_reason: Some("previous promotion".to_string()),
+        promoted_by: Some("previous-approver".to_string()),
+        promoted_at: Some(now),
+        automation_policy: json!({}),
+        created_at: now,
+    };
+    let replacement = AgentRelease {
+        id: Uuid::new_v4(),
+        status: "promotion_in_progress".to_string(),
+        requested_by: Some("replacement-approver".to_string()),
+        approver_subject: Some("replacement-approver".to_string()),
+        decision_by: Some("replacement-approver".to_string()),
+        decided_at: Some(now),
+        decision_reason: Some("replacement promotion".to_string()),
+        promoted_by: None,
+        promoted_at: None,
+        created_at: now + chrono::Duration::seconds(1),
+        ..previous.clone()
+    };
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test requires memory store");
+    };
+    {
+        let mut store = inner.write().await;
+        store.agent_releases.insert(previous.id, previous.clone());
+        store
+            .agent_releases
+            .insert(replacement.id, replacement.clone());
+    }
+
+    let promoted = state
+        .complete_agent_release_promotion(
+            agent.id,
+            replacement.id,
+            "replacement-approver".to_string(),
+        )
+        .await
+        .expect("complete replacement promotion");
+    assert_eq!(promoted.status, "promoted");
+    let releases = state
+        .list_all_agent_releases()
+        .await
+        .expect("list agent releases");
+    assert!(
+        releases
+            .iter()
+            .any(|release| release.id == previous.id && release.status == "superseded")
+    );
+    assert_eq!(
+        releases
+            .iter()
+            .filter(|release| {
+                release.agent_id == agent.id
+                    && release.agent_version_id == version.id
+                    && release.environment == "production"
+                    && release.status == "promoted"
+            })
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn production_session_rejects_agent_without_promoted_release() {
     let _env = env_lock().lock().expect("env lock");
     let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
@@ -6118,6 +6522,28 @@ async fn agent_registry_state_tracks_configured_release_environment() {
         "staged"
     );
 
+    let version = state
+        .current_agent_version(agent.id)
+        .await
+        .expect("agent version");
+    let automated_release = crate::store_releases::new_workflow_pack_agent_release(
+        Uuid::new_v4(),
+        agent.id,
+        version.id,
+        "production",
+        "workflow-pack-release",
+        &json!({"release_gate_id": "automated-before-independent-promotion"}),
+        Utc::now(),
+    );
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test requires memory store");
+    };
+    inner
+        .write()
+        .await
+        .agent_releases
+        .insert(automated_release.id, automated_release.clone());
+
     let production_release = state
         .create_agent_release(
             agent.id,
@@ -6131,6 +6557,18 @@ async fn agent_registry_state_tracks_configured_release_environment() {
         )
         .await
         .expect("promote production agent release");
+    assert_ne!(production_release.id, automated_release.id);
+    assert_eq!(
+        state
+            .list_all_agent_releases()
+            .await
+            .expect("list releases")
+            .into_iter()
+            .find(|release| release.id == automated_release.id)
+            .expect("automated release")
+            .status,
+        "superseded"
+    );
 
     assert_eq!(
         state
@@ -10964,9 +11402,308 @@ async fn memory_governance_filters_objects_to_visible_sessions() {
     );
 }
 
+#[test]
+fn workflow_pack_explicit_step_graph_inherits_manifest_handoff_governance() {
+    let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("packs/ai-governance/package.yaml");
+    let manifest_input = std::fs::read_to_string(manifest_path).expect("fixture manifest");
+    let manifest = workflow_pack::WorkflowPackManifest::from_yaml_str(&manifest_input)
+        .expect("manifest parses");
+    let workflow = manifest
+        .workflows
+        .iter()
+        .find(|workflow| workflow.id == "profile-onboarding")
+        .expect("profile onboarding workflow");
+    let workflow_file: WorkflowPackWorkflowFile = serde_yaml::from_str(
+        r#"
+id: profile-onboarding
+entry_agent: reader
+step_graph:
+  source: explicit_test_graph
+  steps:
+    - key: collect
+      type: agent
+      agent_ref: reader
+      start: true
+    - key: analyze
+      type: shell
+      agent_ref: analyzer
+      depends_on: [collect]
+      risk_level: low
+      approval_required: false
+    - key: draft
+      type: agent
+      agent_ref: writer
+      depends_on: [analyze]
+      risk_level: low
+      approval_required: false
+steps:
+  - agent: reader
+  - agent: analyzer
+    task: classify onboarding risk
+    output_schema: schemas/company_profile.schema.json
+    required_profiles: [company]
+    required_schemas: [company-profile]
+    skills: [ai-impact-assessment]
+  - agent: writer
+"#,
+    )
+    .expect("workflow file parses");
+
+    let graph = workflow_pack_workflow_step_graph(&manifest, workflow, &workflow_file)
+        .expect("explicit graph is governed");
+
+    assert_eq!(graph["source"], json!("explicit_test_graph"));
+    assert_eq!(
+        graph["steps"][1]["handoff_source_agent_ref"],
+        json!("reader")
+    );
+    assert_eq!(graph["steps"][1]["risk_level"], json!("medium"));
+    assert_eq!(graph["steps"][1]["approval_required"], json!(false));
+    assert_eq!(graph["steps"][1]["type"], json!("agent"));
+    assert_eq!(graph["steps"][1]["task"], json!("classify onboarding risk"));
+    assert_eq!(graph["steps"][1]["required_profiles"], json!(["company"]));
+    assert_eq!(
+        graph["steps"][1]["required_schemas"],
+        json!(["company-profile"])
+    );
+    assert_eq!(graph["steps"][1]["skills"], json!(["ai-impact-assessment"]));
+    assert_eq!(
+        graph["steps"][2]["handoff_source_agent_ref"],
+        json!("analyzer")
+    );
+    assert_eq!(graph["steps"][2]["risk_level"], json!("high"));
+    assert_eq!(graph["steps"][2]["approval_required"], json!(true));
+
+    let mut topology_bypass = workflow_file.clone();
+    topology_bypass.step_graph.as_mut().expect("explicit graph")["steps"][2]["depends_on"] =
+        json!(["collect"]);
+    let error = workflow_pack_workflow_step_graph(&manifest, workflow, &topology_bypass)
+        .expect_err("explicit graph cannot change the governed handoff source");
+    assert!(
+        error
+            .message
+            .contains("must preserve its declared linear handoff topology")
+    );
+}
+
+#[test]
+fn workflow_pack_root_tool_scope_includes_reachable_handoff_agents() {
+    let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("packs/ai-governance/package.yaml");
+    let manifest_input = std::fs::read_to_string(manifest_path).expect("fixture manifest");
+    let manifest = workflow_pack::WorkflowPackManifest::from_yaml_str(&manifest_input)
+        .expect("manifest parses");
+    let workflow = manifest
+        .workflows
+        .iter()
+        .find(|workflow| workflow.id == "profile-onboarding")
+        .expect("profile onboarding workflow");
+    let workflow_file: WorkflowPackWorkflowFile = serde_yaml::from_str(
+        r#"
+id: profile-onboarding
+entry_agent: reader
+steps:
+  - agent: reader
+"#,
+    )
+    .expect("workflow file parses");
+
+    let tool_scope = workflow_pack_workflow_tool_scope(&manifest, workflow, &workflow_file);
+    let read = tool_scope["read"].as_array().expect("read tool scope");
+    let write = tool_scope["write"].as_array().expect("write tool scope");
+
+    assert!(read.contains(&json!("file.read")));
+    assert!(read.contains(&json!("ontology_type.lookup")));
+    assert!(write.contains(&json!("artifact.create")));
+}
+
+#[test]
+fn workflow_pack_external_write_scope_materializes_connector_grant() {
+    let package_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("packs/ecommerce-tmall");
+    let manifest_input =
+        std::fs::read_to_string(package_dir.join("package.yaml")).expect("fixture manifest");
+    let manifest = workflow_pack::WorkflowPackManifest::from_yaml_str(&manifest_input)
+        .expect("manifest parses");
+    let workflow = manifest
+        .workflows
+        .iter()
+        .find(|workflow| workflow.id == "after-sales-triage")
+        .expect("after-sales workflow");
+    let workflow_file =
+        workflow_pack_load_workflow_file(&package_dir, workflow).expect("workflow file");
+    let semantic_scopes =
+        workflow_pack_workflow_semantic_scopes(&manifest, &workflow_file).expect("semantic scopes");
+
+    let rules = workflow_pack_workflow_handoff_rules(
+        &manifest,
+        workflow,
+        &workflow_file,
+        &semantic_scopes,
+        &package_dir,
+    )
+    .expect("handoff rules");
+    let root_grant = &rules["root_task_grant"];
+
+    assert_eq!(root_grant["connector_scope"]["mode"], json!("commit_write"));
+    assert!(
+        root_grant["connector_scope"]["allowed_connector_ids"]
+            .as_array()
+            .is_some_and(|ids| ids.contains(&json!("tmall-top")))
+    );
+    assert!(
+        root_grant["connector_scope"]["allowed_tool_names"]
+            .as_array()
+            .is_some_and(|tools| tools.contains(&json!("refund-agree")))
+    );
+    assert!(
+        !root_grant["connector_scope"]["allowed_tool_names"]
+            .as_array()
+            .is_some_and(|tools| tools.contains(&json!("native.connector.call")))
+    );
+    assert!(
+        root_grant["connector_scope"]["side_effect_classes"]
+            .as_array()
+            .is_some_and(|classes| classes.contains(&json!("marketplace_refund_write")))
+    );
+    assert!(
+        root_grant["connector_scope"]["native_operation_bindings"]
+            .as_array()
+            .is_some_and(|bindings| bindings.contains(&json!({
+                "connector_id": "tmall-top",
+                "operation": "refund-agree",
+                "side_effect_class": "marketplace_refund_write"
+            })))
+    );
+    assert_eq!(
+        root_grant["external_effects"]["marketplace_refund_write"],
+        json!(true)
+    );
+}
+
+#[test]
+fn workflow_pack_external_write_scope_respects_agent_action_scope() {
+    let package_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("packs/ecommerce-tmall");
+    let manifest_input =
+        std::fs::read_to_string(package_dir.join("package.yaml")).expect("fixture manifest");
+    let mut manifest = workflow_pack::WorkflowPackManifest::from_yaml_str(&manifest_input)
+        .expect("manifest parses");
+    let executor_index = manifest
+        .agents
+        .iter()
+        .position(|agent| agent.id == "tmall-executor")
+        .expect("tmall executor");
+    manifest.agents[executor_index].native_connector_actions = vec!["refund-agree".to_string()];
+    let workflow = manifest
+        .workflows
+        .iter()
+        .find(|workflow| workflow.id == "after-sales-triage")
+        .expect("after-sales workflow");
+    let workflow_file =
+        workflow_pack_load_workflow_file(&package_dir, workflow).expect("workflow file");
+    let semantic_scopes =
+        workflow_pack_workflow_semantic_scopes(&manifest, &workflow_file).expect("semantic scopes");
+
+    let rules = workflow_pack_workflow_handoff_rules(
+        &manifest,
+        workflow,
+        &workflow_file,
+        &semantic_scopes,
+        &package_dir,
+    )
+    .expect("handoff rules");
+    let root_grant = &rules["root_task_grant"];
+    assert_eq!(
+        root_grant["connector_scope"]["allowed_tool_names"],
+        json!(["refund-agree"])
+    );
+    assert_eq!(
+        root_grant["connector_scope"]["native_operation_bindings"],
+        json!([{
+            "connector_id": "tmall-top",
+            "operation": "refund-agree",
+            "side_effect_class": "marketplace_refund_write"
+        }])
+    );
+
+    let policy =
+        workflow_pack_agent_tool_policy(&manifest, &package_dir, &manifest.agents[executor_index])
+            .expect("executor policy");
+    assert_eq!(
+        policy["connector_scope"]["allowed_tool_names"],
+        json!(["refund-agree"])
+    );
+    assert_eq!(
+        policy["external_effects"],
+        json!({"marketplace_refund_write": true})
+    );
+
+    let mut expanded_workflow_file = workflow_file.clone();
+    expanded_workflow_file.handoff_rules = json!({
+        "root_task_grant": {
+            "connector_scope": {
+                "mode": "commit_write",
+                "allowed_connector_ids": ["tmall-top"],
+                "allowed_tool_names": ["refund-refuse"],
+                "tenant_scope": {},
+                "side_effect_classes": ["marketplace_refund_write"],
+                "native_operation_bindings": [{
+                    "connector_id": "tmall-top",
+                    "operation": "refund-refuse",
+                    "side_effect_class": "marketplace_refund_write"
+                }]
+            }
+        }
+    });
+    let error = workflow_pack_workflow_handoff_rules(
+        &manifest,
+        workflow,
+        &expanded_workflow_file,
+        &semantic_scopes,
+        &package_dir,
+    )
+    .expect_err("explicit root connector scope cannot expand agent action scope");
+    assert!(
+        error
+            .message
+            .contains("connector_scope cannot expand generated agent scope")
+    );
+}
+
+#[test]
+fn governed_handoff_back_to_primary_agent_requires_isolated_context() {
+    let primary_agent_id = Uuid::new_v4();
+
+    assert!(
+        workflow_graph_step_requires_isolated_handoff_context(
+            &json!({"handoff_source_agent_ref": "analyzer"}),
+            Some(primary_agent_id),
+            primary_agent_id,
+        )
+        .expect("governed handoff is valid")
+    );
+    assert!(
+        !workflow_graph_step_requires_isolated_handoff_context(
+            &json!({}),
+            Some(primary_agent_id),
+            primary_agent_id,
+        )
+        .expect("root agent step is valid")
+    );
+}
+
 #[tokio::test]
 async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() {
-    let app = test_app().await;
+    let _env = env_lock().lock().expect("env lock");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let app = build_router(state.clone());
     let manifest_path = ai_governance_manifest_path_string();
     let report: workflow_pack::WorkflowPackValidationReport = request_json(
         app.clone(),
@@ -11125,6 +11862,154 @@ async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() 
         staged_workflow_definition["step_graph"]["steps"][0]["workflow_agent_ref"],
         json!("reader")
     );
+    let reader_binding = staged_bindings
+        .iter()
+        .find(|binding| {
+            binding["binding_type"] == json!("agent") && binding["binding_key"] == json!("reader")
+        })
+        .expect("reader agent binding");
+    let analyzer_binding = staged_bindings
+        .iter()
+        .find(|binding| {
+            binding["binding_type"] == json!("agent") && binding["binding_key"] == json!("analyzer")
+        })
+        .expect("analyzer agent binding");
+    let writer_binding = staged_bindings
+        .iter()
+        .find(|binding| {
+            binding["binding_type"] == json!("agent") && binding["binding_key"] == json!("writer")
+        })
+        .expect("writer agent binding");
+    let reader_agent_id = reader_binding["materialized_payload"]["agent_id"]
+        .as_str()
+        .expect("reader agent id");
+    let analyzer_agent_id = analyzer_binding["materialized_payload"]["agent_id"]
+        .as_str()
+        .expect("analyzer agent id");
+    let writer_agent_id = writer_binding["materialized_payload"]["agent_id"]
+        .as_str()
+        .expect("writer agent id");
+    assert!(reader_binding["target_id"].as_str().is_some());
+    assert!(analyzer_binding["target_id"].as_str().is_some());
+    assert_eq!(
+        reader_binding["materialized_payload"]["agent_version_id"],
+        reader_binding["target_id"]
+    );
+    assert_eq!(
+        staged_workflow_definition["default_agent_id"],
+        json!(reader_agent_id)
+    );
+    assert_eq!(
+        staged_workflow_definition["step_graph"]["steps"][0]["agent_id"],
+        json!(reader_agent_id)
+    );
+    assert_eq!(
+        staged_workflow_definition["step_graph"]["steps"][0]["agent_version_id"],
+        reader_binding["target_id"]
+    );
+    assert_eq!(
+        staged_workflow_definition["step_graph"]["steps"][1]["handoff_source_agent_ref"],
+        json!("reader")
+    );
+    assert_eq!(
+        staged_workflow_definition["step_graph"]["steps"][1]["risk_level"],
+        json!("medium")
+    );
+    assert_eq!(
+        staged_workflow_definition["step_graph"]["steps"][1]["approval_required"],
+        json!(false)
+    );
+    assert_eq!(
+        staged_workflow_definition["step_graph"]["steps"][2]["handoff_source_agent_ref"],
+        json!("analyzer")
+    );
+    assert_eq!(
+        staged_workflow_definition["step_graph"]["steps"][2]["risk_level"],
+        json!("high")
+    );
+    assert_eq!(
+        staged_workflow_definition["step_graph"]["steps"][2]["approval_required"],
+        json!(true)
+    );
+    let root_tool_scope =
+        &staged_workflow_definition["handoff_rules"]["root_task_grant"]["tool_scope"];
+    for tool in [
+        "file.read",
+        "semantic_object.fetch",
+        "semantic_object.search",
+        "ontology_type.lookup",
+    ] {
+        assert!(
+            root_tool_scope["read"]
+                .as_array()
+                .is_some_and(|tools| tools.iter().any(|candidate| candidate == tool)),
+            "root TaskGrant must expose runtime read tool {tool}"
+        );
+    }
+    assert!(
+        root_tool_scope["write"]
+            .as_array()
+            .is_some_and(|tools| tools.iter().any(|tool| tool == "artifact.create"))
+    );
+    for logical_scope in [
+        "connector.read",
+        "profile.read",
+        "schema.read",
+        "artifact.write",
+    ] {
+        assert!(
+            !root_tool_scope
+                .as_object()
+                .into_iter()
+                .flat_map(|scope| scope.values())
+                .filter_map(Value::as_array)
+                .flatten()
+                .any(|tool| tool == logical_scope),
+            "logical scope {logical_scope} must not leak into executable TaskGrant tools"
+        );
+    }
+    let reader_version: Value = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/agents/{reader_agent_id}/versions/1"))
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let analyzer_version: Value = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/agents/{analyzer_agent_id}/versions/1"))
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let writer_version: Value = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/agents/{writer_agent_id}/versions/1"))
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(
+        reader_version["tools"]
+            .as_array()
+            .is_some_and(|tools| { tools.iter().any(|tool| tool == "semantic_object.search") })
+    );
+    assert!(
+        analyzer_version["tools"]
+            .as_array()
+            .is_some_and(|tools| { tools.iter().any(|tool| tool == "ontology_type.lookup") })
+    );
+    assert!(
+        writer_version["tools"]
+            .as_array()
+            .is_some_and(|tools| { tools.iter().any(|tool| tool == "artifact.create") })
+    );
     assert!(staged_bindings.iter().any(|binding| {
         binding["binding_type"] == json!("agent")
             && binding["binding_key"] == json!("reader")
@@ -11193,7 +12078,9 @@ async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() 
             && object["runtime_kind"] == json!("generic_provider_deployment")
             && object["object_key"] == json!("agent:reader:provider-deployment")
             && object["status"] == json!("staged")
-            && object["spec"]["agent_id"] == json!("reader")
+            && object["spec"]["agent_ref"] == json!("reader")
+            && object["spec"]["agent_id"] == json!(reader_agent_id)
+            && object["spec"]["agent_version_id"] == reader_binding["target_id"]
             && object["spec"]["provider_specific_validation"]
                 == json!("deferred_to_provider_adapter")
     }));
@@ -11218,6 +12105,92 @@ async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() 
         Some("workflow pack release requires passed eval and release gates")
     );
 
+    let automated_release_installation_id = Uuid::new_v4();
+    let automated_releases = [
+        (reader_agent_id, reader_binding),
+        (analyzer_agent_id, analyzer_binding),
+        (writer_agent_id, writer_binding),
+    ]
+    .into_iter()
+    .map(|(agent_id, binding)| {
+        crate::store_releases::new_workflow_pack_agent_release(
+            automated_release_installation_id,
+            Uuid::parse_str(agent_id).expect("workflow pack agent UUID"),
+            Uuid::parse_str(
+                binding["target_id"]
+                    .as_str()
+                    .expect("workflow pack AgentVersion UUID"),
+            )
+            .expect("workflow pack AgentVersion UUID"),
+            "production",
+            "automated-pack-release",
+            &json!({"release_gate_id": "must-not-satisfy-independent-promotion"}),
+            Utc::now(),
+        )
+    })
+    .collect::<Vec<_>>();
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test requires memory store");
+    };
+    {
+        let mut store = inner.write().await;
+        for release in &automated_releases {
+            store.agent_releases.insert(release.id, release.clone());
+        }
+    }
+
+    let (status, error) = {
+        let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+        let _release_enforcement =
+            EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+        let _release_environment =
+            EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT", "production");
+        request_value(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                &format!("/api/workflow-packs/installations/{}/release", installed.id),
+                json!({
+                    "eval_gate_status": "passed",
+                    "release_gate_status": "passed",
+                    "environment": "production",
+                    "gate_evidence": {"release_gate_id": "must-not-bypass-agent-release"}
+                }),
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await
+    };
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        error["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("independently promoted agent version"))
+    );
+    let still_staged: WorkflowPackInstallation = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!(
+                "/api/workflow-packs/installations/{}",
+                installed.id
+            ))
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(still_staged.status, "staged");
+    {
+        let mut store = inner.write().await;
+        for automated_release in &automated_releases {
+            store
+                .agent_releases
+                .get_mut(&automated_release.id)
+                .expect("automated release")
+                .status = "rolled_back".to_string();
+        }
+    }
+
     let released: WorkflowPackInstallation = request_json(
         app.clone(),
         json_request_with_headers(
@@ -11226,6 +12199,7 @@ async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() 
             json!({
                 "eval_gate_status": "passed",
                 "release_gate_status": "passed",
+                "environment": "production",
                 "reason": "eval and policy gates passed",
                 "gate_evidence": {
                     "eval_run_id": "eval-ai-governance-1",
@@ -11240,6 +12214,35 @@ async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() 
     assert_eq!(released.eval_gate_status, "passed");
     assert_eq!(released.release_gate_status, "passed");
     assert!(released.released_at.is_some());
+    let reader_releases: Vec<AgentRelease> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/agents/{reader_agent_id}/releases"))
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let reader_pack_version_id = Uuid::parse_str(
+        reader_binding["target_id"]
+            .as_str()
+            .expect("reader binding target id"),
+    )
+    .expect("reader AgentVersion UUID");
+    let reader_pack_release = reader_releases
+        .iter()
+        .find(|release| release.agent_version_id == reader_pack_version_id)
+        .expect("released pack reader AgentVersion promotion");
+    assert_eq!(reader_pack_release.environment, "production");
+    assert_eq!(reader_pack_release.status, "promoted");
+    assert_eq!(
+        reader_pack_release.automation_policy["source"],
+        json!("workflow_pack_release")
+    );
+    assert_eq!(
+        reader_pack_release.automation_policy["workflow_pack_installation_id"],
+        json!(installed.id)
+    );
     let released_bindings: Vec<Value> = request_json(
         app.clone(),
         Request::builder()
@@ -11291,6 +12294,50 @@ async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() 
         released_workflow_definition["release_state"],
         json!("released")
     );
+    let released_definition_model: WorkflowDefinition =
+        serde_json::from_value(released_workflow_definition.clone()).expect("workflow definition");
+    assert_eq!(
+        workflow_definition_agent_version_id(
+            &released_definition_model,
+            Uuid::parse_str(reader_agent_id).expect("reader agent UUID")
+        )
+        .expect("pinned reader version"),
+        Some(
+            Uuid::parse_str(
+                reader_binding["target_id"]
+                    .as_str()
+                    .expect("reader version id")
+            )
+            .expect("reader version UUID")
+        )
+    );
+    let reader_version_two: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/agents/{reader_agent_id}/versions"),
+            json!({
+                "provider": reader_version["provider"],
+                "model": reader_version["model"],
+                "runtime_profile_id": reader_version["runtime_profile_id"],
+                "system_prompt": format!(
+                    "{}\nNew draft instructions that must not affect the released workflow.",
+                    reader_version["system_prompt"].as_str().unwrap_or_default()
+                ),
+                "tools": reader_version["tools"],
+                "runtime_config": reader_version["runtime_config"],
+                "approval_policy": reader_version["approval_policy"],
+                "mcp_server_ids": reader_version["mcp_server_ids"],
+                "skill_ids": reader_version["skill_ids"],
+                "workflow_pack_ids": reader_version["workflow_pack_ids"],
+                "remote_computer_profile": reader_version["remote_computer_profile"],
+                "semantic_scopes": reader_version["semantic_scopes"]
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    assert_eq!(reader_version_two["version"], json!(2));
     let released_pack_run: Value = request_json(
         app.clone(),
         json_request_with_headers(
@@ -11309,6 +12356,251 @@ async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() 
         json!(profile_onboarding_definition_id)
     );
     assert_eq!(released_pack_run["status"], json!("queued"));
+    let workflow_run_id = released_pack_run["id"].as_str().expect("workflow run id");
+    let primary_session_id = released_pack_run["primary_session_id"]
+        .as_str()
+        .expect("primary session id");
+    let primary_session: Value = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/sessions/{primary_session_id}"))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(
+        primary_session["agent_version_id"], reader_binding["target_id"],
+        "released workflow must run the AgentVersion pinned during staging"
+    );
+    assert_ne!(
+        primary_session["agent_version_id"],
+        reader_version_two["id"]
+    );
+    let root_task_grant_id = released_pack_run["root_task_grant_id"]
+        .as_str()
+        .expect("root task grant id");
+    let reader_context: ContextPacket = request_json(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/sessions/{primary_session_id}/context-packet"))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(
+        reader_context
+            .agent
+            .tools
+            .iter()
+            .any(|tool| tool == "semantic_object.search")
+    );
+    assert!(
+        !reader_context
+            .agent
+            .tools
+            .iter()
+            .any(|tool| tool == "ontology_type.lookup" || tool == "artifact.create"),
+        "root delegation ceiling must not expand the pinned reader AgentVersion"
+    );
+    let initial_steps: Vec<Value> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/workflow-runs/{workflow_run_id}/steps"))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let reader_step = initial_steps
+        .iter()
+        .find(|step| step["step_key"] == json!("reader"))
+        .expect("reader workflow step");
+    assert_eq!(reader_step["agent_id"], json!(reader_agent_id));
+    assert_eq!(reader_step["session_id"], json!(primary_session_id));
+    let reader_step_id = reader_step["id"].as_str().expect("reader step id");
+    let _: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "PATCH",
+            &format!("/api/workflow-step-runs/{reader_step_id}"),
+            json!({"status": "completed", "output_payload": {"summary": "read"}}),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    let advanced_steps: Vec<Value> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/workflow-runs/{workflow_run_id}/steps"))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let analyzer_step = advanced_steps
+        .iter()
+        .find(|step| step["step_key"] == json!("analyzer"))
+        .expect("analyzer workflow step");
+    assert_eq!(analyzer_step["agent_id"], json!(analyzer_agent_id));
+    assert_eq!(
+        analyzer_step["agent_version_id"],
+        analyzer_binding["target_id"]
+    );
+    assert_ne!(analyzer_step["session_id"], json!(primary_session_id));
+    assert_ne!(analyzer_step["task_grant_id"], json!(root_task_grant_id));
+    let analyzer_grant_id = analyzer_step["task_grant_id"]
+        .as_str()
+        .expect("analyzer task grant id");
+    let analyzer_grant: Value = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/task-grants/{analyzer_grant_id}"))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(analyzer_grant["parent_grant_id"], json!(root_task_grant_id));
+    assert_eq!(analyzer_grant["grantee_agent_id"], json!(analyzer_agent_id));
+    assert_eq!(analyzer_grant["risk_level"], json!("medium"));
+
+    let analyzer_step_id = analyzer_step["id"].as_str().expect("analyzer step id");
+    let _: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "PATCH",
+            &format!("/api/workflow-step-runs/{analyzer_step_id}"),
+            json!({"status": "completed", "output_payload": {"assessment": "draft"}}),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    let approval_blocked_steps: Vec<Value> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/workflow-runs/{workflow_run_id}/steps"))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let writer_step = approval_blocked_steps
+        .iter()
+        .find(|step| step["step_key"] == json!("writer"))
+        .expect("writer handoff approval step");
+    assert_eq!(writer_step["agent_id"], json!(writer_agent_id));
+    assert_eq!(writer_step["agent_version_id"], writer_binding["target_id"]);
+    assert_eq!(writer_step["status"], json!("requires_action"));
+    assert_eq!(writer_step["session_id"], Value::Null);
+    assert_eq!(writer_step["thread_id"], Value::Null);
+    assert_eq!(writer_step["task_grant_id"], Value::Null);
+    assert_eq!(
+        writer_step["input_payload"]["handoff_governance"]["risk_level"],
+        json!("high")
+    );
+    assert_eq!(
+        writer_step["input_payload"]["handoff_governance"]["approval_required"],
+        json!(true)
+    );
+    assert_eq!(
+        writer_step["output_payload"]["block_reason"],
+        json!("handoff_approval_required")
+    );
+    let writer_step_id = writer_step["id"].as_str().expect("writer step id");
+    let (status, error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/workflow-runs/{workflow_run_id}/steps"),
+            json!({
+                "step_key": "writer",
+                "step_type": "agent",
+                "status": "queued"
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        error["error"].as_str(),
+        Some(
+            "governed definition-owned workflow steps cannot be created through the workflow step API"
+        )
+    );
+
+    let mut forged_writer_step: WorkflowStepRun =
+        serde_json::from_value(writer_step.clone()).expect("writer step decodes");
+    forged_writer_step.id = Uuid::new_v4();
+    forged_writer_step.status = "completed".to_string();
+    forged_writer_step.output_payload = json!({"assessment": "forged"});
+    forged_writer_step.completed_at = Some(Utc::now());
+    forged_writer_step.created_at = Utc::now();
+    forged_writer_step.updated_at = Utc::now();
+    state
+        .create_workflow_step_run(forged_writer_step)
+        .await
+        .expect("inject duplicate step to verify finalizer defense");
+    let persisted_run = state
+        .get_workflow_run(Uuid::parse_str(workflow_run_id).expect("workflow run UUID"))
+        .await
+        .expect("workflow run persists");
+    let persisted_definition = state
+        .get_workflow_definition(persisted_run.workflow_definition_id)
+        .await
+        .expect("workflow definition persists");
+    assert!(
+        !workflow_graph_run_completed(&state, &persisted_definition, &persisted_run)
+            .await
+            .expect("blocked handoff prevents completion")
+    );
+
+    let (status, error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "PATCH",
+            &format!("/api/workflow-step-runs/{writer_step_id}"),
+            json!({"status": "completed", "output_payload": {"assessment": "approved"}}),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        error["error"].as_str(),
+        Some("approval-gated workflow handoffs cannot be updated through the workflow step API")
+    );
+    let steps_after_blocked_patch: Vec<WorkflowStepRun> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/workflow-runs/{workflow_run_id}/steps"))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let writer_step_after_patch = steps_after_blocked_patch
+        .iter()
+        .find(|step| step.id.to_string() == writer_step_id)
+        .expect("writer step remains persisted");
+    assert_eq!(writer_step_after_patch.status, "requires_action");
+    assert_eq!(
+        writer_step_after_patch.output_payload["block_reason"],
+        json!("handoff_approval_required")
+    );
+    let approval_blocked_run: Value = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/workflow-runs/{workflow_run_id}"))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(approval_blocked_run["status"], json!("requires_action"));
     assert_eq!(
         released.gate_evidence["evidence"]["eval_run_id"],
         json!("eval-ai-governance-1")
@@ -11348,6 +12640,18 @@ async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() 
     assert_eq!(rolled_back.eval_gate_status, "passed");
     assert_eq!(rolled_back.release_gate_status, "passed");
     assert_eq!(rolled_back.released_at, released.released_at);
+    let reader_releases_after_rollback: Vec<AgentRelease> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/agents/{reader_agent_id}/releases"))
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(reader_releases_after_rollback.iter().any(|release| {
+        release.id == reader_pack_release.id && release.status == "rolled_back"
+    }));
     assert_eq!(
         rolled_back.gate_evidence["release"]["evidence"]["eval_run_id"],
         json!("eval-ai-governance-1")
@@ -11389,6 +12693,21 @@ async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() 
         start_after_rollback_error["error"].as_str(),
         Some("workflow run requires a released workflow definition")
     );
+    let retired_reader = state
+        .get_agent(Uuid::parse_str(reader_agent_id).expect("reader agent UUID"))
+        .await
+        .expect("retired pack reader remains inspectable");
+    assert_eq!(retired_reader.release_state, "disabled");
+    let error = state
+        .create_session(CreateSession {
+            agent_id: retired_reader.id,
+            environment_id: None,
+            title: "rolled back pack agent must not run".to_string(),
+            message: None,
+        })
+        .await
+        .expect_err("rolled back pack agent must be disabled");
+    assert_eq!(error.message, "agent is disabled");
 
     let update_manifest_path = ai_governance_update_manifest_path_string("0.1.1");
     let updated: WorkflowPackInstallation = request_json(
@@ -11540,6 +12859,341 @@ async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() 
         log.action == "workflow_pack.version_created"
             && log.resource_id == Some(updated.id)
             && log.details["details"]["source_installation_id"] == json!(installed.id)
+    }));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn workflow_pack_release_migrates_legacy_staged_agent_bindings() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::remove("MANDOFORGE_PROVIDER_RUNTIME_ENV");
+    let _release_enforcement = EnvVarGuard::remove("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT");
+    let _release_environment = EnvVarGuard::remove("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let app = build_router(state.clone());
+    let installed: WorkflowPackInstallation = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-packs/install",
+            json!({"manifest_path": ai_governance_manifest_path_string()}),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let profile_assets = state
+        .list_workflow_pack_profile_assets(installed.id)
+        .await
+        .expect("legacy staged profile assets");
+    let legacy_bindings =
+        workflow_pack_materialized_bindings(&installed, &profile_assets, "staged")
+            .expect("legacy staged bindings");
+    assert!(legacy_bindings.iter().any(|binding| {
+        binding.binding_type == "agent"
+            && binding.target_id.is_none()
+            && binding.materialized_payload.get("agent_id").is_none()
+    }));
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test requires memory store");
+    };
+    {
+        let mut store = inner.write().await;
+        let installation = store
+            .workflow_pack_installations
+            .get_mut(&installed.id)
+            .expect("installed workflow pack");
+        installation.status = "staged".to_string();
+        installation.staged_at = Some(Utc::now());
+        installation.updated_at = Utc::now();
+        for binding in legacy_bindings {
+            store.workflow_pack_bindings.insert(binding.id, binding);
+        }
+    }
+
+    let caller_count = 8;
+    let start = Arc::new(tokio::sync::Barrier::new(caller_count));
+    let mut callers = Vec::with_capacity(caller_count);
+    for caller in 0..caller_count {
+        let app = app.clone();
+        let start = start.clone();
+        let installation_id = installed.id;
+        callers.push(tokio::spawn(async move {
+            start.wait().await;
+            request_value(
+                app,
+                json_request_with_headers(
+                    "POST",
+                    &format!("/api/workflow-packs/installations/{installation_id}/release"),
+                    json!({
+                        "eval_gate_status": "passed",
+                        "release_gate_status": "passed",
+                        "environment": "staging",
+                        "reason": "upgrade legacy staged materialization",
+                        "gate_evidence": {"migration_test": true, "caller": caller}
+                    }),
+                    &[
+                        (
+                            "x-mandoforge-subject",
+                            &format!("migration-caller-{caller}"),
+                        ),
+                        ("x-mandoforge-roles", "admin"),
+                    ],
+                ),
+            )
+            .await
+        }));
+    }
+    let mut released = None;
+    for caller in callers {
+        let (status, response) = caller.await.expect("legacy release caller");
+        if status == StatusCode::OK {
+            assert!(released.replace(response).is_none());
+        } else {
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "release response: {response}"
+            );
+        }
+    }
+    let released = released.expect("one concurrent legacy release succeeds");
+    assert_eq!(released["status"], json!("released"));
+
+    let bindings: Vec<Value> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!(
+                "/api/workflow-packs/installations/{}/bindings",
+                installed.id
+            ))
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(
+        bindings
+            .iter()
+            .filter(|binding| binding["binding_type"] == "agent")
+            .all(|binding| {
+                binding["target_id"].as_str().is_some()
+                    && binding["materialized_payload"]["agent_id"]
+                        .as_str()
+                        .is_some()
+                    && binding["materialized_payload"]["agent_version_id"] == binding["target_id"]
+                    && binding["status"] == "released"
+            })
+    );
+    let promoted_releases = state
+        .list_all_agent_releases()
+        .await
+        .expect("migrated AgentVersion releases");
+    for binding in bindings
+        .iter()
+        .filter(|binding| binding["binding_type"] == "agent")
+    {
+        let agent_id = Uuid::parse_str(
+            binding["materialized_payload"]["agent_id"]
+                .as_str()
+                .expect("migrated agent id"),
+        )
+        .expect("migrated agent UUID");
+        let agent_version_id = Uuid::parse_str(
+            binding["target_id"]
+                .as_str()
+                .expect("migrated AgentVersion id"),
+        )
+        .expect("migrated AgentVersion UUID");
+        assert!(promoted_releases.iter().any(|release| {
+            release.agent_id == agent_id
+                && release.agent_version_id == agent_version_id
+                && release.environment == "staging"
+                && release.status == "promoted"
+        }));
+    }
+    let runtime_objects: Vec<Value> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!(
+                "/api/workflow-packs/installations/{}/runtime-objects",
+                installed.id
+            ))
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(!runtime_objects.is_empty());
+    assert!(
+        runtime_objects
+            .iter()
+            .all(|object| object["status"] == "released")
+    );
+    let audit_logs: Vec<AuditLog> = request_json(
+        app,
+        Request::builder()
+            .uri("/api/audit-logs")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(
+        audit_logs
+            .iter()
+            .filter(|log| {
+                log.action == "workflow_pack.runtime_materialization_migrated"
+                    && log.resource_id == Some(installed.id)
+            })
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn workflow_pack_release_failure_is_atomic() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::remove("MANDOFORGE_PROVIDER_RUNTIME_ENV");
+    let _release_enforcement = EnvVarGuard::remove("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let app = build_router(state.clone());
+    let installed: WorkflowPackInstallation = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-packs/install",
+            json!({"manifest_path": ai_governance_manifest_path_string()}),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let staged: WorkflowPackInstallation = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/workflow-packs/installations/{}/stage", installed.id),
+            json!({"reason": "atomic release regression"}),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    assert_eq!(staged.status, "staged");
+
+    let invalid_version_id = Uuid::new_v4();
+    let definition_id = {
+        let StoreBackend::Memory(inner) = &state.store else {
+            panic!("test requires memory store");
+        };
+        let mut store = inner.write().await;
+        let agent_binding = store
+            .workflow_pack_bindings
+            .values_mut()
+            .find(|binding| {
+                binding.installation_id == installed.id
+                    && binding.binding_type == "agent"
+                    && binding.status == "staged"
+            })
+            .expect("staged agent binding");
+        agent_binding.target_id = Some(invalid_version_id);
+        agent_binding.materialized_payload["agent_version_id"] = json!(invalid_version_id);
+        store
+            .workflow_definitions
+            .values()
+            .find(|definition| definition.pack_installation_id == Some(installed.id))
+            .expect("staged workflow definition")
+            .id
+    };
+
+    let (status, error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/workflow-packs/installations/{}/release", installed.id),
+            json!({
+                "eval_gate_status": "passed",
+                "release_gate_status": "passed",
+                "environment": "staging",
+                "gate_evidence": {"release_gate_id": "must-rollback-entire-transition"}
+            }),
+            &[
+                ("x-mandoforge-subject", "release-admin"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        error["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("unknown agent version"))
+    );
+
+    let installation: WorkflowPackInstallation = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!(
+                "/api/workflow-packs/installations/{}",
+                installed.id
+            ))
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(installation.status, "staged");
+    let bindings: Vec<WorkflowPackBinding> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!(
+                "/api/workflow-packs/installations/{}/bindings",
+                installed.id
+            ))
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(bindings.iter().all(|binding| binding.status == "staged"));
+    let runtime_objects: Vec<WorkflowPackRuntimeObject> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!(
+                "/api/workflow-packs/installations/{}/runtime-objects",
+                installed.id
+            ))
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(
+        runtime_objects
+            .iter()
+            .all(|object| object.status == "staged")
+    );
+    let definition: WorkflowDefinition = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/workflow-definitions/{definition_id}"))
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(definition.release_state, "staged");
+    let audit_logs: Vec<AuditLog> = request_json(
+        app,
+        Request::builder()
+            .uri("/api/audit-logs")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(!audit_logs.iter().any(|log| {
+        log.action == "workflow_pack.released" && log.resource_id == Some(installed.id)
     }));
 }
 
@@ -12240,6 +13894,414 @@ async fn dynamic_workflow_plan_validates_agent_fleet_policy() {
     );
 }
 
+#[test]
+fn dynamic_workflow_plan_approval_requires_an_identified_approver() {
+    let error = validate_dynamic_workflow_plan_approval_review(&json!({}))
+        .expect_err("approval without an identified approver must fail");
+
+    assert!(error.message.contains("requires approved_by"));
+}
+
+#[tokio::test]
+async fn dynamic_workflow_plan_decisions_require_an_approver_identity() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "Scoped dynamic workflow review".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create source session");
+    let app = build_router(state);
+    let plan: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/dynamic-workflow-plans",
+            json!({
+                "source_session_id": session.id,
+                "objective": "Review a governed scoped workflow",
+                "phases": [{
+                    "key": "review",
+                    "agent_count": 1,
+                    "prompt": "Review the scoped workflow."
+                }]
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let plan_id = plan["id"].as_str().expect("plan id");
+
+    let (status, error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/dynamic-workflow-plans/{plan_id}/review"),
+            json!({
+                "status": "approved",
+                "review": {"approved_by": "spoofed-subject"}
+            }),
+            &[
+                ("x-mandoforge-subject", "operator-1"),
+                ("x-mandoforge-roles", "operator"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(
+        error["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("ApprovalsDecide"))
+    );
+
+    let reviewed: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/dynamic-workflow-plans/{plan_id}/review"),
+            json!({
+                "status": "approved",
+                "review": {"approved_by": "spoofed-subject"}
+            }),
+            &[
+                ("x-mandoforge-subject", "reviewer-1"),
+                ("x-mandoforge-roles", "approver"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(reviewed["status"], json!("approved"));
+    assert_eq!(reviewed["review"]["approved_by"], json!("reviewer-1"));
+
+    let (status, error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/dynamic-workflow-plans/{plan_id}/review"),
+            json!({"review": {"note": "operator cannot clear approval"}}),
+            &[
+                ("x-mandoforge-subject", "operator-1"),
+                ("x-mandoforge-roles", "operator"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(
+        error["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("ApprovalsDecide"))
+    );
+    let persisted: Value = request_json(
+        app,
+        Request::builder()
+            .uri(format!("/api/dynamic-workflow-plans/{plan_id}"))
+            .header("x-mandoforge-subject", "operator-1")
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(persisted["status"], json!("approved"));
+    assert_eq!(persisted["review"]["approved_by"], json!("reviewer-1"));
+}
+
+#[tokio::test]
+async fn dynamic_workflow_plan_materialization_claim_is_atomic() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let app = build_router(state.clone());
+    let plan: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/dynamic-workflow-plans",
+            json!({
+                "objective": "Claim one approved dynamic workflow exactly once",
+                "phases": [{
+                    "key": "claim",
+                    "agent_count": 1,
+                    "prompt": "Prove the materialization claim is atomic."
+                }]
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let plan_id = Uuid::parse_str(plan["id"].as_str().expect("plan id")).expect("plan uuid");
+    let _: Value = request_json(
+        app,
+        json_request_with_headers(
+            "POST",
+            &format!("/api/dynamic-workflow-plans/{plan_id}/review"),
+            json!({"status": "approved", "review": {}}),
+            &[
+                ("x-mandoforge-subject", "claim-reviewer"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let first_definition_id = Uuid::new_v4();
+    let first_run_id = Uuid::new_v4();
+    let second_definition_id = Uuid::new_v4();
+    let second_run_id = Uuid::new_v4();
+    let first_claim_audit = state
+        .append_audit_log(new_audit_log(
+            None,
+            "system",
+            Some(first_run_id),
+            "dynamic_workflow_plan.materialization_claim_requested",
+            "dynamic_workflow_plan",
+            Some(plan_id),
+            json!({"workflow_run_id": first_run_id}),
+        ))
+        .await
+        .expect("first claim audit");
+    let second_claim_audit = state
+        .append_audit_log(new_audit_log(
+            None,
+            "system",
+            Some(second_run_id),
+            "dynamic_workflow_plan.materialization_claim_requested",
+            "dynamic_workflow_plan",
+            Some(plan_id),
+            json!({"workflow_run_id": second_run_id}),
+        ))
+        .await
+        .expect("second claim audit");
+    let (first, second) = tokio::join!(
+        state.claim_dynamic_workflow_plan_materialization(
+            plan_id,
+            first_claim_audit.id,
+            Utc::now(),
+        ),
+        state.claim_dynamic_workflow_plan_materialization(
+            plan_id,
+            second_claim_audit.id,
+            Utc::now(),
+        )
+    );
+    let (winning_claim_id, winning_definition_id, winning_run_id, losing_error) =
+        match (first, second) {
+            (Ok(_), Err(error)) => (
+                first_claim_audit.id,
+                first_definition_id,
+                first_run_id,
+                error,
+            ),
+            (Err(error), Ok(_)) => (
+                second_claim_audit.id,
+                second_definition_id,
+                second_run_id,
+                error,
+            ),
+            (Ok(_), Ok(_)) => panic!("both materialization claims succeeded"),
+            (Err(first), Err(second)) => {
+                panic!("both materialization claims failed: {first:?}; {second:?}")
+            }
+        };
+    assert_eq!(losing_error.status, StatusCode::CONFLICT);
+    assert!(losing_error.message.contains("already claimed"));
+
+    let completed = state
+        .update_dynamic_workflow_plan_materialized(
+            plan_id,
+            winning_claim_id,
+            winning_definition_id,
+            winning_run_id,
+            None,
+            Utc::now(),
+        )
+        .await
+        .expect("matching claim completes");
+    assert_eq!(completed.status, "materialized");
+    let duplicate = state
+        .update_dynamic_workflow_plan_materialized(
+            plan_id,
+            winning_claim_id,
+            winning_definition_id,
+            winning_run_id,
+            None,
+            Utc::now(),
+        )
+        .await
+        .expect_err("completed materialization cannot finalize twice");
+    assert_eq!(duplicate.status, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn failed_dynamic_workflow_materialization_can_be_reapproved_and_reclaimed() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let source_session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "Retryable dynamic workflow plan".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create source session");
+    let app = build_router(state.clone());
+    let plan: DynamicWorkflowPlan = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/dynamic-workflow-plans",
+            json!({
+                "source_session_id": source_session.id,
+                "objective": "Retry a failed dynamic workflow materialization",
+                "phases": [{
+                    "key": "retry",
+                    "agent_count": 1,
+                    "prompt": "Retry only after a new approval decision."
+                }]
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let approved: DynamicWorkflowPlan = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/dynamic-workflow-plans/{}/review", plan.id),
+            json!({"status": "approved", "review": {}}),
+            &[
+                ("x-mandoforge-subject", "first-reviewer"),
+                ("x-mandoforge-roles", "approver"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(approved.status, "approved");
+
+    let first_claim_audit = state
+        .append_audit_log(new_audit_log(
+            None,
+            "system",
+            None,
+            "dynamic_workflow_plan.materialization_claim_requested",
+            "dynamic_workflow_plan",
+            Some(plan.id),
+            json!({"attempt": 1}),
+        ))
+        .await
+        .expect("first materialization claim audit");
+    state
+        .claim_dynamic_workflow_plan_materialization(plan.id, first_claim_audit.id, Utc::now())
+        .await
+        .expect("claim first materialization attempt");
+    let failed = state
+        .fail_dynamic_workflow_plan_materialization(plan.id, first_claim_audit.id, None, Utc::now())
+        .await
+        .expect("fail first materialization attempt");
+    assert_eq!(failed.status, "materialization_failed");
+
+    let (status, error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/dynamic-workflow-plans/{}/review", plan.id),
+            json!({"status": "approved", "review": {}}),
+            &[
+                ("x-mandoforge-subject", "operator-1"),
+                ("x-mandoforge-roles", "operator"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(
+        error["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("ApprovalsDecide"))
+    );
+
+    let reapproved: DynamicWorkflowPlan = request_json(
+        app,
+        json_request_with_headers(
+            "POST",
+            &format!("/api/dynamic-workflow-plans/{}/review", plan.id),
+            json!({"status": "approved", "review": {"reason": "retry transient failure"}}),
+            &[
+                ("x-mandoforge-subject", "retry-reviewer"),
+                ("x-mandoforge-roles", "approver"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(reapproved.status, "approved");
+    assert_eq!(reapproved.review["approved_by"], json!("retry-reviewer"));
+
+    let retry_claim_audit = state
+        .append_audit_log(new_audit_log(
+            None,
+            "system",
+            None,
+            "dynamic_workflow_plan.materialization_claim_requested",
+            "dynamic_workflow_plan",
+            Some(plan.id),
+            json!({"attempt": 2}),
+        ))
+        .await
+        .expect("retry materialization claim audit");
+    let reclaimed = state
+        .claim_dynamic_workflow_plan_materialization(plan.id, retry_claim_audit.id, Utc::now())
+        .await
+        .expect("reclaim reapproved materialization");
+    assert_eq!(reclaimed.status, "materializing");
+    let late_review_audit = state
+        .append_audit_log(new_audit_log(
+            None,
+            "retry-reviewer",
+            None,
+            "dynamic_workflow_plan.reviewed",
+            "dynamic_workflow_plan",
+            Some(plan.id),
+            json!({"status": "approved"}),
+        ))
+        .await
+        .expect("late review audit");
+    let still_claimed = state
+        .update_dynamic_workflow_plan_audit_trace_if_unchanged(
+            plan.id,
+            &reapproved.status,
+            reapproved.updated_at,
+            Some(late_review_audit.id),
+            late_review_audit.created_at,
+        )
+        .await
+        .expect("late review audit attachment converges to current plan");
+    assert_eq!(still_claimed.status, "materializing");
+    assert_eq!(still_claimed.audit_trace_id, Some(retry_claim_audit.id));
+    let retry_failed = state
+        .fail_dynamic_workflow_plan_materialization(plan.id, retry_claim_audit.id, None, Utc::now())
+        .await
+        .expect("active retry claim remains valid after late review audit");
+    assert_eq!(retry_failed.status, "materialization_failed");
+}
+
 #[tokio::test]
 async fn dynamic_workflow_plan_materializes_delegated_runtime_workflow() {
     let app = test_app().await;
@@ -12333,7 +14395,10 @@ async fn dynamic_workflow_plan_materializes_delegated_runtime_workflow() {
                     "reason": "bounded delegated runtime with draft-only external effects"
                 }
             }),
-            &[("x-mandoforge-roles", "admin")],
+            &[
+                ("x-mandoforge-subject", "architecture-review"),
+                ("x-mandoforge-roles", "admin"),
+            ],
         ),
     )
     .await;
@@ -12357,6 +14422,10 @@ async fn dynamic_workflow_plan_materializes_delegated_runtime_workflow() {
     assert_eq!(materialized["plan"]["status"], json!("materialized"));
     assert!(materialized["plan"]["materialized_at"].as_str().is_some());
     assert_eq!(
+        materialized["workflow_definition"]["release_state"],
+        json!("staged")
+    );
+    assert_eq!(
         materialized["workflow_definition"]["execution_strategy"],
         json!("delegated_runtime")
     );
@@ -12371,6 +14440,21 @@ async fn dynamic_workflow_plan_materializes_delegated_runtime_workflow() {
     assert_eq!(
         materialized["workflow_definition"]["step_graph"]["steps"][0]["type"],
         json!("delegated_runtime")
+    );
+    let pinned_agent_id = materialized["workflow_definition"]["step_graph"]["steps"][0]["agent_id"]
+        .as_str()
+        .expect("pinned agent id");
+    let pinned_agent_version_id =
+        materialized["workflow_definition"]["step_graph"]["steps"][0]["agent_version_id"]
+            .as_str()
+            .expect("pinned agent version id");
+    assert_eq!(
+        materialized["workflow_definition"]["handoff_rules"]["materialization_approval"]["approved_by"],
+        json!("architecture-review")
+    );
+    assert_eq!(
+        materialized["workflow_definition"]["handoff_rules"]["materialization_approval"]["scope"],
+        json!("single_materialization")
     );
     assert_eq!(
         materialized["workflow_run"]["delegation_status"],
@@ -12390,6 +14474,108 @@ async fn dynamic_workflow_plan_materializes_delegated_runtime_workflow() {
         json!(2)
     );
 
+    let session_id = materialized["workflow_run"]["primary_session_id"]
+        .as_str()
+        .expect("session id");
+    let session: Value = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/sessions/{session_id}"))
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(session["agent_id"], json!(pinned_agent_id));
+    assert_eq!(session["agent_version_id"], json!(pinned_agent_version_id));
+
+    let workflow_definition_id = materialized["workflow_definition"]["id"]
+        .as_str()
+        .expect("workflow definition id");
+    let (status, error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-runs",
+            json!({
+                "workflow_definition_id": workflow_definition_id,
+                "input_payload": {"objective": "unreviewed reuse"}
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        error["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("released workflow definition"))
+    );
+
+    let (status, error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "PATCH",
+            &format!("/api/workflow-definitions/{workflow_definition_id}"),
+            json!({"release_state": "released"}),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(
+        error["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("publish a Workflow Pack"))
+    );
+
+    let (status, error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "PATCH",
+            &format!("/api/workflow-definitions/{workflow_definition_id}"),
+            json!({"handoff_rules": {"source": "manual"}}),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        error["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("provenance is immutable"))
+    );
+
+    let (status, error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-definitions",
+            json!({
+                "name": "Forged dynamic release",
+                "entrypoint": "forged-dynamic-release",
+                "default_agent_id": pinned_agent_id,
+                "step_graph": {
+                    "steps": [{"key": "run", "type": "agent", "start": true}]
+                },
+                "handoff_rules": {
+                    "source": "dynamic_workflow_plan",
+                    "dynamic_workflow_plan_id": plan_id,
+                    "materialization_approval": {"approved_by": "forged"}
+                },
+                "release_state": "released"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        error["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("only be created from an approved"))
+    );
+
     let run_id = materialized["workflow_run"]["id"].as_str().expect("run id");
     let steps: Vec<Value> = request_json(
         app,
@@ -12406,6 +14592,107 @@ async fn dynamic_workflow_plan_materializes_delegated_runtime_workflow() {
         steps[0]["input_payload"]["runtime_delegation"]["runtime_mode"],
         json!("dynamic_workflow")
     );
+}
+
+#[tokio::test]
+async fn production_dynamic_workflow_pins_the_independently_promoted_agent_version() {
+    let _env = env_lock().lock().expect("env lock");
+    let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
+    let _release_enforcement = EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
+    let _release_environment =
+        EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT", "production");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let (agent, promoted_version, environment) =
+        seed_promoted_agent_for_test(&state, "production").await;
+    let mut unreleased_agent = agent.clone();
+    unreleased_agent.system_prompt = "Unreleased dynamic workflow prompt".to_string();
+    state
+        .insert_agent_version(&unreleased_agent, 2, json!({}))
+        .await
+        .expect("insert unreleased agent version");
+    let unreleased_version = state
+        .current_agent_version(agent.id)
+        .await
+        .expect("current unreleased version");
+    assert_ne!(promoted_version.id, unreleased_version.id);
+    let app = build_router(state.clone());
+
+    let plan: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/dynamic-workflow-plans",
+            json!({
+                "objective": "Run a governed production migration audit",
+                "phases": [{
+                    "key": "audit",
+                    "agent_count": 1,
+                    "prompt": "Inspect the migration and emit bounded evidence."
+                }]
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let plan_id = plan["id"].as_str().expect("plan id");
+    let reviewed: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/dynamic-workflow-plans/{plan_id}/review"),
+            json!({
+                "status": "approved",
+                "review": {
+                    "approved_by": "production-release-reviewer",
+                    "reason": "single bounded production materialization"
+                }
+            }),
+            &[
+                ("x-mandoforge-subject", "production-release-reviewer"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    let materialized: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/dynamic-workflow-plans/{plan_id}/materialize"),
+            json!({
+                "environment_id": environment.id,
+                "title": "Governed production dynamic workflow"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+
+    assert_eq!(
+        materialized["workflow_definition"]["release_state"],
+        json!("staged")
+    );
+    assert_eq!(
+        materialized["workflow_definition"]["step_graph"]["steps"][0]["agent_version_id"],
+        json!(promoted_version.id)
+    );
+    assert_ne!(
+        materialized["workflow_definition"]["step_graph"]["steps"][0]["agent_version_id"],
+        json!(unreleased_version.id)
+    );
+    assert_eq!(
+        materialized["workflow_run"]["runtime_envelope"]["request_envelope"]["materialization_approval"]
+            ["review_audit_trace_id"],
+        reviewed["audit_trace_id"]
+    );
+    let session_id = materialized["workflow_run"]["primary_session_id"]
+        .as_str()
+        .expect("session id");
+    let session = state
+        .get_session(Uuid::parse_str(session_id).expect("session uuid"))
+        .await
+        .expect("materialized session");
+    assert_eq!(session.agent_version_id, Some(promoted_version.id));
 }
 
 #[tokio::test]
@@ -13628,6 +15915,29 @@ async fn workflow_runs_create_primary_session_and_step_runs() {
     assert_eq!(step["session_id"], json!(session_id));
     assert_eq!(step["task_grant_id"], json!(root_task_grant_id));
 
+    let (status, error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/workflow-runs/{}/steps", run["id"].as_str().unwrap()),
+            json!({
+                "step_key": "draft",
+                "step_type": "agent",
+                "agent_id": agent.id,
+                "session_id": session_id,
+                "task_grant_id": root_task_grant_id,
+                "status": "queued"
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        error["error"].as_str(),
+        Some("workflow step key already exists for this workflow run")
+    );
+
     let listed_steps: Vec<Value> = request_json(
         app.clone(),
         Request::builder()
@@ -13658,6 +15968,130 @@ async fn workflow_runs_create_primary_session_and_step_runs() {
     )
     .await;
     assert!(listed_runs.iter().any(|listed| listed["id"] == run["id"]));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn workflow_step_key_reservation_is_atomic() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let workflow_run_id = Uuid::new_v4();
+    let now = Utc::now();
+    state
+        .create_workflow_run(WorkflowRun {
+            id: workflow_run_id,
+            workflow_definition_id: Uuid::new_v4(),
+            pack_installation_id: None,
+            source_event_id: None,
+            source_work_item_id: None,
+            source_schedule_id: None,
+            status: "queued".to_string(),
+            primary_session_id: Uuid::new_v4(),
+            root_task_grant_id: None,
+            input_payload: json!({}),
+            input_digest: "atomic-step-key-reservation".to_string(),
+            execution_strategy: "managed_graph".to_string(),
+            runtime_adapter: None,
+            runtime_mode: None,
+            delegation_status: None,
+            external_run_ref: None,
+            runtime_event_cursor: None,
+            runtime_envelope: json!({}),
+            started_at: None,
+            completed_at: None,
+            audit_trace_id: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .expect("create workflow run for step reservation");
+    let caller_count = 32;
+    let start = Arc::new(tokio::sync::Barrier::new(caller_count));
+    let mut callers = Vec::with_capacity(caller_count);
+
+    for _ in 0..caller_count {
+        let caller_state = state.clone();
+        let start = start.clone();
+        callers.push(tokio::spawn(async move {
+            start.wait().await;
+            let now = Utc::now();
+            caller_state
+                .create_workflow_step_run_if_key_absent(WorkflowStepRun {
+                    id: Uuid::new_v4(),
+                    workflow_run_id,
+                    step_key: "external-review".to_string(),
+                    step_type: "agent".to_string(),
+                    agent_id: None,
+                    agent_version_id: None,
+                    session_id: None,
+                    thread_id: None,
+                    handoff_id: None,
+                    task_grant_id: None,
+                    environment_id: None,
+                    status: "queued".to_string(),
+                    input_payload: json!({}),
+                    output_payload: json!({}),
+                    artifact_ids: Vec::new(),
+                    approval_ids: Vec::new(),
+                    tool_call_ids: Vec::new(),
+                    claimed_by_worker: None,
+                    lease_expires_at: None,
+                    context_packet_id: None,
+                    started_at: None,
+                    completed_at: None,
+                    scheduled_at: None,
+                    created_at: now,
+                    updated_at: now,
+                })
+                .await
+                .expect("reserve workflow step key")
+        }));
+    }
+
+    let mut created_count = 0;
+    for caller in callers {
+        if caller
+            .await
+            .expect("workflow step reservation task")
+            .is_some()
+        {
+            created_count += 1;
+        }
+    }
+    assert_eq!(created_count, 1);
+    let stored = state
+        .list_workflow_step_runs(workflow_run_id)
+        .await
+        .expect("list reserved workflow steps");
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].step_key, "external-review");
+
+    state
+        .update_workflow_run_status(
+            workflow_run_id,
+            "completed".to_string(),
+            Some(now),
+            Some(now),
+        )
+        .await
+        .expect("complete workflow run");
+    let mut late_step = stored[0].clone();
+    late_step.id = Uuid::new_v4();
+    late_step.step_key = "late-external-review".to_string();
+    late_step.created_at = Utc::now();
+    late_step.updated_at = late_step.created_at;
+    let error = state
+        .create_workflow_step_run_if_key_absent(late_step.clone())
+        .await
+        .expect_err("terminal workflow run must reject store-level step insertion");
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+    assert_eq!(error.message, "workflow run is not executable");
+    late_step.id = Uuid::new_v4();
+    late_step.step_key = "late-internal-step".to_string();
+    let error = state
+        .create_workflow_step_run(late_step)
+        .await
+        .expect_err("terminal workflow run must reject internal step insertion");
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+    assert_eq!(error.message, "workflow run is not executable");
 }
 
 #[tokio::test]
@@ -13893,6 +16327,23 @@ async fn workflow_step_completion_advances_dependency_graph() {
         .and_then(Value::as_str)
         .expect("draft step id")
         .to_string();
+    let _: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/workflow-runs/{run_id}/steps"),
+            json!({
+                "step_key": "untrusted-approval-block",
+                "step_type": "agent",
+                "session_id": run["primary_session_id"],
+                "task_grant_id": root_task_grant_id,
+                "status": "requires_action",
+                "output_payload": {"block_reason": "handoff_approval_required"}
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
     let _: Value = request_json(
         app.clone(),
         json_request_with_headers(
@@ -14725,6 +17176,33 @@ async fn workflow_branch_condition_false_skips_step_and_completes_run() {
     )
     .await;
     let agent = agents.first().expect("seeded agent");
+    let branch_agent: Agent = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/agents",
+            json!({
+                "name": "Skipped Branch Agent",
+                "kind": "specialist",
+                "provider": "openai-compatible",
+                "model": "gpt-5.5-mini",
+                "agent_role": "specialist",
+                "tools": ["artifact.create"],
+                "release_state": "active"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let branch_agent_version: Value = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/agents/{}/versions/1", branch_agent.id))
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
 
     let definition: Value = request_json(
         app.clone(),
@@ -14742,6 +17220,8 @@ async fn workflow_branch_condition_false_skips_step_and_completes_run() {
                         {
                             "key": "publish",
                             "type": "agent",
+                            "agent_id": branch_agent.id,
+                            "agent_version_id": branch_agent_version["id"],
                             "depends_on": ["intake"],
                             "condition": {
                                 "source_step": "intake",
@@ -14810,6 +17290,10 @@ async fn workflow_branch_condition_false_skips_step_and_completes_run() {
         .find(|step| step["step_key"] == json!("publish"))
         .expect("publish branch step should be recorded");
     assert_eq!(publish_step["status"], json!("skipped"));
+    assert_eq!(publish_step["agent_id"], json!(branch_agent.id));
+    assert_eq!(publish_step["session_id"], Value::Null);
+    assert_eq!(publish_step["thread_id"], Value::Null);
+    assert_eq!(publish_step["task_grant_id"], Value::Null);
     assert_eq!(
         publish_step["output_payload"]["skip_reason"],
         json!("branch_condition_false")
@@ -14825,6 +17309,35 @@ async fn workflow_branch_condition_false_skips_step_and_completes_run() {
     )
     .await;
     assert_eq!(completed_run["status"], json!("completed"));
+
+    let sessions: Vec<Session> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/sessions")
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(
+        sessions.len(),
+        1,
+        "skipped branch must not create a child session"
+    );
+    let grants: Vec<TaskGrant> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/workflow-runs/{run_id}/task-grants"))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(
+        grants.len(),
+        1,
+        "skipped branch must not issue a child TaskGrant"
+    );
 
     let transitions: Vec<Value> = request_json(
         app,
@@ -15987,6 +18500,370 @@ async fn workflow_run_initialization_failure_is_fail_closed() {
 }
 
 #[tokio::test]
+async fn workflow_run_initialization_materializes_cross_agent_start_step_atomically() {
+    let app = test_app().await;
+    let agents: Vec<Agent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/agents")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let primary_agent = agents.first().expect("seeded primary agent");
+    let specialist: Agent = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/agents",
+            json!({
+                "name": "Initialization Specialist",
+                "kind": "specialist",
+                "agent_role": "specialist",
+                "provider": "openai-compatible",
+                "model": "gpt-5.5-mini",
+                "tools": ["file.read", "native.connector.call"],
+                "tool_policy": {
+                    "connector_scope": {
+                        "mode": "commit_write",
+                        "allowed_connector_ids": ["specialist-connector"],
+                        "allowed_tool_names": ["specialist-operation"],
+                        "tenant_scope": {"workspace_id": "workflow-test"},
+                        "side_effect_classes": ["specialist_write"],
+                        "native_operation_bindings": [{
+                            "connector_id": "specialist-connector",
+                            "operation": "specialist-operation",
+                            "side_effect_class": "specialist_write"
+                        }]
+                    },
+                    "external_effects": {
+                        "specialist_write": true,
+                        "unrelated_write": false
+                    }
+                }
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let specialist_version: AgentVersion = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/agents/{}/versions/1", specialist.id))
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let definition: WorkflowDefinition = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-definitions",
+            json!({
+                "name": "Cross-agent initialization",
+                "entrypoint": "cross-agent-initialization",
+                "default_agent_id": primary_agent.id,
+                "step_graph": {
+                    "steps": [{
+                        "key": "specialist-start",
+                        "type": "agent",
+                        "agent_id": specialist.id,
+                        "agent_version_id": specialist_version.id,
+                        "start": true
+                    }]
+                },
+                "handoff_rules": {
+                    "root_task_grant": {
+                        "tool_scope": {
+                            "read": ["file.read"],
+                            "write": [],
+                            "external_write": ["native.connector.call"]
+                        },
+                        "connector_scope": {
+                            "mode": "commit_write",
+                            "allowed_connector_ids": [
+                                "specialist-connector",
+                                "unrelated-connector"
+                            ],
+                            "allowed_tool_names": [
+                                "specialist-operation",
+                                "unrelated-operation"
+                            ],
+                            "tenant_scope": {"workspace_id": "workflow-test"},
+                            "side_effect_classes": [
+                                "specialist_write",
+                                "unrelated_write"
+                            ],
+                            "native_operation_bindings": [
+                                {
+                                    "connector_id": "specialist-connector",
+                                    "operation": "specialist-operation",
+                                    "side_effect_class": "specialist_write"
+                                },
+                                {
+                                    "connector_id": "unrelated-connector",
+                                    "operation": "unrelated-operation",
+                                    "side_effect_class": "unrelated_write"
+                                }
+                            ]
+                        },
+                        "external_effects": {
+                            "specialist_write": true,
+                            "unrelated_write": true
+                        }
+                    }
+                },
+                "release_state": "released"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+
+    let run: WorkflowRun = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-runs",
+            json!({
+                "workflow_definition_id": definition.id,
+                "title": "materialize specialist start"
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    assert_eq!(run.status, "queued");
+
+    let steps: Vec<WorkflowStepRun> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/workflow-runs/{}/steps", run.id))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let start_step = steps
+        .iter()
+        .find(|step| step.step_key == "specialist-start")
+        .expect("cross-agent start step");
+    assert_eq!(start_step.status, "queued");
+    assert_eq!(start_step.agent_id, Some(specialist.id));
+    assert_eq!(start_step.agent_version_id, Some(specialist_version.id));
+    assert_ne!(start_step.session_id, Some(run.primary_session_id));
+
+    let grants: Vec<TaskGrant> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/workflow-runs/{}/task-grants", run.id))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let root_grant = grants
+        .iter()
+        .find(|grant| Some(grant.id) == run.root_task_grant_id)
+        .expect("root task grant");
+    let child_grant = grants
+        .iter()
+        .find(|grant| grant.id == start_step.task_grant_id.expect("child grant id"))
+        .expect("cross-agent child grant");
+    assert_eq!(child_grant.parent_grant_id, run.root_task_grant_id);
+    assert_eq!(child_grant.grantee_agent_id, Some(specialist.id));
+    assert_eq!(child_grant.workflow_step_run_id, Some(start_step.id));
+    assert_eq!(
+        child_grant.connector_scope["allowed_connector_ids"],
+        json!(["specialist-connector"])
+    );
+    assert_eq!(
+        child_grant.connector_scope["allowed_tool_names"],
+        json!(["specialist-operation"])
+    );
+    assert_eq!(
+        child_grant.connector_scope["native_operation_bindings"],
+        json!([{
+            "connector_id": "specialist-connector",
+            "operation": "specialist-operation",
+            "side_effect_class": "specialist_write"
+        }])
+    );
+    assert_eq!(
+        child_grant.external_effects,
+        json!({
+            "specialist_write": true,
+            "unrelated_write": false
+        })
+    );
+    assert!(
+        task_grant_connector_invocation_denial(
+            child_grant,
+            "native.connector.call",
+            &json!({
+                "connector_id": "specialist-connector",
+                "operation": "specialist-operation",
+                "side_effect_class": "specialist_write"
+            }),
+        )
+        .expect("specialist connector scope is valid")
+        .is_none()
+    );
+    assert!(
+        task_grant_connector_invocation_denial(
+            child_grant,
+            "native.connector.call",
+            &json!({
+                "connector_id": "unrelated-connector",
+                "operation": "unrelated-operation",
+                "side_effect_class": "unrelated_write"
+            }),
+        )
+        .expect("unrelated connector request is valid")
+        .is_some()
+    );
+
+    let mut read_only_version = specialist_version.clone();
+    read_only_version.approval_policy["connector_scope"]["mode"] = json!("read_only");
+    let (read_only_scope, read_only_effects) = child_connector_scopes_for_agent_version(
+        &root_grant.connector_scope,
+        &root_grant.external_effects,
+        &read_only_version,
+    )
+    .expect("read-only target policy is valid");
+    assert_eq!(read_only_scope["native_operation_bindings"], json!([]));
+    assert_eq!(read_only_effects["specialist_write"], json!(false));
+
+    let mut legacy_root_scope = root_grant.connector_scope.clone();
+    legacy_root_scope
+        .as_object_mut()
+        .expect("legacy root connector scope")
+        .remove("native_operation_bindings");
+    let (legacy_scope, legacy_effects) = child_connector_scopes_for_agent_version(
+        &legacy_root_scope,
+        &root_grant.external_effects,
+        &specialist_version,
+    )
+    .expect("legacy root scope is valid");
+    assert_eq!(legacy_scope["allowed_connector_ids"], json!([]));
+    assert_eq!(legacy_scope["allowed_tool_names"], json!([]));
+    assert_eq!(legacy_effects["specialist_write"], json!(false));
+
+    let approval_definition: WorkflowDefinition = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-definitions",
+            json!({
+                "name": "Approval-blocked cross-agent initialization",
+                "entrypoint": "approval-blocked-cross-agent-initialization",
+                "default_agent_id": primary_agent.id,
+                "step_graph": {
+                    "steps": [{
+                        "key": "specialist-approval-start",
+                        "type": "agent",
+                        "agent_id": specialist.id,
+                        "agent_version_id": specialist_version.id,
+                        "start": true,
+                        "risk_level": "high",
+                        "approval_required": true
+                    }]
+                },
+                "release_state": "released"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let approval_run: WorkflowRun = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-runs",
+            json!({
+                "workflow_definition_id": approval_definition.id,
+                "title": "wait for specialist start approval"
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    assert_eq!(approval_run.status, "requires_action");
+    assert_eq!(approval_run.started_at, None);
+
+    let approval_steps: Vec<WorkflowStepRun> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/workflow-runs/{}/steps", approval_run.id))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let approval_step = approval_steps
+        .iter()
+        .find(|step| step.step_key == "specialist-approval-start")
+        .expect("approval-blocked start step");
+    assert_eq!(approval_step.status, "requires_action");
+    assert_eq!(approval_step.agent_id, Some(specialist.id));
+    assert_eq!(approval_step.agent_version_id, Some(specialist_version.id));
+    assert_eq!(approval_step.session_id, None);
+    assert_eq!(approval_step.task_grant_id, None);
+    assert_eq!(
+        approval_step.output_payload["block_reason"],
+        json!("handoff_approval_required")
+    );
+
+    let approval_grants: Vec<TaskGrant> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!(
+                "/api/workflow-runs/{}/task-grants",
+                approval_run.id
+            ))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(approval_grants.len(), 1);
+    assert_eq!(
+        approval_grants[0].id,
+        approval_run.root_task_grant_id.expect("root task grant id")
+    );
+
+    let persisted_approval_run: WorkflowRun = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/workflow-runs/{}", approval_run.id))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(persisted_approval_run.status, "requires_action");
+    let approval_events: Vec<SessionEvent> = request_json(
+        app,
+        Request::builder()
+            .uri(format!(
+                "/api/sessions/{}/events",
+                approval_run.primary_session_id
+            ))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(approval_events.iter().any(|event| {
+        event.event_type == "workflow.run.created"
+            && event.payload["workflow_run_id"] == json!(approval_run.id)
+            && event.payload["status"] == json!("requires_action")
+    }));
+}
+
+#[tokio::test]
 async fn workflow_step_run_rejects_agent_version_without_agent_boundary() {
     let app = test_app().await;
     let agents: Vec<Agent> = request_json(
@@ -16100,6 +18977,158 @@ async fn workflow_step_run_rejects_agent_version_without_agent_boundary() {
     assert_eq!(
         error["error"],
         "workflow step agent_version_id must match its session agent version"
+    );
+}
+
+#[tokio::test]
+async fn workflow_step_validates_child_grant_before_creating_child_session() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let app = build_router(state.clone());
+    let agents: Vec<Agent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/agents")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let manager = agents.first().expect("seeded manager");
+    let specialist: Agent = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/agents",
+            json!({
+                "name": "Budgeted Child Agent",
+                "kind": "specialist",
+                "agent_role": "specialist",
+                "provider": "openai-compatible",
+                "model": "gpt-5.5-mini",
+                "tools": ["file.read"]
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let specialist_version: AgentVersion = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/agents/{}/versions/1", specialist.id))
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let definition: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-definitions",
+            json!({
+                "name": "Budget validated before child session",
+                "entrypoint": "budget-before-session",
+                "default_agent_id": manager.id,
+                "step_graph": {
+                    "steps": [
+                        {"key": "manager-step", "type": "agent", "start": true},
+                        {
+                            "key": "budgeted-child",
+                            "type": "agent",
+                            "agent_id": specialist.id,
+                            "agent_version_id": specialist_version.id,
+                            "depends_on": ["manager-step"]
+                        }
+                    ]
+                },
+                "handoff_rules": {
+                    "root_task_grant": {
+                        "max_turns": 1,
+                        "tool_scope": {
+                            "read": ["file.read"],
+                            "write": [],
+                            "external_write": []
+                        }
+                    }
+                },
+                "release_state": "released"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let run: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-runs",
+            json!({
+                "workflow_definition_id": definition["id"],
+                "title": "exhaust parent budget"
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    let root_grant_id = Uuid::parse_str(
+        run["root_task_grant_id"]
+            .as_str()
+            .expect("root task grant id"),
+    )
+    .expect("root task grant UUID");
+    state
+        .reserve_task_grant_turn(root_grant_id)
+        .await
+        .expect("consume root turn budget");
+    let sessions_before = state
+        .list_sessions()
+        .await
+        .expect("sessions before failure");
+    let steps: Vec<WorkflowStepRun> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!(
+                "/api/workflow-runs/{}/steps",
+                run["id"].as_str().unwrap()
+            ))
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let manager_step_id = steps
+        .iter()
+        .find(|step| step.step_key == "manager-step")
+        .map(|step| step.id)
+        .expect("manager start step");
+
+    let (status, error) = request_value(
+        app,
+        json_request_with_headers(
+            "PATCH",
+            &format!("/api/workflow-step-runs/{manager_step_id}"),
+            json!({"status": "completed"}),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(
+        error["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("budget is exhausted")),
+        "unexpected error: {error}"
+    );
+    let sessions_after = state.list_sessions().await.expect("sessions after failure");
+    assert_eq!(sessions_after.len(), sessions_before.len());
+    assert_eq!(
+        state
+            .list_task_grants_for_workflow_run(
+                Uuid::parse_str(run["id"].as_str().unwrap()).expect("run UUID")
+            )
+            .await
+            .expect("task grants")
+            .len(),
+        1
     );
 }
 
@@ -16756,7 +19785,7 @@ async fn terminal_workflow_run_closes_active_task_grants() {
     )
     .await;
     let run: WorkflowRun = request_json(
-        app,
+        app.clone(),
         json_request_with_headers(
             "POST",
             "/api/workflow-runs",
@@ -16779,6 +19808,32 @@ async fn terminal_workflow_run_closes_active_task_grants() {
             .status,
         "completed"
     );
+
+    let steps_before = state
+        .list_workflow_step_runs(run.id)
+        .await
+        .expect("steps before terminal append attempt");
+    let (status, error) = request_value(
+        app,
+        json_request_with_headers(
+            "POST",
+            &format!("/api/workflow-runs/{}/steps", run.id),
+            json!({
+                "step_key": "late-terminal-step",
+                "step_type": "agent",
+                "status": "queued"
+            }),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(error["error"], json!("workflow run is not executable"));
+    let steps_after = state
+        .list_workflow_step_runs(run.id)
+        .await
+        .expect("steps after terminal append attempt");
+    assert_eq!(steps_after.len(), steps_before.len());
 }
 
 #[tokio::test]
@@ -18359,7 +21414,7 @@ async fn remote_computer_readiness_separates_agent_sandbox_static_and_live_evide
     assert_eq!(readiness["agent_sandbox"]["production_blocked"], true);
     assert_eq!(
         readiness["agent_sandbox"]["runtime_image"],
-        "mandoforge-agent-sandbox-runtime:0.1.1"
+        "ghcr.io/proerror77/mandoforge/mandoforge-agent-sandbox-runtime@sha256:24225491d9c9bffbef6bd13fe538da86c7fb2549e5641d9864f2ef593a5379e3"
     );
     assert_eq!(
         readiness["agent_sandbox"]["tracked_context_builder_present"],
@@ -26973,7 +30028,7 @@ async fn rendered_context_pins_active_ontology_release_by_domain_scope() {
     let active = promote_ontology_release_with_actor(&state, release.id, "test")
         .await
         .expect("promote release");
-    let app = build_router(state);
+    let app = build_router(state.clone());
     let admin_headers = [
         ("x-mandoforge-subject", "admin-1"),
         ("x-mandoforge-roles", "admin"),
@@ -27039,6 +30094,14 @@ async fn rendered_context_pins_active_ontology_release_by_domain_scope() {
             .expect("valid request"),
     )
     .await;
+    let replacement =
+        ontology_release_candidate_for_test(&state, "commerce-vtest-runtime-pin-replacement").await;
+    gate_ontology_release_with_actor(&state, replacement.id, "test")
+        .await
+        .expect("gate replacement release");
+    promote_ontology_release_with_actor(&state, replacement.id, "test")
+        .await
+        .expect("promote replacement release");
     let rendered: RenderedExecutionContext = request_json(
         app,
         json_request_with_headers(
@@ -27082,6 +30145,344 @@ async fn rendered_context_pins_active_ontology_release_by_domain_scope() {
             .iter()
             .any(|tool| tool == "codex.exec")
     );
+}
+
+#[tokio::test]
+async fn workflow_run_pins_ontology_release_before_context_packet_generation() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let initial =
+        ontology_release_candidate_for_test(&state, "commerce-vtest-workflow-runtime-pin").await;
+    gate_ontology_release_with_actor(&state, initial.id, "test")
+        .await
+        .expect("gate initial release");
+    let initial = promote_ontology_release_with_actor(&state, initial.id, "test")
+        .await
+        .expect("promote initial release");
+    let definition =
+        ontology_release_trigger_workflow_definition_for_test(&state, "commerce").await;
+    let run = create_workflow_run_from_definition(
+        &state,
+        &definition,
+        "Pinned ontology workflow".to_string(),
+        empty_json_object(),
+        empty_json_object(),
+    )
+    .await
+    .expect("workflow run");
+    assert_eq!(
+        run.runtime_envelope["ontology_release"]["id"],
+        json!(initial.id)
+    );
+    assert_eq!(
+        run.runtime_envelope["ontology_release"]["pinned_by"],
+        json!("workflow_run_start")
+    );
+
+    let replacement = ontology_release_candidate_for_test(
+        &state,
+        "commerce-vtest-workflow-runtime-pin-replacement",
+    )
+    .await;
+    gate_ontology_release_with_actor(&state, replacement.id, "test")
+        .await
+        .expect("gate replacement release");
+    let replacement = promote_ontology_release_with_actor(&state, replacement.id, "test")
+        .await
+        .expect("promote replacement release");
+    assert_ne!(replacement.id, initial.id);
+
+    let packet = build_context_packet(&state, run.primary_session_id)
+        .await
+        .expect("context packet");
+    assert_eq!(
+        packet.replay_summary["ontology_release"]["id"],
+        json!(initial.id)
+    );
+    assert_eq!(
+        packet.replay_summary["task_grant_authority"]["approval_policy"]["ontology_release_snapshot"]
+            ["id"],
+        json!(initial.id)
+    );
+    let layers = packet.replay_summary["context_layers"]
+        .as_object()
+        .expect("eight context layers");
+    assert_eq!(layers.len(), 8);
+    for layer in [
+        "work_surfaces",
+        "collaboration",
+        "manager_agent",
+        "managed_runtime",
+        "governance",
+        "ontology_action_contract",
+        "environment_scheduling",
+        "execution_substrate",
+    ] {
+        assert!(layers.contains_key(layer), "missing context layer {layer}");
+    }
+    assert_eq!(packet.task["workflow_run_id"], json!(run.id));
+    assert!(packet.source_refs.iter().any(|source| {
+        source.source_type == "ontology_release" && source.source_id == initial.id.to_string()
+    }));
+    let rendered = render_execution_context_for_packet(
+        &state,
+        &packet,
+        RenderContextPacketRequest {
+            max_prompt_tokens: None,
+            max_objects: None,
+            max_summary_chars: None,
+            max_policy_reminders: None,
+            allow_full_content: None,
+            allow_on_demand_fetch: None,
+        },
+    )
+    .await
+    .expect("render context");
+    assert_eq!(
+        rendered.ontology_scope["ontology_release"]["id"],
+        json!(initial.id)
+    );
+}
+
+#[tokio::test]
+async fn http_workflow_run_pins_ontology_release_into_root_task_grant() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let initial =
+        ontology_release_candidate_for_test(&state, "commerce-vtest-http-workflow-pin").await;
+    gate_ontology_release_with_actor(&state, initial.id, "test")
+        .await
+        .expect("gate initial release");
+    let initial = promote_ontology_release_with_actor(&state, initial.id, "test")
+        .await
+        .expect("promote initial release");
+    let definition =
+        ontology_release_trigger_workflow_definition_for_test(&state, "commerce").await;
+    let app = build_router(state.clone());
+
+    let run: WorkflowRun = request_json(
+        app,
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-runs",
+            json!({"workflow_definition_id": definition.id}),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+
+    assert_eq!(
+        run.runtime_envelope["ontology_release"]["id"],
+        json!(initial.id)
+    );
+    assert_eq!(
+        run.runtime_envelope["ontology_release"]["pinned_by"],
+        json!("workflow_run_start")
+    );
+    let root_grant = state
+        .get_task_grant(run.root_task_grant_id.expect("root task grant"))
+        .await
+        .expect("root task grant");
+    assert_eq!(
+        root_grant.approval_policy["ontology_release_snapshot"]["id"],
+        json!(initial.id)
+    );
+}
+
+#[tokio::test]
+async fn ontology_action_tool_executes_pinned_contract_as_proposal_only() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let release = ontology_release_candidate_for_test(&state, "commerce-vtest-action-tool").await;
+    gate_ontology_release_with_actor(&state, release.id, "test")
+        .await
+        .expect("gate release");
+    let release = promote_ontology_release_with_actor(&state, release.id, "test")
+        .await
+        .expect("promote release");
+    let agent = state
+        .create_agent(CreateAgent {
+            name: "Ontology Action Agent".to_string(),
+            kind: "specialist".to_string(),
+            provider: "openai-compatible".to_string(),
+            model: "gpt-5.5-mini".to_string(),
+            team_id: None,
+            project_id: None,
+            runtime_profile_id: None,
+            agent_role: "specialist".to_string(),
+            system_prompt: "Execute only pinned ontology action contracts.".to_string(),
+            runtime_config: empty_json_object(),
+            tools: vec!["ontology.action.execute".to_string()],
+            tool_policy: empty_json_object(),
+            mcp_server_ids: Vec::new(),
+            skill_ids: Vec::new(),
+            workflow_pack_ids: Vec::new(),
+            remote_computer_profile: empty_json_object(),
+            semantic_scopes: json!({
+                "domain_scope": "commerce",
+                "workflow_scope": "ontology-action-tool",
+                "share_policy": "tenant_only"
+            }),
+            release_state: "active".to_string(),
+        })
+        .await
+        .expect("agent");
+    let now = Utc::now();
+    let definition = state
+        .create_workflow_definition(WorkflowDefinition {
+            id: Uuid::new_v4(),
+            pack_installation_id: None,
+            pack_id: None,
+            pack_version: None,
+            name: "Ontology action contract workflow".to_string(),
+            entrypoint: "ontology-action-tool".to_string(),
+            trigger_type: "manual".to_string(),
+            default_agent_id: agent.id,
+            default_environment_id: None,
+            input_schema_ref: None,
+            output_schema_ref: None,
+            step_graph: empty_json_object(),
+            handoff_rules: json!({
+                "root_task_grant": {
+                    "semantic_scopes": {
+                        "domain_scope": "commerce",
+                        "workflow_scope": "ontology-action-tool",
+                        "share_policy": "tenant_only"
+                    },
+                    "tool_scope": {
+                        "read": [],
+                        "write": ["ontology.action.execute"],
+                        "external_write": []
+                    }
+                }
+            }),
+            execution_strategy: default_workflow_execution_strategy(),
+            runtime_adapter: None,
+            runtime_mode: None,
+            runtime_capability_contract: empty_json_object(),
+            event_ingestion_policy: default_event_ingestion_policy(),
+            approval_policy_ref: None,
+            eval_gate_refs: Vec::new(),
+            release_state: "released".to_string(),
+            created_at: now,
+            updated_at: now,
+            archived_at: None,
+        })
+        .await
+        .expect("definition");
+    let run = create_workflow_run_from_definition(
+        &state,
+        &definition,
+        "Draft refund proposal".to_string(),
+        empty_json_object(),
+        empty_json_object(),
+    )
+    .await
+    .expect("workflow run");
+    let packet = generate_and_persist_context_packet(&state, run.primary_session_id)
+        .await
+        .expect("context packet");
+    let grant_id = run.root_task_grant_id.expect("root task grant");
+    state
+        .update_task_grant_context_packet(grant_id, packet.id)
+        .await
+        .expect("bind context packet");
+    let (_, _, rendered, provider_tools) =
+        build_provider_context_packet(&state, run.primary_session_id)
+            .await
+            .expect("provider context");
+    let rendered = rendered.expect("rendered context");
+    assert_eq!(rendered["task"]["workflow_run_id"], json!(run.id));
+    assert_eq!(
+        rendered["context_layers"]["ontology_action_contract"]["ontology_release"]["id"],
+        json!(release.id)
+    );
+    assert!(
+        provider_tools
+            .iter()
+            .any(|tool| tool == "ontology.action.execute")
+    );
+    assert!(
+        rendered["available_tools"]
+            .as_array()
+            .is_some_and(|tools| tools.iter().any(|tool| tool == "ontology.action.execute"))
+    );
+    let result = execute_tool_invocation(
+        &state,
+        "ontology.action.execute",
+        ExecuteTool {
+            session_id: run.primary_session_id,
+            task_grant_id: Some(grant_id),
+            args: json!({
+                "context_packet_id": packet.id,
+                "action": "commerce.refund_order",
+                "parameters": {
+                    "order_id": "order-1",
+                    "amount": 12.5,
+                    "reason": "customer request"
+                }
+            }),
+        },
+        ToolInvocationOrigin::ManualRoute,
+    )
+    .await
+    .expect("ontology action proposal");
+
+    assert_eq!(result["status"], json!("proposal_created"));
+    assert_eq!(result["ontology_release_id"], json!(release.id));
+    assert_eq!(result["action"], json!("commerce.refund_order"));
+    assert_eq!(result["execution_mode"], json!("proposal_only"));
+    let artifact_id = result["artifact_id"].as_str().expect("artifact id");
+    let artifacts = state
+        .list_artifacts(run.primary_session_id)
+        .await
+        .expect("artifacts");
+    assert!(artifacts.iter().any(|artifact| {
+        artifact.id.to_string() == artifact_id
+            && artifact.content["status"] == json!("draft")
+            && artifact.content["ontology_release_id"] == json!(release.id)
+    }));
+    let error = execute_tool_invocation(
+        &state,
+        "ontology.action.execute",
+        ExecuteTool {
+            session_id: run.primary_session_id,
+            task_grant_id: Some(grant_id),
+            args: json!({
+                "context_packet_id": packet.id,
+                "action": "commerce.refund_order",
+                "parameters": {
+                    "order_id": "order-2",
+                    "amount": "not-a-number"
+                }
+            }),
+        },
+        ToolInvocationOrigin::ManualRoute,
+    )
+    .await
+    .expect_err("published input contract must reject invalid parameters");
+    assert!(error.message.contains("amount must be decimal"));
+
+    let error = execute_tool_invocation(
+        &state,
+        "ontology.action.execute",
+        ExecuteTool {
+            session_id: run.primary_session_id,
+            task_grant_id: Some(grant_id),
+            args: json!({
+                "context_packet_id": packet.id,
+                "action": "commerce.refund_order",
+                "parameters": {
+                    "order_id": "order-3",
+                    "amount": 8.0,
+                    "reason": "customer request",
+                    "unpublished_override": true
+                }
+            }),
+        },
+        ToolInvocationOrigin::ManualRoute,
+    )
+    .await
+    .expect_err("published input contract must reject undeclared parameters");
+    assert!(error.message.contains("unpublished_override"));
+    assert!(error.message.contains("not declared"));
 }
 
 #[tokio::test]
@@ -27348,7 +30749,22 @@ async fn context_packets_are_versioned_persisted_and_include_semantic_objects() 
     assert_eq!(rendered.context_packet_id, packet_v1.id);
     assert_eq!(rendered.context_packet_version, 1);
     assert_eq!(rendered.ontology_scope["workflow_scope"], "context-os");
-    assert_eq!(rendered.relevant_objects.len(), 1);
+    assert_eq!(
+        rendered
+            .context_layers
+            .as_object()
+            .map(|layers| layers.len()),
+        Some(8)
+    );
+    assert_eq!(
+        rendered.relevant_objects.len(),
+        1,
+        "budget={:?} task={} context_layers={}",
+        rendered.budget,
+        rendered.task,
+        rendered.context_layers
+    );
+    assert!(rendered.budget.estimated_tokens_used <= rendered.budget.max_prompt_tokens);
     assert!(!rendered.full_content_included);
     assert!(rendered.fetchable_object_ids.contains(&semantic_object.id));
     assert!(
@@ -30420,15 +33836,27 @@ async fn native_connector_commit_write_enforces_side_effect_scope_and_exact_bind
                     },
                     "connector_scope": {
                         "mode": "commit_write",
-                        "allowed_connector_ids": ["ad-platform"],
-                        "allowed_tool_names": ["launch_campaign"],
+                        "allowed_connector_ids": ["ad-platform", "crm-platform"],
+                        "allowed_tool_names": ["launch_campaign", "send_message"],
                         "tenant_scope": {"workspace_id": "growth-prod"},
-                        "side_effect_classes": ["ad_spend_mutation"]
+                        "side_effect_classes": ["ad_spend_mutation", "external_message"],
+                        "native_operation_bindings": [
+                            {
+                                "connector_id": "ad-platform",
+                                "operation": "launch_campaign",
+                                "side_effect_class": "ad_spend_mutation"
+                            },
+                            {
+                                "connector_id": "crm-platform",
+                                "operation": "send_message",
+                                "side_effect_class": "external_message"
+                            }
+                        ]
                     },
                     "external_effects": {
                         "publish": false,
                         "payment": false,
-                        "external_message": false,
+                        "external_message": true,
                         "account_mutation": false,
                         "ad_spend_mutation": true
                     }
@@ -30475,6 +33903,38 @@ async fn native_connector_commit_write_enforces_side_effect_scope_and_exact_bind
                     "task_grant_id": root_task_grant_id,
                     "args": {
                         "connector_id": "ad-platform",
+                        "operation": "send_message",
+                        "side_effect_class": "external_message",
+                        "payload": {"recipient": "customer-1", "message": "hello"}
+                    }
+                })
+                .to_string(),
+            ))
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(
+        denied["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("operation binding")
+    );
+
+    let (status, denied) = request_value(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri("/api/tools/native.connector.call/execute")
+            .header("content-type", "application/json")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::from(
+                json!({
+                    "session_id": run.primary_session_id,
+                    "task_grant_id": root_task_grant_id,
+                    "args": {
+                        "connector_id": "ad-platform",
                         "operation": "launch_campaign",
                         "side_effect_class": "publish",
                         "payload": {"campaign_id": "cmp-1", "daily_budget_usd": 100}
@@ -30490,7 +33950,7 @@ async fn native_connector_commit_write_enforces_side_effect_scope_and_exact_bind
         denied["error"]
             .as_str()
             .unwrap_or_default()
-            .contains("side effect class")
+            .contains("operation binding")
     );
 
     let approval_required: Value = request_json(
@@ -39059,8 +42519,12 @@ async fn admin_can_create_eval_dataset_cases_and_version_bound_run() {
     assert_eq!(post_rollback_summary.release_count, 5);
     assert_eq!(post_rollback_summary.pending_count, 0);
     assert_eq!(post_rollback_summary.rolled_back_count, 1);
-    assert_eq!(post_rollback_summary.promoted_count, 2);
+    assert_eq!(post_rollback_summary.promoted_count, 1);
     assert_eq!(post_rollback_summary.rejected_count, 2);
+    assert_eq!(
+        post_rollback_summary.by_status.get("superseded").copied(),
+        Some(1)
+    );
 
     let rollback_audit_logs: Vec<AuditLog> = request_json(
         app.clone(),

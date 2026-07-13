@@ -400,9 +400,11 @@ pub(crate) fn default_provider_tool_names() -> Vec<String> {
         "sql.query",
         "shell.exec",
         "codex.exec",
+        "artifact.create",
         "semantic_object.fetch",
         "semantic_object.search",
         "semantic_link.expand",
+        "ontology.action.execute",
         "ontology_type.lookup",
     ]
     .into_iter()
@@ -485,6 +487,40 @@ fn provider_tool_schemas(allowed_tool_names: &[String]) -> Value {
         json!({
             "type": "function",
             "function": {
+                "name": "artifact.create",
+                "description": "Create a governed session artifact from normalized output.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "artifact_type": {"type": "string"},
+                        "path": {"type": "string"},
+                        "content": {}
+                    },
+                    "required": ["name", "content"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "native.connector.call",
+                "description": "Request a policy-governed native connector operation. External effects require an exact approval commit binding.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "connector_id": {"type": "string"},
+                        "operation": {"type": "string"},
+                        "side_effect_class": {"type": "string"},
+                        "payload": {"type": "object"}
+                    },
+                    "required": ["connector_id", "operation", "side_effect_class", "payload"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
                 "name": "semantic_object.fetch",
                 "description": "Fetch a semantic object that is already visible in the current context packet.",
                 "parameters": {
@@ -529,6 +565,22 @@ fn provider_tool_schemas(allowed_tool_names: &[String]) -> Value {
                         "max_links": {"type": "integer", "minimum": 1, "maximum": 50}
                     },
                     "required": ["context_packet_id", "object_id"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "ontology.action.execute",
+                "description": "Validate an action from the pinned ontology release and create a proposal-only artifact. This never commits external side effects.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "context_packet_id": {"type": "string", "description": "The current rendered_context_packet.context_packet_id."},
+                        "action": {"type": "string", "description": "Published action name from the pinned ontology release."},
+                        "parameters": {"type": "object", "description": "Parameters matching the published action contract."}
+                    },
+                    "required": ["context_packet_id", "action", "parameters"]
                 }
             }
         }),
@@ -674,10 +726,25 @@ fn redact_provider_error(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        OpenAiCompatibleProviderClient, provider_api_key_from_env_value,
-        provider_api_key_secret_ref,
+        OpenAiCompatibleProviderClient, default_provider_tool_names,
+        provider_api_key_from_env_value, provider_api_key_secret_ref, provider_tool_schemas,
     };
     use crate::secrets::ReservedSecretProvider;
+
+    #[test]
+    fn default_tools_exclude_approval_only_native_connector_calls() {
+        let default_tools = default_provider_tool_names();
+
+        assert!(
+            !default_tools
+                .iter()
+                .any(|tool| tool == "native.connector.call")
+        );
+        assert_eq!(
+            provider_tool_schemas(&["native.connector.call".to_string()])[0]["function"]["name"],
+            "native.connector.call"
+        );
+    }
 
     #[test]
     fn parses_provider_api_key_vault_reference() {

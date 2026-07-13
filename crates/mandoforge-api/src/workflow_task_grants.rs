@@ -19,6 +19,19 @@ pub(crate) async fn issue_root_task_grant_for_workflow_run(
     } else {
         grantee_agent.agent_role.clone()
     };
+    let mut approval_policy = workflow_definition_root_task_grant_scope(
+        definition,
+        "approval_policy",
+        default_task_grant_approval_policy,
+    );
+    if let Some(ontology_release) = run.runtime_envelope.get("ontology_release")
+        && let Some(policy) = approval_policy.as_object_mut()
+    {
+        policy.insert(
+            "ontology_release_snapshot".to_string(),
+            ontology_release.clone(),
+        );
+    }
     let grant = TaskGrant {
         id: Uuid::new_v4(),
         workflow_run_id: run.id,
@@ -71,11 +84,7 @@ pub(crate) async fn issue_root_task_grant_for_workflow_run(
             "connector_scope",
             default_task_grant_connector_scope,
         ),
-        approval_policy: workflow_definition_root_task_grant_scope(
-            definition,
-            "approval_policy",
-            default_task_grant_approval_policy,
-        ),
+        approval_policy,
         external_effects: workflow_definition_root_task_grant_scope(
             definition,
             "external_effects",
@@ -717,6 +726,27 @@ pub(crate) fn task_grant_connector_invocation_denial(
         return Ok(Some(
             "native connector side effects require commit_write connector scope".to_string(),
         ));
+    }
+    if let Some(bindings) = grant.connector_scope.get("native_operation_bindings") {
+        let bindings = bindings.as_array().ok_or_else(|| {
+            AppError::bad_request(
+                "task grant connector scope native_operation_bindings must be an array",
+            )
+        })?;
+        let binding_allowed = bindings.iter().any(|binding| {
+            binding.get("connector_id").and_then(Value::as_str)
+                == Some(target.connector_id.as_str())
+                && binding.get("operation").and_then(Value::as_str)
+                    == Some(target.operation.as_str())
+                && binding.get("side_effect_class").and_then(Value::as_str)
+                    == Some(target.side_effect_class.as_str())
+        });
+        if !binding_allowed {
+            return Ok(Some(
+                "task grant connector scope does not allow native connector operation binding"
+                    .to_string(),
+            ));
+        }
     }
     if !json_string_array_contains(
         grant.connector_scope.get("allowed_connector_ids"),

@@ -9,6 +9,18 @@ use uuid::Uuid;
 
 use crate::*;
 
+#[derive(Clone)]
+pub(crate) struct WorkflowPackAgentRuntimeTarget {
+    pub(crate) agent: Agent,
+    pub(crate) version: AgentVersion,
+}
+
+pub(crate) struct WorkflowPackRuntimeMaterialization {
+    pub(crate) bindings: Vec<WorkflowPackBinding>,
+    pub(crate) agents: Vec<(Agent, AgentVersion)>,
+    pub(crate) workflow_definitions: Vec<WorkflowDefinition>,
+}
+
 pub(crate) fn load_and_validate_workflow_pack(
     manifest_path: &str,
 ) -> Result<
@@ -284,57 +296,321 @@ pub(crate) fn workflow_pack_default_profile_assets(
         .collect()
 }
 
+pub(crate) fn workflow_pack_agent_binding_needs_runtime_migration(
+    binding: &WorkflowPackBinding,
+) -> bool {
+    if binding.binding_type != "agent" {
+        return false;
+    }
+    binding.target_id.is_none()
+        || binding
+            .materialized_payload
+            .get("agent_id")
+            .and_then(Value::as_str)
+            .is_none()
+        || binding
+            .materialized_payload
+            .get("agent_version_id")
+            .and_then(Value::as_str)
+            .is_none()
+}
+
 pub(crate) async fn workflow_pack_materialized_bindings_with_runtime_targets(
     state: &AppState,
     installation: &WorkflowPackInstallation,
     profile_assets: &[WorkflowPackProfileAsset],
-) -> Result<Vec<WorkflowPackBinding>, AppError> {
+) -> Result<WorkflowPackRuntimeMaterialization, AppError> {
     let mut bindings = workflow_pack_materialized_bindings(installation, profile_assets, "staged")?;
+    let agent_targets = workflow_pack_materialize_agents(state, installation).await?;
     let workflow_definitions =
-        workflow_pack_materialize_workflow_definitions(state, installation).await?;
+        workflow_pack_materialize_workflow_definitions(installation, &agent_targets)?;
     for binding in &mut bindings {
-        if binding.binding_type != "workflow" {
-            continue;
+        match binding.binding_type.as_str() {
+            "agent" => {
+                let Some(target) = agent_targets.get(&binding.binding_key) else {
+                    continue;
+                };
+                binding.target_id = Some(target.version.id);
+                let Value::Object(payload) = &mut binding.materialized_payload else {
+                    continue;
+                };
+                payload.insert("agent_id".to_string(), json!(target.agent.id));
+                payload.insert("agent_version_id".to_string(), json!(target.version.id));
+                payload.insert("version".to_string(), json!(target.version.version));
+                payload.insert(
+                    "release_state".to_string(),
+                    json!(target.agent.release_state),
+                );
+            }
+            "workflow" => {
+                let Some(definition) = workflow_definitions.get(&binding.binding_key) else {
+                    continue;
+                };
+                binding.target_id = Some(definition.id);
+                let Value::Object(payload) = &mut binding.materialized_payload else {
+                    continue;
+                };
+                payload.insert("workflow_definition_id".to_string(), json!(definition.id));
+                payload.insert("release_state".to_string(), json!(definition.release_state));
+                payload.insert(
+                    "execution_strategy".to_string(),
+                    json!(definition.execution_strategy),
+                );
+                payload.insert(
+                    "runtime_adapter".to_string(),
+                    json!(definition.runtime_adapter),
+                );
+                payload.insert("runtime_mode".to_string(), json!(definition.runtime_mode));
+                payload.insert(
+                    "step_count".to_string(),
+                    json!(
+                        definition
+                            .step_graph
+                            .get("steps")
+                            .and_then(Value::as_array)
+                            .map_or(0, Vec::len)
+                    ),
+                );
+            }
+            _ => {}
         }
-        let Some(definition) = workflow_definitions.get(&binding.binding_key) else {
-            continue;
-        };
-        binding.target_id = Some(definition.id);
-        let Value::Object(payload) = &mut binding.materialized_payload else {
-            continue;
-        };
-        payload.insert("workflow_definition_id".to_string(), json!(definition.id));
-        payload.insert("release_state".to_string(), json!(definition.release_state));
-        payload.insert(
-            "execution_strategy".to_string(),
-            json!(definition.execution_strategy),
-        );
-        payload.insert(
-            "runtime_adapter".to_string(),
-            json!(definition.runtime_adapter),
-        );
-        payload.insert("runtime_mode".to_string(), json!(definition.runtime_mode));
-        payload.insert(
-            "step_count".to_string(),
-            json!(
-                definition
-                    .step_graph
-                    .get("steps")
-                    .and_then(Value::as_array)
-                    .map_or(0, Vec::len)
-            ),
-        );
     }
-    Ok(bindings)
+    Ok(WorkflowPackRuntimeMaterialization {
+        bindings,
+        agents: agent_targets
+            .into_values()
+            .map(|target| (target.agent, target.version))
+            .collect(),
+        workflow_definitions: workflow_definitions.into_values().collect(),
+    })
 }
 
-pub(crate) async fn workflow_pack_materialize_workflow_definitions(
+pub(crate) async fn workflow_pack_materialize_agents(
     state: &AppState,
     installation: &WorkflowPackInstallation,
-) -> Result<BTreeMap<String, WorkflowDefinition>, AppError> {
+) -> Result<BTreeMap<String, WorkflowPackAgentRuntimeTarget>, AppError> {
     let (manifest, package_dir) = workflow_pack_manifest_and_dir_from_installation(installation)?;
     let default_agent = workflow_pack_materialization_default_agent(state).await?;
-    let default_agent_id = default_agent.id;
+    let base_version = state.current_agent_version(default_agent.id).await?;
+    let semantic_scopes = merge_semantic_scopes(
+        &json!(manifest.semantic_scopes),
+        &json!({"pack_id": manifest.id}),
+    );
+    let agent_ids = manifest
+        .agents
+        .iter()
+        .map(|agent| (agent.id.clone(), Uuid::new_v4()))
+        .collect::<BTreeMap<_, _>>();
+    let mut targets = BTreeMap::new();
+
+    for agent_ref in &manifest.agents {
+        let contract = workflow_pack_load_agent_file(&package_dir, agent_ref)?;
+        let tools = workflow_pack_agent_tools(agent_ref);
+        let tool_policy = workflow_pack_agent_tool_policy(&manifest, &package_dir, agent_ref)?;
+        let allowed_targets = agent_ref
+            .handoffs
+            .iter()
+            .map(|handoff| {
+                let target_agent_id = agent_ids.get(&handoff.target_agent).ok_or_else(|| {
+                    AppError::bad_request(format!(
+                        "workflow pack agent {} handoff target {} was not declared",
+                        agent_ref.id, handoff.target_agent
+                    ))
+                })?;
+                Ok(json!({
+                    "target_agent_id": target_agent_id,
+                    "target_agent_ref": handoff.target_agent,
+                    "intents": handoff.intents,
+                    "risk_levels": [workflow_pack_risk_level_slug(&handoff.risk_level)],
+                    "approval_required": handoff.approval_required,
+                    "schema_ref": handoff.schema,
+                }))
+            })
+            .collect::<Result<Vec<_>, AppError>>()?;
+        let runtime_config = workflow_pack_agent_runtime_config(
+            &base_version.runtime_config,
+            installation,
+            agent_ref,
+            allowed_targets,
+        )?;
+        let agent_id = *agent_ids.get(&agent_ref.id).ok_or_else(|| {
+            AppError::bad_request(format!(
+                "workflow pack agent {} has no materialization id",
+                agent_ref.id
+            ))
+        })?;
+        let (agent, version) = state
+            .prepare_agent_with_id(
+                agent_id,
+                CreateAgent {
+                    name: format!("{} / {}", manifest.name, agent_ref.id),
+                    kind: agent_ref.role.as_slug().to_string(),
+                    provider: base_version.provider.clone(),
+                    model: base_version.model.clone(),
+                    team_id: default_agent.team_id,
+                    project_id: default_agent.project_id,
+                    runtime_profile_id: base_version.runtime_profile_id,
+                    agent_role: workflow_pack_runtime_agent_role(agent_ref.role).to_string(),
+                    system_prompt: contract.instructions,
+                    runtime_config,
+                    tools,
+                    tool_policy,
+                    mcp_server_ids: Vec::new(),
+                    skill_ids: Vec::new(),
+                    workflow_pack_ids: vec![manifest.id.clone()],
+                    remote_computer_profile: base_version.remote_computer_profile.clone(),
+                    semantic_scopes: semantic_scopes.clone(),
+                    release_state: "draft".to_string(),
+                },
+            )
+            .await?;
+        targets.insert(
+            agent_ref.id.clone(),
+            WorkflowPackAgentRuntimeTarget { agent, version },
+        );
+    }
+    Ok(targets)
+}
+
+pub(crate) fn workflow_pack_load_agent_file(
+    package_dir: &FsPath,
+    agent: &workflow_pack::AgentRef,
+) -> Result<workflow_pack::AgentFileContract, AppError> {
+    let content = std::fs::read_to_string(package_dir.join(&agent.path))
+        .with_context(|| format!("read workflow pack agent {}", agent.path))?;
+    let contract =
+        serde_yaml::from_str::<workflow_pack::AgentFileContract>(&content).map_err(|error| {
+            AppError::bad_request(format!(
+                "workflow pack agent {} is invalid YAML: {error}",
+                agent.path
+            ))
+        })?;
+    if contract.id != agent.id || contract.role != agent.role {
+        return Err(AppError::bad_request(format!(
+            "workflow pack agent {} does not match its manifest declaration",
+            agent.id
+        )));
+    }
+    Ok(contract)
+}
+
+pub(crate) fn workflow_pack_agent_tools(agent: &workflow_pack::AgentRef) -> Vec<String> {
+    agent
+        .tool_scope
+        .read
+        .iter()
+        .chain(&agent.tool_scope.write)
+        .chain(&agent.tool_scope.external_write)
+        .flat_map(|scope| workflow_pack_runtime_tools_for_scope(scope))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+pub(crate) fn workflow_pack_agent_tool_policy(
+    manifest: &workflow_pack::WorkflowPackManifest,
+    package_dir: &FsPath,
+    agent: &workflow_pack::AgentRef,
+) -> Result<Value, AppError> {
+    let mut policy = json!({
+        "source": "workflow_pack",
+        "tool_scope": agent.tool_scope,
+        "runtime_tool_scope": workflow_pack_runtime_tool_scope(&agent.tool_scope),
+        "approval_required_for_external_write": !agent.tool_scope.external_write.is_empty(),
+    });
+    let action_ids = workflow_pack_native_connector_action_ids_for_agent(manifest, agent)?;
+    if !action_ids.is_empty() {
+        let (connector_scope, external_effects) =
+            workflow_pack_external_connector_grant(manifest, package_dir, &action_ids)?;
+        let object = policy
+            .as_object_mut()
+            .expect("workflow pack agent policy must be an object");
+        object.insert("connector_scope".to_string(), connector_scope);
+        object.insert("external_effects".to_string(), external_effects);
+    }
+    Ok(policy)
+}
+
+pub(crate) fn workflow_pack_runtime_tools_for_scope(scope: &str) -> Vec<String> {
+    match scope {
+        "connector.read" | "profile.read" => ["semantic_object.fetch", "semantic_object.search"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        "schema.read" => [
+            "ontology_type.lookup",
+            "semantic_object.fetch",
+            "semantic_object.search",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
+        "artifact.write" => vec!["artifact.create".to_string()],
+        runtime_tool => vec![runtime_tool.to_string()],
+    }
+}
+
+pub(crate) fn workflow_pack_runtime_tool_scope(scope: &workflow_pack::ToolScope) -> Value {
+    let map_scopes = |scopes: &[String]| {
+        scopes
+            .iter()
+            .flat_map(|scope| workflow_pack_runtime_tools_for_scope(scope))
+            .collect::<BTreeSet<_>>()
+    };
+    json!({
+        "read": map_scopes(&scope.read),
+        "write": map_scopes(&scope.write),
+        "external_write": map_scopes(&scope.external_write),
+    })
+}
+
+pub(crate) fn workflow_pack_agent_runtime_config(
+    base: &Value,
+    installation: &WorkflowPackInstallation,
+    agent: &workflow_pack::AgentRef,
+    allowed_targets: Vec<Value>,
+) -> Result<Value, AppError> {
+    let mut runtime_config = base.clone();
+    let object = runtime_config.as_object_mut().ok_or_else(|| {
+        AppError::bad_request("workflow pack base agent runtime_config must be an object")
+    })?;
+    object.insert(
+        "workflow_pack".to_string(),
+        json!({
+            "installation_id": installation.id,
+            "pack_id": installation.pack_id,
+            "pack_version": installation.version,
+            "agent_ref": agent.id,
+            "role": agent.role,
+        }),
+    );
+    object.insert(
+        "handoffs".to_string(),
+        json!({"allowed_targets": allowed_targets}),
+    );
+    Ok(runtime_config)
+}
+
+pub(crate) fn workflow_pack_runtime_agent_role(role: workflow_pack::AgentRole) -> &'static str {
+    match role {
+        workflow_pack::AgentRole::Manager | workflow_pack::AgentRole::Orchestrator => "manager",
+        _ => "specialist",
+    }
+}
+
+pub(crate) fn workflow_pack_risk_level_slug(risk_level: &workflow_pack::RiskLevel) -> &'static str {
+    match risk_level {
+        workflow_pack::RiskLevel::Low => "low",
+        workflow_pack::RiskLevel::Medium => "medium",
+        workflow_pack::RiskLevel::High => "high",
+    }
+}
+
+pub(crate) fn workflow_pack_materialize_workflow_definitions(
+    installation: &WorkflowPackInstallation,
+    agent_targets: &BTreeMap<String, WorkflowPackAgentRuntimeTarget>,
+) -> Result<BTreeMap<String, WorkflowDefinition>, AppError> {
+    let (manifest, package_dir) = workflow_pack_manifest_and_dir_from_installation(installation)?;
     let mut definitions = BTreeMap::new();
     for workflow in &manifest.workflows {
         let workflow_file = workflow_pack_load_workflow_file(&package_dir, workflow)?;
@@ -361,11 +637,21 @@ pub(crate) async fn workflow_pack_materialize_workflow_definitions(
             runtime_adapter.as_deref(),
             &runtime_capability_contract,
         )?;
-        let step_graph = workflow_definition_step_graph_for_execution(
+        let mut step_graph = workflow_definition_step_graph_for_execution(
             &execution_strategy,
-            &workflow_pack_workflow_step_graph(workflow, &workflow_file)?,
+            &workflow_pack_workflow_step_graph(&manifest, workflow, &workflow_file)?,
         );
+        workflow_pack_bind_step_agents(&mut step_graph, workflow, agent_targets)?;
         workflow_graph_start_steps(&step_graph)?;
+        let default_agent_id = agent_targets
+            .get(&workflow.entry_agent)
+            .map(|target| target.agent.id)
+            .ok_or_else(|| {
+                AppError::bad_request(format!(
+                    "workflow pack workflow {} entry agent {} was not materialized",
+                    workflow.id, workflow.entry_agent
+                ))
+            })?;
         let trigger_type = normalize_workflow_trigger_type(
             workflow_file.trigger_type.as_deref().unwrap_or("manual"),
         )?;
@@ -380,41 +666,41 @@ pub(crate) async fn workflow_pack_materialize_workflow_definitions(
             workflow_file.eval_gate_refs.clone()
         };
         let now = Utc::now();
-        let definition = state
-            .create_workflow_definition(WorkflowDefinition {
-                id: Uuid::new_v4(),
-                pack_installation_id: Some(installation.id),
-                pack_id: Some(installation.pack_id.clone()),
-                pack_version: Some(installation.version.clone()),
-                name: workflow_file
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| workflow.id.clone()),
-                entrypoint: workflow.id.clone(),
-                trigger_type,
-                default_agent_id,
-                default_environment_id: None,
-                input_schema_ref: workflow_file.input_schema_ref.clone(),
-                output_schema_ref: workflow_pack_workflow_output_schema_ref(&workflow_file),
-                step_graph,
-                handoff_rules: workflow_pack_workflow_handoff_rules(
-                    workflow,
-                    &workflow_file,
-                    &semantic_scopes,
-                ),
-                execution_strategy,
-                runtime_adapter,
-                runtime_mode,
-                runtime_capability_contract,
-                event_ingestion_policy,
-                approval_policy_ref: workflow_file.approval_policy_ref.clone(),
-                eval_gate_refs,
-                release_state: "staged".to_string(),
-                created_at: now,
-                updated_at: now,
-                archived_at: None,
-            })
-            .await?;
+        let definition = WorkflowDefinition {
+            id: Uuid::new_v4(),
+            pack_installation_id: Some(installation.id),
+            pack_id: Some(installation.pack_id.clone()),
+            pack_version: Some(installation.version.clone()),
+            name: workflow_file
+                .name
+                .clone()
+                .unwrap_or_else(|| workflow.id.clone()),
+            entrypoint: workflow.id.clone(),
+            trigger_type,
+            default_agent_id,
+            default_environment_id: None,
+            input_schema_ref: workflow_file.input_schema_ref.clone(),
+            output_schema_ref: workflow_pack_workflow_output_schema_ref(&workflow_file),
+            step_graph,
+            handoff_rules: workflow_pack_workflow_handoff_rules(
+                &manifest,
+                workflow,
+                &workflow_file,
+                &semantic_scopes,
+                &package_dir,
+            )?,
+            execution_strategy,
+            runtime_adapter,
+            runtime_mode,
+            runtime_capability_contract,
+            event_ingestion_policy,
+            approval_policy_ref: workflow_file.approval_policy_ref.clone(),
+            eval_gate_refs,
+            release_state: "staged".to_string(),
+            created_at: now,
+            updated_at: now,
+            archived_at: None,
+        };
         definitions.insert(workflow.id.clone(), definition);
     }
     Ok(definitions)
@@ -532,39 +818,101 @@ pub(crate) fn workflow_pack_value_string_array(value: Option<&Value>) -> Vec<Str
 }
 
 pub(crate) fn workflow_pack_workflow_step_graph(
+    manifest: &workflow_pack::WorkflowPackManifest,
     workflow: &workflow_pack::WorkflowRef,
     workflow_file: &WorkflowPackWorkflowFile,
 ) -> Result<Value, AppError> {
-    if let Some(step_graph) = &workflow_file.step_graph {
-        if !step_graph.is_object() {
-            return Err(AppError::bad_request(format!(
-                "workflow pack workflow {} step_graph must be a JSON object",
-                workflow.id
-            )));
-        }
-        return Ok(step_graph.clone());
-    }
     let mut graph_steps = Vec::new();
     let mut used_keys = BTreeSet::new();
     let mut previous_key: Option<String> = None;
+    let mut previous_agent_ref: Option<String> = None;
     for (index, step) in workflow_file.steps.iter().enumerate() {
         let step_key = workflow_pack_workflow_step_key(step, index, &mut used_keys);
         let mut graph_step = serde_json::Map::new();
         graph_step.insert("key".to_string(), json!(step_key));
         graph_step.insert("type".to_string(), json!("agent"));
-        if let Some(agent_ref) = workflow_pack_workflow_step_string(step, "agent") {
-            graph_step.insert("workflow_agent_ref".to_string(), json!(agent_ref));
-        }
+        let agent_ref = workflow_pack_workflow_step_string(step, "agent")
+            .unwrap_or_else(|| workflow.entry_agent.clone());
+        graph_step.insert("workflow_agent_ref".to_string(), json!(agent_ref));
         if index == 0 {
             graph_step.insert("start".to_string(), json!(true));
         } else if let Some(previous_key) = &previous_key {
             graph_step.insert("depends_on".to_string(), json!([previous_key]));
         }
-        for key in ["task", "output_schema", "handoff_intent"] {
+        for key in [
+            "task",
+            "output_schema",
+            "handoff_intent",
+            "required_profiles",
+            "required_schemas",
+            "skills",
+            "risk_level",
+        ] {
             if let Some(value) = step.get(key) {
                 graph_step.insert(key.to_string(), value.clone());
             }
         }
+        if let Some(source_agent_ref) = &previous_agent_ref
+            && (source_agent_ref != &agent_ref || graph_step.contains_key("handoff_intent"))
+        {
+            let intent = graph_step.get("handoff_intent").and_then(Value::as_str);
+            let source_agent = manifest
+                .agents
+                .iter()
+                .find(|agent| agent.id == *source_agent_ref)
+                .ok_or_else(|| {
+                    AppError::bad_request(format!(
+                        "workflow pack workflow {} references unknown source agent {}",
+                        workflow.id, source_agent_ref
+                    ))
+                })?;
+            let candidates = source_agent
+                .handoffs
+                .iter()
+                .filter(|handoff| handoff.target_agent == agent_ref)
+                .collect::<Vec<_>>();
+            let handoff = match intent {
+                Some(intent) => {
+                    let mut matches = candidates.iter().copied().filter(|handoff| {
+                        handoff.intents.iter().any(|candidate| candidate == intent)
+                    });
+                    let handoff = matches.next().ok_or_else(|| {
+                        AppError::bad_request(format!(
+                            "workflow pack workflow {} handoff {} -> {} does not allow intent {}",
+                            workflow.id, source_agent_ref, agent_ref, intent
+                        ))
+                    })?;
+                    if matches.next().is_some() {
+                        return Err(AppError::bad_request(format!(
+                            "workflow pack workflow {} handoff {} -> {} intent {} is ambiguous",
+                            workflow.id, source_agent_ref, agent_ref, intent
+                        )));
+                    }
+                    handoff
+                }
+                None if candidates.len() == 1 => candidates[0],
+                None => {
+                    return Err(AppError::bad_request(format!(
+                        "workflow pack workflow {} handoff {} -> {} requires handoff_intent",
+                        workflow.id, source_agent_ref, agent_ref
+                    )));
+                }
+            };
+            graph_step.insert(
+                "handoff_source_agent_ref".to_string(),
+                json!(source_agent_ref),
+            );
+            graph_step.insert(
+                "risk_level".to_string(),
+                json!(workflow_pack_risk_level_slug(&handoff.risk_level)),
+            );
+            graph_step.insert(
+                "approval_required".to_string(),
+                json!(handoff.approval_required),
+            );
+            graph_step.insert("handoff_schema_ref".to_string(), json!(handoff.schema));
+        }
+        previous_agent_ref = Some(agent_ref);
         previous_key = Some(step_key);
         graph_steps.push(Value::Object(graph_step));
     }
@@ -576,11 +924,164 @@ pub(crate) fn workflow_pack_workflow_step_graph(
             "start": true
         }));
     }
-    Ok(json!({
+    let generated_step_graph = json!({
         "source": "workflow_pack_file",
         "workflow_id": workflow.id,
         "steps": graph_steps
-    }))
+    });
+    match &workflow_file.step_graph {
+        Some(step_graph) => workflow_pack_apply_manifest_governance_to_step_graph(
+            workflow,
+            step_graph,
+            &generated_step_graph,
+        ),
+        None => Ok(generated_step_graph),
+    }
+}
+
+fn workflow_pack_apply_manifest_governance_to_step_graph(
+    workflow: &workflow_pack::WorkflowRef,
+    step_graph: &Value,
+    generated_step_graph: &Value,
+) -> Result<Value, AppError> {
+    let explicit_start_keys = workflow_graph_start_steps(step_graph)?
+        .into_iter()
+        .map(workflow_graph_step_key)
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut step_graph = step_graph.clone();
+    let explicit_steps = step_graph
+        .get_mut("steps")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| {
+            AppError::bad_request(format!(
+                "workflow pack workflow {} step_graph must be a JSON object with steps",
+                workflow.id
+            ))
+        })?;
+    let generated_steps = generated_step_graph
+        .get("steps")
+        .and_then(Value::as_array)
+        .expect("generated workflow pack graph always contains steps");
+    let explicit_agent_step_indexes = explicit_steps
+        .iter()
+        .enumerate()
+        .filter(|(_, step)| !workflow_graph_step_is_adapter_owned_compensation(step))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if explicit_agent_step_indexes.len() != generated_steps.len() {
+        return Err(AppError::bad_request(format!(
+            "workflow pack workflow {} step_graph must match its declared steps",
+            workflow.id
+        )));
+    }
+    let explicit_agent_step_keys = explicit_agent_step_indexes
+        .iter()
+        .map(|index| workflow_graph_step_key(&explicit_steps[*index]))
+        .collect::<Result<Vec<_>, _>>()?;
+    if explicit_start_keys != explicit_agent_step_keys[..1] {
+        return Err(AppError::bad_request(format!(
+            "workflow pack workflow {} step_graph must start with its declared entry agent",
+            workflow.id
+        )));
+    }
+    for (position, explicit_index) in explicit_agent_step_indexes.iter().enumerate() {
+        let step = &explicit_steps[*explicit_index];
+        let dependencies = workflow_graph_step_dependencies(step)?;
+        let expected_dependencies = position
+            .checked_sub(1)
+            .map(|previous| vec![explicit_agent_step_keys[previous].clone()])
+            .unwrap_or_default();
+        let explicitly_starts = step
+            .get("start")
+            .or_else(|| step.get("entrypoint"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if dependencies != expected_dependencies || (position > 0 && explicitly_starts) {
+            return Err(AppError::bad_request(format!(
+                "workflow pack workflow {} step_graph must preserve its declared linear handoff topology",
+                workflow.id
+            )));
+        }
+    }
+
+    for (generated_step, explicit_index) in generated_steps.iter().zip(explicit_agent_step_indexes)
+    {
+        let explicit_step = &mut explicit_steps[explicit_index];
+        let expected_agent_ref =
+            workflow_pack_workflow_step_string(generated_step, "workflow_agent_ref")
+                .expect("generated workflow pack agent step always declares workflow_agent_ref");
+        let actual_agent_ref =
+            workflow_pack_workflow_step_string(explicit_step, "workflow_agent_ref")
+                .or_else(|| workflow_pack_workflow_step_string(explicit_step, "agent_ref"))
+                .or_else(|| workflow_pack_workflow_step_string(explicit_step, "agent"))
+                .unwrap_or_else(|| workflow.entry_agent.clone());
+        if actual_agent_ref != expected_agent_ref {
+            return Err(AppError::bad_request(format!(
+                "workflow pack workflow {} step_graph agent {} does not match declared agent {}",
+                workflow.id, actual_agent_ref, expected_agent_ref
+            )));
+        }
+        let explicit_step = explicit_step.as_object_mut().ok_or_else(|| {
+            AppError::bad_request("workflow pack step_graph steps must be JSON objects")
+        })?;
+        explicit_step.insert("workflow_agent_ref".to_string(), json!(expected_agent_ref));
+        for key in [
+            "type",
+            "task",
+            "output_schema",
+            "required_profiles",
+            "required_schemas",
+            "skills",
+            "handoff_source_agent_ref",
+            "handoff_intent",
+            "risk_level",
+            "approval_required",
+            "handoff_schema_ref",
+        ] {
+            match generated_step.get(key) {
+                Some(value) => {
+                    explicit_step.insert(key.to_string(), value.clone());
+                }
+                None => {
+                    explicit_step.remove(key);
+                }
+            }
+        }
+    }
+    Ok(step_graph)
+}
+
+pub(crate) fn workflow_pack_bind_step_agents(
+    step_graph: &mut Value,
+    workflow: &workflow_pack::WorkflowRef,
+    agent_targets: &BTreeMap<String, WorkflowPackAgentRuntimeTarget>,
+) -> Result<(), AppError> {
+    let steps = step_graph
+        .get_mut("steps")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| AppError::bad_request("workflow pack step graph must declare steps"))?;
+    for step in steps {
+        if workflow_graph_step_is_adapter_owned_compensation(step) {
+            continue;
+        }
+        let agent_ref = workflow_pack_workflow_step_string(step, "workflow_agent_ref")
+            .or_else(|| workflow_pack_workflow_step_string(step, "agent_ref"))
+            .or_else(|| workflow_pack_workflow_step_string(step, "agent"))
+            .unwrap_or_else(|| workflow.entry_agent.clone());
+        let target = agent_targets.get(&agent_ref).ok_or_else(|| {
+            AppError::bad_request(format!(
+                "workflow pack workflow {} references unmaterialized agent {}",
+                workflow.id, agent_ref
+            ))
+        })?;
+        let object = step.as_object_mut().ok_or_else(|| {
+            AppError::bad_request("workflow pack graph steps must be JSON objects")
+        })?;
+        object.insert("workflow_agent_ref".to_string(), json!(agent_ref));
+        object.insert("agent_id".to_string(), json!(target.agent.id));
+        object.insert("agent_version_id".to_string(), json!(target.version.id));
+    }
+    Ok(())
 }
 
 pub(crate) fn workflow_pack_workflow_step_key(
@@ -724,10 +1225,33 @@ pub(crate) fn workflow_pack_workflow_semantic_scopes(
 }
 
 pub(crate) fn workflow_pack_workflow_handoff_rules(
+    manifest: &workflow_pack::WorkflowPackManifest,
     workflow: &workflow_pack::WorkflowRef,
     workflow_file: &WorkflowPackWorkflowFile,
     semantic_scopes: &Value,
-) -> Value {
+    package_dir: &FsPath,
+) -> Result<Value, AppError> {
+    let tool_scope = workflow_pack_workflow_tool_scope(manifest, workflow, workflow_file);
+    let workflow_agent_refs = workflow_pack_workflow_agent_refs(manifest, workflow, workflow_file);
+    let mut native_connector_action_ids = BTreeSet::new();
+    for agent in manifest
+        .agents
+        .iter()
+        .filter(|agent| workflow_agent_refs.contains(&agent.id))
+    {
+        native_connector_action_ids.extend(workflow_pack_native_connector_action_ids_for_agent(
+            manifest, agent,
+        )?);
+    }
+    let external_connector_grant = if native_connector_action_ids.is_empty() {
+        None
+    } else {
+        Some(workflow_pack_external_connector_grant(
+            manifest,
+            package_dir,
+            &native_connector_action_ids,
+        )?)
+    };
     let mut rules = if workflow_file.handoff_rules.is_object() {
         workflow_file.handoff_rules.clone()
     } else {
@@ -755,9 +1279,304 @@ pub(crate) fn workflow_pack_workflow_handoff_rules(
             root_task_grant
                 .entry("memory_scope".to_string())
                 .or_insert_with(workflow_pack_root_task_grant_memory_scope);
+            workflow_pack_insert_or_validate_root_scope(
+                root_task_grant,
+                "tool_scope",
+                &tool_scope,
+                false,
+            )?;
+            if let Some((connector_scope, external_effects)) = &external_connector_grant {
+                workflow_pack_insert_or_validate_root_scope(
+                    root_task_grant,
+                    "connector_scope",
+                    connector_scope,
+                    true,
+                )?;
+                workflow_pack_insert_or_validate_root_scope(
+                    root_task_grant,
+                    "external_effects",
+                    external_effects,
+                    false,
+                )?;
+            }
         }
     }
-    rules
+    Ok(rules)
+}
+
+fn workflow_pack_insert_or_validate_root_scope(
+    root_task_grant: &mut serde_json::Map<String, Value>,
+    key: &str,
+    generated_scope: &Value,
+    require_native_bindings: bool,
+) -> Result<(), AppError> {
+    let Some(explicit_scope) = root_task_grant.get(key) else {
+        root_task_grant.insert(key.to_string(), generated_scope.clone());
+        return Ok(());
+    };
+    if !explicit_scope.is_object() {
+        return Err(AppError::bad_request(format!(
+            "workflow pack root task grant {key} must be an object"
+        )));
+    }
+    if require_native_bindings
+        && explicit_scope
+            .get("native_operation_bindings")
+            .and_then(Value::as_array)
+            .is_none()
+    {
+        return Err(AppError::bad_request(
+            "workflow pack root task grant connector_scope must preserve native_operation_bindings",
+        ));
+    }
+    if !json_scope_contains(generated_scope, explicit_scope) {
+        return Err(AppError::bad_request(format!(
+            "workflow pack root task grant {key} cannot expand generated agent scope"
+        )));
+    }
+    Ok(())
+}
+
+fn workflow_pack_external_connector_grant(
+    manifest: &workflow_pack::WorkflowPackManifest,
+    package_dir: &FsPath,
+    action_ids: &BTreeSet<String>,
+) -> Result<(Value, Value), AppError> {
+    for action_id in action_ids {
+        if !manifest
+            .actions
+            .iter()
+            .any(|action| action.id == *action_id)
+        {
+            return Err(AppError::bad_request(format!(
+                "workflow pack native connector scope references missing action {action_id}"
+            )));
+        }
+    }
+    let writable_connector_ids = manifest
+        .connectors
+        .iter()
+        .filter(|connector| {
+            connector.writes.enabled
+                && matches!(&connector.kind, workflow_pack::ConnectorKind::Native)
+        })
+        .map(|connector| connector.id.clone())
+        .collect::<BTreeSet<_>>();
+    if writable_connector_ids.is_empty() {
+        return Err(AppError::bad_request(
+            "workflow pack external-write agents require a writable native connector",
+        ));
+    }
+
+    let mut native_operation_bindings = BTreeSet::new();
+    for action in manifest
+        .actions
+        .iter()
+        .filter(|action| action_ids.contains(&action.id))
+    {
+        let action_type = workflow_pack_load_action_type_file(package_dir, action)?;
+        let connector_id =
+            workflow_pack_value_string(&action_type, "connector_id").ok_or_else(|| {
+                AppError::bad_request(format!(
+                    "workflow pack native connector action {} is missing connector_id",
+                    action.id
+                ))
+            })?;
+        if !writable_connector_ids.contains(&connector_id) {
+            return Err(AppError::bad_request(format!(
+                "workflow pack native connector action {} does not target a writable native connector",
+                action.id
+            )));
+        }
+        let operation_id =
+            workflow_pack_value_string(&action_type, "operation_id").ok_or_else(|| {
+                AppError::bad_request(format!(
+                    "workflow pack native connector action {} is missing operation_id",
+                    action.id
+                ))
+            })?;
+        let side_effect_class = workflow_pack_value_string(&action_type, "side_effect_class")
+            .ok_or_else(|| {
+                AppError::bad_request(format!(
+                    "workflow pack native connector action {} is missing side_effect_class",
+                    action.id
+                ))
+            })?;
+        native_operation_bindings.insert((connector_id, operation_id, side_effect_class));
+    }
+    if native_operation_bindings.is_empty() {
+        return Err(AppError::bad_request(
+            "workflow pack external-write agents require governed action side effects",
+        ));
+    }
+    let connector_ids = native_operation_bindings
+        .iter()
+        .map(|(connector_id, _, _)| connector_id.clone())
+        .collect::<BTreeSet<_>>();
+    let operation_ids = native_operation_bindings
+        .iter()
+        .map(|(_, operation_id, _)| operation_id.clone())
+        .collect::<BTreeSet<_>>();
+    let side_effect_classes = native_operation_bindings
+        .iter()
+        .map(|(_, _, side_effect_class)| side_effect_class.clone())
+        .collect::<BTreeSet<_>>();
+    let native_operation_bindings = native_operation_bindings
+        .into_iter()
+        .map(|(connector_id, operation, side_effect_class)| {
+            json!({
+                "connector_id": connector_id,
+                "operation": operation,
+                "side_effect_class": side_effect_class,
+            })
+        })
+        .collect::<Vec<_>>();
+    let external_effects = Value::Object(
+        side_effect_classes
+            .iter()
+            .map(|side_effect_class| (side_effect_class.clone(), json!(true)))
+            .collect(),
+    );
+    Ok((
+        json!({
+            "mode": "commit_write",
+            "allowed_connector_ids": connector_ids,
+            "allowed_tool_names": operation_ids,
+            "tenant_scope": {},
+            "side_effect_classes": side_effect_classes,
+            "native_operation_bindings": native_operation_bindings,
+        }),
+        external_effects,
+    ))
+}
+
+fn workflow_pack_native_connector_action_ids_for_agent(
+    manifest: &workflow_pack::WorkflowPackManifest,
+    agent: &workflow_pack::AgentRef,
+) -> Result<BTreeSet<String>, AppError> {
+    if !agent
+        .tool_scope
+        .external_write
+        .iter()
+        .any(|tool| tool == "native.connector.call")
+    {
+        return Ok(BTreeSet::new());
+    }
+    if !agent.native_connector_actions.is_empty() {
+        return Ok(agent.native_connector_actions.iter().cloned().collect());
+    }
+    let native_connector_agent_count = manifest
+        .agents
+        .iter()
+        .filter(|candidate| {
+            candidate
+                .tool_scope
+                .external_write
+                .iter()
+                .any(|tool| tool == "native.connector.call")
+        })
+        .count();
+    if native_connector_agent_count != 1 {
+        return Err(AppError::bad_request(format!(
+            "workflow pack agent {} must declare native_connector_actions when multiple agents can call native connectors",
+            agent.id
+        )));
+    }
+    Ok(manifest
+        .actions
+        .iter()
+        .map(|action| action.id.clone())
+        .collect())
+}
+
+fn workflow_pack_workflow_agent_refs(
+    manifest: &workflow_pack::WorkflowPackManifest,
+    workflow: &workflow_pack::WorkflowRef,
+    workflow_file: &WorkflowPackWorkflowFile,
+) -> BTreeSet<String> {
+    let mut agent_refs = BTreeSet::from([workflow.entry_agent.clone()]);
+    for step in &workflow_file.steps {
+        if let Some(agent_ref) = workflow_pack_workflow_step_string(step, "agent") {
+            agent_refs.insert(agent_ref);
+        }
+    }
+    if let Some(steps) = workflow_file
+        .step_graph
+        .as_ref()
+        .and_then(|graph| graph.get("steps"))
+        .and_then(Value::as_array)
+    {
+        for step in steps {
+            if let Some(agent_ref) = workflow_pack_workflow_step_string(step, "workflow_agent_ref")
+                .or_else(|| workflow_pack_workflow_step_string(step, "agent_ref"))
+                .or_else(|| workflow_pack_workflow_step_string(step, "agent"))
+            {
+                agent_refs.insert(agent_ref);
+            }
+        }
+    }
+    loop {
+        let reachable_targets = manifest
+            .agents
+            .iter()
+            .filter(|agent| agent_refs.contains(&agent.id))
+            .flat_map(|agent| {
+                agent
+                    .handoffs
+                    .iter()
+                    .map(|handoff| handoff.target_agent.clone())
+            })
+            .collect::<BTreeSet<_>>();
+        let previous_count = agent_refs.len();
+        agent_refs.extend(reachable_targets);
+        if agent_refs.len() == previous_count {
+            break;
+        }
+    }
+    agent_refs
+}
+
+pub(crate) fn workflow_pack_workflow_tool_scope(
+    manifest: &workflow_pack::WorkflowPackManifest,
+    workflow: &workflow_pack::WorkflowRef,
+    workflow_file: &WorkflowPackWorkflowFile,
+) -> Value {
+    let agent_refs = workflow_pack_workflow_agent_refs(manifest, workflow, workflow_file);
+    let mut read = BTreeSet::new();
+    let mut write = BTreeSet::new();
+    let mut external_write = BTreeSet::new();
+    for agent in manifest
+        .agents
+        .iter()
+        .filter(|agent| agent_refs.contains(&agent.id))
+    {
+        read.extend(
+            agent
+                .tool_scope
+                .read
+                .iter()
+                .flat_map(|scope| workflow_pack_runtime_tools_for_scope(scope)),
+        );
+        write.extend(
+            agent
+                .tool_scope
+                .write
+                .iter()
+                .flat_map(|scope| workflow_pack_runtime_tools_for_scope(scope)),
+        );
+        external_write.extend(
+            agent
+                .tool_scope
+                .external_write
+                .iter()
+                .flat_map(|scope| workflow_pack_runtime_tools_for_scope(scope)),
+        );
+    }
+    json!({
+        "read": read,
+        "write": write,
+        "external_write": external_write,
+    })
 }
 
 pub(crate) fn workflow_pack_root_task_grant_memory_scope() -> Value {
@@ -852,6 +1671,7 @@ pub(crate) fn workflow_pack_materialized_bindings(
             json!({
                 "role": &agent.role,
                 "tool_scope": &agent.tool_scope,
+                "native_connector_actions": &agent.native_connector_actions,
                 "handoffs": &agent.handoffs,
                 "source_digest": workflow_pack_source_digest(&package_dir, &agent.path)?,
             }),
@@ -1148,7 +1968,9 @@ pub(crate) fn workflow_pack_runtime_objects_from_bindings(
                 status,
                 json!({
                     "binding_id": binding.id,
-                    "agent_id": binding.binding_key.clone(),
+                    "agent_ref": binding.binding_key.clone(),
+                    "agent_id": binding.materialized_payload.get("agent_id").cloned(),
+                    "agent_version_id": binding.materialized_payload.get("agent_version_id").cloned(),
                     "role": binding.materialized_payload.get("role").cloned(),
                     "tool_scope": binding.materialized_payload.get("tool_scope").cloned(),
                     "handoffs": binding.materialized_payload.get("handoffs").cloned(),

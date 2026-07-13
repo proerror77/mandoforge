@@ -4,7 +4,7 @@ use axum::{
     http::HeaderMap,
     routing::{get, post},
 };
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -13,24 +13,27 @@ use crate::{
     DynamicWorkflowAdjudicationRequest, DynamicWorkflowAdjudicationResponse, DynamicWorkflowPlan,
     DynamicWorkflowPlanCompilationResponse, DynamicWorkflowPlanMaterializationResponse,
     DynamicWorkflowPressureTestRequest, DynamicWorkflowPressureTestResponse,
-    MaterializeDynamicWorkflowPlan, Permission, ReviewDynamicWorkflowPlan, WorkflowDefinition,
-    WorkflowRun, analyze_dynamic_workflow_plan, authorize_collection_request,
+    MaterializeDynamicWorkflowPlan, Permission, ReviewDynamicWorkflowPlan, SessionStatus,
+    WorkflowDefinition, WorkflowRun, analyze_dynamic_workflow_plan, authorize_collection_request,
     authorize_dynamic_workflow_plan_read, authorize_dynamic_workflow_plan_run, authorize_request,
-    compile_dynamic_workflow_phases, compile_native_dynamic_workflow_phases, dynamic_policy_u64,
+    bind_dynamic_workflow_agent_version, compile_dynamic_workflow_phases,
+    compile_native_dynamic_workflow_phases, dynamic_policy_u64,
     dynamic_workflow_plan_event_ingestion_policy, dynamic_workflow_plan_execution_strategy,
-    dynamic_workflow_plan_handoff_rules, dynamic_workflow_plan_runtime_adapter,
-    dynamic_workflow_plan_runtime_capability_contract, dynamic_workflow_plan_runtime_mode,
-    dynamic_workflow_plan_step_graph, dynamic_workflow_plan_visible_to_principal,
-    dynamic_workflow_step_vote, empty_json_object, ensure_primary_session_thread,
-    issue_root_task_grant_for_workflow_run, materialize_workflow_graph_start_steps, new_audit_log,
-    normalize_dynamic_workflow_plan_status, normalize_optional_runtime_adapter,
-    normalize_optional_text, normalize_workflow_execution_strategy,
-    record_dynamic_workflow_plan_audit, require_non_empty,
+    dynamic_workflow_plan_handoff_rules, dynamic_workflow_plan_materialization_approval,
+    dynamic_workflow_plan_runtime_adapter, dynamic_workflow_plan_runtime_capability_contract,
+    dynamic_workflow_plan_runtime_mode, dynamic_workflow_plan_step_graph,
+    dynamic_workflow_plan_visible_to_principal, dynamic_workflow_step_vote, empty_json_object,
+    ensure_primary_session_thread, issue_root_task_grant_for_workflow_run,
+    materialize_workflow_graph_start_steps, new_audit_log, normalize_dynamic_workflow_plan_status,
+    normalize_optional_runtime_adapter, normalize_optional_text,
+    normalize_workflow_execution_strategy, principal_from_request,
+    record_dynamic_workflow_plan_audit, require_non_empty, set_managed_session_status,
     validate_dynamic_workflow_agent_fleet_policy, validate_dynamic_workflow_governance,
     validate_dynamic_workflow_materialization, validate_dynamic_workflow_phases,
     validate_dynamic_workflow_validation, validate_workflow_execution_binding,
     validate_workflow_graph_definition, visible_session_ids_for_principal, workflow_input_digest,
-    workflow_pack_materialization_default_agent, workflow_run_runtime_envelope, workflow_slug,
+    workflow_pack_materialization_default_agent,
+    workflow_run_runtime_envelope_with_pinned_ontology_release, workflow_slug,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -183,7 +186,13 @@ async fn create_dynamic_workflow_plan(
     )
     .await?;
     let plan = state
-        .update_dynamic_workflow_plan_audit_trace(plan.id, Some(audit.id), audit.created_at)
+        .update_dynamic_workflow_plan_audit_trace_if_unchanged(
+            plan.id,
+            &plan.status,
+            plan.updated_at,
+            Some(audit.id),
+            audit.created_at,
+        )
         .await?;
     Ok(Json(plan))
 }
@@ -310,7 +319,7 @@ async fn review_dynamic_workflow_plan(
     Json(input): Json<ReviewDynamicWorkflowPlan>,
 ) -> Result<Json<DynamicWorkflowPlan>, AppError> {
     let current = state.get_dynamic_workflow_plan(id).await?;
-    authorize_dynamic_workflow_plan_run(&state, &headers, &current).await?;
+    authorize_dynamic_workflow_plan_read(&state, &headers, &current).await?;
     if !input.review.is_object() {
         return Err(AppError::bad_request(
             "dynamic workflow plan review must be a JSON object",
@@ -320,17 +329,50 @@ async fn review_dynamic_workflow_plan(
         Some(status) => normalize_dynamic_workflow_plan_status(&status)?,
         None => "reviewed".to_string(),
     };
-    if current.status == "materialized" {
+    if !matches!(status.as_str(), "reviewed" | "approved" | "rejected") {
         return Err(AppError::bad_request(
-            "materialized dynamic workflow plan cannot be reviewed",
+            "dynamic workflow plan review status must be reviewed, approved, or rejected",
+        ));
+    }
+    let mut review = input.review;
+    let requires_approval_decision = matches!(current.status.as_str(), "approved" | "rejected")
+        || matches!(status.as_str(), "approved" | "rejected");
+    if requires_approval_decision {
+        authorize_request(
+            &state,
+            &headers,
+            Permission::ApprovalsDecide,
+            "dynamic_workflow_plan",
+            Some(current.id),
+        )
+        .await?;
+        if matches!(status.as_str(), "approved" | "rejected") {
+            let principal = principal_from_request(&state, &headers).await?;
+            let actor_field = if status == "approved" {
+                "approved_by"
+            } else {
+                "rejected_by"
+            };
+            review[actor_field] = json!(principal.subject_id);
+        }
+    } else {
+        authorize_dynamic_workflow_plan_run(&state, &headers, &current).await?;
+    }
+    if status == "approved" {
+        crate::validate_dynamic_workflow_plan_approval_review(&review)?;
+    }
+    if matches!(current.status.as_str(), "materializing" | "materialized") {
+        return Err(AppError::bad_request(
+            "claimed or materialized dynamic workflow plan cannot be reviewed",
         ));
     }
     let reviewed_at = Utc::now();
     let reviewed = state
         .update_dynamic_workflow_plan_review(
             current.id,
+            &current.status,
             status,
-            input.review,
+            review,
             current.audit_trace_id,
             reviewed_at,
         )
@@ -343,12 +385,12 @@ async fn review_dynamic_workflow_plan(
     )
     .await?;
     let reviewed = state
-        .update_dynamic_workflow_plan_review(
+        .update_dynamic_workflow_plan_audit_trace_if_unchanged(
             reviewed.id,
-            reviewed.status.clone(),
-            reviewed.review.clone(),
+            &reviewed.status,
+            reviewed.updated_at,
             Some(audit.id),
-            reviewed_at,
+            audit.created_at,
         )
         .await?;
     Ok(Json(reviewed))
@@ -522,24 +564,153 @@ async fn materialize_dynamic_workflow_plan(
         runtime_adapter.as_deref(),
         &runtime_capability_contract,
     )?;
-    let step_graph = dynamic_workflow_plan_step_graph(&plan, &execution_strategy)?;
+    let agent_version = state
+        .runnable_agent_version(agent.id, input.environment_id)
+        .await?;
+    let mut step_graph = dynamic_workflow_plan_step_graph(&plan, &execution_strategy)?;
+    bind_dynamic_workflow_agent_version(&mut step_graph, agent.id, agent_version.id)?;
     validate_workflow_graph_definition(&step_graph)?;
-    let now = Utc::now();
+    let materialization_approval = dynamic_workflow_plan_materialization_approval(
+        &plan,
+        agent.id,
+        agent_version.id,
+        input.environment_id,
+    )?;
+    let claimed_at = Utc::now();
+    let workflow_definition_id = Uuid::new_v4();
+    let workflow_run_id = Uuid::new_v4();
+    let claim_audit = state
+        .append_audit_log(new_audit_log(
+            None,
+            "system",
+            Some(workflow_run_id),
+            "dynamic_workflow_plan.materialization_claim_requested",
+            "dynamic_workflow_plan",
+            Some(plan.id),
+            json!({
+                "workflow_definition_id": workflow_definition_id,
+                "workflow_run_id": workflow_run_id,
+                "agent_id": agent.id,
+                "agent_version_id": agent_version.id,
+                "environment_id": input.environment_id
+            }),
+        ))
+        .await?;
+    state
+        .claim_dynamic_workflow_plan_materialization(plan.id, claim_audit.id, claimed_at)
+        .await?;
+    let prepared = PreparedDynamicWorkflowMaterialization {
+        plan,
+        input,
+        agent_id: agent.id,
+        agent_version_id: agent_version.id,
+        step_graph,
+        materialization_approval,
+        execution_strategy,
+        runtime_adapter,
+        runtime_mode,
+        runtime_capability_contract,
+        event_ingestion_policy,
+        workflow_definition_id,
+        workflow_run_id,
+        claim_audit_id: claim_audit.id,
+        claimed_at,
+    };
+    match materialize_claimed_dynamic_workflow_plan(&state, prepared).await {
+        Ok(materialized) => Ok(Json(materialized)),
+        Err(error) => {
+            let failed_at = Utc::now();
+            let failure_audit = state
+                .append_audit_log(new_audit_log(
+                    None,
+                    "system",
+                    Some(workflow_run_id),
+                    "dynamic_workflow_plan.materialization_failed",
+                    "dynamic_workflow_plan",
+                    Some(id),
+                    json!({
+                        "workflow_definition_id": workflow_definition_id,
+                        "workflow_run_id": workflow_run_id,
+                        "error": &error.message
+                    }),
+                ))
+                .await
+                .ok();
+            let _ = state
+                .fail_dynamic_workflow_plan_materialization(
+                    id,
+                    claim_audit.id,
+                    failure_audit.map(|audit| audit.id),
+                    failed_at,
+                )
+                .await;
+            Err(error)
+        }
+    }
+}
+
+struct PreparedDynamicWorkflowMaterialization {
+    plan: DynamicWorkflowPlan,
+    input: MaterializeDynamicWorkflowPlan,
+    agent_id: Uuid,
+    agent_version_id: Uuid,
+    step_graph: Value,
+    materialization_approval: Value,
+    execution_strategy: String,
+    runtime_adapter: Option<String>,
+    runtime_mode: Option<String>,
+    runtime_capability_contract: Value,
+    event_ingestion_policy: String,
+    workflow_definition_id: Uuid,
+    workflow_run_id: Uuid,
+    claim_audit_id: Uuid,
+    claimed_at: DateTime<Utc>,
+}
+
+async fn materialize_claimed_dynamic_workflow_plan(
+    state: &AppState,
+    prepared: PreparedDynamicWorkflowMaterialization,
+) -> Result<DynamicWorkflowPlanMaterializationResponse, AppError> {
+    let PreparedDynamicWorkflowMaterialization {
+        plan,
+        input,
+        agent_id,
+        agent_version_id,
+        step_graph,
+        materialization_approval,
+        execution_strategy,
+        runtime_adapter,
+        runtime_mode,
+        runtime_capability_contract,
+        event_ingestion_policy,
+        workflow_definition_id,
+        workflow_run_id,
+        claim_audit_id,
+        claimed_at,
+    } = prepared;
+    let MaterializeDynamicWorkflowPlan {
+        title,
+        environment_id,
+        input_payload,
+    } = input;
     let workflow_definition = state
         .create_workflow_definition(WorkflowDefinition {
-            id: Uuid::new_v4(),
+            id: workflow_definition_id,
             pack_installation_id: None,
             pack_id: None,
             pack_version: None,
             name: format!("Dynamic plan: {}", plan.objective),
             entrypoint: format!("dynamic-{}", workflow_slug(&plan.objective)),
             trigger_type: "manual".to_string(),
-            default_agent_id: agent.id,
-            default_environment_id: input.environment_id,
+            default_agent_id: agent_id,
+            default_environment_id: environment_id,
             input_schema_ref: None,
             output_schema_ref: None,
             step_graph,
-            handoff_rules: dynamic_workflow_plan_handoff_rules(&plan),
+            handoff_rules: dynamic_workflow_plan_handoff_rules(
+                &plan,
+                materialization_approval.clone(),
+            ),
             execution_strategy: execution_strategy.clone(),
             runtime_adapter: runtime_adapter.clone(),
             runtime_mode: runtime_mode.clone(),
@@ -547,143 +718,181 @@ async fn materialize_dynamic_workflow_plan(
             event_ingestion_policy: event_ingestion_policy.clone(),
             approval_policy_ref: None,
             eval_gate_refs: Vec::new(),
-            release_state: "released".to_string(),
-            created_at: now,
-            updated_at: now,
+            // An approved dynamic plan authorizes this run, not unlimited reuse.
+            release_state: "staged".to_string(),
+            created_at: claimed_at,
+            updated_at: claimed_at,
             archived_at: None,
         })
         .await?;
     let session = state
-        .create_session(CreateSession {
-            agent_id: workflow_definition.default_agent_id,
-            environment_id: input.environment_id,
-            title: input
-                .title
-                .filter(|title| !title.trim().is_empty())
-                .unwrap_or_else(|| format!("Dynamic workflow: {}", plan.objective)),
-            message: Some(plan.objective.clone()),
-        })
+        .create_session_for_agent_version(
+            CreateSession {
+                agent_id: workflow_definition.default_agent_id,
+                environment_id,
+                title: title
+                    .filter(|title| !title.trim().is_empty())
+                    .unwrap_or_else(|| format!("Dynamic workflow: {}", plan.objective)),
+                message: Some(plan.objective.clone()),
+            },
+            agent_version_id,
+        )
         .await?;
-    ensure_primary_session_thread(&state, session.id).await?;
-    let input_payload = if input.input_payload.is_object()
-        && !input
-            .input_payload
-            .as_object()
-            .is_some_and(serde_json::Map::is_empty)
-    {
-        input.input_payload
-    } else {
-        json!({
-            "objective": plan.objective,
-            "dynamic_workflow_plan_id": plan.id,
-            "phases": plan.phases
-        })
-    };
-    let input_digest = workflow_input_digest(&input_payload);
-    let runtime_envelope = workflow_run_runtime_envelope(
-        &workflow_definition,
-        &execution_strategy,
-        runtime_adapter.as_deref(),
-        runtime_mode.as_deref(),
-        None,
-        &json!({
-            "dynamic_workflow_plan_id": plan.id,
-            "objective": plan.objective,
-            "phases": plan.phases,
-            "agent_fleet_policy": plan.agent_fleet_policy,
-            "validation": plan.validation,
-            "analysis": plan.analysis
-        }),
-    );
-    let workflow_run = state
-        .create_workflow_run(WorkflowRun {
-            id: Uuid::new_v4(),
-            workflow_definition_id: workflow_definition.id,
-            pack_installation_id: None,
-            source_event_id: None,
-            source_work_item_id: plan.source_work_item_id,
-            source_schedule_id: None,
-            status: "queued".to_string(),
-            primary_session_id: session.id,
-            root_task_grant_id: None,
-            input_payload,
-            input_digest,
-            execution_strategy,
-            runtime_adapter,
-            runtime_mode,
-            delegation_status: (workflow_definition.execution_strategy == "delegated_runtime")
-                .then_some("submitted".to_string()),
-            external_run_ref: None,
-            runtime_event_cursor: None,
-            runtime_envelope,
-            started_at: None,
-            completed_at: None,
-            audit_trace_id: None,
-            created_at: now,
-            updated_at: now,
-        })
-        .await?;
-    let root_grant = issue_root_task_grant_for_workflow_run(
-        &state,
-        &workflow_run,
-        &workflow_definition,
-        &session,
-    )
-    .await?;
-    let workflow_run = state
-        .update_workflow_run_root_task_grant(workflow_run.id, root_grant.id)
-        .await?;
-    materialize_workflow_graph_start_steps(
-        &state,
-        &workflow_definition,
-        &workflow_run,
-        &session,
-        &root_grant,
-    )
-    .await?;
-    state
-        .append_event(
-            "system",
-            Some(workflow_run.id),
-            session.id,
-            "dynamic_workflow_plan.materialized",
+    let initialized = async {
+        ensure_primary_session_thread(state, session.id).await?;
+        let input_payload = if input_payload.is_object()
+            && !input_payload
+                .as_object()
+                .is_some_and(serde_json::Map::is_empty)
+        {
+            input_payload
+        } else {
             json!({
+                "objective": plan.objective,
                 "dynamic_workflow_plan_id": plan.id,
-                "workflow_definition_id": workflow_definition.id,
-                "workflow_run_id": workflow_run.id,
-                "execution_strategy": workflow_run.execution_strategy,
-                "runtime_adapter": workflow_run.runtime_adapter,
-                "runtime_mode": workflow_run.runtime_mode,
-                "root_task_grant_id": workflow_run.root_task_grant_id
+                "phases": plan.phases
+            })
+        };
+        let input_digest = workflow_input_digest(&input_payload);
+        let runtime_envelope = workflow_run_runtime_envelope_with_pinned_ontology_release(
+            state,
+            &workflow_definition,
+            &execution_strategy,
+            runtime_adapter.as_deref(),
+            runtime_mode.as_deref(),
+            None,
+            &json!({
+                "dynamic_workflow_plan_id": plan.id,
+                "objective": plan.objective,
+                "phases": plan.phases,
+                "agent_fleet_policy": plan.agent_fleet_policy,
+                "validation": plan.validation,
+                "analysis": plan.analysis,
+                "materialization_approval": materialization_approval
             }),
         )
         .await?;
-    let audit = record_dynamic_workflow_plan_audit(
-        &state,
-        &plan,
-        "dynamic_workflow_plan.materialized",
-        json!({
-            "workflow_definition_id": workflow_definition.id,
-            "workflow_run_id": workflow_run.id,
-            "root_task_grant_id": workflow_run.root_task_grant_id,
-            "execution_strategy": workflow_run.execution_strategy,
-            "runtime_adapter": workflow_run.runtime_adapter,
-            "runtime_mode": workflow_run.runtime_mode
-        }),
-    )
-    .await?;
-    let plan = state
-        .update_dynamic_workflow_plan_materialized(
-            plan.id,
-            workflow_definition.id,
-            workflow_run.id,
-            Some(audit.id),
-            now,
+        let workflow_run = state
+            .create_workflow_run(WorkflowRun {
+                id: workflow_run_id,
+                workflow_definition_id: workflow_definition.id,
+                pack_installation_id: None,
+                source_event_id: None,
+                source_work_item_id: plan.source_work_item_id,
+                source_schedule_id: None,
+                status: "initializing".to_string(),
+                primary_session_id: session.id,
+                root_task_grant_id: None,
+                input_payload,
+                input_digest,
+                execution_strategy,
+                runtime_adapter,
+                runtime_mode,
+                delegation_status: (workflow_definition.execution_strategy == "delegated_runtime")
+                    .then_some("submitted".to_string()),
+                external_run_ref: None,
+                runtime_event_cursor: None,
+                runtime_envelope,
+                started_at: None,
+                completed_at: None,
+                audit_trace_id: None,
+                created_at: claimed_at,
+                updated_at: claimed_at,
+            })
+            .await?;
+        let root_grant = issue_root_task_grant_for_workflow_run(
+            state,
+            &workflow_run,
+            &workflow_definition,
+            &session,
         )
         .await?;
-    Ok(Json(DynamicWorkflowPlanMaterializationResponse {
-        plan,
-        workflow_definition,
-        workflow_run,
-    }))
+        let linked_run = state
+            .update_workflow_run_root_task_grant(workflow_run.id, root_grant.id)
+            .await?;
+        let workflow_run = materialize_workflow_graph_start_steps(
+            state,
+            &workflow_definition,
+            &linked_run,
+            &session,
+            &root_grant,
+        )
+        .await?;
+        state
+            .append_event(
+                "system",
+                Some(workflow_run.id),
+                session.id,
+                "dynamic_workflow_plan.materialized",
+                json!({
+                    "dynamic_workflow_plan_id": plan.id,
+                    "workflow_definition_id": workflow_definition.id,
+                    "workflow_run_id": workflow_run.id,
+                    "execution_strategy": workflow_run.execution_strategy,
+                    "runtime_adapter": workflow_run.runtime_adapter,
+                    "runtime_mode": workflow_run.runtime_mode,
+                    "agent_version_id": session.agent_version_id,
+                    "workflow_release_state": workflow_definition.release_state,
+                    "root_task_grant_id": workflow_run.root_task_grant_id
+                }),
+            )
+            .await?;
+        let audit = record_dynamic_workflow_plan_audit(
+            state,
+            &plan,
+            "dynamic_workflow_plan.materialized",
+            json!({
+                "workflow_definition_id": workflow_definition.id,
+                "workflow_run_id": workflow_run.id,
+                "root_task_grant_id": workflow_run.root_task_grant_id,
+                "execution_strategy": workflow_run.execution_strategy,
+                "runtime_adapter": workflow_run.runtime_adapter,
+                "runtime_mode": workflow_run.runtime_mode,
+                "agent_version_id": session.agent_version_id,
+                "workflow_release_state": workflow_definition.release_state
+            }),
+        )
+        .await?;
+        let plan = state
+            .update_dynamic_workflow_plan_materialized(
+                plan.id,
+                claim_audit_id,
+                workflow_definition.id,
+                workflow_run.id,
+                Some(audit.id),
+                Utc::now(),
+            )
+            .await?;
+        Ok(DynamicWorkflowPlanMaterializationResponse {
+            plan,
+            workflow_definition,
+            workflow_run,
+        })
+    }
+    .await;
+    match initialized {
+        Ok(materialized) => Ok(materialized),
+        Err(error) => {
+            let failed_at = Utc::now();
+            let _ = state
+                .update_workflow_run_status(
+                    workflow_run_id,
+                    "failed".to_string(),
+                    None,
+                    Some(failed_at),
+                )
+                .await;
+            let _ = state
+                .close_active_task_grants_for_workflow_run(workflow_run_id, "cancelled")
+                .await;
+            let _ = set_managed_session_status(
+                state,
+                session.id,
+                SessionStatus::Failed,
+                "dynamic workflow materialization failed",
+            )
+            .await;
+            Err(error)
+        }
+    }
 }
