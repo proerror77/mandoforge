@@ -76,7 +76,8 @@ SH
 start_gate_api() {
   local log_file="$1"
   shift
-  env "$@" cargo run -p mandoforge-api >"$log_file" 2>&1 &
+  cargo build -p mandoforge-api --bin mandoforge-api --locked
+  env "$@" target/debug/mandoforge-api >"$log_file" 2>&1 &
   API_PID="$!"
 
   for _ in $(seq 1 120); do
@@ -90,7 +91,9 @@ start_gate_api() {
     fi
     sleep 0.5
   done
-  curl -fsS "$GATE_BASE_URL/healthz" >/dev/null
+  echo "stage1 gate API did not become healthy; log follows:" >&2
+  cat "$log_file" >&2
+  return 1
 }
 
 if [[ "$RUN_LIVE" != "1" ]]; then
