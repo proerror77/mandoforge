@@ -43,6 +43,10 @@ SESSION_ID="$(
     }')" \
     | jq -r '.id'
 )"
+if [[ -z "$SESSION_ID" || "$SESSION_ID" == "null" ]]; then
+  echo "no session id returned by $BASE_URL/api/sessions" >&2
+  exit 1
+fi
 
 APPROVAL_ID="$(
   curl -fsS -X POST "$BASE_URL/api/tools/shell.exec/execute" \
@@ -56,6 +60,10 @@ APPROVAL_ID="$(
     }')" \
     | jq -r '.approval_id'
 )"
+if [[ -z "$APPROVAL_ID" || "$APPROVAL_ID" == "null" ]]; then
+  echo "no approval id returned by $BASE_URL/api/tools/shell.exec/execute" >&2
+  exit 1
+fi
 
 curl -fsS -X POST "$BASE_URL/api/approvals/$APPROVAL_ID/approve" \
   "${auth_headers[@]}" \
