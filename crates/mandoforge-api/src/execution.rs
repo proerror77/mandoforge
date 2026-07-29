@@ -858,11 +858,21 @@ async fn record_remote_computer_execution_handoff_acknowledged(
 }
 
 fn remote_computer_pod_execution_requested() -> bool {
-    let transport_mode = std::env::var("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT")
-        .ok()
+    remote_computer_pod_execution_requested_from_lookup(&|key| std::env::var(key).ok())
+}
+
+pub(crate) fn remote_computer_pod_execution_requested_from_lookup<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let transport_mode = lookup("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT")
         .map(|value| value.trim().to_ascii_lowercase())
         .unwrap_or_default();
-    let execution_enabled = env_flag("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_ENABLED");
+    let execution_enabled =
+        lookup("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_ENABLED").is_some_and(|value| {
+            let value = value.trim();
+            value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
+        });
     execution_enabled && matches!(transport_mode.as_str(), "kubernetes" | "k8s")
 }
 

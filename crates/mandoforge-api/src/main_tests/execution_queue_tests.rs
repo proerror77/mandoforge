@@ -55,6 +55,8 @@ fn rejects_process_local_broker_queue_backends() {
 
 #[tokio::test]
 async fn api_process_rejects_worker_execution_entrypoints() {
+    let _env_guard = env_lock().lock().expect("env lock");
+    let _insecure_auth = EnvVarGuard::set("MANDOFORGE_INSECURE_DEV_AUTH", "1");
     let mut state = test_state_with_worker(Arc::new(InlineExecutionWorker));
     state.process_role = ProcessRole::Api;
     let mut headers = HeaderMap::new();
@@ -97,6 +99,68 @@ async fn api_process_rejects_worker_execution_entrypoints() {
     handlers::workflows::worker_get_task_board(&state, &headers)
         .await
         .expect("worker process may poll the task board");
+}
+
+#[tokio::test]
+async fn api_process_http_run_routes_require_insecure_dev_auth() {
+    let _env_guard = env_lock().lock().expect("env lock");
+    let _insecure_auth = EnvVarGuard::set("MANDOFORGE_INSECURE_DEV_AUTH", "0");
+    let _worker_token = EnvVarGuard::set("MANDOFORGE_WORKER_TOKEN", "worker-token");
+    let mut state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.process_role = ProcessRole::Api;
+    let app = build_router(state);
+
+    for (uri, json_body) in [
+        (format!("/api/execution-jobs/{}/run", Uuid::new_v4()), false),
+        (
+            format!("/api/session-loop-jobs/{}/run", Uuid::new_v4()),
+            false,
+        ),
+        (
+            format!("/api/workflow-step-runs/{}/run", Uuid::new_v4()),
+            true,
+        ),
+    ] {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("authorization", "Bearer worker-token")
+            .header("x-mandoforge-worker-id", "worker-a");
+        if json_body {
+            request = request.header("content-type", "application/json");
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                request
+                    .body(if json_body {
+                        Body::from("{}")
+                    } else {
+                        Body::empty()
+                    })
+                    .expect("valid request"),
+            )
+            .await
+            .expect("run route response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    drop(_insecure_auth);
+    let _insecure_auth = EnvVarGuard::set("MANDOFORGE_INSECURE_DEV_AUTH", "1");
+    let mut state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.process_role = ProcessRole::Api;
+    let app = build_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/execution-jobs/{}/run", Uuid::new_v4()))
+                .body(Body::empty())
+                .expect("valid request"),
+        )
+        .await
+        .expect("local compatibility response");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

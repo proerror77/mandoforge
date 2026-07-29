@@ -18,13 +18,14 @@ use crate::{
     WorkerLoadValidationRun, WorkerReadinessReport, authorize_collection_request,
     authorize_execution_job_run, authorize_request, authorize_session_loop_job_run,
     build_worker_readiness, cleanup_remote_computer_lease_runtime,
-    enforce_worker_environment_binding, enforce_worker_pool_binding, ensure_worker_process_role,
-    environment_worker_pool, execute_worker_load_validation, header_value, new_audit_log,
-    principal_from_request, reconcile_workflow_steps_after_session_loop_job,
-    record_remote_computer_job_assignment_event, run_execution_job_with_lease_renewal,
-    run_session_loop_with_lease_renewal, session_accepts_worker_execution,
-    set_managed_session_status, visible_session_ids_for_principal,
-    worker_environment_scope_required, worker_scope_headers_present,
+    enforce_worker_environment_binding, enforce_worker_pool_binding,
+    ensure_http_execution_process_role, ensure_worker_process_role, environment_worker_pool,
+    execute_worker_load_validation, header_value, new_audit_log, principal_from_request,
+    reconcile_workflow_steps_after_session_loop_job, record_remote_computer_job_assignment_event,
+    run_execution_job_with_lease_renewal, run_session_loop_with_lease_renewal,
+    session_accepts_worker_execution, set_managed_session_status,
+    visible_session_ids_for_principal, worker_environment_scope_required,
+    worker_scope_headers_present,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -526,6 +527,7 @@ async fn run_session_loop_job_route(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<SessionLoopJob>, AppError> {
+    ensure_http_execution_process_role(&state)?;
     authorize_session_loop_job_run(&state, &headers, id).await?;
     let worker_id = headers
         .get("x-mandoforge-worker-id")
@@ -666,6 +668,7 @@ async fn run_execution_job_route(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<crate::execution_queue::ExecutionJob>, AppError> {
+    ensure_http_execution_process_role(&state)?;
     authorize_execution_job_run(&state, &headers, id).await?;
     let worker_id = headers
         .get("x-mandoforge-worker-id")

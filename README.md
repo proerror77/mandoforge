@@ -221,6 +221,7 @@ Start the API:
 
 ```bash
 MANDOFORGE_INSECURE_DEV_AUTH=1 \
+MANDOFORGE_ALLOW_IN_MEMORY_STORE=1 \
 MANDOFORGE_ALLOW_HOST_SHELL_EXEC=1 \
 cargo run -p mandoforge-api
 ```
@@ -302,6 +303,7 @@ cargo run -p mandoforge-api
 OpenAI-compatible provider:
 
 ```bash
+MANDOFORGE_ALLOW_IN_MEMORY_STORE=1 \
 MANDOFORGE_PROVIDER_BASE_URL=https://api.openai.com \
 MANDOFORGE_PROVIDER_API_KEY=... \
 MANDOFORGE_PROVIDER_MODEL=gpt-5.5-mini \
@@ -311,14 +313,17 @@ cargo run -p mandoforge-api
 Docker shell sandbox:
 
 ```bash
+MANDOFORGE_ALLOW_IN_MEMORY_STORE=1 \
 MANDOFORGE_SHELL_RUNNER=docker \
 MANDOFORGE_SHELL_DOCKER_IMAGE=alpine:3.20 \
 cargo run -p mandoforge-api
 ```
 
-Queue-backed execution worker:
+Local-only HTTP worker compatibility:
 
 ```bash
+MANDOFORGE_INSECURE_DEV_AUTH=true \
+MANDOFORGE_ALLOW_IN_MEMORY_STORE=1 \
 MANDOFORGE_EXECUTION_WORKER=queue \
 MANDOFORGE_DEV_ADMIN_TOKEN=local-worker-token \
 MANDOFORGE_WORKER_TOKEN=local-worker-token \
@@ -330,10 +335,22 @@ WORKER_POOL=managed-agent \
 cargo run -p mandoforge-api --bin mandoforge-worker
 ```
 
-The same worker drains both session-loop jobs and approved execution jobs. It is
-the local entrypoint for the always-available runtime session loop. `WORKER_ENVIRONMENT_ID`
-binds a worker to one Environment id; `WORKER_POOL` or `WORKER_QUEUE` binds it
-to Environments whose `worker_queue_binding` names the same pool.
+The HTTP worker is a local compatibility path and requires the API process to
+run with `MANDOFORGE_INSECURE_DEV_AUTH=true`. Production workers use the same
+API binary, a durable Postgres queue, and no HTTP `/run` endpoint:
+
+```bash
+DATABASE_URL=postgres://mandoforge:mandoforge@127.0.0.1:5432/mandoforge \
+MANDOFORGE_PROCESS_ROLE=worker \
+MANDOFORGE_WORKER_TOKEN=... \
+WORKER_ID=worker-1 \
+cargo run -p mandoforge-api
+```
+
+The worker drains both session-loop jobs and approved execution jobs.
+`WORKER_ENVIRONMENT_ID` binds it to one Environment id; `WORKER_POOL` or
+`WORKER_QUEUE` binds it to Environments whose `worker_queue_binding` names the
+same pool.
 
 Governed coding-agent CLI profiles:
 
@@ -391,6 +408,7 @@ Agent -> Environment -> Session -> runtime adapter -> Events
 Codex App Server adapter:
 
 ```bash
+MANDOFORGE_ALLOW_IN_MEMORY_STORE=1 \
 MANDOFORGE_CODEX_APP_SERVER_URL=http://127.0.0.1:8789 \
 MANDOFORGE_CODEX_APP_SERVER_TIMEOUT_SECONDS=30 \
 MANDOFORGE_CODEX_EXECUTION_STRATEGY=auto \

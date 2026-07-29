@@ -66,6 +66,11 @@ impl WorkerDaemonConfig {
         }
         let worker_token = required_env(lookup, "MANDOFORGE_WORKER_TOKEN")?;
         let worker_id = required_env(lookup, "WORKER_ID")?;
+        if crate::execution::remote_computer_pod_execution_requested_from_lookup(lookup) {
+            bail!(
+                "MANDOFORGE_PROCESS_ROLE=worker cannot own Kubernetes Remote Computer live execution; deploy a separate narrow Kubernetes bridge with scoped RBAC, and do not grant Kubernetes API credentials to the queue worker"
+            );
+        }
         let worker_environment_id = optional_env(lookup, "WORKER_ENVIRONMENT_ID");
         let worker_pool =
             optional_env(lookup, "WORKER_POOL").or_else(|| optional_env(lookup, "WORKER_QUEUE"));
@@ -471,6 +476,23 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("isolated")
         );
+    }
+
+    #[test]
+    fn worker_config_rejects_kubernetes_live_execution_without_bridge() {
+        let error = WorkerDaemonConfig::from_lookup(&|key| match key {
+            "DATABASE_URL" => Some("postgres://db".to_string()),
+            "MANDOFORGE_WORKER_TOKEN" => Some("worker-token".to_string()),
+            "WORKER_ID" => Some("worker-a".to_string()),
+            "MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT" => Some("kubernetes".to_string()),
+            "MANDOFORGE_REMOTE_COMPUTER_EXECUTION_ENABLED"
+            | "MANDOFORGE_REMOTE_COMPUTER_MUTATION_ENABLED"
+            | "MANDOFORGE_REMOTE_COMPUTER_LIVE_MUTATION_ENABLED" => Some("true".to_string()),
+            _ => None,
+        })
+        .expect_err("worker must not own Kubernetes live execution");
+
+        assert!(error.to_string().contains("narrow Kubernetes bridge"));
     }
 
     #[test]

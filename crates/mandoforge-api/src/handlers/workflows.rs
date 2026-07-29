@@ -21,14 +21,15 @@ use crate::{
     build_task_board_snapshot, build_workflow_run_graph_console,
     claim_workflow_step_run as claim_workflow_step_run_inner, collect_session_runtime_refs,
     diff_session_runtime_refs, enforce_worker_environment_binding, enforce_worker_pool_binding,
-    enqueue_session_loop, ensure_child_task_grant_within_parent, ensure_primary_session_thread,
-    ensure_session_event_exists, ensure_worker_process_role,
-    issue_root_task_grant_for_workflow_run, materialize_workflow_graph_start_steps, new_audit_log,
-    normalize_event_ingestion_policy, normalize_optional_runtime_adapter,
-    normalize_optional_runtime_mode, normalize_optional_text, normalize_task_grant_risk_level,
-    normalize_workflow_execution_strategy, normalize_workflow_release_state,
-    normalize_workflow_run_status, normalize_workflow_trigger_type, principal_from_request,
-    record_task_grant_issued, record_workflow_step_run_created, record_workflow_step_run_updated,
+    enqueue_session_loop, ensure_child_task_grant_within_parent,
+    ensure_http_execution_process_role, ensure_primary_session_thread, ensure_session_event_exists,
+    ensure_worker_process_role, issue_root_task_grant_for_workflow_run,
+    materialize_workflow_graph_start_steps, new_audit_log, normalize_event_ingestion_policy,
+    normalize_optional_runtime_adapter, normalize_optional_runtime_mode, normalize_optional_text,
+    normalize_task_grant_risk_level, normalize_workflow_execution_strategy,
+    normalize_workflow_release_state, normalize_workflow_run_status,
+    normalize_workflow_trigger_type, principal_from_request, record_task_grant_issued,
+    record_workflow_step_run_created, record_workflow_step_run_updated,
     record_workflow_step_worker_started, require_non_empty, run_session_loop_with_lease_renewal,
     run_workflow_compensation_adapter_step, run_workflow_delegated_runtime_step,
     set_managed_session_status, task_grant_session_matches,
@@ -1227,6 +1228,7 @@ async fn run_workflow_step_run(
     headers: HeaderMap,
     Json(input): Json<RunWorkflowStepRun>,
 ) -> Result<Json<RunWorkflowStepRunResponse>, AppError> {
+    ensure_http_execution_process_role(&state)?;
     Ok(Json(
         run_workflow_step_run_inner(&state, id, &headers, input).await?,
     ))
