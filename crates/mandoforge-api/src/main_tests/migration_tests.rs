@@ -141,6 +141,163 @@ async fn postgres_migration_ledger_is_idempotent_and_rejects_checksum_drift() {
     fs::remove_dir_all(directory).expect("remove temporary migration directory");
 }
 
+#[tokio::test]
+#[ignore = "requires MANDOFORGE_TEST_POSTGRES_URL"]
+async fn postgres_session_event_trigger_and_explicit_projection_converge() -> Result<()> {
+    let database_url = std::env::var("MANDOFORGE_TEST_POSTGRES_URL")
+        .expect("MANDOFORGE_TEST_POSTGRES_URL is required");
+    let bootstrap_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await?;
+    run_migrations(&bootstrap_pool).await?;
+    drop(bootstrap_pool);
+
+    let tenant_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+    let session_id = Uuid::new_v4();
+    let tenant_setting = format!("SET mandoforge.tenant_id = '{tenant_id}'");
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .after_connect(move |connection, _| {
+            let tenant_setting = tenant_setting.clone();
+            Box::pin(async move {
+                connection.execute(tenant_setting.as_str()).await?;
+                Ok(())
+            })
+        })
+        .connect(&database_url)
+        .await?;
+
+    let outcome: Result<()> = async {
+        sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3)")
+            .bind(tenant_id)
+            .bind("Session event projection test")
+            .bind(format!("session-event-projection-{}", tenant_id.simple()))
+            .execute(&pool)
+            .await?;
+        sqlx::query(
+            "INSERT INTO agents (id, tenant_id, name, kind, provider, model, system_prompt)
+             VALUES ($1, $2, $3, 'orchestrator', 'test', 'test', '')",
+        )
+        .bind(agent_id)
+        .bind(tenant_id)
+        .bind("Session event projection test agent")
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO sessions (id, tenant_id, agent_id, title, status)
+             VALUES ($1, $2, $3, $4, 'idle')",
+        )
+        .bind(session_id)
+        .bind(tenant_id)
+        .bind(agent_id)
+        .bind("Session event projection test session")
+        .execute(&pool)
+        .await?;
+
+        let mut state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+        state.store = StoreBackend::Postgres(pool.clone());
+        state.execution_queue = ExecutionQueue::postgres(pool.clone(), tenant_id);
+        state.tenant_id = tenant_id;
+
+        state
+            .append_event(
+                "user",
+                None,
+                session_id,
+                "user.message",
+                json!({"message": "one"}),
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        let second_event = state
+            .append_event(
+                "user",
+                None,
+                session_id,
+                "user.message",
+                json!({"message": "two"}),
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        let explicit_job = project_session_event_to_loop(&state, &second_event)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))?
+            .ok_or_else(|| anyhow::anyhow!("user event was not explicitly projected"))?;
+
+        let jobs = state
+            .list_session_loop_jobs()
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        anyhow::ensure!(
+            jobs.len() == 1,
+            "expected one converged queued job: {jobs:?}"
+        );
+        let first_job = &jobs[0];
+        anyhow::ensure!(first_job.id == explicit_job.id);
+        anyhow::ensure!(first_job.status == SessionLoopJobStatus::Queued);
+        anyhow::ensure!(first_job.pending_event_seq_start == Some(1));
+        anyhow::ensure!(first_job.pending_event_seq_end == Some(2));
+
+        state
+            .start_session_loop_job(first_job.id, "projection-test-worker")
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        let next_event = state
+            .append_event(
+                "user",
+                None,
+                session_id,
+                "user.message",
+                json!({"message": "three"}),
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+
+        let jobs = state
+            .list_session_loop_jobs()
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        let running = jobs
+            .iter()
+            .filter(|job| job.status == SessionLoopJobStatus::Running)
+            .collect::<Vec<_>>();
+        let queued = jobs
+            .iter()
+            .filter(|job| job.status == SessionLoopJobStatus::Queued)
+            .collect::<Vec<_>>();
+        anyhow::ensure!(running.len() == 1, "expected one running job: {jobs:?}");
+        anyhow::ensure!(queued.len() == 1, "expected one queued job: {jobs:?}");
+        anyhow::ensure!(
+            queued[0].pending_event_seq_start
+                == running[0].pending_event_seq_end.map(|seq| seq + 1)
+        );
+        anyhow::ensure!(queued[0].pending_event_seq_end == Some(next_event.seq));
+        Ok(())
+    }
+    .await;
+
+    let cleanup: Result<()> = async {
+        let mut transaction = pool.begin().await?;
+        for table in ["session_loop_jobs", "session_events", "sessions", "agents"] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE tenant_id = $1"))
+                .bind(tenant_id)
+                .execute(&mut *transaction)
+                .await?;
+        }
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(tenant_id)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+    .await;
+    cleanup?;
+    outcome
+}
+
 #[test]
 fn dynamic_workflow_cleanup_migration_is_restart_safe() {
     let migration = include_str!("../../../../db/migrations/0076_drop_dynamic_workflow_plans.sql");
