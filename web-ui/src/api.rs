@@ -269,7 +269,83 @@ pub struct CapabilityDiscovery {
     #[serde(default)]
     pub status: String,
     #[serde(default)]
+    pub generated_at: String,
+    #[serde(default)]
+    pub summary: Value,
+    #[serde(default)]
+    pub agent_cards: Vec<CapabilityAgentCard>,
+    #[serde(default)]
+    pub suggested_prompts: Vec<CapabilityPrompt>,
+    #[serde(default)]
+    pub onboarding_steps: Vec<DiscoveryStep>,
+    #[serde(default)]
+    pub empty_states: Vec<DiscoveryEmptyState>,
+    #[serde(default)]
     pub capabilities: Vec<Value>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct CapabilityAgentCard {
+    #[serde(default)]
+    pub agent_id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub agent_role: String,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub release_state: String,
+    #[serde(default)]
+    pub tools: Vec<String>,
+    #[serde(default)]
+    pub skill_ids: Vec<String>,
+    #[serde(default)]
+    pub workflow_pack_ids: Vec<String>,
+    #[serde(default)]
+    pub semantic_scopes: Value,
+    #[serde(default)]
+    pub primary_action: String,
+    #[serde(default)]
+    pub failure_modes: Value,
+    #[serde(default)]
+    pub sample_tasks: Value,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct CapabilityPrompt {
+    #[serde(default)]
+    pub target_view: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub prompt: String,
+    #[serde(default)]
+    pub action: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct DiscoveryStep {
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct DiscoveryEmptyState {
+    #[serde(default)]
+    pub view: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub action: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]

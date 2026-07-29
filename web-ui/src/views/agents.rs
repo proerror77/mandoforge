@@ -1,16 +1,28 @@
-use crate::api::{Agent, Session};
-use crate::components::{FlowMeter, KeyMetrics, Panel, Rows, RuntimePipeline, VersionBlock};
+use crate::api::{Agent, Session, api_get};
+use crate::components::{
+    ApprovalRows, FlowMeter, JsonPreview, KeyMetrics, Panel, Rows, RuntimePipeline, VersionBlock,
+};
 use crate::state::{ConsoleData, UiLang};
 use crate::{
     compact_json, is_active_status, label_or, orbit_point, position_style, session_title, short_id,
     status_tone,
 };
+use serde_json::Value;
+use wasm_bindgen_futures::spawn_local;
+use web_sys::HtmlSelectElement;
 use yew::prelude::*;
+
+const SESSION_DETAIL_ROUTE: &str = "/api/sessions/{session_id}";
+const SESSION_EVENTS_ROUTE: &str = "/api/sessions/{session_id}/events";
+const SESSION_ARTIFACTS_ROUTE: &str = "/api/sessions/{session_id}/artifacts";
+const SESSION_AUDIT_LOGS_ROUTE: &str = "/api/sessions/{session_id}/audit-logs";
 
 #[derive(Properties, Clone, PartialEq)]
 pub(crate) struct AgentsProps {
     pub(crate) data: ConsoleData,
     pub(crate) lang: UiLang,
+    pub(crate) on_approve_approval: Callback<String>,
+    pub(crate) on_reject_approval: Callback<String>,
     pub(crate) task_title: String,
     pub(crate) task_message: String,
     pub(crate) selected_agent_id: String,
@@ -50,6 +62,112 @@ pub(crate) fn AgentsView(props: &AgentsProps) -> Html {
         .map(|environment| environment.id.clone())
         .unwrap_or_default();
     let direct_session_launch_allowed = data.direct_session_launch_allowed();
+    let selected_session_id = use_state(|| {
+        data.sessions
+            .data
+            .first()
+            .map(|session| session.id.clone())
+            .unwrap_or_default()
+    });
+    let selected_session_detail = use_state(|| None::<Value>);
+    let selected_session_events = use_state(|| None::<Value>);
+    let selected_session_artifacts = use_state(|| None::<Value>);
+    let selected_session_audit_logs = use_state(|| None::<Value>);
+    let session_evidence_status = use_state(String::new);
+
+    {
+        let selected_session_id = selected_session_id.clone();
+        let sessions = data.sessions.data.clone();
+        use_effect_with(sessions, move |sessions| {
+            if let Some(first_session) = sessions.first() {
+                if selected_session_id.is_empty()
+                    || !sessions
+                        .iter()
+                        .any(|session| session.id == *selected_session_id)
+                {
+                    selected_session_id.set(first_session.id.clone());
+                }
+            } else {
+                selected_session_id.set(String::new());
+            }
+            || ()
+        });
+    }
+    {
+        let selected_session_id_handle = selected_session_id.clone();
+        let selected_session_detail = selected_session_detail.clone();
+        let selected_session_events = selected_session_events.clone();
+        let selected_session_artifacts = selected_session_artifacts.clone();
+        let selected_session_audit_logs = selected_session_audit_logs.clone();
+        let session_evidence_status = session_evidence_status.clone();
+        use_effect_with(
+            (*selected_session_id_handle).clone(),
+            move |selected_session_id| {
+                if selected_session_id.is_empty() {
+                    selected_session_detail.set(None);
+                    selected_session_events.set(None);
+                    selected_session_artifacts.set(None);
+                    selected_session_audit_logs.set(None);
+                    session_evidence_status.set(String::new());
+                } else {
+                    session_evidence_status.set("Loading session evidence...".to_string());
+                    let detail_handle = selected_session_detail.clone();
+                    let events_handle = selected_session_events.clone();
+                    let artifacts_handle = selected_session_artifacts.clone();
+                    let audit_handle = selected_session_audit_logs.clone();
+                    let status_handle = session_evidence_status.clone();
+                    let selected_session_id_handle = selected_session_id_handle.clone();
+                    let session_id = selected_session_id.clone();
+                    spawn_local(async move {
+                        let detail_path = SESSION_DETAIL_ROUTE.replace("{session_id}", &session_id);
+                        let events_path = SESSION_EVENTS_ROUTE.replace("{session_id}", &session_id);
+                        let artifacts_path =
+                            SESSION_ARTIFACTS_ROUTE.replace("{session_id}", &session_id);
+                        let audit_path =
+                            SESSION_AUDIT_LOGS_ROUTE.replace("{session_id}", &session_id);
+                        let detail = api_get::<Value>(&detail_path).await;
+                        let events = api_get::<Value>(&events_path).await;
+                        let artifacts = api_get::<Value>(&artifacts_path).await;
+                        let audit_logs = api_get::<Value>(&audit_path).await;
+                        if *selected_session_id_handle != session_id {
+                            return;
+                        }
+                        let mut failed = Vec::new();
+                        if detail.is_err() {
+                            failed.push("session");
+                        }
+                        if events.is_err() {
+                            failed.push("events");
+                        }
+                        if artifacts.is_err() {
+                            failed.push("artifacts");
+                        }
+                        if audit_logs.is_err() {
+                            failed.push("audit logs");
+                        }
+                        detail_handle.set(detail.ok());
+                        events_handle.set(events.ok());
+                        artifacts_handle.set(artifacts.ok());
+                        audit_handle.set(audit_logs.ok());
+                        status_handle.set(if failed.is_empty() {
+                            "Session evidence loaded.".to_string()
+                        } else {
+                            format!("Session evidence incomplete: {} failed.", failed.join(", "))
+                        });
+                    });
+                }
+                || ()
+            },
+        );
+    }
+
+    let on_session_select = {
+        let selected_session_id = selected_session_id.clone();
+        Callback::from(move |event: Event| {
+            let value = event.target_unchecked_into::<HtmlSelectElement>().value();
+            selected_session_id.set(value);
+        })
+    };
     html! {
         <div class="page-stack">
             <section class="page-purpose">
@@ -142,9 +260,13 @@ pub(crate) fn AgentsView(props: &AgentsProps) -> Html {
                 }).collect::<Vec<_>>()} />
             </Panel>
             <Panel title={lang.text("Approvals", "审批")}>
-                <Rows empty={lang.text("No approvals.", "没有审批。")} rows={data.approvals.data.iter().take(8).map(|approval| {
-                    (approval.status.clone(), label_or(&approval.kind, "approval").to_string(), label_or(&approval.reason, &approval.id).to_string())
-                }).collect::<Vec<_>>()} />
+                <ApprovalRows
+                    approvals={data.approvals.data.clone()}
+                    lang={lang}
+                    limit={8}
+                    on_approve={props.on_approve_approval.clone()}
+                    on_reject={props.on_reject_approval.clone()}
+                />
             </Panel>
             <Panel title={lang.text("Tool Calls", "工具调用")}>
                 <Rows empty={lang.text("No tool calls.", "没有工具调用。")} rows={data.tool_calls.data.iter().take(8).map(|call| {
@@ -154,13 +276,28 @@ pub(crate) fn AgentsView(props: &AgentsProps) -> Html {
             <Panel title={lang.text("Deployment Version", "部署版本")}>
                 <VersionBlock version={data.deployment_version.data.clone()} />
             </Panel>
-            <Panel title={lang.text("Logs and Artifacts", "日志与产物")}>
-                <KeyMetrics values={vec![
-                    (lang.text("Events", "事件").to_string(), "via /api/sessions/{id}/events".to_string()),
-                    (lang.text("Stream", "流").to_string(), "via /api/sessions/{id}/stream".to_string()),
-                    (lang.text("Artifacts", "产物").to_string(), "via /api/sessions/{id}/artifacts".to_string()),
-                    (lang.text("Audit logs", "审计日志").to_string(), "via /api/sessions/{id}/audit-logs".to_string()),
-                ]} />
+            <Panel title={lang.text("Session Evidence", "会话证据")}>
+                <label>
+                    <span>{ lang.text("Session", "会话") }</span>
+                    <select value={(*selected_session_id).clone()} onchange={on_session_select}>
+                        { for data.sessions.data.iter().map(|session| {
+                            html! { <option value={session.id.clone()}>{ format!("{} / {}", short_id(&session.id), session_title(session)) }</option> }
+                        }) }
+                    </select>
+                </label>
+                <h3>{ lang.text("Session Detail", "会话详情") }</h3>
+                <JsonPreview value={selected_session_detail.as_ref().cloned().unwrap_or(Value::Null)} />
+                <h3>{ lang.text("Session Events", "会话事件") }</h3>
+                <JsonPreview value={selected_session_events.as_ref().cloned().unwrap_or(Value::Null)} />
+                <h3>{ lang.text("Session Artifacts", "会话产物") }</h3>
+                <JsonPreview value={selected_session_artifacts.as_ref().cloned().unwrap_or(Value::Null)} />
+                <h3>{ lang.text("Session Audit Logs", "审计日志") }</h3>
+                <JsonPreview value={selected_session_audit_logs.as_ref().cloned().unwrap_or(Value::Null)} />
+                <small>{ if selected_session_id.is_empty() {
+                    lang.text("No active session selected for evidence inspection.", "未选择用于检查证据的会话。").to_string()
+                } else {
+                    (*session_evidence_status).clone()
+                } }</small>
             </Panel>
             </div>
         </div>

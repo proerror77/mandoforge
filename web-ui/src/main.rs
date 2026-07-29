@@ -20,6 +20,9 @@ use wasm_bindgen_futures::spawn_local;
 use web_sys::{HtmlInputElement, HtmlSelectElement, HtmlTextAreaElement};
 use yew::prelude::*;
 
+const APPROVAL_APPROVE_ROUTE: &str = "/api/approvals/{approval_id}/approve";
+const APPROVAL_REJECT_ROUTE: &str = "/api/approvals/{approval_id}/reject";
+
 #[component]
 fn App() -> Html {
     let active_view = use_state(initial_active_view);
@@ -871,6 +874,36 @@ fn App() -> Html {
         })
     };
 
+    let approve_approval = {
+        let mutation_status = mutation_status.clone();
+        Callback::from(move |approval_id: String| {
+            let mutation_status = mutation_status.clone();
+            spawn_local(async move {
+                let path = APPROVAL_APPROVE_ROUTE.replace("{approval_id}", &approval_id);
+                match api_post::<Value, _>(&path, &json!({})).await {
+                    Ok(_) => mutation_status
+                        .set(format!("Approval {} approved.", short_id(&approval_id))),
+                    Err(error) => mutation_status.set(format!("Approval approve failed: {error}")),
+                }
+            });
+        })
+    };
+
+    let reject_approval = {
+        let mutation_status = mutation_status.clone();
+        Callback::from(move |approval_id: String| {
+            let mutation_status = mutation_status.clone();
+            spawn_local(async move {
+                let path = APPROVAL_REJECT_ROUTE.replace("{approval_id}", &approval_id);
+                match api_post::<Value, _>(&path, &json!({})).await {
+                    Ok(_) => mutation_status
+                        .set(format!("Approval {} rejected.", short_id(&approval_id))),
+                    Err(error) => mutation_status.set(format!("Approval reject failed: {error}")),
+                }
+            });
+        })
+    };
+
     let notifications = use_memo((data.clone(), *ui_lang), |(data, lang)| {
         console_notifications(data, *lang)
     });
@@ -1036,6 +1069,8 @@ fn App() -> Html {
                             <AgentsView
                                 data={data.clone()}
                                 lang={*ui_lang}
+                                on_approve_approval={approve_approval.clone()}
+                                on_reject_approval={reject_approval.clone()}
                                 task_title={(*task_title).clone()}
                                 task_message={(*task_message).clone()}
                                 selected_agent_id={(*task_agent_id).clone()}
@@ -1051,6 +1086,8 @@ fn App() -> Html {
                             <WorkflowsView
                                 data={data.clone()}
                                 lang={*ui_lang}
+                                on_approve_approval={approve_approval.clone()}
+                                on_reject_approval={reject_approval.clone()}
                             />
                         },
                         View::Semantic => html! {

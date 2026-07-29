@@ -1,5 +1,5 @@
 use crate::api::{WorkflowDefinition, WorkflowRun};
-use crate::components::{FlowMeter, JsonPreview, KeyMetrics, Panel, Rows};
+use crate::components::{ApprovalRows, FlowMeter, JsonPreview, KeyMetrics, Panel, Rows};
 use crate::state::{ConsoleData, UiLang};
 use crate::{board_column, is_active_status, label_or, short_id, status_tone};
 use yew::prelude::*;
@@ -16,6 +16,8 @@ enum RunsTasksTab {
 pub(crate) struct WorkflowsProps {
     pub(crate) data: ConsoleData,
     pub(crate) lang: UiLang,
+    pub(crate) on_approve_approval: Callback<String>,
+    pub(crate) on_reject_approval: Callback<String>,
 }
 
 impl RunsTasksTab {
@@ -85,7 +87,10 @@ pub(crate) fn WorkflowsView(props: &WorkflowsProps) -> Html {
                 ) }</p>
             </section>
 
-            <RunsTasksSummary data={props.data.clone()} lang={lang} />
+            <RunsTasksSummary
+                data={props.data.clone()}
+                lang={lang}
+            />
 
             <nav class="subnav-tabs" aria-label="Runs and tasks sections">
                 { for RunsTasksTab::ALL.into_iter().map(|tab| {
@@ -104,10 +109,32 @@ pub(crate) fn WorkflowsView(props: &WorkflowsProps) -> Html {
 
             {
                 match *active_tab {
-                    RunsTasksTab::Runs => html! { <RunsPanel data={props.data.clone()} lang={lang} /> },
-                    RunsTasksTab::Board => html! { <TaskBoardPanel data={props.data.clone()} lang={lang} /> },
-                    RunsTasksTab::Templates => html! { <WorkflowTemplatesPanel data={props.data.clone()} lang={lang} /> },
-                    RunsTasksTab::Approvals => html! { <ApprovalsPanel data={props.data.clone()} lang={lang} /> },
+                    RunsTasksTab::Runs => html! {
+                        <RunsPanel
+                            data={props.data.clone()}
+                            lang={lang}
+                        />
+                    },
+                    RunsTasksTab::Board => html! {
+                        <TaskBoardPanel
+                            data={props.data.clone()}
+                            lang={lang}
+                        />
+                    },
+                    RunsTasksTab::Templates => html! {
+                        <WorkflowTemplatesPanel
+                            data={props.data.clone()}
+                            lang={lang}
+                        />
+                    },
+                    RunsTasksTab::Approvals => html! {
+                        <ApprovalsPanel
+                            data={props.data.clone()}
+                            lang={lang}
+                            on_approve_approval={props.on_approve_approval.clone()}
+                            on_reject_approval={props.on_reject_approval.clone()}
+                        />
+                    },
                 }
             }
         </div>
@@ -251,13 +278,17 @@ fn WorkflowTemplatesPanel(props: &RunsTasksDataProps) -> Html {
 }
 
 #[component]
-fn ApprovalsPanel(props: &RunsTasksDataProps) -> Html {
+fn ApprovalsPanel(props: &WorkflowsProps) -> Html {
     html! {
         <div class="page-grid">
             <Panel title={props.lang.text("Approval Queue", "审批队列")}>
-                <Rows empty={props.lang.text("No pending approvals.", "没有待处理审批。")} rows={props.data.approvals.data.iter().take(12).map(|approval| {
-                    (approval.status.clone(), label_or(&approval.kind, "approval").to_string(), label_or(&approval.reason, "reason").to_string())
-                }).collect::<Vec<_>>()} />
+                <ApprovalRows
+                    approvals={props.data.approvals.data.clone()}
+                    lang={props.lang}
+                    limit={12}
+                    on_approve={props.on_approve_approval.clone()}
+                    on_reject={props.on_reject_approval.clone()}
+                />
             </Panel>
             <Panel title={props.lang.text("Human Review Rules", "人工确认原则")}>
                 <KeyMetrics values={vec![

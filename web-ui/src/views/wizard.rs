@@ -152,8 +152,9 @@ pub(crate) fn WizardView(props: &WizardProps) -> Html {
                 .find(|agent| agent.is_runnable())
                 .cloned()
             else {
-                on_status
-                    .emit("Wizard cannot start a pilot session: no agent is registered.".to_string());
+                on_status.emit(
+                    "Wizard cannot start a pilot session: no agent is registered.".to_string(),
+                );
                 return;
             };
             let environment_id = data
@@ -330,6 +331,8 @@ fn access_mode_detail(mode: &str) -> &'static str {
         "customer_grade" => {
             "Keep completion blocked until customer-grade credentials, reconciliation, support, and archived deployment evidence exist."
         }
-        _ => "Use local memory/dev auth and no external business writes while learning the console.",
+        _ => {
+            "Use local memory/dev auth and no external business writes while learning the console."
+        }
     }
 }

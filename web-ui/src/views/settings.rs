@@ -41,9 +41,8 @@ pub(crate) fn SettingsView(props: &SettingsProps) -> Html {
     let ontology_memory_scope = use_state(|| {
         stored_console_default(ONTOLOGY_MEMORY_SCOPE_KEY, DEFAULT_ONTOLOGY_MEMORY_SCOPE)
     });
-    let ontology_objective = use_state(|| {
-        stored_console_default(ONTOLOGY_OBJECTIVE_KEY, DEFAULT_ONTOLOGY_OBJECTIVE)
-    });
+    let ontology_objective =
+        use_state(|| stored_console_default(ONTOLOGY_OBJECTIVE_KEY, DEFAULT_ONTOLOGY_OBJECTIVE));
     let deployment_target =
         use_state(|| stored_console_default(DEPLOYMENT_TARGET_KEY, DEFAULT_DEPLOYMENT_TARGET));
     let defaults_action_status = use_state(String::new);
@@ -153,8 +152,11 @@ pub(crate) fn SettingsView(props: &SettingsProps) -> Html {
             storage_set(ONTOLOGY_OBJECTIVE_KEY, ontology_objective.trim());
             storage_set(DEPLOYMENT_TARGET_KEY, deployment_target.trim());
             defaults_action_status.set(
-                lang.text("Console defaults saved locally.", "控制台默认值已本地保存。")
-                    .to_string(),
+                lang.text(
+                    "Console defaults saved locally.",
+                    "控制台默认值已本地保存。",
+                )
+                .to_string(),
             );
         })
     };
@@ -450,18 +452,30 @@ fn desktop_boundary_metrics(
     vec![
         (
             lang.text("Signed distribution", "签名发布").to_string(),
-            bool_label(lang, status.map(|status| status.signed_distribution_ready).unwrap_or(false)),
+            bool_label(
+                lang,
+                status
+                    .map(|status| status.signed_distribution_ready)
+                    .unwrap_or(false),
+            ),
         ),
         (
             lang.text("Updater", "更新器").to_string(),
-            bool_label(lang, status.map(|status| status.updater_enabled).unwrap_or(false)),
+            bool_label(
+                lang,
+                status.map(|status| status.updater_enabled).unwrap_or(false),
+            ),
         ),
         (
             "CSP".to_string(),
-            bool_label(lang, status.map(|status| status.csp_configured).unwrap_or(false)),
+            bool_label(
+                lang,
+                status.map(|status| status.csp_configured).unwrap_or(false),
+            ),
         ),
         (
-            lang.text("Enterprise completion", "企业完成声明").to_string(),
+            lang.text("Enterprise completion", "企业完成声明")
+                .to_string(),
             bool_label(
                 lang,
                 status

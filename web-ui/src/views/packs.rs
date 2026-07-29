@@ -1,13 +1,10 @@
-use crate::components::{
-    JsonPreview, KeyMetrics, PackCardModel, PackMosaic, Panel, Rows, StatusLogo,
-};
+use crate::components::{KeyMetrics, PackCardModel, PackMosaic, Panel, Rows, StatusLogo};
 use crate::state::{ConsoleData, UiLang};
 use crate::{
     json_array_len, label_or, pack_blocker_summary, pack_card_models, pack_connector_rows,
     pack_has_external_writes, pack_lifecycle_steps, pack_metric_count, pack_requires_approval,
     pack_string_list, semantic_scope_summary, status_tone,
 };
-use serde_json::Value;
 use yew::prelude::*;
 
 #[derive(Properties, Clone, PartialEq)]
@@ -22,6 +19,7 @@ pub(crate) fn PacksView(props: &PacksProps) -> Html {
         &props.data.workflow_pack_installations.data,
         &props.data.workflow_pack_marketplace.data,
     );
+    let discovery = &props.data.capability_discovery.data;
     let lang = props.lang;
     html! {
         <div class="page-stack">
@@ -67,8 +65,34 @@ pub(crate) fn PacksView(props: &PacksProps) -> Html {
                     )
                 }).collect::<Vec<_>>()} />
             </Panel>
-            <Panel title={lang.text("Discovery Payload", "发现载荷")}>
-                <JsonPreview value={Value::Array(props.data.capability_discovery.data.capabilities.clone())} />
+            <Panel title={lang.text("Agent Capability Discovery", "能力发现")}>
+                <h3>{ lang.text("Agent cards", "能力卡片") }</h3>
+                <div class="rows">
+                    { for discovery.agent_cards.iter().map(|card| {
+                        html! {
+                            <article class="row" key={card.agent_id.clone()}>
+                                <StatusLogo status={card.release_state.clone()} />
+                                <div>
+                                    <strong>{ format!("{} / {}", label_or(&card.name, "agent"), label_or(&card.kind, "kind")) }</strong>
+                                    <span>{ format!("{} / {} / {}", label_or(&card.provider, "provider"), label_or(&card.model, "model"), label_or(&card.primary_action, "primary action")) }</span>
+                                </div>
+                                <small>{ label_or(&card.agent_role, "role") }</small>
+                            </article>
+                        }
+                    }) }
+                </div>
+                <h3>{ lang.text("Suggested prompts", "推荐提示") }</h3>
+                <Rows empty={lang.text("No suggested prompts.", "没有推荐提示。")} rows={discovery.suggested_prompts.iter().map(|prompt| {
+                    (label_or(&prompt.target_view, "view").to_string(), label_or(&prompt.title, "title").to_string(), label_or(&prompt.prompt, "prompt").to_string())
+                }).collect::<Vec<_>>()} />
+                <h3>{ lang.text("Onboarding steps", "引导步骤") }</h3>
+                <Rows empty={lang.text("No onboarding steps.", "没有引导步骤。")} rows={discovery.onboarding_steps.iter().map(|step| {
+                    (label_or(&step.key, "step").to_string(), label_or(&step.title, "title").to_string(), label_or(&step.description, "description").to_string())
+                }).collect::<Vec<_>>()} />
+                <h3>{ lang.text("Empty states", "空态") }</h3>
+                <Rows empty={lang.text("No empty states.", "没有空态建议。")} rows={discovery.empty_states.iter().map(|state| {
+                    (label_or(&state.view, "view").to_string(), label_or(&state.title, "title").to_string(), label_or(&state.action, "action").to_string())
+                }).collect::<Vec<_>>()} />
             </Panel>
             </div>
         </div>
@@ -95,9 +119,14 @@ fn PackProductCard(props: &PackProductCardProps) -> Html {
     let external_writes = pack_has_external_writes(&card.manifest);
     let approval_required = pack_requires_approval(&card.manifest);
     let safe_action = if external_writes {
-        props.lang.text("Draft + approval before external write", "外部写入前先草稿并审批")
+        props.lang.text(
+            "Draft + approval before external write",
+            "外部写入前先草稿并审批",
+        )
     } else {
-        props.lang.text("Read and draft surfaces only", "只开放读取和草稿界面")
+        props
+            .lang
+            .text("Read and draft surfaces only", "只开放读取和草稿界面")
     };
     html! {
         <article class={classes!("pack-product-card", status_tone(&card.status))} key={card.id.clone()}>

@@ -6,8 +6,8 @@ pub(crate) mod semantic;
 pub(crate) mod semantic_i18n;
 pub(crate) mod semantic_release;
 pub(crate) mod settings;
-pub(crate) mod workflows;
 pub(crate) mod wizard;
+pub(crate) mod workflows;
 
 pub(crate) use agents::AgentsView;
 pub(crate) use deploy::DeployView;
@@ -15,5 +15,5 @@ pub(crate) use overview::OverviewView;
 pub(crate) use packs::PacksView;
 pub(crate) use semantic::SemanticView;
 pub(crate) use settings::SettingsView;
-pub(crate) use workflows::WorkflowsView;
 pub(crate) use wizard::WizardView;
+pub(crate) use workflows::WorkflowsView;
