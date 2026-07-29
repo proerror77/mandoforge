@@ -1062,6 +1062,10 @@ impl AppState {
         step: WorkflowStepRun,
         worker_id: &str,
     ) -> Result<WorkflowStepRun, AppError> {
+        if step.claimed_by_worker.as_deref() != Some(worker_id) {
+            return Err(AppError::not_found("workflow step run not found"));
+        }
+        let now = chrono::Utc::now();
         let updated = match &self.store {
             StoreBackend::Memory(inner) => {
                 let mut store = inner.write().await;
@@ -1069,8 +1073,12 @@ impl AppState {
                     .workflow_step_runs
                     .get(&step.id)
                     .filter(|current| {
-                        current.status == "running"
-                            && current.claimed_by_worker.as_deref() == Some(worker_id)
+                        (current.status == "running"
+                            && current.claimed_by_worker.as_deref() == Some(worker_id))
+                            || (current.status == "requires_action"
+                                && current
+                                    .lease_expires_at
+                                    .is_none_or(|expires_at| expires_at <= now))
                     })
                     .ok_or_else(|| AppError::not_found("workflow step run not found"))?;
                 store.workflow_step_runs.insert(step.id, step.clone());
@@ -1080,7 +1088,9 @@ impl AppState {
                 let row = sqlx::query(
                     "UPDATE workflow_step_runs
                      SET status = $3, output_payload = $4, artifact_ids = $5, approval_ids = $6, tool_call_ids = $7, claimed_by_worker = $8, lease_expires_at = $9, context_packet_id = $10, started_at = $11, completed_at = $12, scheduled_at = $13, updated_at = $14
-                     WHERE tenant_id = $1 AND id = $2 AND status = 'running' AND claimed_by_worker = $15
+                     WHERE tenant_id = $1 AND id = $2
+                       AND ((status = 'running' AND claimed_by_worker = $15)
+                         OR (status = 'requires_action' AND (lease_expires_at IS NULL OR lease_expires_at <= now())))
                      RETURNING id, workflow_run_id, step_key, step_type, agent_id, agent_version_id, session_id, thread_id, handoff_id, task_grant_id, environment_id, status, input_payload, output_payload, artifact_ids, approval_ids, tool_call_ids, claimed_by_worker, lease_expires_at, context_packet_id, started_at, completed_at, scheduled_at, created_at, updated_at",
                 )
                 .bind(self.current_tenant_id())

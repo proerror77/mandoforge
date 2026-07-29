@@ -502,6 +502,7 @@ pub(crate) async fn complete_delegated_runtime_requires_action(
         "session_loop_job_id": completed_job.id,
         "context_packet_id": blocked_step.context_packet_id
     });
+    blocked_step.lease_expires_at = None;
     blocked_step.updated_at = Utc::now();
     let blocked_step = state
         .update_claimed_workflow_step_run(blocked_step, worker_id)
@@ -1157,6 +1158,8 @@ pub(crate) async fn update_workflow_step_after_worker_session(
             "session_loop_resume": session_loop_resume
         }
     });
+    next.claimed_by_worker = Some(worker_id.to_string());
+    next.lease_expires_at = None;
     if workflow_step_status_terminal(next_status) {
         next.completed_at = next.completed_at.or(Some(now));
     }

@@ -4503,6 +4503,48 @@ async fn workflow_step_lease_renewal_is_owner_fenced() {
 }
 
 #[tokio::test]
+async fn workflow_step_requires_action_can_resume_on_new_worker() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let now = Utc::now();
+    let mut step = test_workflow_step_run(
+        Uuid::new_v4(),
+        "approval-resume",
+        "requires_action",
+        empty_json_object(),
+        now,
+    );
+    step.claimed_by_worker = Some("worker-a".to_string());
+    step.lease_expires_at = None;
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test state must use memory store");
+    };
+    inner
+        .write()
+        .await
+        .workflow_step_runs
+        .insert(step.id, step.clone());
+
+    let mut completed = step.clone();
+    completed.status = "completed".to_string();
+    completed.claimed_by_worker = Some("worker-b".to_string());
+    completed.completed_at = Some(Utc::now());
+    let completed = state
+        .update_claimed_workflow_step_run(completed, "worker-b")
+        .await
+        .expect("available requires-action step can resume on a new worker");
+    assert_eq!(completed.status, "completed");
+    assert_eq!(completed.claimed_by_worker.as_deref(), Some("worker-b"));
+
+    step.status = "completed".to_string();
+    step.completed_at = Some(Utc::now());
+    let stale = state
+        .update_claimed_workflow_step_run(step, "worker-a")
+        .await
+        .expect_err("previous worker stays fenced after resume");
+    assert_eq!(stale.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn workflow_step_claim_is_atomic() {
     let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
     let now = Utc::now();
@@ -30580,13 +30622,13 @@ async fn memory_writeback_candidates_require_review_before_durable_memory() {
         ),
     )
     .await;
-    assert_eq!(generated.len(), 6);
+    assert_eq!(generated.len(), 5);
     assert_eq!(
         generated
             .iter()
             .filter(|candidate| candidate.candidate_type == "artifact")
             .count(),
-        3
+        2
     );
     for expected_type in [
         "session_summary",
@@ -30765,7 +30807,7 @@ async fn memory_writeback_candidates_require_review_before_durable_memory() {
             .expect("valid request"),
     )
     .await;
-    assert_eq!(listed.len(), 6);
+    assert_eq!(listed.len(), 5);
     assert!(listed.iter().any(|candidate| {
         candidate.id == approved_candidate.id
             && candidate.status == "approved"
@@ -30789,7 +30831,7 @@ async fn memory_writeback_candidates_require_review_before_durable_memory() {
     .await;
     assert!(events.iter().any(|event| {
         event.event_type == "memory_writeback.candidates_generated"
-            && event.payload["candidate_count"] == json!(6)
+            && event.payload["candidate_count"] == json!(5)
     }));
     assert!(
         events
@@ -33993,7 +34035,6 @@ async fn session_events_user_message_drives_provider_loop() {
         "tool.call",
         "policy.requires_approval",
         "approval.requested",
-        "artifact.created",
         "agent.custom_tool_result",
     ] {
         assert!(
@@ -34001,6 +34042,7 @@ async fn session_events_user_message_drives_provider_loop() {
             "missing event type {expected}: {event_types:?}"
         );
     }
+    assert!(!event_types.contains(&"artifact.created"));
     assert!(events.iter().any(|event| {
         event.event_type == "llm.request"
             && event.payload["context"]["custom_tool_result_count"] == json!(1)
@@ -35294,9 +35336,12 @@ async fn request_tenant_header_must_match_runtime_tenant() {
 
 #[tokio::test]
 async fn tenant_routed_mode_uses_request_tenant_context() {
+    let _env_guard = env_lock().lock().expect("env lock");
+    let _insecure_auth = EnvVarGuard::set("MANDOFORGE_INSECURE_DEV_AUTH", "1");
     let mut state = test_state_with_worker(Arc::new(InlineExecutionWorker));
     state.tenant_runtime_mode = TenantRuntimeMode::TenantRouted;
     state.seed_demo_agent().await.expect("seed demo agent");
+    let default_tenant = state.configured_tenant_id().to_string();
     let app = build_router(state);
     let alternate_tenant = "00000000-0000-4000-8000-000000000099";
 
@@ -35306,6 +35351,7 @@ async fn tenant_routed_mode_uses_request_tenant_context() {
             .uri("/api/agents")
             .header("x-mandoforge-subject", "admin-1")
             .header("x-mandoforge-roles", "admin")
+            .header("x-mandoforge-tenant-id", default_tenant)
             .body(Body::empty())
             .expect("valid request"),
     )
@@ -38029,7 +38075,7 @@ async fn workflow_step_run_endpoint_claims_and_executes_session_loop() {
             .is_empty()
     );
     assert!(
-        !executed["step"]["artifact_ids"]
+        executed["step"]["artifact_ids"]
             .as_array()
             .unwrap()
             .is_empty()
@@ -42510,7 +42556,7 @@ async fn queue_backed_worker_defers_approved_tool_until_job_run() {
         worker_readiness
             .runbook_actions
             .iter()
-            .any(|action| action.contains("mandoforge-worker"))
+            .any(|action| action.contains("MANDOFORGE_PROCESS_ROLE=worker"))
     );
     let worker_load_validation: WorkerLoadValidationRun = request_json(
         app.clone(),

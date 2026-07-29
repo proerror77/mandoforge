@@ -47,6 +47,17 @@ pub(crate) fn ensure_worker_process_role(state: &AppState) -> Result<(), AppErro
     }
 }
 
+pub(crate) fn ensure_http_execution_process_role(state: &AppState) -> Result<(), AppError> {
+    if state.process_role == crate::worker_daemon::ProcessRole::Worker
+        || insecure_dev_auth_enabled()
+    {
+        return Ok(());
+    }
+    Err(AppError::forbidden(
+        "HTTP job execution is disabled in the API process; run the worker daemon or enable MANDOFORGE_INSECURE_DEV_AUTH only for local development",
+    ))
+}
+
 pub(crate) async fn run_session_loop_with_lease_renewal(
     state: &AppState,
     job: &SessionLoopJob,
@@ -99,10 +110,21 @@ pub(crate) async fn run_execution_job_with_lease_renewal(
             result = &mut work => {
                 return match result {
                     Ok(job) => Ok(job),
-                    Err(error) => match execution_job_interrupt_state(state, job_id, worker_id).await? {
-                        Some(job) => Ok(job),
-                        None => Err(error),
-                    },
+                    Err(error) => {
+                        let current = state.execution_queue.get(job_id).await?;
+                        match current.status {
+                            ExecutionJobStatus::CancelRequested
+                                if current.worker_id.as_deref() == Some(worker_id) =>
+                            {
+                                state
+                                    .execution_queue
+                                    .acknowledge_canceled_started(job_id, worker_id)
+                                    .await
+                            }
+                            ExecutionJobStatus::Canceled => Ok(current),
+                            _ => Err(error),
+                        }
+                    }
                 };
             }
             _ = renewals.tick() => {
