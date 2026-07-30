@@ -42034,6 +42034,21 @@ async fn approving_file_write_resumes_tool_and_creates_artifact() {
         artifact.name == "diagnostics.md" && artifact.path.as_deref() == Some("diagnostics.md")
     }));
 
+    let audit_logs: Vec<AuditLog> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/sessions/{}/audit-logs", session.id))
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(audit_logs.iter().any(|log| {
+        log.action == "artifact.created"
+            && artifacts
+                .iter()
+                .any(|artifact| Some(artifact.id) == log.resource_id)
+    }));
+
     let tool_calls: Vec<ToolCall> = request_json(
         app.clone(),
         Request::builder()

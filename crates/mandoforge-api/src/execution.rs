@@ -2154,6 +2154,23 @@ async fn execute_approved_file_write(
             Some(approval.session_id),
             "tool",
             Some(tool_call.id),
+            "artifact.created",
+            "artifact",
+            Some(artifact.id),
+            json!({
+                "name": artifact.name,
+                "path": artifact.path,
+                "artifact_type": artifact.artifact_type,
+                "tool": tool_call.tool_name,
+                "resumed_after_approval": true
+            }),
+        ))
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(approval.session_id),
+            "tool",
+            Some(tool_call.id),
             "tool.completed",
             "tool_call",
             Some(tool_call.id),
@@ -2318,6 +2335,26 @@ async fn execute_approved_remote_computer_file_write(
             "artifact.created",
             json!({"artifact_id": artifact.id, "name": artifact.name, "path": artifact.path, "artifact_type": artifact.artifact_type, "runner": "remote_computer_pod_exec"}),
         )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(approval.session_id),
+            "tool",
+            Some(tool_call.id),
+            "artifact.created",
+            "artifact",
+            Some(artifact.id),
+            json!({
+                "name": artifact.name,
+                "path": artifact.path,
+                "artifact_type": artifact.artifact_type,
+                "tool": tool_call.tool_name,
+                "runner": "remote_computer_pod_exec",
+                "remote_computer_id": remote_computer.id,
+                "assignment_id": assignment.id,
+                "resumed_after_approval": true
+            }),
+        ))
         .await?;
     state
         .append_audit_log(new_audit_log(
