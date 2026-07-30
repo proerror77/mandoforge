@@ -13,10 +13,12 @@ use crate::{
     mcp_gateway::{McpGatewayClient, McpGatewayConfig},
     observability::{ObservabilityConfig, TelemetryExporter},
     store_backend::StoreBackend,
+    worker_daemon::ProcessRole,
 };
 
 #[derive(Clone)]
 pub(crate) struct AppState {
+    pub(crate) process_role: ProcessRole,
     pub(crate) store: StoreBackend,
     pub(crate) execution_queue: ExecutionQueue,
     pub(crate) execution_worker: Arc<dyn ExecutionWorker>,

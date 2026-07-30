@@ -194,6 +194,53 @@ impl AppState {
         .await
     }
 
+    pub(crate) async fn renew_session_loop_job_lease(
+        &self,
+        id: Uuid,
+        worker_id: &str,
+        lease_seconds: i64,
+    ) -> Result<SessionLoopJob, AppError> {
+        if !(1..=86_400).contains(&lease_seconds) {
+            return Err(AppError::bad_request(
+                "session loop lease_seconds must be between 1 and 86400",
+            ));
+        }
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let job = store
+                    .session_loop_jobs
+                    .get_mut(&id)
+                    .filter(|job| {
+                        job.status == SessionLoopJobStatus::Running
+                            && job.worker_id.as_deref() == Some(worker_id)
+                    })
+                    .ok_or_else(|| AppError::not_found("session loop job not found"))?;
+                job.lease_expires_at = Some(Utc::now() + chrono::Duration::seconds(lease_seconds));
+                Ok(job.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE session_loop_jobs
+                     SET lease_expires_at = now() + $1 * interval '1 second'
+                     WHERE tenant_id = $2 AND id = $3 AND status = 'running' AND worker_id = $4
+                     RETURNING id, session_id, environment_id, status, trigger_event_id,
+                               pending_event_seq_start, pending_event_seq_end, processed_event_seq, reason,
+                               enqueued_at, started_at, completed_at, worker_id, lease_expires_at,
+                               attempt_count, max_attempts, last_error",
+                )
+                .bind(lease_seconds)
+                .bind(self.current_tenant_id())
+                .bind(id)
+                .bind(worker_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("session loop job not found"))?;
+                session_loop_job_from_row(row)
+            }
+        }
+    }
+
     pub(crate) async fn fail_session_loop_job(
         &self,
         id: Uuid,
@@ -278,8 +325,7 @@ impl AppState {
                     let lease_expired = matches!(job.status, SessionLoopJobStatus::Running)
                         && job
                             .lease_expires_at
-                            .as_ref()
-                            .is_some_and(|expires_at| *expires_at < Utc::now());
+                            .is_none_or(|expires_at| expires_at <= Utc::now());
                     let other_running_job = store.session_loop_jobs.values().any(|existing| {
                         existing.id != id
                             && existing.session_id == job.session_id
@@ -338,7 +384,7 @@ impl AppState {
                                          AND running_job.status = 'running'
                                    )
                                )
-                               OR (status = 'running' AND lease_expires_at < now())
+                               OR (status = 'running' AND (lease_expires_at IS NULL OR lease_expires_at <= now()))
                            )
                          RETURNING id, session_id, environment_id, status, trigger_event_id,
                                    pending_event_seq_start, pending_event_seq_end, processed_event_seq, reason,

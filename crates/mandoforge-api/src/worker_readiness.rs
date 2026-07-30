@@ -40,7 +40,7 @@ pub(crate) async fn build_worker_readiness(
                     _ => job.enqueued_at,
                 });
             }
-            ExecutionJobStatus::Running => running_jobs += 1,
+            ExecutionJobStatus::Running | ExecutionJobStatus::CancelRequested => running_jobs += 1,
             ExecutionJobStatus::Completed => completed_jobs += 1,
             ExecutionJobStatus::Failed => failed_jobs += 1,
             ExecutionJobStatus::Canceled => {}
@@ -233,8 +233,7 @@ pub(crate) async fn build_worker_readiness(
     }
     if queued_jobs > 0 || retryable_jobs > 0 {
         runbook_actions.push(
-            "run mandoforge-worker or POST /api/execution-jobs/:id/run for claimable jobs"
-                .to_string(),
+            "run mandoforge-api with MANDOFORGE_PROCESS_ROLE=worker for claimable jobs".to_string(),
         );
     }
     if stale_leases > 0 {

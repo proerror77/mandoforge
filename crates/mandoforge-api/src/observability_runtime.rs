@@ -1592,7 +1592,7 @@ pub(crate) async fn build_observability_summary(
                     _ => job.enqueued_at,
                 });
             }
-            ExecutionJobStatus::Running => running_jobs += 1,
+            ExecutionJobStatus::Running | ExecutionJobStatus::CancelRequested => running_jobs += 1,
             ExecutionJobStatus::Failed => failed_jobs += 1,
             ExecutionJobStatus::Completed | ExecutionJobStatus::Canceled => {}
         }
@@ -1661,6 +1661,7 @@ pub(crate) fn execution_job_status_label(status: &ExecutionJobStatus) -> &'stati
     match status {
         ExecutionJobStatus::Queued => "queued",
         ExecutionJobStatus::Running => "running",
+        ExecutionJobStatus::CancelRequested => "cancel_requested",
         ExecutionJobStatus::Completed => "completed",
         ExecutionJobStatus::Failed => "failed",
         ExecutionJobStatus::Canceled => "canceled",

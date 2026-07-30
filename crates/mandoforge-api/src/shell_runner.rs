@@ -20,6 +20,7 @@ pub(crate) fn shell_command(
             let image = std::env::var("MANDOFORGE_SHELL_DOCKER_IMAGE")
                 .unwrap_or_else(|_| "alpine:3.20".to_string());
             let mut process = Command::new("docker");
+            process.kill_on_drop(true);
             process.args(docker_shell_args(&workspace, &image, command));
             Ok(process)
         }
@@ -28,6 +29,7 @@ pub(crate) fn shell_command(
         // Set MANDOFORGE_SHELL_RUNNER=bubblewrap to enable.
         "bubblewrap" | "bwrap" => {
             let mut process = Command::new("bwrap");
+            process.kill_on_drop(true);
             process.args(bubblewrap_args(&workspace, command));
             Ok(process)
         }
@@ -35,6 +37,7 @@ pub(crate) fn shell_command(
         // Requires `nsjail` installed. Set MANDOFORGE_SHELL_RUNNER=nsjail to enable.
         "nsjail" => {
             let mut process = Command::new("nsjail");
+            process.kill_on_drop(true);
             process.args(nsjail_args(&workspace, command));
             Ok(process)
         }
@@ -42,6 +45,7 @@ pub(crate) fn shell_command(
         // Fastest option — use only for trusted agent workloads on your own infra.
         _ => {
             let mut process = Command::new("sh");
+            process.kill_on_drop(true);
             process.arg("-c").arg(command).current_dir(&workspace);
             Ok(process)
         }

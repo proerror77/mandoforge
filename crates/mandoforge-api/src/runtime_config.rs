@@ -4,11 +4,10 @@ use anyhow::{Context, Result};
 use uuid::Uuid;
 
 use crate::{
-    BrokerExecutionQueue, BrokerQueueConfig, BrokerQueueKind, CodexAppServerClient,
-    CodexAppServerConfig, CostAlertSmtpConfig, DEFAULT_TENANT_ID, EvalJudgeClient, EvalJudgeConfig,
-    ExecutionQueue, ExecutionWorker, HttpCodexAppServerClient, HttpEvalJudgeClient,
-    HttpMcpGatewayClient, HttpTelemetryExporter, InlineExecutionWorker, McpGatewayClient,
-    McpGatewayConfig, ObservabilityConfig, QueueBackedExecutionWorker,
+    CodexAppServerClient, CodexAppServerConfig, CostAlertSmtpConfig, DEFAULT_TENANT_ID,
+    EvalJudgeClient, EvalJudgeConfig, ExecutionQueue, ExecutionWorker, HttpCodexAppServerClient,
+    HttpEvalJudgeClient, HttpMcpGatewayClient, HttpTelemetryExporter, InlineExecutionWorker,
+    McpGatewayClient, McpGatewayConfig, ObservabilityConfig, QueueBackedExecutionWorker,
     ReservedCodexAppServerClient, ReservedMcpGatewayClient, ReservedTelemetryExporter,
     StoreBackend, TelemetryExporter, TenantRuntimeMode, WsCodexAppServerClient,
 };
@@ -17,9 +16,18 @@ use crate::{
 pub(crate) enum ExecutionQueueBackendSelection {
     Memory,
     Postgres,
-    Redis,
-    Nats,
-    NatsJetstream,
+}
+
+pub(crate) fn allow_in_memory_store_from_env() -> bool {
+    allow_in_memory_store_from_lookup(|key| std::env::var(key).ok())
+}
+
+pub(crate) fn allow_in_memory_store_from_lookup<F>(lookup: F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MANDOFORGE_ALLOW_IN_MEMORY_STORE")
+        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
 }
 
 pub(crate) fn select_execution_queue_backend(
@@ -41,17 +49,19 @@ pub(crate) fn select_execution_queue_backend(
                 anyhow::bail!("MANDOFORGE_EXECUTION_QUEUE_BACKEND=postgres requires DATABASE_URL");
             }
         }
-        "redis" => Ok(ExecutionQueueBackendSelection::Redis),
-        "nats" => Ok(ExecutionQueueBackendSelection::Nats),
-        "nats_jetstream" | "jetstream" => Ok(ExecutionQueueBackendSelection::NatsJetstream),
+        "redis" | "nats" | "nats_jetstream" | "jetstream" => {
+            anyhow::bail!(
+                "MANDOFORGE_EXECUTION_QUEUE_BACKEND={requested} is disabled because drained broker jobs become process-local API state; use auto or postgres to keep Postgres as the durable queue source of truth, or memory for local development"
+            );
+        }
         "broker" => {
             anyhow::bail!(
-                "MANDOFORGE_EXECUTION_QUEUE_BACKEND={requested} is reserved for a future broker-backed queue; use auto, memory, postgres, redis, nats, or nats_jetstream"
+                "MANDOFORGE_EXECUTION_QUEUE_BACKEND={requested} is reserved for a future broker-backed queue; use auto, memory, or postgres"
             );
         }
         other => {
             anyhow::bail!(
-                "unsupported MANDOFORGE_EXECUTION_QUEUE_BACKEND={other}; use auto, memory, postgres, redis, nats, or nats_jetstream"
+                "unsupported MANDOFORGE_EXECUTION_QUEUE_BACKEND={other}; use auto, memory, or postgres"
             );
         }
     }
@@ -110,27 +120,6 @@ pub(crate) fn execution_queue_from_env(
         }
         (ExecutionQueueBackendSelection::Postgres, StoreBackend::Memory(_)) => {
             anyhow::bail!("Postgres execution queue selected without a Postgres store")
-        }
-        (ExecutionQueueBackendSelection::Redis, _) => {
-            let config = BrokerQueueConfig::from_env(BrokerQueueKind::Redis)
-                .map_err(|error| anyhow::anyhow!(error.message))?;
-            Ok(ExecutionQueue::broker(Arc::new(
-                BrokerExecutionQueue::redis(config),
-            )))
-        }
-        (ExecutionQueueBackendSelection::Nats, _) => {
-            let config = BrokerQueueConfig::from_env(BrokerQueueKind::Nats)
-                .map_err(|error| anyhow::anyhow!(error.message))?;
-            Ok(ExecutionQueue::broker(Arc::new(
-                BrokerExecutionQueue::nats(config),
-            )))
-        }
-        (ExecutionQueueBackendSelection::NatsJetstream, _) => {
-            let config = BrokerQueueConfig::from_env(BrokerQueueKind::NatsJetstream)
-                .map_err(|error| anyhow::anyhow!(error.message))?;
-            Ok(ExecutionQueue::broker(Arc::new(
-                BrokerExecutionQueue::nats_jetstream(config),
-            )))
         }
     }
 }

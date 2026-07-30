@@ -1,4 +1,16 @@
 use super::*;
+use chrono::{Duration as ChronoDuration, Utc};
+
+#[test]
+fn in_memory_store_requires_explicit_local_opt_in() {
+    assert!(!allow_in_memory_store_from_lookup(|_| None));
+    assert!(allow_in_memory_store_from_lookup(|key| {
+        (key == "MANDOFORGE_ALLOW_IN_MEMORY_STORE").then(|| "true".to_string())
+    }));
+    assert!(!allow_in_memory_store_from_lookup(|_| Some(
+        "false".to_string()
+    )));
+}
 
 #[test]
 fn selects_execution_queue_backend_fail_closed() {
@@ -18,24 +30,102 @@ fn selects_execution_queue_backend_fail_closed() {
         select_execution_queue_backend(Some("postgres"), false).is_err(),
         "forced postgres queue should require DATABASE_URL"
     );
-    assert_eq!(
-        select_execution_queue_backend(Some("redis"), true).expect("redis queue"),
-        ExecutionQueueBackendSelection::Redis
-    );
-    assert_eq!(
-        select_execution_queue_backend(Some("nats"), true).expect("nats queue"),
-        ExecutionQueueBackendSelection::Nats
-    );
-    assert_eq!(
-        select_execution_queue_backend(Some("nats_jetstream"), true).expect("nats jetstream queue"),
-        ExecutionQueueBackendSelection::NatsJetstream
-    );
-    assert_eq!(
-        select_execution_queue_backend(Some("jetstream"), true).expect("jetstream alias"),
-        ExecutionQueueBackendSelection::NatsJetstream
-    );
     assert!(
         select_execution_queue_backend(Some("broker"), true).is_err(),
         "generic broker queue should remain reserved"
     );
+}
+
+#[test]
+fn rejects_process_local_broker_queue_backends() {
+    for requested in ["redis", "nats", "nats_jetstream", "jetstream"] {
+        let error = select_execution_queue_backend(Some(requested), true)
+            .expect_err("process-local broker queue should be rejected");
+        let message = error.to_string();
+        assert!(
+            message.contains("process-local"),
+            "error should explain the process-local risk: {message}"
+        );
+        assert!(
+            message.contains("postgres") && message.contains("auto"),
+            "error should name the safe replacement: {message}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn api_process_rejects_worker_execution_entrypoints() {
+    let mut state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.process_role = ProcessRole::Api;
+    let mut headers = HeaderMap::new();
+    headers.insert("x-mandoforge-subject", "worker-1".parse().unwrap());
+    headers.insert("x-mandoforge-roles", "worker".parse().unwrap());
+    headers.insert("x-mandoforge-worker-id", "worker-1".parse().unwrap());
+
+    let session_error =
+        handlers::execution_jobs::worker_run_session_loop_job(&state, Uuid::new_v4(), &headers)
+            .await
+            .expect_err("API process must reject session-loop execution");
+    assert_eq!(session_error.status, StatusCode::FORBIDDEN);
+
+    let execution_error =
+        handlers::execution_jobs::worker_run_execution_job(&state, Uuid::new_v4(), &headers)
+            .await
+            .expect_err("API process must reject execution-job execution");
+    assert_eq!(execution_error.status, StatusCode::FORBIDDEN);
+
+    let task_board_error = handlers::workflows::worker_get_task_board(&state, &headers)
+        .await
+        .expect_err("API process must reject daemon task-board polling");
+    assert_eq!(task_board_error.status, StatusCode::FORBIDDEN);
+
+    let workflow_error = handlers::workflows::worker_run_workflow_step_run(
+        &state,
+        Uuid::new_v4(),
+        &headers,
+        RunWorkflowStepRun {
+            agent_id: None,
+            worker_id: None,
+            lease_seconds: None,
+        },
+    )
+    .await
+    .expect_err("API process must reject daemon workflow execution");
+    assert_eq!(workflow_error.status, StatusCode::FORBIDDEN);
+
+    state.process_role = ProcessRole::Worker;
+    handlers::workflows::worker_get_task_board(&state, &headers)
+        .await
+        .expect("worker process may poll the task board");
+}
+
+#[tokio::test]
+async fn expired_execution_cancellation_can_be_recovered_after_lease_expiry() {
+    let queue = ExecutionQueue::default();
+    let job = queue
+        .enqueue(ExecutionJobRequest {
+            session_id: Uuid::new_v4(),
+            environment_id: None,
+            approval_id: Uuid::new_v4(),
+            tool_call_id: Uuid::new_v4(),
+            tool_name: "shell.exec".to_string(),
+            max_attempts: None,
+        })
+        .await
+        .expect("queue job");
+
+    queue.start(job.id, "dead-worker").await.expect("start job");
+    queue.cancel(job.id).await.expect("request cancellation");
+
+    queue
+        .acknowledge_canceled_expired(job.id, Utc::now())
+        .await
+        .expect_err("live lease should not be recoverable");
+
+    let recovered = queue
+        .acknowledge_canceled_expired(job.id, Utc::now() + ChronoDuration::minutes(10))
+        .await
+        .expect("expired cancel request should recover");
+    assert_eq!(recovered.status, ExecutionJobStatus::Canceled);
+    assert!(recovered.completed_at.is_some());
 }

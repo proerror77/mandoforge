@@ -489,8 +489,6 @@ pub(crate) struct AgentInboxEntry {
 pub(crate) struct ClaimWorkflowStepRun {
     pub(crate) agent_id: Uuid,
     #[serde(default)]
-    pub(crate) worker_id: Option<String>,
-    #[serde(default)]
     pub(crate) lease_seconds: Option<i64>,
 }
 

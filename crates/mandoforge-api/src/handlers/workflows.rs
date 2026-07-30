@@ -22,14 +22,14 @@ use crate::{
     claim_workflow_step_run as claim_workflow_step_run_inner, collect_session_runtime_refs,
     diff_session_runtime_refs, enforce_worker_environment_binding, enforce_worker_pool_binding,
     enqueue_session_loop, ensure_child_task_grant_within_parent, ensure_primary_session_thread,
-    ensure_session_event_exists, issue_root_task_grant_for_workflow_run,
-    materialize_workflow_graph_start_steps, new_audit_log, normalize_event_ingestion_policy,
-    normalize_optional_runtime_adapter, normalize_optional_runtime_mode, normalize_optional_text,
-    normalize_task_grant_risk_level, normalize_workflow_execution_strategy,
-    normalize_workflow_release_state, normalize_workflow_run_status,
-    normalize_workflow_trigger_type, principal_from_request, record_task_grant_issued,
-    record_workflow_step_run_created, record_workflow_step_run_updated,
-    record_workflow_step_worker_started, require_non_empty, run_session_loop,
+    ensure_session_event_exists, ensure_worker_process_role,
+    issue_root_task_grant_for_workflow_run, materialize_workflow_graph_start_steps, new_audit_log,
+    normalize_event_ingestion_policy, normalize_optional_runtime_adapter,
+    normalize_optional_runtime_mode, normalize_optional_text, normalize_task_grant_risk_level,
+    normalize_workflow_execution_strategy, normalize_workflow_release_state,
+    normalize_workflow_run_status, normalize_workflow_trigger_type, principal_from_request,
+    record_task_grant_issued, record_workflow_step_run_created, record_workflow_step_run_updated,
+    record_workflow_step_worker_started, require_non_empty, run_session_loop_with_lease_renewal,
     run_workflow_compensation_adapter_step, run_workflow_delegated_runtime_step,
     set_managed_session_status, task_grant_session_matches,
     update_workflow_step_after_worker_session, validate_retired_materialization_provenance_update,
@@ -41,9 +41,10 @@ use crate::{
     workflow_handoff_rules_has_retired_materialization, workflow_input_digest,
     workflow_run_execution_denial, workflow_run_owns_session,
     workflow_run_runtime_envelope_with_pinned_ontology_release,
-    workflow_run_status_allows_execution, workflow_step_is_adapter_owned_compensation,
-    workflow_step_run_is_handoff_approval_blocked, workflow_step_status_terminal,
-    workflow_step_worker_message, workflow_transition_filter_from_query,
+    workflow_run_status_allows_execution, workflow_step_execution_owner,
+    workflow_step_is_adapter_owned_compensation, workflow_step_run_is_handoff_approval_blocked,
+    workflow_step_status_terminal, workflow_step_worker_message,
+    workflow_transition_filter_from_query,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -96,6 +97,227 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/api/task-grants/{id}", get(get_task_grant))
         .route("/api/task-board", get(get_task_board))
         .route("/api/agents/{id}/inbox", get(get_agent_inbox))
+}
+
+pub(crate) async fn worker_get_task_board(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<TaskBoardSnapshot, AppError> {
+    ensure_worker_process_role(state)?;
+    authorize_request(state, headers, Permission::SessionsRead, "task_board", None).await?;
+    build_task_board_snapshot(state).await
+}
+
+pub(crate) async fn worker_run_workflow_step_run(
+    state: &AppState,
+    id: Uuid,
+    headers: &HeaderMap,
+    input: RunWorkflowStepRun,
+) -> Result<RunWorkflowStepRunResponse, AppError> {
+    ensure_worker_process_role(state)?;
+    run_workflow_step_run_inner(state, id, headers, input).await
+}
+
+async fn run_workflow_step_run_inner(
+    state: &AppState,
+    id: Uuid,
+    headers: &HeaderMap,
+    mut input: RunWorkflowStepRun,
+) -> Result<RunWorkflowStepRunResponse, AppError> {
+    let principal = principal_from_request(state, headers).await?;
+    input.worker_id = Some(workflow_step_execution_owner(&principal, headers)?);
+    let lease_seconds = input.lease_seconds.unwrap_or(300);
+    let current = state.get_workflow_step_run(id).await?;
+    let run = state.get_workflow_run(current.workflow_run_id).await?;
+    if let Some(reason) = workflow_run_execution_denial(&run.status) {
+        return Err(AppError::forbidden(reason));
+    }
+    let session_id = current.session_id.unwrap_or(run.primary_session_id);
+    enforce_worker_environment_binding(state, headers, session_id, current.environment_id).await?;
+    enforce_worker_pool_binding(state, headers, session_id, current.environment_id).await?;
+    if workflow_step_is_adapter_owned_compensation(&current) {
+        return run_workflow_compensation_adapter_step(state, headers, current, run, input)
+            .await
+            .map(|Json(response)| response);
+    }
+    if current.step_type == "delegated_runtime" || run.execution_strategy == "delegated_runtime" {
+        return run_workflow_delegated_runtime_step(state, headers, current, run, input)
+            .await
+            .map(|Json(response)| response);
+    }
+    let agent_id = input
+        .agent_id
+        .or(current.agent_id)
+        .ok_or_else(|| AppError::bad_request("workflow step run requires agent_id"))?;
+    let worker_id = input
+        .worker_id
+        .clone()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| {
+            headers
+                .get("x-mandoforge-worker-id")
+                .and_then(|value| value.to_str().ok())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .unwrap_or_else(|| format!("agent:{agent_id}"))
+        });
+    let claim = claim_workflow_step_run_inner(
+        state,
+        headers,
+        current,
+        run.clone(),
+        ClaimWorkflowStepRun {
+            agent_id,
+            lease_seconds: input.lease_seconds,
+        },
+    )
+    .await?;
+    let session_id = claim.step.session_id.unwrap_or(run.primary_session_id);
+    let before_refs = collect_session_runtime_refs(state, session_id).await?;
+    record_workflow_step_worker_started(
+        state,
+        &run,
+        &claim.step,
+        &worker_id,
+        claim.context_packet.id,
+    )
+    .await?;
+    let trigger_event = append_user_message_event(
+        state,
+        session_id,
+        workflow_step_worker_message(&claim.step, &claim.task_grant),
+    )
+    .await?;
+    let queued = enqueue_session_loop(
+        state,
+        session_id,
+        Some(trigger_event.id),
+        "workflow.step.run",
+    )
+    .await?;
+    let running = state.start_session_loop_job(queued.id, &worker_id).await?;
+    state
+        .append_event(
+            "worker",
+            Some(running.id),
+            running.session_id,
+            "session.loop.started",
+            json!({
+                "session_loop_job_id": running.id,
+                "environment_id": running.environment_id,
+                "worker_id": worker_id,
+                "attempt_count": running.attempt_count,
+                "workflow_step_run_id": claim.step.id
+            }),
+        )
+        .await?;
+
+    match run_session_loop_with_lease_renewal(
+        state,
+        &running,
+        &worker_id,
+        Some((claim.step.id, lease_seconds)),
+    )
+    .await
+    {
+        Ok(session) => {
+            let completed = state
+                .complete_session_loop_job(running.id, &worker_id)
+                .await?;
+            state
+                .append_event(
+                    "worker",
+                    Some(completed.id),
+                    completed.session_id,
+                    "session.loop.completed",
+                    json!({
+                        "session_loop_job_id": completed.id,
+                        "status": completed.status,
+                        "session_status": session.status,
+                        "worker_id": worker_id,
+                        "workflow_step_run_id": claim.step.id
+                    }),
+                )
+                .await?;
+            let refs = diff_session_runtime_refs(
+                &before_refs,
+                &collect_session_runtime_refs(state, session_id).await?,
+            );
+            let step = update_workflow_step_after_worker_session(
+                state,
+                &run,
+                &claim.step,
+                &session,
+                &completed,
+                &worker_id,
+                refs,
+                None,
+                false,
+            )
+            .await?;
+            Ok(RunWorkflowStepRunResponse {
+                step,
+                task_grant: claim.task_grant,
+                context_packet: claim.context_packet,
+                session,
+                session_loop_job: completed,
+            })
+        }
+        Err(error) => {
+            let error_message = error.message.clone();
+            let failed = state
+                .fail_session_loop_job(running.id, &worker_id, &error_message)
+                .await?;
+            set_managed_session_status(
+                state,
+                failed.session_id,
+                SessionStatus::Failed,
+                "workflow step session loop failed",
+            )
+            .await?;
+            state
+                .append_event(
+                    "worker",
+                    Some(failed.id),
+                    failed.session_id,
+                    "session.loop.failed",
+                    json!({
+                        "session_loop_job_id": failed.id,
+                        "status": failed.status,
+                        "error": error_message,
+                        "worker_id": worker_id,
+                        "workflow_step_run_id": claim.step.id
+                    }),
+                )
+                .await?;
+            let session = state.get_session(session_id).await?;
+            let refs = diff_session_runtime_refs(
+                &before_refs,
+                &collect_session_runtime_refs(state, session_id).await?,
+            );
+            let step = update_workflow_step_after_worker_session(
+                state,
+                &run,
+                &claim.step,
+                &session,
+                &failed,
+                &worker_id,
+                refs,
+                Some(error_message),
+                false,
+            )
+            .await?;
+            Ok(RunWorkflowStepRunResponse {
+                step,
+                task_grant: claim.task_grant,
+                context_packet: claim.context_packet,
+                session,
+                session_loop_job: failed,
+            })
+        }
+    }
 }
 
 async fn list_workflow_definitions(
@@ -932,6 +1154,7 @@ async fn update_workflow_step_run(
     }
 
     let now = Utc::now();
+    let current_claimed_by_worker = current.claimed_by_worker.clone();
     let mut next = current;
     next.status = next_status;
     if let Some(output_payload) = input.output_payload {
@@ -962,7 +1185,22 @@ async fn update_workflow_step_run(
     }
     next.updated_at = now;
 
-    let updated = state.update_workflow_step_run(next).await?;
+    let updated = if previous_status == "running" {
+        if let Some(claimed_by_worker) = current_claimed_by_worker.as_deref() {
+            let principal = principal_from_request(&state, &headers).await?;
+            let owner = workflow_step_execution_owner(&principal, &headers)?;
+            if claimed_by_worker != owner {
+                return Err(AppError::forbidden(
+                    "workflow step update requires the current claim owner",
+                ));
+            }
+            state.update_claimed_workflow_step_run(next, &owner).await?
+        } else {
+            state.update_workflow_step_run(next).await?
+        }
+    } else {
+        state.update_workflow_step_run(next).await?
+    };
     record_workflow_step_run_updated(&state, &run, &updated, &previous_status).await?;
     if previous_status != updated.status {
         advance_workflow_graph_after_step_update(&state, &run, &updated).await?;
@@ -989,188 +1227,9 @@ async fn run_workflow_step_run(
     headers: HeaderMap,
     Json(input): Json<RunWorkflowStepRun>,
 ) -> Result<Json<RunWorkflowStepRunResponse>, AppError> {
-    let current = state.get_workflow_step_run(id).await?;
-    let run = state.get_workflow_run(current.workflow_run_id).await?;
-    if let Some(reason) = workflow_run_execution_denial(&run.status) {
-        return Err(AppError::forbidden(reason));
-    }
-    let session_id = current.session_id.unwrap_or(run.primary_session_id);
-    enforce_worker_environment_binding(&state, &headers, session_id, current.environment_id)
-        .await?;
-    enforce_worker_pool_binding(&state, &headers, session_id, current.environment_id).await?;
-    if workflow_step_is_adapter_owned_compensation(&current) {
-        return run_workflow_compensation_adapter_step(&state, &headers, current, run, input).await;
-    }
-    if current.step_type == "delegated_runtime" || run.execution_strategy == "delegated_runtime" {
-        return run_workflow_delegated_runtime_step(&state, &headers, current, run, input).await;
-    }
-    let agent_id = input
-        .agent_id
-        .or(current.agent_id)
-        .ok_or_else(|| AppError::bad_request("workflow step run requires agent_id"))?;
-    let worker_id = input
-        .worker_id
-        .clone()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| {
-            headers
-                .get("x-mandoforge-worker-id")
-                .and_then(|value| value.to_str().ok())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToString::to_string)
-                .unwrap_or_else(|| format!("agent:{agent_id}"))
-        });
-    let claim = claim_workflow_step_run_inner(
-        &state,
-        &headers,
-        current,
-        run.clone(),
-        ClaimWorkflowStepRun {
-            agent_id,
-            worker_id: Some(worker_id.clone()),
-            lease_seconds: input.lease_seconds,
-        },
-    )
-    .await?;
-    let session_id = claim.step.session_id.unwrap_or(run.primary_session_id);
-    let before_refs = collect_session_runtime_refs(&state, session_id).await?;
-    record_workflow_step_worker_started(
-        &state,
-        &run,
-        &claim.step,
-        &worker_id,
-        claim.context_packet.id,
-    )
-    .await?;
-    let trigger_event = append_user_message_event(
-        &state,
-        session_id,
-        workflow_step_worker_message(&claim.step, &claim.task_grant),
-    )
-    .await?;
-    let queued = enqueue_session_loop(
-        &state,
-        session_id,
-        Some(trigger_event.id),
-        "workflow.step.run",
-    )
-    .await?;
-    let running = state.start_session_loop_job(queued.id, &worker_id).await?;
-    state
-        .append_event(
-            "worker",
-            Some(running.id),
-            running.session_id,
-            "session.loop.started",
-            json!({
-                "session_loop_job_id": running.id,
-                "environment_id": running.environment_id,
-                "worker_id": worker_id,
-                "attempt_count": running.attempt_count,
-                "workflow_step_run_id": claim.step.id
-            }),
-        )
-        .await?;
-
-    match run_session_loop(&state, &running).await {
-        Ok(session) => {
-            let completed = state
-                .complete_session_loop_job(running.id, &worker_id)
-                .await?;
-            state
-                .append_event(
-                    "worker",
-                    Some(completed.id),
-                    completed.session_id,
-                    "session.loop.completed",
-                    json!({
-                        "session_loop_job_id": completed.id,
-                        "status": completed.status,
-                        "session_status": session.status,
-                        "worker_id": worker_id,
-                        "workflow_step_run_id": claim.step.id
-                    }),
-                )
-                .await?;
-            let refs = diff_session_runtime_refs(
-                &before_refs,
-                &collect_session_runtime_refs(&state, session_id).await?,
-            );
-            let step = update_workflow_step_after_worker_session(
-                &state,
-                &run,
-                &claim.step,
-                &session,
-                &completed,
-                &worker_id,
-                refs,
-                None,
-                false,
-            )
-            .await?;
-            Ok(Json(RunWorkflowStepRunResponse {
-                step,
-                task_grant: claim.task_grant,
-                context_packet: claim.context_packet,
-                session,
-                session_loop_job: completed,
-            }))
-        }
-        Err(error) => {
-            let error_message = error.message.clone();
-            let failed = state
-                .fail_session_loop_job(running.id, &worker_id, &error_message)
-                .await?;
-            set_managed_session_status(
-                &state,
-                failed.session_id,
-                SessionStatus::Failed,
-                "workflow step session loop failed",
-            )
-            .await?;
-            state
-                .append_event(
-                    "worker",
-                    Some(failed.id),
-                    failed.session_id,
-                    "session.loop.failed",
-                    json!({
-                        "session_loop_job_id": failed.id,
-                        "status": failed.status,
-                        "error": error_message,
-                        "worker_id": worker_id,
-                        "workflow_step_run_id": claim.step.id
-                    }),
-                )
-                .await?;
-            let session = state.get_session(session_id).await?;
-            let refs = diff_session_runtime_refs(
-                &before_refs,
-                &collect_session_runtime_refs(&state, session_id).await?,
-            );
-            let step = update_workflow_step_after_worker_session(
-                &state,
-                &run,
-                &claim.step,
-                &session,
-                &failed,
-                &worker_id,
-                refs,
-                Some(error_message),
-                false,
-            )
-            .await?;
-            Ok(Json(RunWorkflowStepRunResponse {
-                step,
-                task_grant: claim.task_grant,
-                context_packet: claim.context_packet,
-                session,
-                session_loop_job: failed,
-            }))
-        }
-    }
+    Ok(Json(
+        run_workflow_step_run_inner(&state, id, &headers, input).await?,
+    ))
 }
 
 async fn list_workflow_task_grants(

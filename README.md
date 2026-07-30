@@ -133,7 +133,8 @@ remaining core gaps, and the evidence required for managed agent actions.
 Stage 1 implements the generic runtime kernel:
 
 - Rust + Axum API server.
-- Postgres-backed runtime store with in-memory fallback when `DATABASE_URL` is missing.
+- Postgres-backed runtime store; local in-memory mode requires the explicit
+  `MANDOFORGE_ALLOW_IN_MEMORY_STORE=1` opt-in.
 - Agents, agent versions, sessions, events, tool calls, approvals, artifacts, and audit logs.
 - Tool Router for all controlled external execution.
 - Policy Engine for allow, deny, and approval-required decisions.

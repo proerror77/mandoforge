@@ -802,14 +802,14 @@ pub(crate) async fn run_session_loop(
 
     let session_task_grant_id = active_task_grant.as_ref().map(|(_, grant)| grant.id);
     let mut waiting_for_approval = false;
-    for tool_call in provider_response.tool_calls {
+    for tool_call in &provider_response.tool_calls {
         let result = execute_tool_invocation(
             state,
             &tool_call.tool_name,
             ExecuteTool {
                 session_id: id,
                 task_grant_id: session_task_grant_id,
-                args: tool_call.args,
+                args: tool_call.args.clone(),
             },
             ToolInvocationOrigin::SessionLoop,
         )
@@ -820,61 +820,27 @@ pub(crate) async fn run_session_loop(
         }
     }
 
-    let artifact = Artifact {
-        id: Uuid::new_v4(),
-        session_id: id,
-        artifact_type: "markdown".to_string(),
-        name: "diagnostics.md".to_string(),
-        path: None,
-        content: json!({
-            "markdown": "# Runtime Diagnostics\n\nThe generic runtime processed recent platform events, confirmed approval gating for shell execution, and produced a replayable diagnostics artifact."
-        }),
-        created_at: Utc::now(),
-    };
-    let artifact = state.insert_artifact(artifact).await?;
+    let tool_calls = provider_response.tool_calls.clone();
+    let final_report = provider_response
+        .final_message
+        .as_ref()
+        .map(|final_message| json!({"summary": final_message}));
     state
         .append_event(
-        "system",
-        Some(artifact.id),
-        id,
-        "artifact.created",
-        json!({"artifact_id": artifact.id, "name": artifact.name, "artifact_type": artifact.artifact_type}),
-    )
-    .await?;
-    state
-        .append_audit_log(new_audit_log(
-            Some(id),
-            "system",
+            "agent",
             None,
-            "artifact.created",
-            "artifact",
-            Some(artifact.id),
-            json!({"name": artifact.name, "artifact_type": artifact.artifact_type}),
-        ))
-        .await?;
-
-    state
-        .append_event(
-        "agent",
-        None,
-        id,
+            id,
             "llm.response",
-            json!({
-                "final_report": {
-                "summary": "Generic Runtime Diagnostics Demo reached the approval gate and produced a replayable artifact.",
-                "files_read": ["README.md", "config/policy.stage1.yaml"],
-                "sql_tables": ["generic_demo.platform_events", "generic_demo.sample_documents", "generic_demo.sample_metrics"],
-                "policy_events": ["policy.requires_approval for shell.exec"],
-                "artifacts": ["diagnostics.md"],
-                "next_steps": [
-                    "Add live external provider transport behind the ProviderClient trait",
-                    "Add Docker-backed sandbox execution for shell workers",
-                    "Run Postgres-backed sql.query integration verification"
-                ]
-            }
-        }),
-    )
-    .await?;
+            serde_json::json!({
+                "provider": provider_label,
+                "client": provider.name(),
+                "plan": provider_response.plan,
+                "tool_calls": tool_calls,
+                "final_message": provider_response.final_message,
+                "final_report": final_report,
+            }),
+        )
+        .await?;
 
     if let Some(final_message) = provider_response.final_message {
         state

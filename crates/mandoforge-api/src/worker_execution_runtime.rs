@@ -1,7 +1,16 @@
+use std::time::Duration;
+
 use serde_json::{Value, json};
+use tokio::time::{Instant, MissedTickBehavior};
 use uuid::Uuid;
 
 use crate::*;
+
+const WORKER_JOB_LEASE_SECONDS: i64 = 300;
+const WORKER_LEASE_RENEW_INTERVAL: Duration = Duration::from_secs(60);
+// ponytail: bounded polling keeps cancellation durable across processes; replace with NOTIFY if
+// concurrent running-job volume makes two checks per second material.
+const WORKER_CANCELLATION_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
 fn worker_environment_id_from_headers(headers: &HeaderMap) -> Result<Option<Uuid>, AppError> {
     let Some(value) = header_value(headers, "x-mandoforge-environment-id")
@@ -27,6 +36,111 @@ pub(crate) fn worker_environment_scope_required() -> bool {
         .ok()
         .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(!cfg!(test))
+}
+
+pub(crate) fn ensure_worker_process_role(state: &AppState) -> Result<(), AppError> {
+    match state.process_role {
+        crate::worker_daemon::ProcessRole::Worker => Ok(()),
+        crate::worker_daemon::ProcessRole::Api => Err(AppError::forbidden(
+            "job execution is disabled in the API process",
+        )),
+    }
+}
+
+pub(crate) async fn run_session_loop_with_lease_renewal(
+    state: &AppState,
+    job: &SessionLoopJob,
+    worker_id: &str,
+    workflow_step: Option<(Uuid, i64)>,
+) -> Result<Session, AppError> {
+    let work = run_session_loop(state, job);
+    tokio::pin!(work);
+    let mut renewals = tokio::time::interval_at(
+        Instant::now() + WORKER_LEASE_RENEW_INTERVAL,
+        WORKER_LEASE_RENEW_INTERVAL,
+    );
+    renewals.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            result = &mut work => return result,
+            _ = renewals.tick() => {
+                state
+                    .renew_session_loop_job_lease(job.id, worker_id, WORKER_JOB_LEASE_SECONDS)
+                    .await?;
+                if let Some((step_id, lease_seconds)) = workflow_step {
+                    state
+                        .renew_workflow_step_run_lease(step_id, worker_id, lease_seconds)
+                        .await?;
+                }
+            }
+        }
+    }
+}
+
+pub(crate) async fn run_execution_job_with_lease_renewal(
+    state: &AppState,
+    job_id: Uuid,
+    worker_id: &str,
+) -> Result<crate::execution_queue::ExecutionJob, AppError> {
+    let work = run_execution_job(state, job_id, worker_id);
+    tokio::pin!(work);
+    let mut renewals = tokio::time::interval_at(
+        Instant::now() + WORKER_LEASE_RENEW_INTERVAL,
+        WORKER_LEASE_RENEW_INTERVAL,
+    );
+    renewals.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut cancellation_checks = tokio::time::interval_at(
+        Instant::now() + WORKER_CANCELLATION_CHECK_INTERVAL,
+        WORKER_CANCELLATION_CHECK_INTERVAL,
+    );
+    cancellation_checks.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            result = &mut work => {
+                return match result {
+                    Ok(job) => Ok(job),
+                    Err(error) => match execution_job_interrupt_state(state, job_id, worker_id).await? {
+                        Some(job) => Ok(job),
+                        None => Err(error),
+                    },
+                };
+            }
+            _ = renewals.tick() => {
+                state
+                    .execution_queue
+                    .renew_started(job_id, worker_id, WORKER_JOB_LEASE_SECONDS)
+                    .await?;
+            }
+            _ = cancellation_checks.tick() => {
+                if let Some(job) = execution_job_interrupt_state(state, job_id, worker_id).await? {
+                    return Ok(job);
+                }
+            }
+        }
+    }
+}
+
+async fn execution_job_interrupt_state(
+    state: &AppState,
+    job_id: Uuid,
+    worker_id: &str,
+) -> Result<Option<crate::execution_queue::ExecutionJob>, AppError> {
+    let job = state.execution_queue.get(job_id).await?;
+    match job.status {
+        ExecutionJobStatus::Running if job.worker_id.as_deref() == Some(worker_id) => Ok(None),
+        ExecutionJobStatus::CancelRequested if job.worker_id.as_deref() == Some(worker_id) => state
+            .execution_queue
+            .acknowledge_canceled_started(job_id, worker_id)
+            .await
+            .map(Some),
+        ExecutionJobStatus::Running | ExecutionJobStatus::CancelRequested => Err(
+            AppError::not_found("execution job lease is no longer owned by this worker"),
+        ),
+        ExecutionJobStatus::Queued
+        | ExecutionJobStatus::Completed
+        | ExecutionJobStatus::Failed
+        | ExecutionJobStatus::Canceled => Ok(Some(job)),
+    }
 }
 
 pub(crate) fn worker_scope_headers_present(headers: &HeaderMap) -> Result<bool, AppError> {

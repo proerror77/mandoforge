@@ -29,6 +29,7 @@ use tokio::sync::RwLock;
 use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing::info;
 use uuid::Uuid;
+use worker_daemon::ProcessRole;
 
 const DEFAULT_TENANT_ID: &str = "00000000-0000-4000-8000-000000000001";
 const CONSOLE_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-eK4Q6Gyw5gYv9DLAVVcjH4qa599agT8YgMfKbmqhCpU='; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
@@ -138,6 +139,7 @@ mod usage_finance_runtime;
 mod usage_summary_runtime;
 mod vault_kms_runtime;
 mod vault_readiness_runtime;
+mod worker_daemon;
 mod worker_execution_runtime;
 mod worker_load_validation;
 mod worker_readiness;
@@ -168,7 +170,7 @@ use codex_app_server::{
 pub(crate) use codex_app_server_ops::*;
 pub(crate) use context_packet_runtime::*;
 #[cfg(test)]
-pub(crate) use db_bootstrap::migration_paths;
+pub(crate) use db_bootstrap::{migration_paths, run_migrations_from_paths};
 pub(crate) use db_bootstrap::{run_migrations, seed_demo_tenant};
 #[cfg(test)]
 pub(crate) use deployment_version::deployment_version_from_lookup;
@@ -191,7 +193,8 @@ use execution::{codex_jsonl_event_type, parse_codex_jsonl};
 #[cfg(test)]
 use execution_queue::{ExecutionJobRequest, ExecutionQueueBackend};
 use execution_queue::{ExecutionJobStatus, ExecutionQueue};
-use execution_queue_broker::{BrokerExecutionQueue, BrokerQueueConfig, BrokerQueueKind};
+#[cfg(test)]
+use execution_queue_broker::{BrokerExecutionQueue, BrokerQueueKind};
 pub(crate) use http_shell::{api_cors_layer, security_headers_middleware};
 use mcp_gateway::{
     HttpMcpGatewayClient, McpCallRequest, McpGatewayClient, McpGatewayConfig,
@@ -274,17 +277,18 @@ pub(crate) use remote_computer_supervision_runtime::*;
 pub(crate) use request_auth::*;
 #[cfg(test)]
 pub(crate) use runtime_config::{
-    ExecutionQueueBackendSelection, runtime_tenant_id_from_lookup, select_execution_queue_backend,
-    tenant_runtime_mode_from_lookup,
+    ExecutionQueueBackendSelection, allow_in_memory_store_from_lookup,
+    runtime_tenant_id_from_lookup, select_execution_queue_backend, tenant_runtime_mode_from_lookup,
 };
 pub(crate) use runtime_config::{
-    approval_email_relay_url_from_env, approval_slack_webhook_url_from_env,
-    approval_webhook_url_from_env, codex_app_server_client_from_env,
-    codex_app_server_config_from_env, cost_alert_email_relay_url_from_env,
-    cost_alert_smtp_config_from_env, cost_alert_webhook_url_from_env, eval_judge_client_from_env,
-    eval_judge_config_from_env, execution_queue_from_env, execution_worker_from_env,
-    mcp_gateway_client_from_env, mcp_gateway_config_from_env, runtime_tenant_id_from_env,
-    telemetry_exporter_from_env, tenant_runtime_mode_from_env,
+    allow_in_memory_store_from_env, approval_email_relay_url_from_env,
+    approval_slack_webhook_url_from_env, approval_webhook_url_from_env,
+    codex_app_server_client_from_env, codex_app_server_config_from_env,
+    cost_alert_email_relay_url_from_env, cost_alert_smtp_config_from_env,
+    cost_alert_webhook_url_from_env, eval_judge_client_from_env, eval_judge_config_from_env,
+    execution_queue_from_env, execution_worker_from_env, mcp_gateway_client_from_env,
+    mcp_gateway_config_from_env, runtime_tenant_id_from_env, telemetry_exporter_from_env,
+    tenant_runtime_mode_from_env,
 };
 pub(crate) use runtime_support::*;
 pub(crate) use sandbox_runtime_protocol::{
@@ -596,6 +600,27 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
+    let process_role = ProcessRole::from_env()?;
+    let state = build_state(process_role).await?;
+    if process_role == ProcessRole::Worker {
+        return worker_daemon::run_worker_daemon(state).await;
+    }
+
+    let app = build_router(state);
+
+    let addr: SocketAddr = std::env::var("MANDOFORGE_ADDR")
+        .unwrap_or_else(|_| "127.0.0.1:8787".to_string())
+        .parse()
+        .context("invalid MANDOFORGE_ADDR")?;
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    info!(%addr, "mandoforge api listening");
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+async fn build_state(process_role: ProcessRole) -> Result<AppState> {
+    let require_postgres = process_role == ProcessRole::Worker;
+
     let workspace_root = std::env::var("MANDOFORGE_WORKSPACE_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(".mandoforge/workspaces"));
@@ -637,12 +662,21 @@ async fn main() -> Result<()> {
             seed_demo_tenant(&pool, tenant_id).await?;
             StoreBackend::Postgres(pool)
         }
-        _ => StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
+        _ if require_postgres => anyhow::bail!(
+            "MANDOFORGE_PROCESS_ROLE=worker requires DATABASE_URL-backed Postgres state"
+        ),
+        _ if allow_in_memory_store_from_env() => {
+            StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default())))
+        }
+        _ => anyhow::bail!(
+            "DATABASE_URL is required; set MANDOFORGE_ALLOW_IN_MEMORY_STORE=1 only for local development"
+        ),
     };
 
     let execution_queue = execution_queue_from_env(&store, tenant_id)?;
 
     let state = AppState {
+        process_role,
         store,
         execution_queue,
         execution_worker: execution_worker_from_env(),
@@ -669,17 +703,7 @@ async fn main() -> Result<()> {
         .seed_demo_agent()
         .await
         .map_err(|error| anyhow::anyhow!(error.message))?;
-
-    let app = build_router(state);
-
-    let addr: SocketAddr = std::env::var("MANDOFORGE_ADDR")
-        .unwrap_or_else(|_| "127.0.0.1:8787".to_string())
-        .parse()
-        .context("invalid MANDOFORGE_ADDR")?;
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    info!(%addr, "mandoforge api listening");
-    axum::serve(listener, app).await?;
-    Ok(())
+    Ok(state)
 }
 
 fn build_router(state: AppState) -> Router {

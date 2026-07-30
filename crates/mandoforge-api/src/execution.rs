@@ -4102,6 +4102,7 @@ pub(crate) async fn run_agent_cli(
         .await?;
 
     let mut command = Command::new(&config.command);
+    command.kill_on_drop(true);
     command.current_dir(&workspace);
     for arg in &config.args {
         command.arg(arg);
@@ -5367,6 +5368,7 @@ async fn run_codex_cli(
     let output = tokio::time::timeout(
         Duration::from_secs(180),
         Command::new("codex")
+            .kill_on_drop(true)
             .arg("exec")
             .arg("--sandbox")
             .arg(&request.sandbox_mode)

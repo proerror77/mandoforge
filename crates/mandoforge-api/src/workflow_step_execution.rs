@@ -7,6 +7,30 @@ use uuid::Uuid;
 
 use crate::*;
 
+pub(crate) fn workflow_step_execution_owner(
+    principal: &Principal,
+    headers: &HeaderMap,
+) -> Result<String, AppError> {
+    if principal.roles.contains(&Role::Worker) {
+        let worker_id = header_value(headers, "x-mandoforge-worker-id")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                AppError::bad_request(
+                    "x-mandoforge-worker-id header is required for workflow execution",
+                )
+            })?;
+        if principal.subject_id != worker_id {
+            return Err(AppError::forbidden(
+                "worker principal does not match x-mandoforge-worker-id",
+            ));
+        }
+        Ok(worker_id.to_string())
+    } else {
+        Ok(format!("subject:{}", principal.subject_id))
+    }
+}
+
 pub(crate) async fn claim_workflow_step_run(
     state: &AppState,
     headers: &HeaderMap,
@@ -88,11 +112,7 @@ pub(crate) async fn claim_workflow_step_run(
             "workflow step claim lease_seconds must be between 1 and 86400",
         ));
     }
-    let worker_id = input
-        .worker_id
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| format!("agent:{}", agent.id));
+    let worker_id = workflow_step_execution_owner(&principal, headers)?;
 
     let context_packet = generate_and_persist_context_packet(state, session_id).await?;
     let task_grant = state
@@ -107,7 +127,9 @@ pub(crate) async fn claim_workflow_step_run(
     next.context_packet_id = Some(context_packet.id);
     next.started_at = next.started_at.or(Some(now));
     next.updated_at = now;
-    let step = state.update_workflow_step_run(next).await?;
+    let step = state
+        .claim_workflow_step_run_if_available(next, now)
+        .await?;
     record_agent_inbox_claimed(
         state,
         &run,
@@ -174,6 +196,7 @@ pub(crate) async fn run_workflow_delegated_runtime_step(
                 .map(ToString::to_string)
                 .unwrap_or_else(|| format!("agent:{agent_id}"))
         });
+    let lease_seconds = input.lease_seconds.unwrap_or(300);
     let claim = claim_workflow_step_run(
         state,
         headers,
@@ -181,7 +204,6 @@ pub(crate) async fn run_workflow_delegated_runtime_step(
         run.clone(),
         ClaimWorkflowStepRun {
             agent_id,
-            worker_id: Some(worker_id.clone()),
             lease_seconds: input.lease_seconds,
         },
     )
@@ -238,16 +260,36 @@ pub(crate) async fn run_workflow_delegated_runtime_step(
         .await?;
 
     let adapter = run.runtime_adapter.as_deref().unwrap_or("unconfigured");
-    let execution = match adapter {
-        "codex_app_server" => {
-            run_codex_app_server_delegated_runtime(state, &run, &claim.step, &worker_id).await
+    let execution = async {
+        match adapter {
+            "codex_app_server" => {
+                run_codex_app_server_delegated_runtime(state, &run, &claim.step, &worker_id).await
+            }
+            "codex_cli" | "claude_code" => {
+                run_agent_cli_delegated_runtime(state, &run, &claim.step, session_id, adapter).await
+            }
+            _ => Err(AppError::bad_request(format!(
+                "delegated runtime adapter {adapter} requires an external worker adapter"
+            ))),
         }
-        "codex_cli" | "claude_code" => {
-            run_agent_cli_delegated_runtime(state, &run, &claim.step, session_id, adapter).await
+    };
+    tokio::pin!(execution);
+    let renew_interval = std::time::Duration::from_secs(60);
+    let mut renewals =
+        tokio::time::interval_at(tokio::time::Instant::now() + renew_interval, renew_interval);
+    renewals.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let execution = loop {
+        tokio::select! {
+            result = &mut execution => break result,
+            _ = renewals.tick() => {
+                state
+                    .renew_session_loop_job_lease(running_job.id, &worker_id, 300)
+                    .await?;
+                state
+                    .renew_workflow_step_run_lease(claim.step.id, &worker_id, lease_seconds)
+                    .await?;
+            }
         }
-        _ => Err(AppError::bad_request(format!(
-            "delegated runtime adapter {adapter} requires an external worker adapter"
-        ))),
     };
 
     match execution {
@@ -277,7 +319,9 @@ pub(crate) async fn run_workflow_delegated_runtime_step(
                 });
                 pending_step.lease_expires_at = Some(now);
                 pending_step.updated_at = now;
-                let pending_step = state.update_workflow_step_run(pending_step).await?;
+                let pending_step = state
+                    .update_claimed_workflow_step_run(pending_step, &worker_id)
+                    .await?;
                 record_workflow_step_run_updated(state, &run, &pending_step, &previous_status)
                     .await?;
                 record_workflow_step_worker_completed(
@@ -361,7 +405,9 @@ pub(crate) async fn run_workflow_delegated_runtime_step(
             });
             completed_step.completed_at = Some(now);
             completed_step.updated_at = now;
-            let completed_step = state.update_workflow_step_run(completed_step).await?;
+            let completed_step = state
+                .update_claimed_workflow_step_run(completed_step, &worker_id)
+                .await?;
             record_workflow_step_run_updated(state, &run, &completed_step, &previous_status)
                 .await?;
             record_workflow_step_worker_completed(
@@ -457,7 +503,9 @@ pub(crate) async fn complete_delegated_runtime_requires_action(
         "context_packet_id": blocked_step.context_packet_id
     });
     blocked_step.updated_at = Utc::now();
-    let blocked_step = state.update_workflow_step_run(blocked_step).await?;
+    let blocked_step = state
+        .update_claimed_workflow_step_run(blocked_step, worker_id)
+        .await?;
     record_workflow_step_run_updated(state, run, &blocked_step, &previous_status).await?;
     record_workflow_step_worker_completed(state, run, &blocked_step, worker_id, &completed_job)
         .await?;
@@ -643,7 +691,7 @@ pub(crate) async fn create_delegated_runtime_artifact(
         session_id,
         artifact_type: "json".to_string(),
         name: name.to_string(),
-        path: Some(format!("delegated-runtime/{session_id}/{name}")),
+        path: None,
         content,
         created_at: Utc::now(),
     };
@@ -824,7 +872,9 @@ pub(crate) async fn run_workflow_compensation_adapter_step(
     running_step.context_packet_id = Some(context_packet.id);
     running_step.started_at = running_step.started_at.or(Some(now));
     running_step.updated_at = now;
-    let running_step = state.update_workflow_step_run(running_step).await?;
+    let running_step = state
+        .claim_workflow_step_run_if_available(running_step, now)
+        .await?;
     record_workflow_step_run_updated(state, &run, &running_step, &previous_status).await?;
     record_workflow_step_worker_started(state, &run, &running_step, &worker_id, context_packet.id)
         .await?;
@@ -911,7 +961,9 @@ pub(crate) async fn run_workflow_compensation_adapter_step(
     completed_step.completed_at = Some(completed_at);
     completed_step.lease_expires_at = None;
     completed_step.updated_at = completed_at;
-    let completed_step = state.update_workflow_step_run(completed_step).await?;
+    let completed_step = state
+        .update_claimed_workflow_step_run(completed_step, &worker_id)
+        .await?;
     record_workflow_step_run_updated(state, &run, &completed_step, &previous_status).await?;
     record_workflow_step_worker_completed(state, &run, &completed_step, &worker_id, &completed_job)
         .await?;
@@ -1109,7 +1161,9 @@ pub(crate) async fn update_workflow_step_after_worker_session(
         next.completed_at = next.completed_at.or(Some(now));
     }
     next.updated_at = now;
-    let updated = state.update_workflow_step_run(next).await?;
+    let updated = state
+        .update_claimed_workflow_step_run(next, worker_id)
+        .await?;
     record_workflow_step_run_updated(state, run, &updated, &previous_status).await?;
     record_workflow_step_worker_completed(state, run, &updated, worker_id, session_loop_job)
         .await?;

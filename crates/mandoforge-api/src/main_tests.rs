@@ -4233,6 +4233,17 @@ async fn execution_queue_tracks_job_lifecycle() {
     assert_eq!(running.worker_id.as_deref(), Some("test-worker"));
     assert!(running.lease_expires_at.is_some());
 
+    let renewed = queue
+        .renew_started(queued.id, "test-worker", 600)
+        .await
+        .expect("owning worker renews job lease");
+    assert!(renewed.lease_expires_at > running.lease_expires_at);
+    let stale_renewal = queue
+        .renew_started(queued.id, "stale-worker", 600)
+        .await
+        .expect_err("stale worker cannot renew job lease");
+    assert_eq!(stale_renewal.status, StatusCode::NOT_FOUND);
+
     let completed = queue.complete(queued.id).await.expect("complete job");
     assert_eq!(completed.status, ExecutionJobStatus::Completed);
     assert!(completed.completed_at.is_some());
@@ -4337,6 +4348,197 @@ async fn execution_queue_tracks_job_lifecycle() {
     assert_eq!(canceled.status, ExecutionJobStatus::Canceled);
     assert!(canceled.completed_at.is_some());
     assert!(canceled.lease_expires_at.is_none());
+
+    let running_cancel = queue
+        .enqueue(ExecutionJobRequest {
+            session_id: Uuid::new_v4(),
+            environment_id: None,
+            approval_id: Uuid::new_v4(),
+            tool_call_id: Uuid::new_v4(),
+            tool_name: "shell.exec".to_string(),
+            max_attempts: None,
+        })
+        .await
+        .expect("queue running cancellation job");
+    queue
+        .start(running_cancel.id, "cancel-owner")
+        .await
+        .expect("start running cancellation job");
+    let requested = queue
+        .cancel(running_cancel.id)
+        .await
+        .expect("request running cancellation");
+    assert_eq!(requested.status, ExecutionJobStatus::CancelRequested);
+    assert!(requested.completed_at.is_none());
+    queue
+        .acknowledge_canceled_started(running_cancel.id, "stale-worker")
+        .await
+        .expect_err("stale worker cannot acknowledge cancellation");
+    let confirmed = queue
+        .acknowledge_canceled_started(running_cancel.id, "cancel-owner")
+        .await
+        .expect("owning worker acknowledges cancellation");
+    assert_eq!(confirmed.status, ExecutionJobStatus::Canceled);
+    assert!(confirmed.completed_at.is_some());
+}
+
+#[tokio::test]
+async fn session_loop_job_lease_renewal_is_owner_fenced() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "session-loop lease renewal".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create session");
+    let queued = state
+        .enqueue_session_loop_job(session.id, None, "lease renewal test")
+        .await
+        .expect("enqueue session loop job");
+    let running = state
+        .start_session_loop_job(queued.id, "worker-a")
+        .await
+        .expect("start session loop job");
+
+    let renewed = state
+        .renew_session_loop_job_lease(queued.id, "worker-a", 600)
+        .await
+        .expect("owning worker renews session loop lease");
+    assert!(renewed.lease_expires_at > running.lease_expires_at);
+    let stale = state
+        .renew_session_loop_job_lease(queued.id, "worker-b", 600)
+        .await
+        .expect_err("stale worker cannot renew session loop lease");
+    assert_eq!(stale.status, StatusCode::NOT_FOUND);
+
+    let active_claim = state
+        .start_session_loop_job(queued.id, "worker-b")
+        .await
+        .expect_err("active session loop lease fences another worker");
+    assert_eq!(active_claim.status, StatusCode::NOT_FOUND);
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test state must use memory store");
+    };
+    inner
+        .write()
+        .await
+        .session_loop_jobs
+        .get_mut(&queued.id)
+        .expect("session loop job")
+        .lease_expires_at = None;
+
+    let reclaimed = state
+        .start_session_loop_job(queued.id, "worker-b")
+        .await
+        .expect("missing legacy lease is reclaimable");
+    assert_eq!(reclaimed.worker_id.as_deref(), Some("worker-b"));
+    assert_eq!(reclaimed.attempt_count, 2);
+    let stale_completion = state
+        .complete_session_loop_job(queued.id, "worker-a")
+        .await
+        .expect_err("old session loop owner stays fenced after recovery");
+    assert_eq!(stale_completion.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn workflow_step_lease_renewal_is_owner_fenced() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let now = Utc::now();
+    let mut step = test_workflow_step_run(
+        Uuid::new_v4(),
+        "lease-renewal",
+        "running",
+        empty_json_object(),
+        now,
+    );
+    step.claimed_by_worker = Some("worker-a".to_string());
+    step.lease_expires_at = Some(now + chrono::Duration::seconds(60));
+    let step_id = step.id;
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test state must use memory store");
+    };
+    inner
+        .write()
+        .await
+        .workflow_step_runs
+        .insert(step_id, step.clone());
+
+    let renewed = state
+        .renew_workflow_step_run_lease(step_id, "worker-a", 600)
+        .await
+        .expect("owning worker renews workflow step lease");
+    assert!(renewed.lease_expires_at > step.lease_expires_at);
+    let stale = state
+        .renew_workflow_step_run_lease(step_id, "worker-b", 600)
+        .await
+        .expect_err("stale worker cannot renew workflow step lease");
+    assert_eq!(stale.status, StatusCode::NOT_FOUND);
+
+    let mut completed = renewed;
+    completed.status = "completed".to_string();
+    completed.completed_at = Some(Utc::now());
+    let stale = state
+        .update_claimed_workflow_step_run(completed.clone(), "worker-b")
+        .await
+        .expect_err("stale worker cannot complete workflow step");
+    assert_eq!(stale.status, StatusCode::NOT_FOUND);
+    let completed = state
+        .update_claimed_workflow_step_run(completed, "worker-a")
+        .await
+        .expect("owning worker completes workflow step");
+    assert_eq!(completed.status, "completed");
+}
+
+#[tokio::test]
+async fn workflow_step_claim_is_atomic() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let now = Utc::now();
+    let queued = test_workflow_step_run(
+        Uuid::new_v4(),
+        "atomic-claim",
+        "queued",
+        empty_json_object(),
+        now,
+    );
+    let step_id = queued.id;
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test state must use memory store");
+    };
+    inner
+        .write()
+        .await
+        .workflow_step_runs
+        .insert(step_id, queued.clone());
+
+    let mut worker_a = queued.clone();
+    worker_a.status = "running".to_string();
+    worker_a.claimed_by_worker = Some("worker-a".to_string());
+    worker_a.lease_expires_at = Some(now + chrono::Duration::minutes(5));
+    state
+        .claim_workflow_step_run_if_available(worker_a, now)
+        .await
+        .expect("first worker claims queued step");
+
+    let mut worker_b = queued;
+    worker_b.status = "running".to_string();
+    worker_b.claimed_by_worker = Some("worker-b".to_string());
+    worker_b.lease_expires_at = Some(now + chrono::Duration::minutes(5));
+    let stale = state
+        .claim_workflow_step_run_if_available(worker_b, now)
+        .await
+        .expect_err("second worker cannot claim active step");
+    assert_eq!(stale.status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -23618,6 +23820,7 @@ fn test_state_with_worker(execution_worker: Arc<dyn ExecutionWorker>) -> AppStat
         }
     }
     AppState {
+        process_role: ProcessRole::Worker,
         store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
         execution_queue: ExecutionQueue::default(),
         execution_worker,
@@ -24077,6 +24280,7 @@ async fn policy_rollout_can_rollback_and_run_due_activation() {
 
 async fn test_app_with_approval_webhook(approval_webhook_url: String) -> Router {
     let state = AppState {
+        process_role: ProcessRole::Worker,
         store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
         execution_queue: ExecutionQueue::default(),
         execution_worker: Arc::new(InlineExecutionWorker),
@@ -25080,6 +25284,7 @@ async fn vault_readiness_reports_secret_consumers_and_kms_gate() {
 #[tokio::test]
 async fn vault_kms_rotation_executes_external_endpoint_and_updates_catalog_metadata() {
     let state = AppState {
+        process_role: ProcessRole::Worker,
         store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
         execution_queue: ExecutionQueue::default(),
         execution_worker: Arc::new(InlineExecutionWorker),
@@ -25509,6 +25714,7 @@ fn vault_kms_recovery_readiness_rejects_pilot_backend_identity() {
 async fn appended_session_events_export_telemetry_when_enabled() {
     let exporter = Arc::new(RecordingTelemetryExporter::default());
     let state = AppState {
+        process_role: ProcessRole::Worker,
         store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
         execution_queue: ExecutionQueue::default(),
         execution_worker: Arc::new(InlineExecutionWorker),
@@ -25630,6 +25836,7 @@ async fn appended_session_events_export_telemetry_when_enabled() {
 async fn codex_app_server_routes_require_admin_and_call_adapter() {
     let codex_client = Arc::new(RecordingCodexAppServerClient::default());
     let state = AppState {
+        process_role: ProcessRole::Worker,
         store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
         execution_queue: ExecutionQueue::default(),
         execution_worker: Arc::new(InlineExecutionWorker),
@@ -26029,6 +26236,7 @@ async fn codex_app_server_routes_require_admin_and_call_adapter() {
 async fn approved_codex_exec_can_use_app_server_strategy() {
     let codex_client = Arc::new(RecordingCodexAppServerClient::default());
     let state = AppState {
+        process_role: ProcessRole::Worker,
         store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
         execution_queue: ExecutionQueue::default(),
         execution_worker: Arc::new(InlineExecutionWorker),
@@ -26168,6 +26376,7 @@ async fn approved_codex_exec_can_use_app_server_strategy() {
 async fn queue_backed_worker_runs_codex_app_server_polling() {
     let codex_client = Arc::new(RecordingCodexAppServerClient::default());
     let state = AppState {
+        process_role: ProcessRole::Worker,
         store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
         execution_queue: ExecutionQueue::default(),
         execution_worker: Arc::new(QueueBackedExecutionWorker),
@@ -26411,6 +26620,7 @@ async fn queue_backed_worker_retries_codex_app_server_across_leases() {
         "completed",
     ]));
     let state = AppState {
+        process_role: ProcessRole::Worker,
         store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
         execution_queue: ExecutionQueue::default(),
         execution_worker: Arc::new(QueueBackedExecutionWorker),
@@ -30635,6 +30845,7 @@ async fn cost_alert_delivery_posts_budget_alerts_to_webhook() {
             .expect("mock cost alert webhook");
     });
     let state = AppState {
+        process_role: ProcessRole::Worker,
         store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
         execution_queue: ExecutionQueue::default(),
         execution_worker: Arc::new(InlineExecutionWorker),
@@ -30908,6 +31119,7 @@ async fn cost_alert_email_route_can_deliver_through_direct_smtp() {
     let addr = listener.local_addr().expect("smtp addr");
     let smtp_server = tokio::spawn(run_mock_smtp_server(listener));
     let state = AppState {
+        process_role: ProcessRole::Worker,
         store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
         execution_queue: ExecutionQueue::default(),
         execution_worker: Arc::new(InlineExecutionWorker),
@@ -31084,6 +31296,7 @@ async fn mcp_call_executes_through_tool_router_and_gateway_policy() {
     let _insecure_auth = EnvVarGuard::set("MANDOFORGE_INSECURE_DEV_AUTH", "1");
     let mcp_client = Arc::new(RecordingMcpGatewayClient::default());
     let state = AppState {
+        process_role: ProcessRole::Worker,
         store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
         execution_queue: ExecutionQueue::default(),
         execution_worker: Arc::new(InlineExecutionWorker),
@@ -31899,6 +32112,7 @@ async fn mcp_commit_write_uses_approval_commit_token_exact_binding() {
     let _insecure_auth = EnvVarGuard::set("MANDOFORGE_INSECURE_DEV_AUTH", "1");
     let mcp_client = Arc::new(RecordingMcpGatewayClient::default());
     let state = AppState {
+        process_role: ProcessRole::Worker,
         store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
         execution_queue: ExecutionQueue::default(),
         execution_worker: Arc::new(QueueBackedExecutionWorker),
@@ -33456,7 +33670,6 @@ async fn generic_runtime_diagnostics_replay_api_flow() {
         "policy.allowed",
         "policy.requires_approval",
         "approval.requested",
-        "artifact.created",
         "llm.response",
         "thread.created",
         "thread.status_changed",
@@ -33480,20 +33693,6 @@ async fn generic_runtime_diagnostics_replay_api_flow() {
                 .and_then(Value::as_array)
                 .is_some_and(|calls| calls.iter().any(|call| call["tool_name"] == "shell.exec"))
     }));
-
-    let artifacts: Vec<Artifact> = request_json(
-        app.clone(),
-        Request::builder()
-            .uri(format!("/api/sessions/{}/artifacts", session.id))
-            .body(Body::empty())
-            .expect("valid request"),
-    )
-    .await;
-    assert!(
-        artifacts
-            .iter()
-            .any(|artifact| artifact.name == "diagnostics.md")
-    );
 
     let tool_calls: Vec<ToolCall> = request_json(
         app.clone(),
@@ -33524,7 +33723,6 @@ async fn generic_runtime_diagnostics_replay_api_flow() {
     for expected in [
         "session.started",
         "tool.completed",
-        "artifact.created",
         "policy.requires_approval",
         "approval.requested",
     ] {
@@ -37552,7 +37750,7 @@ async fn task_board_agent_inbox_claim_binds_context_packet_and_grant() {
     assert_eq!(claim["step"]["status"], json!("running"));
     assert_eq!(
         claim["step"]["claimed_by_worker"],
-        json!("worker-whiskey-1")
+        json!("subject:operator-1")
     );
     assert_eq!(claim["step"]["agent_id"], json!(agent.id));
     assert!(claim["step"]["lease_expires_at"].as_str().is_some());
@@ -37568,6 +37766,25 @@ async fn task_board_agent_inbox_claim_binds_context_packet_and_grant() {
     assert_eq!(
         claim["context_packet"]["retrieved_objects"][0]["source_uri"],
         json!(format!("mandoforge://work-items/{work_item_id}"))
+    );
+
+    let (status, error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "PATCH",
+            &format!("/api/workflow-step-runs/{step_id}"),
+            json!({"status": "completed"}),
+            &[
+                ("x-mandoforge-subject", "operator-2"),
+                ("x-mandoforge-roles", "operator"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        error["error"],
+        json!("workflow step update requires the current claim owner")
     );
 
     let grant: Value = request_json(
@@ -37780,7 +37997,7 @@ async fn workflow_step_run_endpoint_claims_and_executes_session_loop() {
     assert_eq!(executed["step"]["status"], json!("requires_action"));
     assert_eq!(
         executed["step"]["claimed_by_worker"],
-        json!("worker-whiskey-1")
+        json!("subject:operator-1")
     );
     assert_eq!(executed["step"]["task_grant_id"], json!(root_task_grant_id));
     assert_eq!(
@@ -37795,7 +38012,7 @@ async fn workflow_step_run_endpoint_claims_and_executes_session_loop() {
     );
     assert_eq!(
         executed["step"]["output_payload"]["worker_execution"]["worker_id"],
-        json!("worker-whiskey-1")
+        json!("subject:operator-1")
     );
     assert!(
         !executed["step"]["approval_ids"]
@@ -37926,7 +38143,7 @@ async fn workflow_step_run_endpoint_claims_and_executes_session_loop() {
     let resumed = run_next_session_loop_job(
         app.clone(),
         Uuid::parse_str(run["primary_session_id"].as_str().unwrap()).unwrap(),
-        "worker-whiskey-1",
+        "subject:operator-1",
     )
     .await;
     assert_eq!(resumed.status, SessionLoopJobStatus::Completed);

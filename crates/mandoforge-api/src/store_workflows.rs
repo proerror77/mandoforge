@@ -998,6 +998,120 @@ impl AppState {
                 workflow_step_run_from_row(row)
             }
         }?;
+        self.finalize_workflow_step_task_grant(&updated).await?;
+        Ok(updated)
+    }
+
+    pub(crate) async fn claim_workflow_step_run_if_available(
+        &self,
+        step: WorkflowStepRun,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<WorkflowStepRun, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let claimable = store
+                    .workflow_step_runs
+                    .get(&step.id)
+                    .is_some_and(|current| {
+                        current.status == "queued"
+                            || (current.status == "running"
+                                && current
+                                    .lease_expires_at
+                                    .is_some_and(|expires_at| expires_at <= now))
+                    });
+                if !claimable {
+                    return Err(AppError::not_found("workflow step run not found"));
+                }
+                store.workflow_step_runs.insert(step.id, step.clone());
+                Ok(step)
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE workflow_step_runs
+                     SET status = $3, output_payload = $4, artifact_ids = $5, approval_ids = $6, tool_call_ids = $7, claimed_by_worker = $8, lease_expires_at = $9, context_packet_id = $10, started_at = $11, completed_at = $12, scheduled_at = $13, updated_at = $14
+                     WHERE tenant_id = $1 AND id = $2
+                       AND (status = 'queued' OR (status = 'running' AND lease_expires_at <= $15))
+                     RETURNING id, workflow_run_id, step_key, step_type, agent_id, agent_version_id, session_id, thread_id, handoff_id, task_grant_id, environment_id, status, input_payload, output_payload, artifact_ids, approval_ids, tool_call_ids, claimed_by_worker, lease_expires_at, context_packet_id, started_at, completed_at, scheduled_at, created_at, updated_at",
+                )
+                .bind(self.current_tenant_id())
+                .bind(step.id)
+                .bind(&step.status)
+                .bind(&step.output_payload)
+                .bind(serde_json::to_value(&step.artifact_ids)?)
+                .bind(serde_json::to_value(&step.approval_ids)?)
+                .bind(serde_json::to_value(&step.tool_call_ids)?)
+                .bind(&step.claimed_by_worker)
+                .bind(step.lease_expires_at)
+                .bind(step.context_packet_id)
+                .bind(step.started_at)
+                .bind(step.completed_at)
+                .bind(step.scheduled_at)
+                .bind(step.updated_at)
+                .bind(now)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("workflow step run not found"))?;
+                workflow_step_run_from_row(row)
+            }
+        }
+    }
+
+    pub(crate) async fn update_claimed_workflow_step_run(
+        &self,
+        step: WorkflowStepRun,
+        worker_id: &str,
+    ) -> Result<WorkflowStepRun, AppError> {
+        let updated = match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                store
+                    .workflow_step_runs
+                    .get(&step.id)
+                    .filter(|current| {
+                        current.status == "running"
+                            && current.claimed_by_worker.as_deref() == Some(worker_id)
+                    })
+                    .ok_or_else(|| AppError::not_found("workflow step run not found"))?;
+                store.workflow_step_runs.insert(step.id, step.clone());
+                Ok(step)
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE workflow_step_runs
+                     SET status = $3, output_payload = $4, artifact_ids = $5, approval_ids = $6, tool_call_ids = $7, claimed_by_worker = $8, lease_expires_at = $9, context_packet_id = $10, started_at = $11, completed_at = $12, scheduled_at = $13, updated_at = $14
+                     WHERE tenant_id = $1 AND id = $2 AND status = 'running' AND claimed_by_worker = $15
+                     RETURNING id, workflow_run_id, step_key, step_type, agent_id, agent_version_id, session_id, thread_id, handoff_id, task_grant_id, environment_id, status, input_payload, output_payload, artifact_ids, approval_ids, tool_call_ids, claimed_by_worker, lease_expires_at, context_packet_id, started_at, completed_at, scheduled_at, created_at, updated_at",
+                )
+                .bind(self.current_tenant_id())
+                .bind(step.id)
+                .bind(&step.status)
+                .bind(&step.output_payload)
+                .bind(serde_json::to_value(&step.artifact_ids)?)
+                .bind(serde_json::to_value(&step.approval_ids)?)
+                .bind(serde_json::to_value(&step.tool_call_ids)?)
+                .bind(&step.claimed_by_worker)
+                .bind(step.lease_expires_at)
+                .bind(step.context_packet_id)
+                .bind(step.started_at)
+                .bind(step.completed_at)
+                .bind(step.scheduled_at)
+                .bind(step.updated_at)
+                .bind(worker_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("workflow step run not found"))?;
+                workflow_step_run_from_row(row)
+            }
+        }?;
+        self.finalize_workflow_step_task_grant(&updated).await?;
+        Ok(updated)
+    }
+
+    async fn finalize_workflow_step_task_grant(
+        &self,
+        updated: &WorkflowStepRun,
+    ) -> Result<(), AppError> {
         if crate::workflow_step_status_terminal(&updated.status)
             && let Some(task_grant_id) = updated.task_grant_id
         {
@@ -1015,7 +1129,54 @@ impl AppState {
                 }
             }
         }
-        Ok(updated)
+        Ok(())
+    }
+
+    pub(crate) async fn renew_workflow_step_run_lease(
+        &self,
+        id: uuid::Uuid,
+        worker_id: &str,
+        lease_seconds: i64,
+    ) -> Result<WorkflowStepRun, AppError> {
+        if !(1..=86_400).contains(&lease_seconds) {
+            return Err(AppError::bad_request(
+                "workflow step lease_seconds must be between 1 and 86400",
+            ));
+        }
+        let now = chrono::Utc::now();
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let step = store
+                    .workflow_step_runs
+                    .get_mut(&id)
+                    .filter(|step| {
+                        step.status == "running"
+                            && step.claimed_by_worker.as_deref() == Some(worker_id)
+                    })
+                    .ok_or_else(|| AppError::not_found("workflow step run not found"))?;
+                step.lease_expires_at = Some(now + chrono::Duration::seconds(lease_seconds));
+                step.updated_at = now;
+                Ok(step.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE workflow_step_runs
+                     SET lease_expires_at = now() + $1 * interval '1 second', updated_at = $2
+                     WHERE tenant_id = $3 AND id = $4 AND status = 'running' AND claimed_by_worker = $5
+                     RETURNING id, workflow_run_id, step_key, step_type, agent_id, agent_version_id, session_id, thread_id, handoff_id, task_grant_id, environment_id, status, input_payload, output_payload, artifact_ids, approval_ids, tool_call_ids, claimed_by_worker, lease_expires_at, context_packet_id, started_at, completed_at, scheduled_at, created_at, updated_at",
+                )
+                .bind(lease_seconds)
+                .bind(now)
+                .bind(self.current_tenant_id())
+                .bind(id)
+                .bind(worker_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("workflow step run not found"))?;
+                workflow_step_run_from_row(row)
+            }
+        }
     }
 
     pub(crate) async fn activate_scheduled_workflow_step_run(

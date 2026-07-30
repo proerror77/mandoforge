@@ -33,10 +33,6 @@ impl ExecutionQueue {
         }
     }
 
-    pub(crate) fn broker(backend: Arc<dyn ExecutionQueueBackend>) -> Self {
-        Self { backend }
-    }
-
     /// Returns the Postgres LISTEN channel name for this queue, if the backend
     /// supports push notifications. Workers subscribe to this channel to avoid
     /// polling — they are woken immediately when a job is enqueued.
@@ -72,6 +68,18 @@ impl ExecutionQueue {
         self.backend.complete_started(job_id, worker_id).await
     }
 
+    pub(crate) async fn renew_started(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+        lease_seconds: i64,
+    ) -> Result<ExecutionJob, AppError> {
+        validate_execution_lease_seconds(lease_seconds)?;
+        self.backend
+            .renew_started(job_id, worker_id, lease_seconds)
+            .await
+    }
+
     #[allow(dead_code)]
     pub(crate) async fn fail(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
         self.backend.fail(job_id).await
@@ -79,6 +87,24 @@ impl ExecutionQueue {
 
     pub(crate) async fn cancel(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
         self.backend.cancel(job_id).await
+    }
+
+    pub(crate) async fn acknowledge_canceled_started(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+    ) -> Result<ExecutionJob, AppError> {
+        self.backend
+            .acknowledge_canceled_started(job_id, worker_id)
+            .await
+    }
+
+    pub(crate) async fn acknowledge_canceled_expired(
+        &self,
+        job_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<ExecutionJob, AppError> {
+        self.backend.acknowledge_canceled_expired(job_id, now).await
     }
 
     #[allow(dead_code)]
@@ -131,9 +157,30 @@ pub(crate) trait ExecutionQueueBackend: Send + Sync {
         worker_id: &str,
     ) -> Result<ExecutionJob, AppError>;
 
+    async fn renew_started(
+        &self,
+        _job_id: Uuid,
+        _worker_id: &str,
+        _lease_seconds: i64,
+    ) -> Result<ExecutionJob, AppError> {
+        Err(AppError::bad_request(
+            "execution queue backend does not support lease renewal",
+        ))
+    }
+
     async fn fail(&self, job_id: Uuid) -> Result<ExecutionJob, AppError>;
 
     async fn cancel(&self, job_id: Uuid) -> Result<ExecutionJob, AppError>;
+
+    async fn acknowledge_canceled_started(
+        &self,
+        _job_id: Uuid,
+        _worker_id: &str,
+    ) -> Result<ExecutionJob, AppError> {
+        Err(AppError::bad_request(
+            "execution queue backend does not support cancellation acknowledgement",
+        ))
+    }
 
     async fn retry_or_fail(&self, job_id: Uuid, error: &str) -> Result<ExecutionJob, AppError>;
 
@@ -147,6 +194,16 @@ pub(crate) trait ExecutionQueueBackend: Send + Sync {
     async fn list(&self) -> Result<Vec<ExecutionJob>, AppError>;
 
     async fn get(&self, job_id: Uuid) -> Result<ExecutionJob, AppError>;
+
+    async fn acknowledge_canceled_expired(
+        &self,
+        _job_id: Uuid,
+        _now: DateTime<Utc>,
+    ) -> Result<ExecutionJob, AppError> {
+        Err(AppError::bad_request(
+            "execution queue backend does not support expired cancellation acknowledgement",
+        ))
+    }
 }
 
 #[derive(Default)]
@@ -162,6 +219,65 @@ struct PostgresExecutionQueue {
 impl PostgresExecutionQueue {
     fn current_tenant_id(&self) -> Uuid {
         crate::current_request_tenant_id(self.tenant_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request() -> ExecutionJobRequest {
+        ExecutionJobRequest {
+            session_id: Uuid::new_v4(),
+            environment_id: None,
+            approval_id: Uuid::new_v4(),
+            tool_call_id: Uuid::new_v4(),
+            tool_name: "shell.exec".to_string(),
+            max_attempts: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_queue_fences_active_execution_lease() {
+        let queue = ExecutionQueue::default();
+        let job = queue.enqueue(request()).await.expect("enqueue job");
+        queue
+            .start(job.id, "worker-a")
+            .await
+            .expect("first worker claims job");
+
+        let error = queue
+            .start(job.id, "worker-b")
+            .await
+            .expect_err("active lease must fence a second worker");
+
+        assert_eq!(error.status, axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn memory_queue_reclaims_only_expired_execution_lease() {
+        let queue = MemoryExecutionQueue::default();
+        let job = queue.enqueue(request()).await.expect("enqueue job");
+        queue
+            .start(job.id, "worker-a")
+            .await
+            .expect("first worker claims job");
+        queue.inner.write().await.jobs[0].lease_expires_at =
+            Some(Utc::now() - chrono::Duration::seconds(1));
+
+        let reclaimed = queue
+            .start(job.id, "worker-b")
+            .await
+            .expect("expired lease can be reclaimed");
+
+        assert_eq!(reclaimed.status, ExecutionJobStatus::Running);
+        assert_eq!(reclaimed.worker_id.as_deref(), Some("worker-b"));
+        assert_eq!(reclaimed.attempt_count, 2);
+        let stale_completion = queue
+            .complete_started(job.id, "worker-a")
+            .await
+            .expect_err("old owner stays fenced after recovery");
+        assert_eq!(stale_completion.status, axum::http::StatusCode::NOT_FOUND);
     }
 }
 
@@ -195,6 +311,7 @@ pub(crate) struct ExecutionJob {
 pub(crate) enum ExecutionJobStatus {
     Queued,
     Running,
+    CancelRequested,
     Completed,
     Failed,
     Canceled,
@@ -205,6 +322,7 @@ impl ExecutionJobStatus {
         match self {
             Self::Queued => "queued",
             Self::Running => "running",
+            Self::CancelRequested => "cancel_requested",
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Canceled => "canceled",
@@ -218,6 +336,7 @@ impl FromStr for ExecutionJobStatus {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         Ok(match value {
             "running" => Self::Running,
+            "cancel_requested" => Self::CancelRequested,
             "completed" => Self::Completed,
             "failed" => Self::Failed,
             "canceled" | "cancelled" => Self::Canceled,
@@ -264,6 +383,15 @@ fn default_execution_job_max_attempts() -> i32 {
         .ok()
         .and_then(|value| value.trim().parse::<i32>().ok())
         .unwrap_or(3)
+}
+
+fn validate_execution_lease_seconds(lease_seconds: i64) -> Result<(), AppError> {
+    if !(1..=86_400).contains(&lease_seconds) {
+        return Err(AppError::bad_request(
+            "execution job lease_seconds must be between 1 and 86400",
+        ));
+    }
+    Ok(())
 }
 
 fn execution_job_from_row(row: PgRow) -> Result<ExecutionJob, AppError> {
@@ -318,13 +446,96 @@ impl ExecutionQueueBackend for MemoryExecutionQueue {
             .await
     }
 
+    async fn renew_started(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+        lease_seconds: i64,
+    ) -> Result<ExecutionJob, AppError> {
+        let mut state = self.inner.write().await;
+        let job = state
+            .jobs
+            .iter_mut()
+            .find(|job| {
+                job.id == job_id
+                    && job.status == ExecutionJobStatus::Running
+                    && job.worker_id.as_deref() == Some(worker_id)
+            })
+            .ok_or_else(|| AppError::not_found("execution job not found"))?;
+        job.lease_expires_at = Some(Utc::now() + chrono::Duration::seconds(lease_seconds));
+        Ok(job.clone())
+    }
+
     async fn fail(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
         self.update(job_id, ExecutionJobStatus::Failed, None).await
     }
 
     async fn cancel(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
-        self.update(job_id, ExecutionJobStatus::Canceled, None)
-            .await
+        let mut state = self.inner.write().await;
+        let job = state
+            .jobs
+            .iter_mut()
+            .find(|job| job.id == job_id)
+            .ok_or_else(|| AppError::not_found("execution job not found"))?;
+        match job.status {
+            ExecutionJobStatus::Queued => {
+                job.status = ExecutionJobStatus::Canceled;
+                job.completed_at = Some(Utc::now());
+                job.lease_expires_at = None;
+            }
+            ExecutionJobStatus::Running => {
+                job.status = ExecutionJobStatus::CancelRequested;
+            }
+            ExecutionJobStatus::CancelRequested
+            | ExecutionJobStatus::Completed
+            | ExecutionJobStatus::Failed
+            | ExecutionJobStatus::Canceled => {}
+        }
+        Ok(job.clone())
+    }
+
+    async fn acknowledge_canceled_started(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+    ) -> Result<ExecutionJob, AppError> {
+        let mut state = self.inner.write().await;
+        let job = state
+            .jobs
+            .iter_mut()
+            .find(|job| {
+                job.id == job_id
+                    && job.status == ExecutionJobStatus::CancelRequested
+                    && job.worker_id.as_deref() == Some(worker_id)
+            })
+            .ok_or_else(|| AppError::not_found("execution job not found"))?;
+        job.status = ExecutionJobStatus::Canceled;
+        job.completed_at = Some(Utc::now());
+        job.lease_expires_at = None;
+        Ok(job.clone())
+    }
+
+    async fn acknowledge_canceled_expired(
+        &self,
+        job_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<ExecutionJob, AppError> {
+        let mut state = self.inner.write().await;
+        let job = state
+            .jobs
+            .iter_mut()
+            .find(|job| {
+                job.id == job_id
+                    && job.status == ExecutionJobStatus::CancelRequested
+                    && job
+                        .lease_expires_at
+                        .is_none_or(|lease_expires_at| lease_expires_at <= now)
+            })
+            .ok_or_else(|| AppError::not_found("execution job not found"))?;
+        job.status = ExecutionJobStatus::Canceled;
+        job.completed_at = Some(now);
+        job.lease_expires_at = None;
+        Ok(job.clone())
     }
 
     async fn retry_or_fail(&self, job_id: Uuid, error: &str) -> Result<ExecutionJob, AppError> {
@@ -393,6 +604,15 @@ impl MemoryExecutionQueue {
             .iter_mut()
             .find(|job| job.id == job_id)
             .ok_or_else(|| AppError::not_found("execution job not found"))?;
+        if status == ExecutionJobStatus::Running
+            && !(job.status == ExecutionJobStatus::Queued
+                || (job.status == ExecutionJobStatus::Running
+                    && job
+                        .lease_expires_at
+                        .is_none_or(|lease_expires_at| lease_expires_at <= Utc::now())))
+        {
+            return Err(AppError::not_found("execution job not found"));
+        }
         job.status = status;
         match job.status {
             ExecutionJobStatus::Running => {
@@ -401,6 +621,7 @@ impl MemoryExecutionQueue {
                 job.lease_expires_at = Some(Utc::now() + chrono::Duration::minutes(5));
                 job.attempt_count += 1;
             }
+            ExecutionJobStatus::CancelRequested => {}
             ExecutionJobStatus::Completed
             | ExecutionJobStatus::Failed
             | ExecutionJobStatus::Canceled => {
@@ -462,7 +683,9 @@ impl MemoryExecutionQueue {
                 job.completed_at = Some(Utc::now());
                 job.lease_expires_at = None;
             }
-            ExecutionJobStatus::Canceled | ExecutionJobStatus::Running => {
+            ExecutionJobStatus::Canceled
+            | ExecutionJobStatus::CancelRequested
+            | ExecutionJobStatus::Running => {
                 return Err(AppError::bad_request("unsupported started job transition"));
             }
         }
@@ -534,13 +757,92 @@ impl ExecutionQueueBackend for PostgresExecutionQueue {
             .await
     }
 
+    async fn renew_started(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+        lease_seconds: i64,
+    ) -> Result<ExecutionJob, AppError> {
+        let row = sqlx::query(
+            "UPDATE execution_jobs
+             SET lease_expires_at = now() + $1 * interval '1 second'
+             WHERE tenant_id = $2 AND id = $3 AND status = 'running' AND worker_id = $4
+             RETURNING id, session_id, environment_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error",
+        )
+        .bind(lease_seconds)
+        .bind(self.current_tenant_id())
+        .bind(job_id)
+        .bind(worker_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::not_found("execution job not found"))?;
+        execution_job_from_row(row)
+    }
+
     async fn fail(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
         self.update(job_id, ExecutionJobStatus::Failed, None).await
     }
 
     async fn cancel(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
-        self.update(job_id, ExecutionJobStatus::Canceled, None)
-            .await
+        let row = sqlx::query(
+            "UPDATE execution_jobs
+             SET status = CASE WHEN status = 'queued' THEN 'canceled' ELSE 'cancel_requested' END,
+                 completed_at = CASE WHEN status = 'queued' THEN COALESCE(completed_at, now()) ELSE completed_at END,
+                 lease_expires_at = CASE WHEN status = 'queued' THEN NULL ELSE lease_expires_at END
+             WHERE tenant_id = $1 AND id = $2 AND status IN ('queued', 'running', 'cancel_requested')
+             RETURNING id, session_id, environment_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error",
+        )
+        .bind(self.current_tenant_id())
+        .bind(job_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        match row {
+            Some(row) => execution_job_from_row(row),
+            None => self.get(job_id).await,
+        }
+    }
+
+    async fn acknowledge_canceled_started(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+    ) -> Result<ExecutionJob, AppError> {
+        let row = sqlx::query(
+            "UPDATE execution_jobs
+             SET status = 'canceled', completed_at = COALESCE(completed_at, now()), lease_expires_at = NULL
+             WHERE tenant_id = $1 AND id = $2 AND status = 'cancel_requested' AND worker_id = $3
+             RETURNING id, session_id, environment_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error",
+        )
+        .bind(self.current_tenant_id())
+        .bind(job_id)
+        .bind(worker_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::not_found("execution job not found"))?;
+        execution_job_from_row(row)
+    }
+
+    async fn acknowledge_canceled_expired(
+        &self,
+        job_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<ExecutionJob, AppError> {
+        let row = sqlx::query(
+            "UPDATE execution_jobs
+             SET status = 'canceled', completed_at = COALESCE(completed_at, $3), lease_expires_at = NULL
+             WHERE tenant_id = $1
+               AND id = $2
+               AND status = 'cancel_requested'
+               AND (lease_expires_at IS NULL OR lease_expires_at <= $3)
+             RETURNING id, session_id, environment_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error",
+        )
+        .bind(self.current_tenant_id())
+        .bind(job_id)
+        .bind(now)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::not_found("execution job not found"))?;
+        execution_job_from_row(row)
     }
 
     async fn retry_or_fail(&self, job_id: Uuid, error: &str) -> Result<ExecutionJob, AppError> {
@@ -632,7 +934,7 @@ impl PostgresExecutionQueue {
                  SET status = 'running', started_at = COALESCE(started_at, now()), completed_at = NULL, worker_id = $1, lease_expires_at = now() + interval '5 minutes', attempt_count = attempt_count + 1
                  WHERE tenant_id = $2
                    AND id = $3
-                   AND (status = 'queued' OR (status = 'running' AND lease_expires_at < now()))
+                   AND (status = 'queued' OR (status = 'running' AND (lease_expires_at IS NULL OR lease_expires_at <= now())))
                  RETURNING id, session_id, environment_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, attempt_count, max_attempts, last_error",
             )
             .bind(worker_id.unwrap_or("api"))
@@ -661,6 +963,9 @@ impl PostgresExecutionQueue {
             .bind(job_id)
             .fetch_optional(&self.pool)
             .await?,
+            ExecutionJobStatus::CancelRequested => {
+                return Err(AppError::bad_request("unsupported execution job transition"));
+            }
         }
         .ok_or_else(|| AppError::not_found("execution job not found"))?;
         execution_job_from_row(row)
@@ -687,7 +992,10 @@ impl PostgresExecutionQueue {
             .bind(worker_id)
             .fetch_optional(&self.pool)
             .await?,
-            ExecutionJobStatus::Queued | ExecutionJobStatus::Canceled | ExecutionJobStatus::Running => {
+            ExecutionJobStatus::Queued
+            | ExecutionJobStatus::Canceled
+            | ExecutionJobStatus::CancelRequested
+            | ExecutionJobStatus::Running => {
                 return Err(AppError::bad_request("unsupported started job transition"));
             }
         }
