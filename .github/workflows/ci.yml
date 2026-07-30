@@ -119,6 +119,7 @@ jobs:
           MANDOFORGE_ADDR=127.0.0.1:8787 \
             MANDOFORGE_WORKSPACE_ROOT=.mandoforge/ci-agent-os-core-workspaces \
             MANDOFORGE_INSECURE_DEV_AUTH=1 \
+            MANDOFORGE_ALLOW_IN_MEMORY_STORE=1 \
             MANDOFORGE_ALLOW_HOST_SHELL_EXEC=1 \
             target/debug/mandoforge-api >"$LOG_FILE" 2>&1 &
           API_PID="$!"

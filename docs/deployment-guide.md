@@ -12,6 +12,7 @@ Start the API:
 
 ```bash
 MANDOFORGE_INSECURE_DEV_AUTH=1 \
+MANDOFORGE_ALLOW_IN_MEMORY_STORE=1 \
 MANDOFORGE_ALLOW_HOST_SHELL_EXEC=1 \
 cargo run -p mandoforge-api
 ```
@@ -58,6 +59,7 @@ Use **Run Diagnostics Demo** to inspect the timeline, approval queue, artifact d
 To use a real OpenAI-compatible provider instead of the deterministic mock:
 
 ```bash
+MANDOFORGE_ALLOW_IN_MEMORY_STORE=1 \
 MANDOFORGE_PROVIDER_BASE_URL=https://api.openai.com \
 MANDOFORGE_PROVIDER_API_KEY=... \
 MANDOFORGE_PROVIDER_MODEL=gpt-5.5-mini \
@@ -69,6 +71,7 @@ In development mode, missing provider env vars fall back to the deterministic mo
 To run approved `shell.exec` calls through Docker instead of the host shell:
 
 ```bash
+MANDOFORGE_ALLOW_IN_MEMORY_STORE=1 \
 MANDOFORGE_SHELL_RUNNER=docker \
 MANDOFORGE_SHELL_DOCKER_IMAGE=alpine:3.20 \
 cargo run -p mandoforge-api

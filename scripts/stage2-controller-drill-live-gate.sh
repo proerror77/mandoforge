@@ -85,6 +85,7 @@ start_gate_api() {
     "MANDOFORGE_FINANCE_CLOSE_CONTROLLER_URL=$MOCK_BASE_URL/finance/close" \
     "MANDOFORGE_FINANCE_RECONCILIATION_CONTROLLER_REQUIRED=true" \
     "MANDOFORGE_FINANCE_RECONCILIATION_CONTROLLER_URL=$MOCK_BASE_URL/finance/reconcile" \
+    "MANDOFORGE_ALLOW_IN_MEMORY_STORE=1" \
     cargo run -p mandoforge-api >"$log_file" 2>&1 &
   API_PID="$!"
 

@@ -162,7 +162,9 @@ require_command jq
 require_command sed
 
 if ! curl -fsS "$BASE_URL/healthz" >/dev/null 2>&1; then
-  MANDOFORGE_ADDR="$GATE_ADDR" cargo run -p mandoforge-api >/tmp/mandoforge-actionbook-api.log 2>&1 &
+  MANDOFORGE_ADDR="$GATE_ADDR" \
+    MANDOFORGE_ALLOW_IN_MEMORY_STORE=1 \
+    cargo run -p mandoforge-api >/tmp/mandoforge-actionbook-api.log 2>&1 &
   API_PID="$!"
   wait_for_url "$BASE_URL/healthz"
 fi

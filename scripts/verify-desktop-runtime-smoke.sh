@@ -38,6 +38,7 @@ if [[ "$START_API" == "1" ]]; then
     exit 1
   fi
   MANDOFORGE_INSECURE_DEV_AUTH=1 \
+    MANDOFORGE_ALLOW_IN_MEMORY_STORE=1 \
     MANDOFORGE_STORE_BACKEND=memory \
     MANDOFORGE_EXECUTION_QUEUE_BACKEND=memory \
     cargo run -p mandoforge-api >"$api_log" 2>&1 &
@@ -50,6 +51,7 @@ if [[ "$EMBEDDED_API" == "1" ]]; then
     MANDOFORGE_DESKTOP_API_COMMAND="target/debug/mandoforge-api" \
     MANDOFORGE_DESKTOP_SMOKE_EXIT_AFTER_MS="$SMOKE_EXIT_MS" \
     MANDOFORGE_INSECURE_DEV_AUTH=1 \
+    MANDOFORGE_ALLOW_IN_MEMORY_STORE=1 \
     MANDOFORGE_STORE_BACKEND=memory \
     MANDOFORGE_EXECUTION_QUEUE_BACKEND=memory \
     cargo run -p mandoforge-desktop >"$desktop_log" 2>&1; then

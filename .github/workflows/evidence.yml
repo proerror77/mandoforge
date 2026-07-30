@@ -93,6 +93,7 @@ jobs:
           set -euo pipefail
           cargo build -p mandoforge-api --bin mandoforge-api --locked
           MANDOFORGE_INSECURE_DEV_AUTH=1 \
+          MANDOFORGE_ALLOW_IN_MEMORY_STORE=1 \
           MANDOFORGE_EXECUTION_WORKER=inline \
           target/debug/mandoforge-api > /tmp/mandoforge-api.log 2>&1 &
           echo "$!" > /tmp/mandoforge-api.pid
