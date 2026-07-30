@@ -21,9 +21,11 @@ services:
       context: .
       dockerfile: Dockerfile
     environment:
+      MANDOFORGE_PROCESS_ROLE: api
       MANDOFORGE_ADDR: 0.0.0.0:8787
       MANDOFORGE_WORKSPACE_ROOT: /var/lib/mandoforge/workspaces
       DATABASE_URL: postgres://mandoforge:${MANDOFORGE_POSTGRES_PASSWORD:?MANDOFORGE_POSTGRES_PASSWORD must be set}@postgres:5432/mandoforge
+      MANDOFORGE_WORKER_TOKEN: ${MANDOFORGE_WORKER_TOKEN:?MANDOFORGE_WORKER_TOKEN must be set}
       MANDOFORGE_EXECUTION_WORKER: ${MANDOFORGE_EXECUTION_WORKER:-queue}
       MANDOFORGE_PROVIDER_BASE_URL: ${MANDOFORGE_PROVIDER_BASE_URL:-}
       MANDOFORGE_PROVIDER_API_KEY: ${MANDOFORGE_PROVIDER_API_KEY:-}
@@ -43,9 +45,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: ["mandoforge-worker"]
+    command: ["mandoforge-api"]
     environment:
-      BASE_URL: http://api:8787
+      MANDOFORGE_PROCESS_ROLE: worker
+      MANDOFORGE_WORKSPACE_ROOT: /var/lib/mandoforge/workspaces
+      DATABASE_URL: postgres://mandoforge:${MANDOFORGE_POSTGRES_PASSWORD:?MANDOFORGE_POSTGRES_PASSWORD must be set}@postgres:5432/mandoforge
+      MANDOFORGE_WORKER_TOKEN: ${MANDOFORGE_WORKER_TOKEN:?MANDOFORGE_WORKER_TOKEN must be set}
       WORKER_ID: compose-worker-1
       POLL_INTERVAL_SECONDS: ${MANDOFORGE_WORKER_POLL_INTERVAL_SECONDS:-0.5}
     depends_on:
@@ -54,6 +59,8 @@ services:
       api:
         condition: service_started
     restart: unless-stopped
+    volumes:
+      - workspace-data:/var/lib/mandoforge/workspaces
 
 volumes:
   postgres-data:

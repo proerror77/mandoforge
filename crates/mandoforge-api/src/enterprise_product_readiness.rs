@@ -1086,6 +1086,12 @@ fn production_deployment_safety_static_ready() -> bool {
                 && content.contains("mountPath: /var/run/secrets/kubernetes.io/serviceaccount")
                 && !content.contains("emptyDir: {}")
         })
+        && project_file_content("deploy/k8s/workspace-pvc.yaml")
+            .as_deref()
+            .is_some_and(|content| {
+                content.contains("ReadWriteMany")
+                    && content.contains("storageClassName: mandoforge-shared-workspaces-rwx")
+            })
         && worker_manifest.as_deref().is_some_and(|content| {
             workload_disables_service_account_token(content)
                 && !content.contains("mountPath: /var/run/secrets/kubernetes.io/serviceaccount")

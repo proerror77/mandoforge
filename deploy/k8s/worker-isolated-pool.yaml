@@ -27,7 +27,7 @@ spec:
         - name: worker
           image: ghcr.io/proerror77/mandoforge/mandoforge-api:latest
           imagePullPolicy: IfNotPresent
-          command: ["mandoforge-worker"]
+          command: ["mandoforge-api"]
           envFrom:
             - configMapRef:
                 name: mandoforge-config
@@ -40,8 +40,8 @@ spec:
               drop:
                 - ALL
           env:
-            - name: BASE_URL
-              value: "http://mandoforge-api:8787"
+            - name: MANDOFORGE_PROCESS_ROLE
+              value: "worker"
             - name: WORKER_ID
               valueFrom:
                 fieldRef:
@@ -62,6 +62,11 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            - name: workspaces
+              mountPath: /var/lib/mandoforge/workspaces
       volumes:
         - name: tmp
           emptyDir: {}
+        - name: workspaces
+          persistentVolumeClaim:
+            claimName: mandoforge-workspaces

@@ -13,10 +13,28 @@ spec:
     - to:
         - podSelector:
             matchLabels:
-              app: mandoforge-api
+              app: mandoforge-postgres
       ports:
         - protocol: TCP
-          port: 8787
+          port: 5432
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+        - ipBlock:
+            cidr: ::/0
+            except:
+              - ::1/128
+              - fc00::/7
+              - fe80::/10
+      ports:
+        - protocol: TCP
+          port: 443
     - ports:
         - protocol: UDP
           port: 53

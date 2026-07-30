@@ -32,6 +32,7 @@ spec:
         - name: api
           image: ghcr.io/proerror77/mandoforge/mandoforge-api:latest
           imagePullPolicy: IfNotPresent
+          command: ["mandoforge-api"]
           ports:
             - name: http
               containerPort: 8787
@@ -42,6 +43,9 @@ spec:
                 name: mandoforge-agent-sandbox-controller-contract
             - secretRef:
                 name: mandoforge-secrets
+          env:
+            - name: MANDOFORGE_PROCESS_ROLE
+              value: "api"
           volumeMounts:
             - name: kube-api-token
               mountPath: /var/run/secrets/kubernetes.io/serviceaccount
