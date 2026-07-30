@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{collections::VecDeque, time::Duration};
 
 use axum::{
     Json, Router,
@@ -73,15 +73,12 @@ async fn stream_events(
         Some(id),
     )
     .await?;
+    let tenant_id = state.current_tenant_id();
     let after_seq = stream_after_seq(&headers, query.after_seq)?;
-    let live_events = store_events::subscribe_session_events();
+    let live_events = store_events::subscribe_session_events(&state).await?;
     let events = state
-        .list_events(id)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|event| after_seq.is_none_or(|after_seq| event.seq > after_seq))
-        .collect::<Vec<_>>();
+        .list_events_after_for_tenant(tenant_id, id, after_seq)
+        .await?;
     let replay_high_water = events
         .iter()
         .map(|event| event.seq)
@@ -89,25 +86,48 @@ async fn stream_events(
         .or(after_seq)
         .unwrap_or_default();
     let replay_stream = futures_util::stream::iter(events.into_iter().map(sse_session_event));
-    let live_stream =
-        futures_util::stream::unfold((live_events, replay_high_water), move |state| async move {
-            let (mut live_events, mut high_water) = state;
+    let live_stream = futures_util::stream::unfold(
+        SessionEventStreamState {
+            app_state: state.clone(),
+            tenant_id,
+            session_id: id,
+            high_water: replay_high_water,
+            pending: VecDeque::new(),
+            live_events,
+        },
+        move |mut state| async move {
             loop {
-                match live_events.recv().await {
-                    Ok(event)
-                        if event.session_id == id
-                            && event.seq > high_water
-                            && after_seq.is_none_or(|after_seq| event.seq > after_seq) =>
-                    {
-                        high_water = event.seq;
-                        return Some((sse_session_event(event), (live_events, high_water)));
+                if let Some(event) = state.pending.pop_front() {
+                    return Some((sse_session_event(event), state));
+                }
+                match state
+                    .live_events
+                    .wait_for_session_change(state.session_id)
+                    .await
+                {
+                    Ok(true) => {
+                        let events = match state
+                            .app_state
+                            .list_events_after_for_tenant(
+                                state.tenant_id,
+                                state.session_id,
+                                Some(state.high_water),
+                            )
+                            .await
+                        {
+                            Ok(events) => events,
+                            Err(_) => return None,
+                        };
+                        if let Some(high_water) = events.last().map(|event| event.seq) {
+                            state.high_water = high_water;
+                        }
+                        state.pending.extend(events);
                     }
-                    Ok(_) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                    Ok(false) | Err(_) => return None,
                 }
             }
-        });
+        },
+    );
     let stream = replay_stream.chain(live_stream);
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }
@@ -146,6 +166,15 @@ fn stream_after_seq(
         ));
     }
     Ok(after_seq)
+}
+
+struct SessionEventStreamState {
+    app_state: AppState,
+    tenant_id: Uuid,
+    session_id: Uuid,
+    high_water: i64,
+    pending: VecDeque<SessionEvent>,
+    live_events: store_events::SessionEventSubscription,
 }
 
 async fn list_artifacts(

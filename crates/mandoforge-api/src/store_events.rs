@@ -3,6 +3,7 @@ use std::sync::OnceLock;
 use anyhow::Result;
 use chrono::Utc;
 use serde_json::Value;
+use sqlx::postgres::PgListener;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -12,12 +13,46 @@ use crate::{AppError, AppState, SessionEvent};
 
 const SESSION_EVENT_BROADCAST_CAPACITY: usize = 1024;
 
-pub(crate) fn subscribe_session_events() -> broadcast::Receiver<SessionEvent> {
-    session_event_broadcaster().subscribe()
+pub(crate) enum SessionEventSubscription {
+    Memory(broadcast::Receiver<SessionEvent>),
+    Postgres(PgListener),
+}
+
+pub(crate) async fn subscribe_session_events(
+    state: &AppState,
+) -> Result<SessionEventSubscription, AppError> {
+    match &state.store {
+        StoreBackend::Memory(_) => Ok(SessionEventSubscription::Memory(
+            session_event_broadcaster().subscribe(),
+        )),
+        StoreBackend::Postgres(pool) => {
+            let mut listener = PgListener::connect_with(pool).await?;
+            listener
+                .listen(&session_event_notify_channel(state.current_tenant_id()))
+                .await?;
+            Ok(SessionEventSubscription::Postgres(listener))
+        }
+    }
 }
 
 fn publish_session_event(event: &SessionEvent) {
     let _ = session_event_broadcaster().send(event.clone());
+}
+
+fn session_event_notify_channel(tenant_id: Uuid) -> String {
+    format!("mf_session_events_{}", tenant_id.simple())
+}
+
+fn session_event_notify_payload(event: &SessionEvent) -> String {
+    format!("{}:{}", event.session_id, event.seq)
+}
+
+fn notified_session_id(payload: &str) -> Option<Uuid> {
+    payload
+        .split_once(':')
+        .map(|(session_id, _)| session_id)
+        .or_else(|| (!payload.is_empty()).then_some(payload))
+        .and_then(|session_id| Uuid::parse_str(session_id).ok())
 }
 
 fn session_event_broadcaster() -> &'static broadcast::Sender<SessionEvent> {
@@ -33,6 +68,25 @@ impl AppState {
         &self,
         session_id: Uuid,
     ) -> Result<Vec<SessionEvent>, AppError> {
+        self.list_events_after(session_id, None).await
+    }
+
+    pub(crate) async fn list_events_after(
+        &self,
+        session_id: Uuid,
+        after_seq: Option<i64>,
+    ) -> Result<Vec<SessionEvent>, AppError> {
+        self.list_events_after_for_tenant(self.current_tenant_id(), session_id, after_seq)
+            .await
+    }
+
+    pub(crate) async fn list_events_after_for_tenant(
+        &self,
+        tenant_id: Uuid,
+        session_id: Uuid,
+        after_seq: Option<i64>,
+    ) -> Result<Vec<SessionEvent>, AppError> {
+        let after_seq = after_seq.unwrap_or(0);
         match &self.store {
             StoreBackend::Memory(inner) => Ok(inner
                 .read()
@@ -40,16 +94,20 @@ impl AppState {
                 .events
                 .get(&session_id)
                 .cloned()
-                .unwrap_or_default()),
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|event| event.seq > after_seq)
+                .collect()),
             StoreBackend::Postgres(pool) => {
                 let rows = sqlx::query(
                     "SELECT id, session_id, seq, parent_event_id, actor_type, actor_id, event_type, payload, created_at
                      FROM session_events
-                     WHERE tenant_id = $1 AND session_id = $2
+                     WHERE tenant_id = $1 AND session_id = $2 AND seq > $3
                      ORDER BY seq ASC",
                 )
-                .bind(self.current_tenant_id())
+                .bind(tenant_id)
                 .bind(session_id)
+                .bind(after_seq)
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter().map(event_from_row).collect()
@@ -129,12 +187,93 @@ impl AppState {
                 .fetch_one(&mut *tx)
                 .await?;
                 let event = event_from_row(row)?;
+                sqlx::query("SELECT pg_notify($1, $2)")
+                    .bind(session_event_notify_channel(tenant_id))
+                    .bind(session_event_notify_payload(&event))
+                    .execute(&mut *tx)
+                    .await?;
                 tx.commit().await?;
                 event
             }
         };
         self.emit_telemetry_event(&event).await;
-        publish_session_event(&event);
+        if matches!(&self.store, StoreBackend::Memory(_)) {
+            publish_session_event(&event);
+        }
         Ok(event)
+    }
+}
+
+impl SessionEventSubscription {
+    pub(crate) async fn wait_for_session_change(
+        &mut self,
+        session_id: Uuid,
+    ) -> Result<bool, AppError> {
+        match self {
+            SessionEventSubscription::Memory(receiver) => loop {
+                match receiver.recv().await {
+                    Ok(event) if event.session_id == session_id => return Ok(true),
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => return Ok(true),
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(false),
+                }
+            },
+            SessionEventSubscription::Postgres(listener) => loop {
+                let notification = listener.recv().await?;
+                match notified_session_id(notification.payload()) {
+                    Some(notified_session_id) if notified_session_id != session_id => {}
+                    _ => return Ok(true),
+                }
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notified_session_id_parses_session_prefix() {
+        let session_id = Uuid::new_v4();
+        assert_eq!(
+            notified_session_id(&format!("{session_id}:42")),
+            Some(session_id)
+        );
+        assert_eq!(
+            notified_session_id(&session_id.to_string()),
+            Some(session_id)
+        );
+        assert_eq!(notified_session_id("not-a-uuid"), None);
+    }
+
+    #[tokio::test]
+    async fn memory_subscription_requests_catch_up_after_lag() {
+        let (sender, _) = broadcast::channel(1);
+        let session_id = Uuid::new_v4();
+        let other_session_id = Uuid::new_v4();
+        let mut subscription = SessionEventSubscription::Memory(sender.subscribe());
+
+        let send_event = |session_id| SessionEvent {
+            id: Uuid::new_v4(),
+            session_id,
+            seq: 1,
+            parent_event_id: None,
+            actor_type: "user".to_string(),
+            actor_id: None,
+            event_type: "user.message".to_string(),
+            payload: Value::Null,
+            created_at: Utc::now(),
+        };
+
+        let _ = sender.send(send_event(other_session_id));
+        let _ = sender.send(send_event(session_id));
+
+        assert!(
+            subscription
+                .wait_for_session_change(session_id)
+                .await
+                .expect("lag should request catch-up")
+        );
     }
 }

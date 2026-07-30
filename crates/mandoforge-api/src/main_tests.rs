@@ -1615,6 +1615,8 @@ mod migration_tests;
 mod observability_controller_tests;
 #[path = "main_tests/ontology_release_workflow_trigger_tests.rs"]
 mod ontology_release_workflow_trigger_tests;
+#[path = "main_tests/postgres_event_stream_tests.rs"]
+mod postgres_event_stream_tests;
 #[path = "main_tests/provider_controller_tests.rs"]
 mod provider_controller_tests;
 #[path = "main_tests/remote_computer_execution_tests.rs"]
