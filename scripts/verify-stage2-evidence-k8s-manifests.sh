@@ -63,6 +63,7 @@ managed_workflow_runtime_script="scripts/managed-workflow-runtime-evidence-gate.
 mcp_gateway_script="scripts/mcp-gateway-evidence-gate.sh"
 eval_release_script="scripts/eval-release-evidence-gate.sh"
 finance_script="scripts/finance-evidence-gate.sh"
+remote_computer_manifest_script="scripts/verify-remote-computer-k8s-manifests.sh"
 completion_audit_script="scripts/stage2-completion-audit-gate.sh"
 runtime_production_script="scripts/runtime-production-readiness-gate.sh"
 production_deployment_safety_script="scripts/production-deployment-safety-gate.sh"
@@ -248,6 +249,11 @@ if [[ ! -x "$whiskey_evidence_script" ]]; then
   exit 1
 fi
 
+if [[ ! -x "$remote_computer_manifest_script" ]]; then
+  echo "missing executable Remote Computer manifest verifier: $remote_computer_manifest_script" >&2
+  exit 1
+fi
+
 if ! grep -q "stop_remote_listener_by_port()" "$whiskey_deploy_script"; then
   echo "Whiskey deploy script must clean stale controller listeners by port before restarting controllers" >&2
   exit 1
@@ -283,6 +289,7 @@ deploy_root_render_file="$(mktemp -t mandoforge-deploy-root-kustomize.XXXXXX)"
 remote_computer_pilot_render_file="$(mktemp -t mandoforge-remote-computer-pilot-kustomize.XXXXXX)"
 trap 'rm -f "$stage2_render_file" "$stage2_production_render_file" "$deploy_render_file" "$deploy_root_render_file" "$remote_computer_pilot_render_file"' EXIT
 
+"$remote_computer_manifest_script"
 kubectl kustomize deploy/stage2-evidence >"$stage2_render_file"
 kubectl kustomize deploy/stage2-production-evidence --load-restrictor LoadRestrictionsNone \
   >"$stage2_production_render_file"

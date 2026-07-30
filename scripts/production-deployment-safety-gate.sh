@@ -136,6 +136,7 @@ static_contract_check() {
   require_executable scripts/production-launch-preflight.sh
   require_executable scripts/production-deployment-safety-gate.sh
   require_executable scripts/enterprise-product-completion-contract-gate.sh
+  require_executable scripts/verify-remote-computer-k8s-manifests.sh
 
   [[ -f deploy/k8s/kustomization.yaml ]] || fail "missing deploy/k8s/kustomization.yaml"
   [[ -f deploy/k8s/configmap.yaml ]] || fail "missing deploy/k8s/configmap.yaml"
@@ -268,6 +269,7 @@ static_contract_check() {
     local deploy_render_file="$EVIDENCE_DIR/deploy-k8s-render.yaml"
     local deploy_root_render_file="$EVIDENCE_DIR/deploy-root-render.yaml"
 
+    scripts/verify-remote-computer-k8s-manifests.sh
     verify_kubernetes_access_contracts
     kubectl kustomize deploy/k8s >"$deploy_render_file"
     kubectl kustomize deploy >"$deploy_root_render_file"

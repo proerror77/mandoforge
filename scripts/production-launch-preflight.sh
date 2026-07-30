@@ -194,11 +194,6 @@ if grep -q 'mountPath: /var/run/secrets/kubernetes.io/serviceaccount' deploy/k8s
   fail "queue workers must not receive Kubernetes API credentials"
 fi
 
-if grep -q 'app: agent-remote-computer' deploy/k8s/worker-isolated-pool-networkpolicy.yaml \
-  || grep -q 'port: 8080' deploy/k8s/worker-isolated-pool-networkpolicy.yaml; then
-  fail "queue workers must not retain a direct runtime network path"
-fi
-
 if ! grep -q 'claimName: mandoforge-workspaces' deploy/k8s/api.yaml; then
   fail "API workspace volume must use the mandoforge-workspaces PVC"
 fi
