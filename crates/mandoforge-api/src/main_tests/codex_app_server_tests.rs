@@ -333,6 +333,73 @@ fn codex_app_server_production_ops_requires_fresh_stale_poll_supervision() {
 }
 
 #[tokio::test]
+async fn codex_artifact_sync_rejects_missing_workspace_file() {
+    let codex_client = Arc::new(RecordingCodexAppServerClient::default());
+    let app = test_app_with_codex_app_server(codex_client).await;
+
+    let agents: Vec<Agent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/agents")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let session: Session = request_json(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri("/api/sessions")
+            .header("content-type", "application/json")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::from(
+                json!({"agent_id": agents[0].id, "title": "codex artifact sync missing file"})
+                    .to_string(),
+            ))
+            .expect("valid request"),
+    )
+    .await;
+
+    let (status, body) = request_value(
+        app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/codex-app-server/artifacts/sync")
+            .header("content-type", "application/json")
+            .header("x-mandoforge-subject", "admin-1")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::from(
+                json!({
+                    "session_id": session.id,
+                    "turn_id": "turn-1",
+                    "command_id": "command-1",
+                    "artifacts": [{
+                        "name": "codex-report.md",
+                        "artifact_type": "markdown",
+                        "path": "artifacts/codex-report.md",
+                        "content": {"markdown": "# Codex Report"},
+                        "metadata": {"source": "mock"}
+                    }]
+                })
+                .to_string(),
+            ))
+            .expect("valid request"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("existing file inside the session workspace")
+    );
+}
+
+#[tokio::test]
 async fn codex_app_server_deployment_controller_executes_external_boundary() {
     let payloads = Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

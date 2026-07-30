@@ -3004,11 +3004,7 @@ pub(crate) async fn principal_from_request(
     if worker_token_authenticated(headers) {
         return Ok(Principal {
             tenant_id,
-            subject_id: header_value(headers, "x-mandoforge-subject")
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or("mandoforge-worker")
-                .to_string(),
+            subject_id: worker_subject_from_headers(headers),
             roles: vec![Role::Worker],
         });
     }
@@ -3196,7 +3192,9 @@ pub(crate) fn resolve_request_tenant_id(
         (TenantRuntimeMode::TenantRouted, Some(_)) => Err(AppError::forbidden(
             "x-mandoforge-tenant-id is only accepted from trusted tenant-routing ingress",
         )),
-        (TenantRuntimeMode::TenantRouted, None) => Ok(state.configured_tenant_id()),
+        (TenantRuntimeMode::TenantRouted, None) => Err(AppError::forbidden(
+            "tenant-routed runtime requires x-mandoforge-tenant-id from trusted ingress",
+        )),
         (TenantRuntimeMode::SingleRuntimeTenant, Some(tenant_id)) => {
             if tenant_id != state.configured_tenant_id() {
                 return Err(AppError::forbidden(
@@ -3207,6 +3205,15 @@ pub(crate) fn resolve_request_tenant_id(
         }
         (TenantRuntimeMode::SingleRuntimeTenant, None) => Ok(state.configured_tenant_id()),
     }
+}
+
+fn worker_subject_from_headers(headers: &HeaderMap) -> String {
+    header_value(headers, "x-mandoforge-worker-id")
+        .or_else(|| header_value(headers, "x-mandoforge-worker-pool"))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("mandoforge-worker")
+        .to_string()
 }
 
 pub(crate) fn subject_from_headers(headers: &HeaderMap) -> Result<String, AppError> {

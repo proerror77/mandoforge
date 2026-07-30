@@ -1606,6 +1606,8 @@ mod environment_tests;
 mod execution_queue_tests;
 #[path = "main_tests/finance_controller_tests.rs"]
 mod finance_controller_tests;
+#[path = "main_tests/github_security_tests.rs"]
+mod github_security_tests;
 #[path = "main_tests/migration_tests.rs"]
 mod migration_tests;
 
@@ -14046,6 +14048,7 @@ async fn delegated_runtime_step_calls_codex_app_server_and_records_artifact() {
     .await;
     assert_eq!(artifacts.len(), 1);
     assert_eq!(artifacts[0].name, "delegated-runtime-result.json");
+    assert_eq!(artifacts[0].path, None);
     let events: Vec<SessionEvent> = request_json(
         app,
         Request::builder()
@@ -23779,6 +23782,50 @@ async fn tenant_routed_header_requires_trusted_ingress() {
 }
 
 #[tokio::test]
+async fn tenant_routed_missing_header_fails_closed() {
+    let _env_guard = env_lock().lock().expect("env lock");
+    let _insecure_auth = EnvVarGuard::set("MANDOFORGE_INSECURE_DEV_AUTH", "0");
+    let mut state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.tenant_runtime_mode = TenantRuntimeMode::TenantRouted;
+
+    let error = resolve_request_tenant_id(&state, &HeaderMap::new())
+        .expect_err("missing tenant header should fail closed in tenant-routed mode");
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn worker_token_principal_ignores_caller_subject_and_binds_worker_identity() {
+    let _env_guard = env_lock().lock().expect("env lock");
+    let _insecure_auth = EnvVarGuard::set("MANDOFORGE_INSECURE_DEV_AUTH", "0");
+    let _worker_token = EnvVarGuard::set("MANDOFORGE_WORKER_TOKEN", "worker-token");
+    let _dev_token = EnvVarGuard::remove("MANDOFORGE_DEV_ADMIN_TOKEN");
+    let _tenant_trust = EnvVarGuard::remove("MANDOFORGE_TRUST_X_MANDOFORGE_TENANT_ID");
+    let _subject_trust = EnvVarGuard::remove("MANDOFORGE_TRUST_X_MANDOFORGE_SUBJECT");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+
+    let mut headers = HeaderMap::new();
+    headers.insert("authorization", "Bearer worker-token".parse().unwrap());
+    headers.insert("x-mandoforge-subject", "admin-1".parse().unwrap());
+    headers.insert("x-mandoforge-worker-id", "worker-a".parse().unwrap());
+
+    let principal = principal_from_request(&state, &headers)
+        .await
+        .expect("worker token auth should succeed");
+    assert_eq!(principal.subject_id, "worker-a");
+    assert_eq!(principal.roles, vec![Role::Worker]);
+
+    let mut fallback_headers = HeaderMap::new();
+    fallback_headers.insert("authorization", "Bearer worker-token".parse().unwrap());
+    fallback_headers.insert("x-mandoforge-subject", "admin-1".parse().unwrap());
+
+    let fallback_principal = principal_from_request(&state, &fallback_headers)
+        .await
+        .expect("worker token auth should ignore caller subject without worker id");
+    assert_eq!(fallback_principal.subject_id, "mandoforge-worker");
+    assert_eq!(fallback_principal.roles, vec![Role::Worker]);
+}
+
+#[tokio::test]
 async fn policy_rollout_can_rollback_and_run_due_activation() {
     let app = test_app().await;
 
@@ -25852,6 +25899,19 @@ async fn codex_app_server_routes_require_admin_and_call_adapter() {
         })
     );
 
+    let session_workspace = test_workspace_root().join(session.id.to_string());
+    let artifact_path = session_workspace.join("artifacts").join("codex-report.md");
+    tokio::fs::create_dir_all(
+        artifact_path
+            .parent()
+            .expect("artifact path should have parent"),
+    )
+    .await
+    .expect("create codex artifact dir");
+    tokio::fs::write(&artifact_path, "# Codex Report\n")
+        .await
+        .expect("write codex artifact");
+
     let synced: CodexArtifactSyncResponse = request_json(
         app.clone(),
         Request::builder()
@@ -25880,6 +25940,10 @@ async fn codex_app_server_routes_require_admin_and_call_adapter() {
     .await;
     assert_eq!(synced.artifact_count, 1);
     assert_eq!(synced.artifacts[0].name, "codex-report.md");
+    assert_eq!(
+        synced.artifacts[0].path.as_deref(),
+        Some("artifacts/codex-report.md")
+    );
 
     let artifacts: Vec<Artifact> = request_json(
         app.clone(),
