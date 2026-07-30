@@ -70,10 +70,92 @@ async fn migration_paths_include_stage2_migrations_in_order() {
     assert!(names.contains(&"0073_task_grant_budget_usage.sql"));
     assert!(names.contains(&"0074_task_grant_root_unique.sql"));
     assert!(names.contains(&"0075_agent_release_promoted_unique.sql"));
+    assert!(names.contains(&"0076_drop_dynamic_workflow_plans.sql"));
+    assert!(names.contains(&"0077_session_event_loop_projection.sql"));
     assert!(
         names.windows(2).all(|window| window[0] <= window[1]),
         "migrations should run lexicographically: {names:?}"
     );
+}
+
+#[test]
+fn migration_checksum_is_content_addressed() {
+    assert_eq!(
+        db_bootstrap::migration_checksum("SELECT 1;"),
+        db_bootstrap::migration_checksum("SELECT 1;")
+    );
+    assert_ne!(
+        db_bootstrap::migration_checksum("SELECT 1;"),
+        db_bootstrap::migration_checksum("SELECT 2;")
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires MANDOFORGE_TEST_POSTGRES_URL"]
+async fn postgres_migration_ledger_is_idempotent_and_rejects_checksum_drift() {
+    let database_url = std::env::var("MANDOFORGE_TEST_POSTGRES_URL")
+        .expect("MANDOFORGE_TEST_POSTGRES_URL is required");
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .expect("connect test postgres");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let table_name = format!("mandoforge_migration_ledger_{suffix}");
+    let filename = format!("9999_migration_ledger_{suffix}.sql");
+    let directory = std::env::temp_dir().join(format!("mandoforge-migrations-{suffix}"));
+    fs::create_dir_all(&directory).expect("create temporary migration directory");
+    let path = directory.join(&filename);
+    fs::write(
+        &path,
+        format!("CREATE TABLE {table_name} (id INTEGER PRIMARY KEY);"),
+    )
+    .expect("write test migration");
+
+    run_migrations_from_paths(&pool, vec![path.clone()])
+        .await
+        .expect("apply migration once");
+    run_migrations_from_paths(&pool, vec![path.clone()])
+        .await
+        .expect("reapply unchanged migration");
+
+    fs::write(
+        &path,
+        format!("ALTER TABLE {table_name} ADD COLUMN changed BOOLEAN;"),
+    )
+    .expect("mutate test migration");
+    let error = run_migrations_from_paths(&pool, vec![path])
+        .await
+        .expect_err("changed migration must fail closed");
+    assert!(error.to_string().contains("migration checksum mismatch"));
+
+    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
+        .execute(&pool)
+        .await
+        .expect("drop test table");
+    sqlx::query("DELETE FROM schema_migrations WHERE filename = $1")
+        .bind(filename)
+        .execute(&pool)
+        .await
+        .expect("remove test ledger row");
+    fs::remove_dir_all(directory).expect("remove temporary migration directory");
+}
+
+#[test]
+fn dynamic_workflow_cleanup_migration_is_restart_safe() {
+    let migration = include_str!("../../../../db/migrations/0076_drop_dynamic_workflow_plans.sql");
+
+    assert!(migration.contains("DROP TABLE IF EXISTS dynamic_workflow_plans"));
+}
+
+#[test]
+fn session_event_loop_projection_migration_is_restart_safe() {
+    let migration =
+        include_str!("../../../../db/migrations/0077_session_event_loop_projection.sql");
+
+    assert!(migration.contains("CREATE OR REPLACE FUNCTION project_session_event_to_loop_job"));
+    assert!(migration.contains("AFTER INSERT ON session_events"));
+    assert!(migration.contains("ON CONFLICT (tenant_id, session_id)"));
 }
 
 #[test]
