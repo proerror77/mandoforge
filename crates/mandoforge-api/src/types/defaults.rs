@@ -155,44 +155,6 @@ pub(crate) fn default_event_ingestion_policy() -> String {
     "normalized".to_string()
 }
 
-pub(crate) fn default_dynamic_workflow_agent_fleet_policy() -> Value {
-    json!({
-        "max_total_agents": 64,
-        "max_parallel_agents": 16,
-        "retry_limit": 1,
-        "timeout_seconds": 3600
-    })
-}
-
-pub(crate) fn default_dynamic_workflow_governance() -> Value {
-    json!({
-        "risk_level": "medium",
-        "budget_usd_micros": 0,
-        "memory_scope": default_task_grant_memory_scope(),
-        "tool_scope": default_task_grant_tool_scope(),
-        "connector_scope": default_task_grant_connector_scope(),
-        "approval_policy": default_task_grant_approval_policy(),
-        "external_effects": default_task_grant_external_effects()
-    })
-}
-
-pub(crate) fn default_dynamic_workflow_validation() -> Value {
-    json!({
-        "cross_check_required": true,
-        "vote_threshold": 0.67,
-        "adjudicator_agent": null,
-        "required_artifacts": ["final_report"]
-    })
-}
-
-pub(crate) fn default_dynamic_workflow_materialization() -> Value {
-    json!({
-        "execution_strategy": "delegated_runtime",
-        "runtime_adapter": "claude_code",
-        "runtime_mode": "dynamic_workflow"
-    })
-}
-
 pub(crate) fn default_task_grant_risk_level() -> String {
     "low".to_string()
 }
@@ -248,10 +210,6 @@ pub(crate) fn default_task_grant_external_effects() -> Value {
 
 pub(crate) fn empty_json_object() -> Value {
     json!({})
-}
-
-pub(crate) fn empty_json_array() -> Value {
-    json!([])
 }
 
 pub(crate) fn workflow_input_digest(value: &Value) -> String {

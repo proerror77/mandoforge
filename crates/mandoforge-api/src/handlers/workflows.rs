@@ -32,13 +32,13 @@ use crate::{
     record_workflow_step_worker_started, require_non_empty, run_session_loop,
     run_workflow_compensation_adapter_step, run_workflow_delegated_runtime_step,
     set_managed_session_status, task_grant_session_matches,
-    update_workflow_step_after_worker_session, validate_dynamic_materialization_provenance_update,
+    update_workflow_step_after_worker_session, validate_retired_materialization_provenance_update,
     validate_task_grant_scope_objects, validate_workflow_execution_binding,
     validate_workflow_graph_definition, visible_session_ids_for_principal,
     workflow_definition_agent_version_id, workflow_definition_step_graph_for_execution,
     workflow_graph_step_agent_id, workflow_graph_step_by_key,
     workflow_graph_step_requires_isolated_handoff_context,
-    workflow_handoff_rules_is_dynamic_materialization, workflow_input_digest,
+    workflow_handoff_rules_has_retired_materialization, workflow_input_digest,
     workflow_run_execution_denial, workflow_run_owns_session,
     workflow_run_runtime_envelope_with_pinned_ontology_release,
     workflow_run_status_allows_execution, workflow_step_is_adapter_owned_compensation,
@@ -161,9 +161,9 @@ async fn create_workflow_definition(
             "workflow definition handoff_rules must be a JSON object",
         ));
     }
-    if workflow_handoff_rules_is_dynamic_materialization(&input.handoff_rules) {
+    if workflow_handoff_rules_has_retired_materialization(&input.handoff_rules) {
         return Err(AppError::bad_request(
-            "dynamic workflow materialization definitions can only be created from an approved dynamic workflow plan",
+            "retired workflow materialization definitions can no longer be created",
         ));
     }
     let execution_strategy = normalize_workflow_execution_strategy(&input.execution_strategy)?;
@@ -253,8 +253,8 @@ async fn update_workflow_definition(
     )
     .await?;
     let mut definition = state.get_workflow_definition(id).await?;
-    let dynamic_materialization =
-        workflow_handoff_rules_is_dynamic_materialization(&definition.handoff_rules);
+    let retired_materialization =
+        workflow_handoff_rules_has_retired_materialization(&definition.handoff_rules);
     let mut changed_fields = Vec::new();
 
     if let Some(name) = input.name {
@@ -305,7 +305,7 @@ async fn update_workflow_definition(
                 "workflow definition handoff_rules must be a JSON object",
             ));
         }
-        validate_dynamic_materialization_provenance_update(
+        validate_retired_materialization_provenance_update(
             &definition.handoff_rules,
             &handoff_rules,
         )?;
@@ -360,9 +360,9 @@ async fn update_workflow_definition(
     }
     if let Some(release_state) = input.release_state {
         let release_state = normalize_workflow_release_state(&release_state)?;
-        if dynamic_materialization && release_state == "released" {
+        if retired_materialization && release_state == "released" {
             return Err(AppError::forbidden(
-                "dynamic workflow materializations cannot be released through generic workflow definition updates; publish a Workflow Pack with release gates",
+                "retired workflow materializations cannot be released through generic workflow definition updates; publish a Workflow Pack with release gates",
             ));
         }
         definition.release_state = release_state;

@@ -31,8 +31,8 @@ use tracing::info;
 use uuid::Uuid;
 
 const DEFAULT_TENANT_ID: &str = "00000000-0000-4000-8000-000000000001";
-const CONSOLE_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-w1lKnuwwmhE0Xrkx/vuamFpvJ0MhJzm3MkSKnpQOQFQ='; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
-const CONSOLE_DEV_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-w1lKnuwwmhE0Xrkx/vuamFpvJ0MhJzm3MkSKnpQOQFQ='; connect-src 'self' http://127.0.0.1:* http://localhost:*; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+const CONSOLE_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-eK4Q6Gyw5gYv9DLAVVcjH4qa599agT8YgMfKbmqhCpU='; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+const CONSOLE_DEV_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-eK4Q6Gyw5gYv9DLAVVcjH4qa599agT8YgMfKbmqhCpU='; connect-src 'self' http://127.0.0.1:* http://localhost:*; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
 
 mod agent_release_automation;
 mod agent_runtime_profile_release;
@@ -44,7 +44,6 @@ mod codex_app_server_ops;
 mod context_packet_runtime;
 mod db_bootstrap;
 mod deployment_version;
-mod dynamic_workflow_runtime;
 mod enterprise_product_readiness;
 mod enterprise_security_readiness;
 mod error;
@@ -106,7 +105,6 @@ mod store_backend;
 mod store_codex_app_server;
 mod store_context_packets;
 mod store_cost_alert_routes;
-mod store_dynamic_workflow_plans;
 mod store_entities;
 mod store_environments;
 mod store_eval;
@@ -177,7 +175,6 @@ pub(crate) use deployment_version::deployment_version_from_lookup;
 pub(crate) use deployment_version::{
     deployment_expected_value_matches, deployment_version_from_env,
 };
-pub(crate) use dynamic_workflow_runtime::*;
 pub(crate) use enterprise_product_readiness::build_enterprise_product_completion_readiness;
 pub(crate) use enterprise_security_readiness::build_enterprise_security_admin_readiness;
 pub(crate) use error::AppError;
@@ -533,14 +530,9 @@ pub(crate) use types::worker::{
 };
 pub(crate) use types::workflow::{
     AgentInboxEntry, AgentInboxSnapshot, ClaimWorkflowStepRun, ClaimWorkflowStepRunResponse,
-    CompileDynamicWorkflowPlan, CreateDynamicWorkflowPlan, CreateTaskGrant,
-    CreateWorkflowDefinition, CreateWorkflowRun, CreateWorkflowStepRun,
-    DynamicWorkflowAdjudicationRequest, DynamicWorkflowAdjudicationResponse, DynamicWorkflowPlan,
-    DynamicWorkflowPlanCompilationResponse, DynamicWorkflowPlanMaterializationResponse,
-    DynamicWorkflowPressureTestRequest, DynamicWorkflowPressureTestResponse,
-    MaterializeDynamicWorkflowPlan, ReviewDynamicWorkflowPlan, RunDueWorkflowSteps,
-    RunWorkflowStepRun, RunWorkflowStepRunResponse, SessionRuntimeRefs, TaskBoardItem,
-    TaskBoardSnapshot, TaskGrant, UpdateWorkflowDefinition, UpdateWorkflowStepRun,
+    CreateTaskGrant, CreateWorkflowDefinition, CreateWorkflowRun, CreateWorkflowStepRun,
+    RunDueWorkflowSteps, RunWorkflowStepRun, RunWorkflowStepRunResponse, SessionRuntimeRefs,
+    TaskBoardItem, TaskBoardSnapshot, TaskGrant, UpdateWorkflowDefinition, UpdateWorkflowStepRun,
     WorkflowDefinition, WorkflowGraphConditionEvaluation, WorkflowGraphConsoleEdge,
     WorkflowGraphConsoleNode, WorkflowGraphFanInReadiness, WorkflowGraphNumericComparator,
     WorkflowGraphReadyStep, WorkflowGraphRetryPolicy, WorkflowGraphTimeComparator, WorkflowRun,
@@ -705,7 +697,6 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::memory_governance::router())
         .merge(handlers::sessions::router())
         .merge(handlers::manager_plans::router())
-        .merge(handlers::dynamic_workflow_plans::router())
         .merge(handlers::workflows::router())
         .merge(handlers::tools::router())
         .merge(handlers::tenant::router())

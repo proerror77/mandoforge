@@ -157,27 +157,6 @@ pub struct WorkflowDefinition {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
-pub struct DynamicWorkflowPlan {
-    pub id: String,
-    #[serde(default)]
-    pub objective: String,
-    #[serde(default)]
-    pub status: String,
-    #[serde(default)]
-    pub runtime_adapter: String,
-    #[serde(default)]
-    pub phases: Value,
-    #[serde(default)]
-    pub materialization: Value,
-    #[serde(default)]
-    pub analysis: Value,
-    #[serde(default)]
-    pub plan: Value,
-    #[serde(default)]
-    pub created_at: String,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 pub struct TaskBoardSnapshot {
     #[serde(default)]
     pub generated_at: String,
@@ -826,16 +805,6 @@ where
         .json::<T>()
         .await
         .map_err(|error| format!("json decode failed: {error}"))
-}
-
-pub fn compile_dynamic_body(objective: &str, total_agents: u32, parallel_agents: u32) -> Value {
-    json!({
-        "objective": objective,
-        "runtime_adapter": "codex_app_server",
-        "execution_strategy": "native_dynamic",
-        "max_total_agents": total_agents,
-        "max_parallel_agents": parallel_agents
-    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -35,7 +35,6 @@ const LIVE_CHECKS = [
   ["GET", "/api/tool-calls"],
   ["GET", "/api/workflow-runs"],
   ["GET", "/api/workflow-definitions"],
-  ["GET", "/api/dynamic-workflow-plans"],
   ["GET", "/api/task-board"],
   ["GET", "/api/work-items"],
   ["GET", "/api/manager-plans"],
@@ -66,16 +65,6 @@ const LIVE_CHECKS = [
   ["GET", "/api/ontology/registry"],
   ["GET", "/api/ontology/engine-readiness"],
   ["GET", "/api/semantic-retrieval/backends"],
-  [
-    "POST",
-    "/api/dynamic-workflow-plans/compile",
-    {
-      objective: "Run a multi-agent codebase audit and produce a cross-checked report.",
-      runtime_adapter: "codex_app_server",
-      max_total_agents: 4,
-      max_parallel_agents: 2,
-    },
-  ],
   [
     "POST",
     "/api/semantic-ontology/builder",
@@ -215,14 +204,6 @@ async function assertLiveEndpoints(baseUrl) {
     if (!response.ok) {
       failures.push({ method, path, status: response.status, body: text.slice(0, 400) });
       continue;
-    }
-    if (path === "/api/dynamic-workflow-plans/compile") {
-      const payload = JSON.parse(text);
-      const total = payload?.compiler?.analysis?.total_agent_count;
-      const max = payload?.request?.agent_fleet_policy?.max_total_agents;
-      if (total > max) {
-        failures.push({ method, path, status: response.status, body: `compiled ${total} agents above max ${max}` });
-      }
     }
     if (path === "/api/semantic-ontology/builder") {
       const payload = JSON.parse(text);

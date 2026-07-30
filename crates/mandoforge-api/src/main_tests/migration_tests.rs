@@ -57,7 +57,6 @@ async fn migration_paths_include_stage2_migrations_in_order() {
     assert!(names.contains(&"0055_workflow_step_run_schedule.sql"));
     assert!(names.contains(&"0056_workflow_pack_runtime_objects.sql"));
     assert!(names.contains(&"0058_delegated_runtime_workflow_envelope.sql"));
-    assert!(names.contains(&"0059_dynamic_workflow_plans.sql"));
     assert!(names.contains(&"0061_ontology_releases.sql"));
     assert!(names.contains(&"0064_agent_version_snapshot_fields.sql"));
     assert!(names.contains(&"0065_ontology_onboarding_runs.sql"));
@@ -127,7 +126,6 @@ fn tenant_rls_migration_covers_tracked_tables() {
         include_str!("../../../../db/migrations/0053_workflow_transitions.sql"),
         include_str!("../../../../db/migrations/0054_workflow_pack_bindings.sql"),
         include_str!("../../../../db/migrations/0056_workflow_pack_runtime_objects.sql"),
-        include_str!("../../../../db/migrations/0059_dynamic_workflow_plans.sql"),
         include_str!("../../../../db/migrations/0061_ontology_releases.sql"),
         include_str!("../../../../db/migrations/0065_ontology_onboarding_runs.sql"),
         include_str!("../../../../db/migrations/0066_workflow_schedules.sql"),

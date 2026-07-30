@@ -31,9 +31,6 @@ fn App() -> Html {
     });
     let task_agent_id = use_state(String::new);
     let task_environment_id = use_state(String::new);
-    let dynamic_objective = use_state(|| {
-        "Run a multi-agent codebase audit and produce a cross-checked report.".to_string()
-    });
     let semantic_source = use_state(|| {
         "合同审核会用到合同、当事方、条款、义务、风险、司法辖区、模板和审批要求等业务概念。"
             .to_string()
@@ -51,9 +48,9 @@ fn App() -> Html {
     let poll_agent_activity = matches!(current_view, View::Overview | View::Agents);
     let poll_runs_tasks = matches!(
         current_view,
-        View::Overview | View::Agents | View::Board | View::Workflows | View::Dynamic
+        View::Overview | View::Agents | View::Board | View::Workflows
     );
-    let poll_runs_detail = matches!(current_view, View::Board | View::Workflows | View::Dynamic);
+    let poll_runs_detail = matches!(current_view, View::Board | View::Workflows);
     let poll_capabilities = matches!(current_view, View::Overview | View::Packs);
     let poll_capability_detail = matches!(current_view, View::Packs);
     let poll_ontology_summary = matches!(current_view, View::Overview | View::Semantic);
@@ -82,36 +79,22 @@ fn App() -> Html {
             3_000,
             poll_runs_detail,
         ),
-        dynamic_workflow_plans: use_polling::<Vec<DynamicWorkflowPlan>>(
-            "/api/dynamic-workflow-plans",
-            2_500,
-            poll_runs_tasks,
-        ),
         task_board: use_polling::<TaskBoardSnapshot>("/api/task-board", 1_500, poll_runs_tasks),
         work_items: use_polling::<Vec<WorkItem>>("/api/work-items", 3_000, poll_runs_detail),
         manager_plans: use_polling::<Vec<Value>>(
             "/api/manager-plans",
             3_000,
-            matches!(
-                current_view,
-                View::Agents | View::Workflows | View::Board | View::Dynamic
-            ),
+            matches!(current_view, View::Agents | View::Workflows | View::Board),
         ),
         agent_handoffs: use_polling::<Vec<Value>>(
             "/api/agent-handoffs",
             3_000,
-            matches!(
-                current_view,
-                View::Agents | View::Workflows | View::Board | View::Dynamic
-            ),
+            matches!(current_view, View::Agents | View::Workflows | View::Board),
         ),
         agent_handoff_assignments: use_polling::<Vec<Value>>(
             "/api/agent-handoff-assignments",
             3_000,
-            matches!(
-                current_view,
-                View::Agents | View::Workflows | View::Board | View::Dynamic
-            ),
+            matches!(current_view, View::Agents | View::Workflows | View::Board),
         ),
         workflow_pack_installations: use_polling::<Vec<WorkflowPackInstallation>>(
             "/api/workflow-packs/installations",
@@ -247,24 +230,6 @@ fn App() -> Html {
         .iter()
         .filter(|approval| approval.status == "pending" || approval.status == "requires_action")
         .count();
-
-    let compile_dynamic = {
-        let dynamic_objective = dynamic_objective.clone();
-        let mutation_status = mutation_status.clone();
-        Callback::from(move |_| {
-            let objective = (*dynamic_objective).clone();
-            let mutation_status = mutation_status.clone();
-            spawn_local(async move {
-                mutation_status.set("Compiling dynamic workflow plan...".to_string());
-                let body = compile_dynamic_body(&objective, 4, 2);
-                match api_post::<Value, _>("/api/dynamic-workflow-plans/compile", &body).await {
-                    Ok(payload) => mutation_status
-                        .set(format!("Dynamic compile ready: {}", compact_json(&payload))),
-                    Err(error) => mutation_status.set(format!("Dynamic compile failed: {error}")),
-                }
-            });
-        })
-    };
 
     let build_ontology = {
         let semantic_source = semantic_source.clone();
@@ -1082,13 +1047,10 @@ fn App() -> Html {
                                 on_start_task={start_task.clone()}
                             />
                         },
-                        View::Board | View::Workflows | View::Dynamic => html! {
+                        View::Board | View::Workflows => html! {
                             <WorkflowsView
                                 data={data.clone()}
                                 lang={*ui_lang}
-                                objective={(*dynamic_objective).clone()}
-                                on_objective={state_input(dynamic_objective.clone())}
-                                on_compile={compile_dynamic.clone()}
                             />
                         },
                         View::Semantic => html! {
@@ -1192,7 +1154,7 @@ fn VisualCommandDeck(props: &VisualCommandDeckProps) -> Html {
         .data
         .readiness_score
         .unwrap_or_else(|| readiness_from_status(&data.stage2_readiness.data.status));
-    let workflow_activity = data.workflow_runs.data.len() + data.dynamic_workflow_plans.data.len();
+    let workflow_activity = data.workflow_runs.data.len();
     let semantic_mass = data.semantic_graph.data.node_count + data.semantic_graph.data.edge_count;
     let enterprise_blocked = data.enterprise_product_readiness.data.blocked_lane_count;
 
@@ -1200,18 +1162,12 @@ fn VisualCommandDeck(props: &VisualCommandDeckProps) -> Html {
         <section class="visual-command-deck">
             <div class="deck-copy">
                 <span>{ props.view.label(props.lang) }</span>
-                <strong>{ props.lang.text("Dynamic workflow map", "动态工作流地图") }</strong>
+                <strong>{ props.lang.text("Governed execution status", "治理执行状态") }</strong>
                 <small>{ props.lang.text(
-                    "Live plan state, materialization strategy, active work, and gate pressure from the MandoForge control plane.",
-                    "展示实时计划状态、发布策略、活跃任务和控制平面的闸门压力。"
+                    "Live workflow activity, active work, approvals, and gate pressure from the MandoForge control plane.",
+                    "展示工作流活动、活跃任务、审批和控制平面的闸门压力。"
                 ) }</small>
             </div>
-            <DynamicWorkflowCanvas
-                plans={data.dynamic_workflow_plans.data.clone()}
-                workflow_runs={data.workflow_runs.data.clone()}
-                execution_jobs={data.execution_jobs.data.clone()}
-                session_loop_jobs={data.session_loop_jobs.data.clone()}
-            />
             <div class="deck-bars">
                 <FlowMeter label={props.lang.text("Active work", "活跃任务")} value={active_jobs} max={active_jobs.max(data.sessions.data.len()).max(1)} tone="info" />
                 <FlowMeter label={props.lang.text("Approvals", "审批")} value={pending_approvals} max={pending_approvals.max(data.approvals.data.len()).max(1)} tone={if pending_approvals > 0 { "warn" } else { "good" }} />
@@ -1228,146 +1184,6 @@ fn VisualCommandDeck(props: &VisualCommandDeckProps) -> Html {
             </div>
         </section>
     }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct DynamicWorkflowCanvasProps {
-    plans: Vec<DynamicWorkflowPlan>,
-    workflow_runs: Vec<WorkflowRun>,
-    execution_jobs: Vec<WorkerJob>,
-    session_loop_jobs: Vec<WorkerJob>,
-}
-
-#[component]
-fn DynamicWorkflowCanvas(props: &DynamicWorkflowCanvasProps) -> Html {
-    let active_work =
-        active_job_count(&props.execution_jobs) + active_job_count(&props.session_loop_jobs);
-    let failed_jobs = props
-        .execution_jobs
-        .iter()
-        .chain(props.session_loop_jobs.iter())
-        .filter(|job| status_tone(&job.status) == "bad" || job.last_error.is_some())
-        .count();
-    let active_runs = props
-        .workflow_runs
-        .iter()
-        .filter(|run| is_active_status(&run.status))
-        .count();
-    let native_plans = props
-        .plans
-        .iter()
-        .filter(|plan| dynamic_plan_strategy(plan) == "native_dynamic")
-        .count();
-    let ready_plans = props
-        .plans
-        .iter()
-        .filter(|plan| {
-            matches!(
-                plan.status.as_str(),
-                "approved" | "materialized" | "reviewed"
-            )
-        })
-        .count();
-    let latest_plan = props.plans.first();
-    let latest_objective = latest_plan
-        .map(|plan| label_or(&plan.objective, "No dynamic workflow plan").to_string())
-        .unwrap_or_else(|| "No dynamic workflow plan".to_string());
-    let latest_status = latest_plan
-        .map(|plan| label_or(&plan.status, "empty").to_string())
-        .unwrap_or_else(|| "empty".to_string());
-    let latest_strategy = latest_plan
-        .map(dynamic_plan_strategy)
-        .unwrap_or_else(|| "not compiled".to_string());
-    let latest_phase_count = latest_plan.map(dynamic_plan_phase_count).unwrap_or(0);
-    let latest_agent_count = latest_plan.map(dynamic_plan_total_agents).unwrap_or(0);
-    let stages = vec![
-        ("Plan", props.plans.len(), status_tone(&latest_status)),
-        (
-            "Native",
-            native_plans,
-            if native_plans > 0 { "good" } else { "neutral" },
-        ),
-        (
-            "Work",
-            active_work,
-            if active_work > 0 { "info" } else { "neutral" },
-        ),
-        (
-            "Runs",
-            active_runs,
-            if active_runs > 0 { "info" } else { "neutral" },
-        ),
-        (
-            "Gate",
-            ready_plans,
-            if ready_plans > 0 { "good" } else { "neutral" },
-        ),
-        (
-            "Errors",
-            failed_jobs,
-            if failed_jobs > 0 { "bad" } else { "good" },
-        ),
-    ];
-
-    html! {
-        <div class="dynamic-workflow-canvas" aria-label="Dynamic workflow status map">
-            <div class="workflow-canvas-summary">
-                <span>{ latest_strategy }</span>
-                <strong title={latest_objective.clone()}>{ latest_objective }</strong>
-                <small>{ format!("{latest_status} / {latest_phase_count} phases / {latest_agent_count} agents") }</small>
-            </div>
-            <div class="workflow-canvas-track">
-                { for stages.iter().enumerate().map(|(index, (label, value, tone))| html! {
-                    <article class={classes!("workflow-step-card", *tone)} key={(*label).to_string()}>
-                        <span>{ format!("{:02}", index + 1) }</span>
-                        <strong>{ *label }</strong>
-                        <b>{ value }</b>
-                    </article>
-                }) }
-            </div>
-        </div>
-    }
-}
-
-fn dynamic_plan_strategy(plan: &DynamicWorkflowPlan) -> String {
-    plan.materialization
-        .get("execution_strategy")
-        .and_then(Value::as_str)
-        .or_else(|| {
-            plan.analysis
-                .get("execution_strategy")
-                .and_then(Value::as_str)
-        })
-        .or_else(|| {
-            if plan.runtime_adapter.is_empty() {
-                None
-            } else {
-                Some(plan.runtime_adapter.as_str())
-            }
-        })
-        .map(label_or_strategy)
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
-fn dynamic_plan_phase_count(plan: &DynamicWorkflowPlan) -> usize {
-    plan.analysis
-        .get("phase_count")
-        .and_then(Value::as_u64)
-        .map(|value| value as usize)
-        .or_else(|| plan.phases.as_array().map(Vec::len))
-        .unwrap_or(0)
-}
-
-fn dynamic_plan_total_agents(plan: &DynamicWorkflowPlan) -> usize {
-    plan.analysis
-        .get("total_agent_count")
-        .and_then(Value::as_u64)
-        .map(|value| value as usize)
-        .unwrap_or(0)
-}
-
-fn label_or_strategy(value: &str) -> String {
-    label_or(value, "unknown").replace('_', " ")
 }
 
 fn storage_value_or(key: &str, default: &str) -> String {

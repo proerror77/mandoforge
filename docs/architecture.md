@@ -310,11 +310,6 @@ control plane:
 - `delegated_runtime`: MandoForge creates one governed runtime envelope and
   delegates inner planning, fan-out/fan-in, and subagent execution to a runtime
   adapter such as `claude_code`, `codex_app_server`, or `codex_cli`.
-- `native_dynamic`: MandoForge materializes a governed evaluator feedback loop
-  with explicit implement, evaluator, repair, integration, gatekeeper, and
-  unexpected-error steps. This is the first MandoForge-owned dynamic
-  orchestration slice; recursive runtime spawning remains a later enhancement.
-
 The delegated path records `runtime_adapter`, `runtime_mode`,
 `runtime_capability_contract`, and `event_ingestion_policy` on the definition.
 Each `WorkflowRun` snapshots those values with `delegation_status`,
@@ -323,54 +318,6 @@ call the external runtime, but they still receive a TaskGrant and must stream or
 normalize runtime output back into MandoForge session events, artifacts, and
 audit records. Runtime scripts or external agents must not become a side channel
 around policy, approval, memory scope, connector scope, or worker leases.
-
-## Dynamic Workflow Plan
-
-`DynamicWorkflowPlan` is the reviewable planning envelope for large multi-agent
-runs. It is not a JavaScript or Rust workflow runtime. It is the platform-owned
-proposal that captures:
-
-- objective.
-- phases, prompts, agent counts, dependencies, and phase-level validation.
-- agent fleet limits such as total agents, max parallel agents, timeout, and
-  retry budget.
-- governance scope for memory, tools, connectors, external effects, and
-  approvals.
-- materialization target: `delegated_runtime` for Claude Code or Codex-managed
-  inner workflows, `native_steps` when MandoForge should materialize the phase
-  graph itself, or the default `native_dynamic` path when MandoForge should own
-  the implement/evaluate/repair/integrate/gate control loop.
-
-Lifecycle:
-
-1. `POST /api/dynamic-workflow-plans/compile` deterministically compiles a
-   natural-language objective into a reviewable dynamic feedback-loop request
-   by default. Callers can explicitly request `delegated_runtime` or
-   `native_steps` for the older materialization shapes. This is a compiler for
-   governed workflow plans, not a side-channel script runtime.
-2. `POST /api/dynamic-workflow-plans` validates phases and fleet policy, then
-   stores an analyzable proposal with audit evidence.
-3. `POST /api/dynamic-workflow-plans/:id/review` records the human or
-   pack-defined review decision. Only approved plans can be materialized.
-4. `POST /api/dynamic-workflow-plans/:id/materialize` creates a
-   `WorkflowDefinition`, `WorkflowRun`, primary session, root `TaskGrant`, and
-   start steps through the same managed runtime path as normal workflows.
-   `native_dynamic` materialization creates a feedback graph shaped as
-   `/implement -> implementation-evaluator -> developer/troubleshooter ->
-   integration-tester -> integration-gate-keeper`, with `unexpected-error`
-   attached to implementation, repair, and integration failures.
-5. `POST /api/dynamic-workflow-plans/:id/adjudicate` evaluates materialized
-   step outputs against the plan's voting threshold and records session/audit
-   evidence. Missing vote evidence is not treated as approval.
-6. `POST /api/dynamic-workflow-plans/:id/pressure-test` records a large-fleet
-   control-plane pressure simulation. It is evidence for batching and
-   backpressure limits, not a claim of live provider execution at that scale;
-   the response status is `control_plane_passed`.
-
-This keeps the Claude Code Dynamic Workflow product pattern, where many
-subagents may be planned behind one run, but preserves MandoForge's enterprise
-boundary: stable identity, approval, memory scope, connector scope, audit,
-artifacts, and UI observability stay outside the delegated runtime.
 
 ## Semantic Layer
 

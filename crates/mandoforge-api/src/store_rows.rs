@@ -6,14 +6,14 @@ use crate::{
     Agent, AgentHandoffAssignment, AgentHandoffEvent, AgentRelease, AgentRuntimeProfile,
     AgentTeammate, AgentVersion, AppError, Approval, ApprovalCommitToken, ApprovalEscalationRule,
     ApprovalGroup, ApprovalNotificationChannelPolicy, Artifact, AuditLog, ContextPacket,
-    CostAlertRoute, DynamicWorkflowPlan, Environment, EvalCase, EvalDataset, EvalRun,
-    ManagerAgentPlan, McpServerRecord, Membership, MemoryWritebackCandidate, OntologyRelease,
-    Organization, PolicyRevision, Project, ProviderAccess, ProviderRecord, SecretRecord,
-    SemanticLink, SemanticObject, SemanticSource, Session, SessionEvent, SessionLoopJob,
-    SessionLoopJobStatus, SessionThread, Squad, SquadMember, TaskGrant, Team, TenantInvitation,
-    ToolCall, UsageRollup, WorkItem, WorkItemActivityEntry, WorkItemAssignment, WorkItemReview,
-    WorkflowDefinition, WorkflowPackBinding, WorkflowPackInstallation, WorkflowPackProfileAsset,
-    WorkflowPackRuntimeObject, WorkflowRun, WorkflowStepRun, WorkflowTransition,
+    CostAlertRoute, Environment, EvalCase, EvalDataset, EvalRun, ManagerAgentPlan, McpServerRecord,
+    Membership, MemoryWritebackCandidate, OntologyRelease, Organization, PolicyRevision, Project,
+    ProviderAccess, ProviderRecord, SecretRecord, SemanticLink, SemanticObject, SemanticSource,
+    Session, SessionEvent, SessionLoopJob, SessionLoopJobStatus, SessionThread, Squad, SquadMember,
+    TaskGrant, Team, TenantInvitation, ToolCall, UsageRollup, WorkItem, WorkItemActivityEntry,
+    WorkItemAssignment, WorkItemReview, WorkflowDefinition, WorkflowPackBinding,
+    WorkflowPackInstallation, WorkflowPackProfileAsset, WorkflowPackRuntimeObject, WorkflowRun,
+    WorkflowStepRun, WorkflowTransition,
 };
 
 fn json_array_from_row<T: serde::de::DeserializeOwned>(
@@ -477,30 +477,6 @@ pub(crate) fn manager_agent_plan_from_row(row: PgRow) -> Result<ManagerAgentPlan
         audit_trace_id: row.try_get("audit_trace_id")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
-    })
-}
-
-pub(crate) fn dynamic_workflow_plan_from_row(row: PgRow) -> Result<DynamicWorkflowPlan, AppError> {
-    Ok(DynamicWorkflowPlan {
-        id: row.try_get("id")?,
-        source_work_item_id: row.try_get("source_work_item_id")?,
-        source_session_id: row.try_get("source_session_id")?,
-        objective: row.try_get("objective")?,
-        status: row.try_get("status")?,
-        phases: row.try_get("phases")?,
-        agent_fleet_policy: row.try_get("agent_fleet_policy")?,
-        governance: row.try_get("governance")?,
-        validation: row.try_get("validation")?,
-        materialization: row.try_get("materialization")?,
-        analysis: row.try_get("analysis")?,
-        review: row.try_get("review")?,
-        workflow_definition_id: row.try_get("workflow_definition_id")?,
-        workflow_run_id: row.try_get("workflow_run_id")?,
-        audit_trace_id: row.try_get("audit_trace_id")?,
-        created_at: row.try_get("created_at")?,
-        updated_at: row.try_get("updated_at")?,
-        reviewed_at: row.try_get("reviewed_at")?,
-        materialized_at: row.try_get("materialized_at")?,
     })
 }
 
