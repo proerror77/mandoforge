@@ -1,0 +1,16 @@
+{
+  "name": "@mandoforge/ontology-sdk-consumer-example",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "live": "tsc && node dist/consumer.js"
+  },
+  "devDependencies": {
+    "typescript": "5.6.3"
+  }
+}

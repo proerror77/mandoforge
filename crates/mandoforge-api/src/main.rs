@@ -79,6 +79,9 @@ mod ontology_engine;
 mod ontology_onboarding_engine;
 mod ontology_review;
 mod ontology_review_graph_helpers;
+mod ontology_sdk_catalog;
+mod ontology_sdk_consumer_runtime;
+mod ontology_sdk_typescript;
 mod ontology_seed_builders;
 mod ontology_source_adapters;
 mod policy;
@@ -131,6 +134,7 @@ mod store_manager_plans;
 mod store_memory_writeback;
 mod store_ontology_release_workflow_triggers;
 mod store_ontology_releases;
+mod store_ontology_sdk_applications;
 mod store_policy_revisions;
 mod store_releases;
 mod store_remote_computers;
@@ -235,6 +239,13 @@ pub(crate) use ontology_review_graph_helpers::{
     ontology_graph_node_id_for_subgraph_member, ontology_graph_object_id,
     ontology_graph_subgraph_id, ontology_graph_tool_id, ontology_proposal_risk,
 };
+pub(crate) use ontology_sdk_catalog::*;
+pub(crate) use ontology_sdk_consumer_runtime::{
+    OntologySdkConsumerActionRequest, OntologySdkConsumerReadQuery, authorize_consumer_read,
+    consumer_object_by_id, consumer_objects, consumer_relations, propose_consumer_action,
+    task_grant_for_consumer_read,
+};
+pub(crate) use ontology_sdk_typescript::generate_typescript_sdk;
 pub(crate) use ontology_seed_builders::{
     ontology_demo_dataset, ontology_seed_action, ontology_seed_metric, ontology_seed_object,
     ontology_seed_relation,
@@ -449,6 +460,12 @@ pub(crate) use types::ontology::{
     SubgraphProposalDraft, SubgraphProposalMember, SubgraphProposalRequest,
     SubgraphProposalResponse, TaxonomyLayerCandidate, ontology_release_current_status,
     ontology_release_workflow_trigger_status_allowed,
+};
+pub(crate) use types::ontology_sdk::{
+    CreateOntologySdkApplicationRequest, ONTOLOGY_RELEASE_CATALOG_SCHEMA,
+    ONTOLOGY_SDK_APPLICATION_STATUS_ACTIVE, OntologyReleaseCatalogV1, OntologySdkApplication,
+    OntologySdkApplicationManifest, OntologySdkCatalogAction, OntologySdkCatalogObject,
+    OntologySdkCatalogProperty, OntologySdkCatalogRelation, OntologySdkSubsetManifest,
 };
 pub(crate) use types::policy::{
     CreatePolicyRevision, PolicyActivationWindow, PolicyDiffChange, PolicyGateCaseInput,
@@ -742,6 +759,8 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::semantic::router())
         .merge(handlers::ontology_onboarding::router())
         .merge(handlers::ontology_releases::router())
+        .merge(handlers::ontology_sdk_applications::router())
+        .merge(handlers::ontology_sdk_consumers::router())
         .merge(handlers::ontology_intelligence::router())
         .merge(handlers::ontology::router())
         .merge(handlers::memory_governance::router())

@@ -1220,6 +1220,18 @@ pub(crate) async fn active_ontology_release_metadata_for_scopes(
 }
 
 pub(crate) fn ontology_release_runtime_metadata(release: &OntologyRelease) -> Value {
+    let catalog_digest = release
+        .evidence_refs
+        .as_array()
+        .and_then(|entries| {
+            entries.iter().find(|entry| {
+                entry.get("schema").and_then(Value::as_str)
+                    == Some(crate::ONTOLOGY_RELEASE_CATALOG_SCHEMA)
+            })
+        })
+        .and_then(|entry| entry.get("digest"))
+        .cloned()
+        .unwrap_or(Value::Null);
     json!({
         "id": release.id,
         "version": release.version,
@@ -1229,6 +1241,7 @@ pub(crate) fn ontology_release_runtime_metadata(release: &OntologyRelease) -> Va
         "object_count": release.object_count,
         "relation_count": release.relation_count,
         "action_count": release.action_count,
+        "catalog_digest": catalog_digest,
         "source_run_id": release.source_run_id,
         "parent_release_id": release.parent_release_id,
         "rollback_target_release_id": release.rollback_target_release_id,

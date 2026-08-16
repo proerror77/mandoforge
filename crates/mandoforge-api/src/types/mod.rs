@@ -15,6 +15,7 @@ pub(crate) mod github;
 pub(crate) mod mcp;
 pub(crate) mod observability;
 pub(crate) mod ontology;
+pub(crate) mod ontology_sdk;
 pub(crate) mod policy;
 pub(crate) mod provider;
 pub(crate) mod remote_computer;

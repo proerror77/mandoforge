@@ -7,14 +7,37 @@ use crate::{
     AgentTeammate, AgentVersion, AppError, Approval, ApprovalCommitToken, ApprovalEscalationRule,
     ApprovalGroup, ApprovalNotificationChannelPolicy, Artifact, AuditLog, ContextPacket,
     CostAlertRoute, Environment, EvalCase, EvalDataset, EvalRun, ManagerAgentPlan, McpServerRecord,
-    Membership, MemoryWritebackCandidate, OntologyRelease, Organization, PolicyRevision, Project,
-    ProviderAccess, ProviderRecord, SecretRecord, SemanticLink, SemanticObject, SemanticSource,
-    Session, SessionEvent, SessionLoopJob, SessionLoopJobStatus, SessionStatus, SessionThread,
-    Squad, SquadMember, TaskGrant, Team, TenantInvitation, ToolCall, UsageRollup, WorkItem,
+    Membership, MemoryWritebackCandidate, OntologyRelease, OntologySdkApplication,
+    OntologySdkSubsetManifest, Organization, PolicyRevision, Project, ProviderAccess,
+    ProviderRecord, SecretRecord, SemanticLink, SemanticObject, SemanticSource, Session,
+    SessionEvent, SessionLoopJob, SessionLoopJobStatus, SessionStatus, SessionThread, Squad,
+    SquadMember, TaskGrant, Team, TenantInvitation, ToolCall, UsageRollup, WorkItem,
     WorkItemActivityEntry, WorkItemAssignment, WorkItemReview, WorkflowDefinition,
     WorkflowPackBinding, WorkflowPackInstallation, WorkflowPackProfileAsset,
     WorkflowPackRuntimeObject, WorkflowRun, WorkflowStepRun, WorkflowTransition,
 };
+
+pub(crate) fn ontology_sdk_application_from_row(
+    row: PgRow,
+) -> Result<OntologySdkApplication, AppError> {
+    let subset_manifest: Value = row.try_get("subset_manifest")?;
+    Ok(OntologySdkApplication {
+        id: row.try_get("id")?,
+        tenant_id: row.try_get("tenant_id")?,
+        subject: row.try_get("subject")?,
+        ontology_release_id: row.try_get("ontology_release_id")?,
+        release_version: row.try_get("release_version")?,
+        domain_scope: row.try_get("domain_scope")?,
+        catalog_digest: row.try_get("catalog_digest")?,
+        subset_manifest: serde_json::from_value::<OntologySdkSubsetManifest>(subset_manifest)
+            .map_err(|error| {
+                AppError::bad_request(format!("invalid ontology SDK subset manifest: {error}"))
+            })?,
+        subset_digest: row.try_get("subset_digest")?,
+        status: row.try_get("status")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
 
 fn json_array_from_row<T: serde::de::DeserializeOwned>(
     value: Value,

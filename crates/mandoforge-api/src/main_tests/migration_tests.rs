@@ -78,6 +78,7 @@ async fn migration_paths_include_stage2_migrations_in_order() {
     assert!(names.contains(&"0078_execution_completion_projection.sql"));
     assert!(names.contains(&"0079_workflow_step_claim_owner_version.sql"));
     assert!(names.contains(&"0080_session_status_constraints.sql"));
+    assert!(names.contains(&"0081_ontology_sdk_applications.sql"));
     assert!(
         names.windows(2).all(|window| window[0] <= window[1]),
         "migrations should run lexicographically: {names:?}"
@@ -1125,6 +1126,25 @@ fn execution_completion_projection_migration_is_restart_safe() {
 }
 
 #[test]
+fn ontology_sdk_applications_migration_is_restart_safe_and_tenant_bound() {
+    let migration = include_str!("../../../../db/migrations/0081_ontology_sdk_applications.sql");
+
+    assert!(migration.contains("CREATE TABLE IF NOT EXISTS ontology_sdk_applications"));
+    assert!(migration.contains("DROP TRIGGER IF EXISTS trg_check_ontology_sdk_application_tenant"));
+    assert!(
+        migration.contains(
+            "CREATE OR REPLACE FUNCTION mandoforge_check_ontology_sdk_application_tenant"
+        )
+    );
+    assert!(migration.contains("release tenant mismatch"));
+    assert!(migration.contains(
+        "CREATE OR REPLACE FUNCTION mandoforge_prevent_ontology_sdk_application_mutation"
+    ));
+    assert!(migration.contains("ENABLE ROW LEVEL SECURITY"));
+    assert!(migration.contains("FORCE ROW LEVEL SECURITY"));
+}
+
+#[test]
 fn promoted_agent_release_uniqueness_migration_is_restart_safe() {
     let migration =
         include_str!("../../../../db/migrations/0075_agent_release_promoted_unique.sql");
@@ -1178,10 +1198,13 @@ fn tenant_rls_migration_covers_tracked_tables() {
         include_str!("../../../../db/migrations/0065_ontology_onboarding_runs.sql"),
         include_str!("../../../../db/migrations/0066_workflow_schedules.sql"),
         include_str!("../../../../db/migrations/0069_ontology_release_workflow_triggers.sql"),
+        include_str!("../../../../db/migrations/0081_ontology_sdk_applications.sql"),
     ]
     .join("\n");
     assert!(migration.contains("mandoforge_current_tenant_id"));
     assert!(migration.contains("FORCE ROW LEVEL SECURITY"));
+    assert!(migration.contains("tenant_isolation_ontology_sdk_applications"));
+    assert!(migration.contains("trg_check_ontology_sdk_application_tenant"));
     for table in tenant_isolation_tracked_tables() {
         assert!(
             migration.contains(&format!("'{table}'"))

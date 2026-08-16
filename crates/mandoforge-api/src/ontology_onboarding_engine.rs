@@ -3927,6 +3927,10 @@ pub(crate) async fn create_ontology_release_candidate_with_actor(
             Ok(evidence)
         })
         .collect::<Result<Vec<_>, AppError>>()?;
+    let (catalog, catalog_digest) =
+        build_ontology_release_catalog(&domain_scope, &proposals, active_release.as_ref())?;
+    let mut evidence_refs = evidence_refs;
+    evidence_refs.push(catalog_evidence(&catalog, &catalog_digest));
     let release = OntologyRelease {
         id: Uuid::new_v4(),
         version,
@@ -3936,18 +3940,9 @@ pub(crate) async fn create_ontology_release_candidate_with_actor(
         rollback_target_release_id: active_release.as_ref().map(|release| release.id),
         status: "candidate".to_string(),
         release_class: ontology_release_class(input.release_class.as_deref())?,
-        object_count: proposals
-            .iter()
-            .filter(|proposal| proposal.proposal_type == "object")
-            .count() as i32,
-        relation_count: proposals
-            .iter()
-            .filter(|proposal| proposal.proposal_type == "relation")
-            .count() as i32,
-        action_count: proposals
-            .iter()
-            .filter(|proposal| proposal.proposal_type == "action")
-            .count() as i32,
+        object_count: catalog.objects.len() as i32,
+        relation_count: catalog.relations.len() as i32,
+        action_count: catalog.actions.len() as i32,
         migration_policy: input
             .migration_policy
             .unwrap_or_else(default_ontology_release_migration_policy),
@@ -4207,6 +4202,17 @@ pub(crate) async fn gate_ontology_release_with_actor(
         blockers.push(
             "ontology release actions must carry immutable tool contract snapshots".to_string(),
         );
+    }
+    let catalog_result = validate_release_catalog(&release);
+    checks.push(json!({
+        "id": "release_catalog",
+        "status": if catalog_result.is_ok() { "passed" } else { "failed" },
+    }));
+    if let Err(error) = catalog_result {
+        blockers.push(format!(
+            "ontology release catalog validation failed: {}",
+            error.message
+        ));
     }
     if active_release.is_some() && release.rollback_target_release_id.is_none() {
         checks.push(json!({

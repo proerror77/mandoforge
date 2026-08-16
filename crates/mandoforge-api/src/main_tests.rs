@@ -1085,18 +1085,29 @@ async fn ontology_release_candidate_captures_materialized_proposals() {
     let run = create_demo_ontology_onboarding_run_for_test(&state)
         .await
         .expect("demo run");
-    let object_proposal = run
-        .proposals
-        .iter()
-        .find(|proposal| proposal.proposal_type == "object")
-        .map(|proposal| proposal.id)
-        .expect("object proposal");
     let action_proposal = run
         .proposals
         .iter()
         .find(|proposal| proposal.proposal_type == "action")
         .map(|proposal| proposal.id)
         .expect("action proposal");
+    let action_target = run
+        .proposals
+        .iter()
+        .find(|proposal| proposal.id == action_proposal)
+        .and_then(|proposal| proposal.content.get("target_object"))
+        .and_then(Value::as_str)
+        .expect("action target");
+    let object_proposal = run
+        .proposals
+        .iter()
+        .find(|proposal| {
+            proposal.proposal_type == "object"
+                && proposal.content.get("object_type").and_then(Value::as_str)
+                    == Some(action_target)
+        })
+        .map(|proposal| proposal.id)
+        .expect("action target object proposal");
     review_ontology_onboarding_proposal_for_test(
         &state,
         object_proposal,
@@ -1157,19 +1168,42 @@ async fn ontology_release_candidate_excludes_rejected_materialized_proposals() {
     let run = create_demo_ontology_onboarding_run_for_test(&state)
         .await
         .expect("demo run");
-    let object_proposal = run
-        .proposals
-        .iter()
-        .find(|proposal| proposal.proposal_type == "object" && proposal.name == "Order")
-        .map(|proposal| proposal.id)
-        .expect("object proposal");
     let action_proposal = run
         .proposals
         .iter()
         .find(|proposal| proposal.proposal_type == "action")
         .map(|proposal| proposal.id)
         .expect("action proposal");
-    for proposal_id in [object_proposal, action_proposal] {
+    let action_target = run
+        .proposals
+        .iter()
+        .find(|proposal| proposal.id == action_proposal)
+        .and_then(|proposal| proposal.content.get("target_object"))
+        .and_then(Value::as_str)
+        .expect("action target");
+    let target_object_proposal = run
+        .proposals
+        .iter()
+        .find(|proposal| {
+            proposal.proposal_type == "object"
+                && proposal.content.get("object_type").and_then(Value::as_str)
+                    == Some(action_target)
+        })
+        .map(|proposal| proposal.id)
+        .expect("action target object proposal");
+    let rejected_object_proposal = run
+        .proposals
+        .iter()
+        .find(|proposal| {
+            proposal.proposal_type == "object" && proposal.id != target_object_proposal
+        })
+        .map(|proposal| proposal.id)
+        .expect("rejected object proposal");
+    for proposal_id in [
+        target_object_proposal,
+        rejected_object_proposal,
+        action_proposal,
+    ] {
         review_ontology_onboarding_proposal_for_test(
             &state,
             proposal_id,
@@ -1184,7 +1218,7 @@ async fn ontology_release_candidate_excludes_rejected_materialized_proposals() {
         .expect("materialize approved proposals");
     review_ontology_onboarding_proposal_for_test(
         &state,
-        object_proposal,
+        rejected_object_proposal,
         "reject",
         Some("business owner pulled approval after materialization"),
     )
@@ -1204,7 +1238,7 @@ async fn ontology_release_candidate_excludes_rejected_materialized_proposals() {
     .await
     .expect("release candidate");
 
-    assert_eq!(release.object_count, 0);
+    assert!(release.object_count >= 1);
     assert!(release.action_count >= 1);
     assert!(
         !release
@@ -1212,7 +1246,7 @@ async fn ontology_release_candidate_excludes_rejected_materialized_proposals() {
             .as_array()
             .expect("evidence refs")
             .iter()
-            .any(|evidence| evidence["proposal_id"] == json!(object_proposal))
+            .any(|evidence| evidence["proposal_id"] == json!(rejected_object_proposal))
     );
 }
 
@@ -1228,14 +1262,25 @@ async fn ontology_release_candidate_tracks_reused_materialized_objects_by_key() 
         .find(|proposal| proposal.proposal_type == "action" && proposal.name == "refund_order")
         .map(|proposal| proposal.id)
         .expect("first action proposal");
-    review_ontology_onboarding_proposal_for_test(
-        &state,
-        first_action,
-        "approve",
-        Some("first release action"),
-    )
-    .await
-    .expect("approve first action");
+    let first_target_object = first
+        .proposals
+        .iter()
+        .find(|proposal| {
+            proposal.proposal_type == "object"
+                && proposal.content.get("object_type").and_then(Value::as_str) == Some("Order")
+        })
+        .map(|proposal| proposal.id)
+        .expect("first action target object proposal");
+    for proposal_id in [first_target_object, first_action] {
+        review_ontology_onboarding_proposal_for_test(
+            &state,
+            proposal_id,
+            "approve",
+            Some("first release fixture"),
+        )
+        .await
+        .expect("approve first release fixture");
+    }
     materialize_ontology_onboarding_run_for_test(&state, first.id)
         .await
         .expect("materialize first run");
@@ -1246,6 +1291,24 @@ async fn ontology_release_candidate_tracks_reused_materialized_objects_by_key() 
         .into_iter()
         .find(|object| object.object_key == "commerce.action.refund_order")
         .expect("first action object");
+    let first_release = create_ontology_release_candidate_with_actor(
+        &state,
+        first.id,
+        CreateOntologyReleaseCandidateRequest {
+            version: Some("commerce-vtest-reused-action-parent".to_string()),
+            migration_policy: Some(default_ontology_release_migration_policy()),
+            release_class: None,
+        },
+        "test",
+    )
+    .await
+    .expect("first release candidate");
+    gate_ontology_release_with_actor(&state, first_release.id, "test")
+        .await
+        .expect("gate first release");
+    promote_ontology_release_with_actor(&state, first_release.id, "test")
+        .await
+        .expect("promote first release");
 
     let second = create_demo_ontology_onboarding_run_for_test(&state)
         .await
@@ -1256,14 +1319,25 @@ async fn ontology_release_candidate_tracks_reused_materialized_objects_by_key() 
         .find(|proposal| proposal.proposal_type == "action" && proposal.name == "refund_order")
         .map(|proposal| proposal.id)
         .expect("second action proposal");
-    review_ontology_onboarding_proposal_for_test(
-        &state,
-        second_action,
-        "approve",
-        Some("second release reuses existing action object"),
-    )
-    .await
-    .expect("approve second action");
+    let second_target_object = second
+        .proposals
+        .iter()
+        .find(|proposal| {
+            proposal.proposal_type == "object"
+                && proposal.content.get("object_type").and_then(Value::as_str) == Some("Order")
+        })
+        .map(|proposal| proposal.id)
+        .expect("second action target object proposal");
+    for proposal_id in [second_target_object, second_action] {
+        review_ontology_onboarding_proposal_for_test(
+            &state,
+            proposal_id,
+            "approve",
+            Some("second release fixture"),
+        )
+        .await
+        .expect("approve second release fixture");
+    }
     materialize_ontology_onboarding_run_for_test(&state, second.id)
         .await
         .expect("materialize second run");
@@ -1307,14 +1381,33 @@ async fn ontology_release_generated_versions_include_entropy() {
         .find(|proposal| proposal.proposal_type == "action")
         .map(|proposal| proposal.id)
         .expect("action proposal");
-    review_ontology_onboarding_proposal_for_test(
-        &state,
-        action_proposal,
-        "approve",
-        Some("release action"),
-    )
-    .await
-    .expect("approve action");
+    let target_object = run
+        .proposals
+        .iter()
+        .find(|proposal| proposal.id == action_proposal)
+        .and_then(|proposal| proposal.content.get("target_object"))
+        .and_then(Value::as_str)
+        .expect("action target");
+    let target_object_proposal = run
+        .proposals
+        .iter()
+        .find(|proposal| {
+            proposal.proposal_type == "object"
+                && proposal.content.get("object_type").and_then(Value::as_str)
+                    == Some(target_object)
+        })
+        .map(|proposal| proposal.id)
+        .expect("action target object proposal");
+    for proposal_id in [target_object_proposal, action_proposal] {
+        review_ontology_onboarding_proposal_for_test(
+            &state,
+            proposal_id,
+            "approve",
+            Some("release fixture"),
+        )
+        .await
+        .expect("approve release fixture");
+    }
     materialize_ontology_onboarding_run_for_test(&state, run.id)
         .await
         .expect("materialize action");
@@ -1407,14 +1500,26 @@ async fn ontology_release_candidate_for_test(state: &AppState, version: &str) ->
     let run = create_demo_ontology_onboarding_run_for_test(state)
         .await
         .expect("demo run");
-    let proposal_ids = ["object", "action"]
-        .into_iter()
-        .filter_map(|proposal_type| {
-            run.proposals
-                .iter()
-                .find(|proposal| proposal.proposal_type == proposal_type)
-                .map(|proposal| proposal.id)
+    let action = run
+        .proposals
+        .iter()
+        .find(|proposal| proposal.proposal_type == "action")
+        .expect("action proposal");
+    let target_object = action
+        .content
+        .get("target_object")
+        .and_then(Value::as_str)
+        .expect("action target object");
+    let proposal_ids = run
+        .proposals
+        .iter()
+        .filter(|proposal| {
+            proposal.id == action.id
+                || (proposal.proposal_type == "object"
+                    && proposal.content.get("object_type").and_then(Value::as_str)
+                        == Some(target_object))
         })
+        .map(|proposal| proposal.id)
         .collect::<Vec<_>>();
     for proposal_id in proposal_ids {
         review_ontology_onboarding_proposal_for_test(
@@ -1615,6 +1720,8 @@ mod migration_tests;
 mod observability_controller_tests;
 #[path = "main_tests/ontology_release_workflow_trigger_tests.rs"]
 mod ontology_release_workflow_trigger_tests;
+#[path = "main_tests/ontology_sdk_tests.rs"]
+mod ontology_sdk_tests;
 #[path = "main_tests/postgres_event_stream_tests.rs"]
 mod postgres_event_stream_tests;
 #[path = "main_tests/provider_controller_tests.rs"]
