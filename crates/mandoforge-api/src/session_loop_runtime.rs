@@ -172,8 +172,11 @@ pub(crate) async fn build_harness_context(
         })
         .collect::<Vec<_>>();
     let latest_goal_event = recent_goal_events.first().cloned();
+    let refresh_context = pending_events
+        .iter()
+        .any(|event| event.event_type == "user.message");
     let (task_grant_id, context_packet_id, rendered_context_packet, provider_tool_names) =
-        build_provider_context_packet(state, session_id).await?;
+        build_provider_context_packet(state, session_id, refresh_context).await?;
     Ok(HarnessContext {
         session_id,
         agent_version_id: agent_version.id,
@@ -205,6 +208,7 @@ pub(crate) async fn build_harness_context(
 pub(crate) async fn build_provider_context_packet(
     state: &AppState,
     session_id: Uuid,
+    refresh_requested: bool,
 ) -> Result<(Option<Uuid>, Option<Uuid>, Option<Value>, Vec<String>), AppError> {
     let active_task_grant = active_task_grant_for_session(state, session_id).await?;
     let task_grant_id = active_task_grant.as_ref().map(|(_, grant)| grant.id);
@@ -229,6 +233,35 @@ pub(crate) async fn build_provider_context_packet(
             .await?
             .into_iter()
             .max_by_key(|packet| packet.version);
+    }
+    let claimed_workflow_step = if refresh_requested {
+        if let Some((_, grant)) = active_task_grant.as_ref() {
+            state
+                .list_workflow_step_runs(grant.workflow_run_id)
+                .await?
+                .iter()
+                .any(|step| step.session_id == Some(session_id) && step.status == "running")
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    let refresh_allowed = refresh_requested
+        && active_task_grant.is_some()
+        && !claimed_workflow_step
+        && !state
+            .list_approvals()
+            .await?
+            .iter()
+            .any(|approval| approval.session_id == session_id && approval.status == "pending")
+        && !state
+            .list_tool_calls(Some(session_id))
+            .await?
+            .iter()
+            .any(|call| matches!(call.status.as_str(), "running" | "waiting_approval"));
+    if refresh_allowed {
+        packet = None;
     }
     if packet.is_none() && active_task_grant.is_some() {
         let generated_packet = generate_and_persist_context_packet(state, session_id).await?;

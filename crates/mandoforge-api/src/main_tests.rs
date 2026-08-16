@@ -31139,6 +31139,20 @@ async fn workflow_run_pins_ontology_release_before_context_packet_generation() {
         rendered.ontology_scope["ontology_release"]["id"],
         json!(initial.id)
     );
+    let (_, original_packet_id, _, _) =
+        build_provider_context_packet(&state, run.primary_session_id, false)
+            .await
+            .expect("reuse provider context");
+    let (_, refreshed_packet_id, refreshed, _) =
+        build_provider_context_packet(&state, run.primary_session_id, true)
+            .await
+            .expect("refresh provider context");
+    assert!(original_packet_id.is_some());
+    assert_ne!(refreshed_packet_id, original_packet_id);
+    assert_eq!(
+        refreshed.expect("refreshed context")["ontology_scope"]["ontology_release"]["id"],
+        json!(initial.id)
+    );
 }
 
 #[tokio::test]
@@ -31283,7 +31297,7 @@ async fn ontology_action_tool_executes_pinned_contract_as_proposal_only() {
         .await
         .expect("bind context packet");
     let (_, _, rendered, provider_tools) =
-        build_provider_context_packet(&state, run.primary_session_id)
+        build_provider_context_packet(&state, run.primary_session_id, false)
             .await
             .expect("provider context");
     let rendered = rendered.expect("rendered context");
