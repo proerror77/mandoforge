@@ -316,6 +316,146 @@ async fn ontology_sdk_application_api_persists_release_bound_manifest() {
     assert_eq!(manifest.resolved_catalog.objects[0].api_name, "Order");
 }
 
+#[tokio::test]
+#[ignore = "requires MANDOFORGE_TEST_POSTGRES_URL"]
+async fn postgres_ontology_sdk_application_round_trips_without_cross_tenant_read() {
+    let database_url = std::env::var("MANDOFORGE_TEST_POSTGRES_URL")
+        .expect("MANDOFORGE_TEST_POSTGRES_URL is required");
+    let bootstrap_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .expect("connect bootstrap postgres");
+    run_migrations(&bootstrap_pool)
+        .await
+        .expect("run migrations");
+    let tenant_a = Uuid::new_v4();
+    let tenant_b = Uuid::new_v4();
+    for (tenant_id, label) in [(tenant_a, "a"), (tenant_b, "b")] {
+        sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3)")
+            .bind(tenant_id)
+            .bind(format!("OSDK Postgres tenant {label}"))
+            .bind(format!("osdk-postgres-{label}-{}", tenant_id.simple()))
+            .execute(&bootstrap_pool)
+            .await
+            .expect("insert tenant");
+    }
+
+    let tenant_pool = |tenant_id| {
+        let database_url = database_url.clone();
+        async move {
+            let tenant_setting = format!("SET mandoforge.tenant_id = '{tenant_id}'");
+            PgPoolOptions::new()
+                .max_connections(2)
+                .after_connect(move |connection, _| {
+                    let tenant_setting = tenant_setting.clone();
+                    Box::pin(async move {
+                        connection.execute(tenant_setting.as_str()).await?;
+                        Ok(())
+                    })
+                })
+                .connect(&database_url)
+                .await
+                .expect("connect tenant postgres")
+        }
+    };
+    let pool_a = tenant_pool(tenant_a).await;
+    let mut state_a = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state_a.store = StoreBackend::Postgres(pool_a.clone());
+    state_a.execution_queue = ExecutionQueue::postgres(pool_a, tenant_a);
+    state_a.tenant_id = tenant_a;
+
+    let catalog = OntologyReleaseCatalogV1 {
+        schema: ONTOLOGY_RELEASE_CATALOG_SCHEMA.to_string(),
+        domain_scope: "commerce".to_string(),
+        objects: vec![OntologySdkCatalogObject {
+            stable_key: "object:Order".to_string(),
+            api_name: "Order".to_string(),
+            object_type: "Order".to_string(),
+            properties: Vec::new(),
+            primary_key_api_name: None,
+        }],
+        relations: Vec::new(),
+        actions: Vec::new(),
+    };
+    let catalog_digest =
+        canonical_json_sha256(&serde_json::to_value(&catalog).expect("catalog value"));
+    let release = OntologyRelease {
+        id: Uuid::new_v4(),
+        version: format!("commerce-postgres-{}", tenant_a.simple()),
+        domain_scope: "commerce".to_string(),
+        source_run_id: None,
+        parent_release_id: None,
+        rollback_target_release_id: None,
+        status: "active".to_string(),
+        release_class: "repo_controlled".to_string(),
+        object_count: 1,
+        relation_count: 0,
+        action_count: 0,
+        migration_policy: json!({}),
+        gate_result: json!({"status": "passed"}),
+        materialized_object_ids: json!([]),
+        materialized_link_ids: json!([]),
+        evidence_refs: json!([catalog_evidence(&catalog, &catalog_digest)]),
+        promoted_by: Some("postgres-test".to_string()),
+        promoted_at: Some(Utc::now()),
+        rolled_back_by: None,
+        rolled_back_at: None,
+        archived_at: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    state_a
+        .create_ontology_release(release.clone())
+        .await
+        .expect("create release");
+    let (subset_manifest, subset_digest) = normalize_and_validate_subset(
+        &catalog,
+        &OntologySdkSubsetManifest {
+            objects: vec!["Order".to_string()],
+            relations: Vec::new(),
+            actions: Vec::new(),
+        },
+    )
+    .expect("valid subset");
+    let application = state_a
+        .create_ontology_sdk_application(OntologySdkApplication {
+            id: Uuid::new_v4(),
+            tenant_id: tenant_a,
+            subject: "postgres-osdk-subject".to_string(),
+            ontology_release_id: release.id,
+            release_version: release.version,
+            domain_scope: release.domain_scope,
+            catalog_digest,
+            subset_manifest,
+            subset_digest,
+            status: ONTOLOGY_SDK_APPLICATION_STATUS_ACTIVE.to_string(),
+            created_at: Utc::now(),
+        })
+        .await
+        .expect("create application");
+    assert_eq!(
+        state_a
+            .get_ontology_sdk_application(application.id)
+            .await
+            .expect("read application")
+            .subject,
+        "postgres-osdk-subject"
+    );
+
+    let pool_b = tenant_pool(tenant_b).await;
+    let mut state_b = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state_b.store = StoreBackend::Postgres(pool_b.clone());
+    state_b.execution_queue = ExecutionQueue::postgres(pool_b, tenant_b);
+    state_b.tenant_id = tenant_b;
+    assert!(
+        state_b
+            .get_ontology_sdk_application(application.id)
+            .await
+            .is_err()
+    );
+}
+
 #[test]
 fn ontology_sdk_subset_requires_relation_endpoints_and_proposal_only_actions() {
     let customer = proposal("object", "Customer", json!({"object_type": "Customer"}));
