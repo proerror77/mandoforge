@@ -259,7 +259,7 @@ pub(crate) use policy_runtime::runtime_policy;
 use provider::parse_openai_compatible_provider_response;
 use provider::{
     HarnessContext, MockProviderClient, OpenAiCompatibleProviderClient, ProviderClient,
-    ProviderResponse, default_provider_tool_names,
+    ProviderResponse, ProviderToolCall, default_provider_tool_names,
 };
 pub(crate) use provider_governance_runtime::*;
 pub(crate) use provider_mcp_runtime::*;

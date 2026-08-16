@@ -225,10 +225,52 @@ fn provider_tool_names_require_agent_and_task_grant_for_mcp() {
 
     let without_grant = provider_tool_names_for_grant_and_agent_version(None, &agent_version);
     assert!(without_grant.iter().any(|tool| tool == "file.read"));
+    assert!(without_grant.iter().any(|tool| tool == "complete_task"));
     assert!(!without_grant.iter().any(|tool| tool == "mcp.call"));
     assert!(
         !without_grant
             .iter()
             .any(|tool| tool == "native.connector.call")
     );
+}
+
+#[tokio::test]
+async fn complete_task_is_explicit_validated_and_terminal() {
+    assert!(
+        provider_completion_request(&[ProviderToolCall {
+            tool_name: "complete_task".to_string(),
+            args: json!({"status": "completed", "summary": "objective satisfied"}),
+        }])
+        .expect("valid completion")
+        .is_some()
+    );
+    assert!(
+        provider_completion_request(&[
+            ProviderToolCall {
+                tool_name: "complete_task".to_string(),
+                args: json!({"status": "completed", "summary": "too early"}),
+            },
+            ProviderToolCall {
+                tool_name: "file.read".to_string(),
+                args: json!({"paths": ["README.md"]}),
+            },
+        ])
+        .is_err()
+    );
+
+    let (state, session) = harness_test_session().await;
+    let completed =
+        apply_provider_completion(&state, session.id, "completed", "objective satisfied")
+            .await
+            .expect("complete session");
+    assert!(matches!(completed.status, SessionStatus::Terminated));
+    let events = state.list_events(session.id).await.expect("events");
+    assert!(
+        events
+            .iter()
+            .any(|event| event.event_type == "session.goal.completed")
+    );
+    assert!(events.iter().any(|event| {
+        event.event_type == "tool.result" && event.payload["tool"] == "complete_task"
+    }));
 }

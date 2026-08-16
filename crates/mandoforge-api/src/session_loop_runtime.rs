@@ -303,7 +303,7 @@ pub(crate) fn provider_tool_names_for_grant_and_agent_version(
         .into_iter()
         .filter(|tool| agent_allowed.contains(tool.as_str()))
         .collect::<Vec<_>>();
-    if let Some(grant) = grant {
+    let mut names: Vec<String> = if let Some(grant) = grant {
         names
             .into_iter()
             .filter(|tool| task_grant_allows_tool(grant, tool))
@@ -313,7 +313,112 @@ pub(crate) fn provider_tool_names_for_grant_and_agent_version(
             .into_iter()
             .filter(|tool| tool != "mcp.call")
             .collect()
+    };
+    if !names.iter().any(|tool| tool == "complete_task") {
+        names.push("complete_task".to_string());
     }
+    names
+}
+
+pub(crate) fn provider_completion_request(
+    tool_calls: &[ProviderToolCall],
+) -> Result<Option<(String, String)>, AppError> {
+    let Some(call) = tool_calls
+        .iter()
+        .find(|call| call.tool_name == "complete_task")
+    else {
+        return Ok(None);
+    };
+    if tool_calls.len() != 1 {
+        return Err(AppError::bad_request(
+            "complete_task must be the only provider tool call",
+        ));
+    }
+    let status = call
+        .args
+        .get("status")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if !matches!(status, "completed" | "blocked") {
+        return Err(AppError::bad_request(
+            "complete_task status must be completed or blocked",
+        ));
+    }
+    let summary = call
+        .args
+        .get("summary")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if summary.is_empty() {
+        return Err(AppError::bad_request(
+            "complete_task summary must not be empty",
+        ));
+    }
+    Ok(Some((status.to_string(), summary.to_string())))
+}
+
+pub(crate) async fn apply_provider_completion(
+    state: &AppState,
+    session_id: Uuid,
+    status: &str,
+    summary: &str,
+) -> Result<Session, AppError> {
+    state
+        .append_event(
+            "agent",
+            None,
+            session_id,
+            "agent.tool_use",
+            json!({"tool": "complete_task", "args": {"status": status, "summary": summary}}),
+        )
+        .await?;
+    state
+        .append_event(
+            "tool",
+            None,
+            session_id,
+            "tool.result",
+            json!({"tool": "complete_task", "origin": "session_loop", "content": {"status": status, "summary": summary}}),
+        )
+        .await?;
+    let event_type = if status == "completed" {
+        "session.goal.completed"
+    } else {
+        "session.goal.blocked"
+    };
+    state
+        .append_event(
+            "agent",
+            None,
+            session_id,
+            event_type,
+            json!({"objective": summary, "summary": summary, "reason": summary}),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(session_id),
+            "agent",
+            None,
+            event_type,
+            "session",
+            Some(session_id),
+            json!({"status": status, "summary": summary}),
+        ))
+        .await?;
+    set_managed_session_status(
+        state,
+        session_id,
+        if status == "completed" {
+            SessionStatus::Terminated
+        } else {
+            SessionStatus::RequiresAction
+        },
+        summary,
+    )
+    .await
 }
 
 pub(crate) async fn run_provider_harness(
@@ -1047,9 +1152,13 @@ pub(crate) async fn run_session_loop(
         )
         .await?;
 
+    let completion = provider_completion_request(&provider_response.tool_calls)?;
     let session_task_grant_id = active_task_grant.as_ref().map(|(_, grant)| grant.id);
     let mut waiting_for_approval = false;
     for tool_call in &provider_response.tool_calls {
+        if tool_call.tool_name == "complete_task" {
+            continue;
+        }
         let result = execute_tool_invocation(
             state,
             &tool_call.tool_name,
@@ -1099,6 +1208,10 @@ pub(crate) async fn run_session_loop(
                 json!({"message": final_message}),
             )
             .await?;
+    }
+
+    if let Some((status, summary)) = completion {
+        return apply_provider_completion(state, id, &status, &summary).await;
     }
 
     let session = if waiting_for_approval {

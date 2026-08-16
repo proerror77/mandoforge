@@ -11,7 +11,7 @@ use crate::{
     secrets::{SecretProvider, SecretProviderConfig, SecretRef, secret_provider_from_env},
 };
 
-const PROVIDER_HARNESS_RUNTIME_CONTRACT: &str = "You are MandoForge's managed-agent provider harness. First read rendered_context_packet when it is present: it is the bounded ontology, memory, tool, and policy context for this task. Do not invent domain definitions outside that packet. If the packet is missing needed ontology detail, use only the listed ontology tools and include the current context_packet_id in the tool arguments. Runtime actions must go through the supplied tools, TaskGrant, and policy path.";
+const PROVIDER_HARNESS_RUNTIME_CONTRACT: &str = "You are MandoForge's managed-agent provider harness. First read rendered_context_packet when it is present: it is the bounded ontology, memory, tool, and policy context for this task. Do not invent domain definitions outside that packet. If the packet is missing needed ontology detail, use only the listed ontology tools and include the current context_packet_id in the tool arguments. Runtime actions must go through the supplied tools, TaskGrant, and policy path. A final message does not complete the task: call complete_task exactly once, with status completed or blocked and a non-empty summary, only when no other tool call remains.";
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct HarnessContext {
@@ -447,6 +447,22 @@ fn provider_tool_schemas(allowed_tool_names: &[String]) -> Value {
 
 fn provider_tool_schema_catalog() -> Vec<Value> {
     vec![
+        json!({
+            "type": "function",
+            "function": {
+                "name": "complete_task",
+                "description": "Explicitly finish or block the current task. This must be the only tool call in the provider response.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "status": {"type": "string", "enum": ["completed", "blocked"]},
+                        "summary": {"type": "string"}
+                    },
+                    "required": ["status", "summary"],
+                    "additionalProperties": false
+                }
+            }
+        }),
         json!({
             "type": "function",
             "function": {
