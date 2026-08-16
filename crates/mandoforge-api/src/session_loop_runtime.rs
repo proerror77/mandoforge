@@ -310,6 +310,9 @@ pub(crate) fn provider_tool_names_for_grant_and_agent_version(
             .collect()
     } else {
         names
+            .into_iter()
+            .filter(|tool| tool != "mcp.call")
+            .collect()
     }
 }
 
@@ -352,14 +355,65 @@ pub(crate) async fn run_provider_harness(
             json!({"span_id": span_id, "provider": provider_label, "client": provider.name(), "context": context}),
         )
         .await?;
-    let response = provider.complete(context).await?;
+    let response = match provider.complete(context).await {
+        Ok(response) => response,
+        Err(error) => {
+            let error_message = error.message.clone();
+            state
+                .append_event(
+                    "agent",
+                    Some(span_id),
+                    session_id,
+                    "llm.error",
+                    json!({
+                        "span_id": span_id,
+                        "provider": provider_label,
+                        "client": provider.name(),
+                        "status": "failed",
+                        "error": error_message.clone(),
+                    }),
+                )
+                .await?;
+            state
+                .append_event(
+                    "agent",
+                    Some(span_id),
+                    session_id,
+                    "span.model_request_end",
+                    json!({
+                        "span_id": span_id,
+                        "provider": provider_label,
+                        "client": provider.name(),
+                        "status": "failed",
+                    }),
+                )
+                .await?;
+            state
+                .append_audit_log(new_audit_log(
+                    Some(session_id),
+                    "agent",
+                    Some(span_id),
+                    "provider.request_failed",
+                    "provider_request",
+                    Some(span_id),
+                    json!({
+                        "provider": provider_label,
+                        "client": provider.name(),
+                        "status": "failed",
+                        "error": error_message,
+                    }),
+                ))
+                .await?;
+            return Err(error);
+        }
+    };
     state
         .append_event(
             "agent",
             Some(span_id),
             session_id,
             "llm.response",
-            json!({"span_id": span_id, "provider": provider_label, "client": provider.name(), "tool_calls": &response.tool_calls, "final_message": &response.final_message, "usage": &response.usage}),
+            json!({"span_id": span_id, "provider": provider_label, "client": provider.name(), "plan": &response.plan, "tool_calls": &response.tool_calls, "final_message": &response.final_message, "usage": &response.usage}),
         )
         .await?;
     state
@@ -372,6 +426,7 @@ pub(crate) async fn run_provider_harness(
                 "span_id": span_id,
                 "provider": provider_label,
                 "client": provider.name(),
+                "status": "completed",
                 "tool_call_count": response.tool_calls.len(),
                 "final_message_present": response.final_message.is_some(),
                 "usage": response.usage

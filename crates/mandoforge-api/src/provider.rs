@@ -410,23 +410,20 @@ impl ProviderClient for OpenAiCompatibleProviderClient {
     }
 }
 
+const DEFAULT_PROVIDER_TOOL_EXCLUSIONS: &[&str] = &["native.connector.call"];
+
 pub(crate) fn default_provider_tool_names() -> Vec<String> {
-    [
-        "file.read",
-        "sql.get_schema",
-        "sql.query",
-        "shell.exec",
-        "codex.exec",
-        "artifact.create",
-        "semantic_object.fetch",
-        "semantic_object.search",
-        "semantic_link.expand",
-        "ontology.action.execute",
-        "ontology_type.lookup",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect()
+    provider_tool_schema_catalog()
+        .into_iter()
+        .filter_map(|schema| {
+            schema
+                .get("function")
+                .and_then(|function| function.get("name"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .filter(|name| !DEFAULT_PROVIDER_TOOL_EXCLUSIONS.contains(&name.as_str()))
+        .collect()
 }
 
 fn provider_tool_schemas(allowed_tool_names: &[String]) -> Value {
@@ -434,7 +431,22 @@ fn provider_tool_schemas(allowed_tool_names: &[String]) -> Value {
         .iter()
         .map(String::as_str)
         .collect::<HashSet<_>>();
-    let schemas = vec![
+    Value::Array(
+        provider_tool_schema_catalog()
+            .into_iter()
+            .filter(|schema| {
+                schema
+                    .get("function")
+                    .and_then(|function| function.get("name"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| allowed.contains(name))
+            })
+            .collect(),
+    )
+}
+
+fn provider_tool_schema_catalog() -> Vec<Value> {
+    vec![
         json!({
             "type": "function",
             "function": {
@@ -521,6 +533,22 @@ fn provider_tool_schemas(allowed_tool_names: &[String]) -> Value {
         json!({
             "type": "function",
             "function": {
+                "name": "mcp.call",
+                "description": "Call a TaskGrant-scoped MCP tool. Server, tool, and arguments remain bounded by the active agent version and TaskGrant.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "server": {"type": "string"},
+                        "tool": {"type": "string"},
+                        "args": {"type": "object", "additionalProperties": true}
+                    },
+                    "required": ["server", "tool"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
                 "name": "native.connector.call",
                 "description": "Request a policy-governed native connector operation. External effects require an exact approval commit binding.",
                 "parameters": {
@@ -589,13 +617,14 @@ fn provider_tool_schemas(allowed_tool_names: &[String]) -> Value {
             "type": "function",
             "function": {
                 "name": "ontology.action.execute",
-                "description": "Validate an action from the pinned ontology release and create a proposal-only artifact. This never commits external side effects.",
+                "description": "Validate and execute one published local-semantic ontology action only after approval. Postgres/customer-grade writeback remains disabled and executable actions require an idempotency_key at runtime.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "context_packet_id": {"type": "string", "description": "The current rendered_context_packet.context_packet_id."},
                         "action": {"type": "string", "description": "Published action name from the pinned ontology release."},
-                        "parameters": {"type": "object", "description": "Parameters matching the published action contract."}
+                        "parameters": {"type": "object", "description": "Parameters matching the published action contract."},
+                        "idempotency_key": {"type": "string", "description": "Optional for read-only or proposal-only actions; required by runtime validation for executable actions."}
                     },
                     "required": ["context_packet_id", "action", "parameters"]
                 }
@@ -617,19 +646,7 @@ fn provider_tool_schemas(allowed_tool_names: &[String]) -> Value {
                 }
             }
         }),
-    ];
-    Value::Array(
-        schemas
-            .into_iter()
-            .filter(|schema| {
-                schema
-                    .get("function")
-                    .and_then(|function| function.get("name"))
-                    .and_then(Value::as_str)
-                    .is_some_and(|name| allowed.contains(name))
-            })
-            .collect(),
-    )
+    ]
 }
 
 pub(crate) fn parse_openai_compatible_provider_response(
@@ -645,16 +662,18 @@ pub(crate) fn parse_openai_compatible_provider_response(
         .get("content")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let tool_calls = message
-        .get("tool_calls")
-        .and_then(Value::as_array)
-        .map(|calls| {
+    let tool_calls = match message.get("tool_calls") {
+        None => Vec::new(),
+        Some(value) => {
+            let calls = value.as_array().ok_or_else(|| {
+                AppError::bad_request("provider response tool_calls must be an array")
+            })?;
             calls
                 .iter()
-                .filter_map(parse_provider_tool_call)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+                .map(parse_provider_tool_call)
+                .collect::<Result<Vec<_>, _>>()?
+        }
+    };
     let plan = provider_plan_from_content(content).unwrap_or_else(|| {
         vec![format!(
             "Provider returned {} runtime tool call(s)",
@@ -692,16 +711,35 @@ fn parse_provider_token_usage(value: Option<&Value>) -> Option<ProviderTokenUsag
     })
 }
 
-fn parse_provider_tool_call(value: &Value) -> Option<ProviderToolCall> {
-    let function = value.get("function")?;
-    let tool_name = function.get("name")?.as_str()?.to_string();
+fn parse_provider_tool_call(value: &Value) -> Result<ProviderToolCall, AppError> {
+    let function = value
+        .get("function")
+        .and_then(Value::as_object)
+        .ok_or_else(|| AppError::bad_request("provider response tool call function is required"))?;
+    let tool_name = function
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            AppError::bad_request("provider response tool call function name is required")
+        })?;
     let arguments = function
         .get("arguments")
         .and_then(Value::as_str)
-        .unwrap_or("{}");
-    let args =
-        serde_json::from_str(arguments).unwrap_or_else(|_| json!({"raw_arguments": arguments}));
-    Some(ProviderToolCall { tool_name, args })
+        .ok_or_else(|| {
+            AppError::bad_request("provider response tool call arguments are required")
+        })?;
+    let args: Value = serde_json::from_str(arguments).map_err(|_| {
+        AppError::bad_request("provider response tool call arguments must be valid JSON")
+    })?;
+    if !args.is_object() {
+        return Err(AppError::bad_request(
+            "provider response tool call arguments must be a JSON object",
+        ));
+    }
+    Ok(ProviderToolCall { tool_name, args })
 }
 
 fn provider_plan_from_content(content: &str) -> Option<Vec<String>> {
@@ -744,9 +782,11 @@ fn redact_provider_error(value: &Value) -> String {
 mod tests {
     use super::{
         OpenAiCompatibleProviderClient, default_provider_tool_names,
-        provider_api_key_from_env_value, provider_api_key_secret_ref, provider_tool_schemas,
+        parse_openai_compatible_provider_response, provider_api_key_from_env_value,
+        provider_api_key_secret_ref, provider_tool_schemas,
     };
     use crate::secrets::ReservedSecretProvider;
+    use serde_json::json;
 
     #[test]
     fn default_tools_exclude_approval_only_native_connector_calls() {
@@ -761,6 +801,55 @@ mod tests {
             provider_tool_schemas(&["native.connector.call".to_string()])[0]["function"]["name"],
             "native.connector.call"
         );
+        assert!(default_tools.iter().any(|tool| tool == "mcp.call"));
+        let mcp_only =
+            provider_tool_schemas(&["mcp.call".to_string(), "custom.unknown".to_string()]);
+        assert_eq!(mcp_only.as_array().map(Vec::len), Some(1));
+        assert_eq!(mcp_only[0]["function"]["name"], "mcp.call");
+    }
+
+    #[test]
+    fn provider_tool_call_parser_rejects_malformed_calls_without_argument_echo() {
+        let malformed = [
+            json!({
+                "choices": [{"message": {"tool_calls": "not-an-array"}}]
+            }),
+            json!({
+                "choices": [{"message": {"tool_calls": [{"function": {}}]}}]
+            }),
+            json!({
+                "choices": [{"message": {"tool_calls": [{"function": {
+                    "name": "shell.exec",
+                    "arguments": "{invalid secret-argument}"
+                }}]}}]
+            }),
+            json!({
+                "choices": [{"message": {"tool_calls": [{"function": {
+                    "name": "shell.exec",
+                    "arguments": "[1, 2, 3]"
+                }}]}}]
+            }),
+        ];
+        for response in malformed {
+            let error = parse_openai_compatible_provider_response(&response)
+                .expect_err("malformed provider tool call must fail closed");
+            assert!(!error.message.contains("secret-argument"));
+        }
+    }
+
+    #[test]
+    fn provider_tool_call_parser_accepts_only_json_object_arguments() {
+        let response = json!({
+            "choices": [{"message": {"tool_calls": [{"function": {
+                "name": "file.read",
+                "arguments": "{\"paths\":[\"README.md\"]}"
+            }}]}}]
+        });
+        let parsed =
+            parse_openai_compatible_provider_response(&response).expect("valid provider tool call");
+        assert_eq!(parsed.tool_calls.len(), 1);
+        assert_eq!(parsed.tool_calls[0].tool_name, "file.read");
+        assert_eq!(parsed.tool_calls[0].args["paths"][0], "README.md");
     }
 
     #[test]

@@ -1726,6 +1726,8 @@ mod ontology_sdk_tests;
 mod postgres_event_stream_tests;
 #[path = "main_tests/provider_controller_tests.rs"]
 mod provider_controller_tests;
+#[path = "main_tests/provider_harness_tests.rs"]
+mod provider_harness_tests;
 #[path = "main_tests/remote_computer_execution_tests.rs"]
 mod remote_computer_execution_tests;
 #[path = "main_tests/remote_computer_lease_tests.rs"]
