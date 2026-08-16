@@ -31026,6 +31026,18 @@ async fn rendered_context_pins_active_ontology_release_by_domain_scope() {
         json!("active_ontology_release")
     );
     assert!(
+        rendered.ontology_scope["ontology_release"]["catalog_summary"]["objects"]
+            .as_array()
+            .is_some_and(|objects| !objects.is_empty())
+    );
+    assert!(
+        rendered.ontology_scope["ontology_release"]["catalog_summary"]["actions"]
+            .as_array()
+            .is_some_and(|actions| actions.iter().all(|action| {
+                action["api_name"].is_string() && action["input_schema"].is_object()
+            }))
+    );
+    assert!(
         !rendered
             .available_tools
             .iter()

@@ -1232,6 +1232,24 @@ pub(crate) fn ontology_release_runtime_metadata(release: &OntologyRelease) -> Va
         .and_then(|entry| entry.get("digest"))
         .cloned()
         .unwrap_or(Value::Null);
+    let catalog_summary = release_catalog_from_evidence(release)
+        .ok()
+        .map(|(catalog, _)| {
+            json!({
+                "objects": catalog.objects.iter().take(50).map(|object| object.api_name.as_str()).collect::<Vec<_>>(),
+                "relations": catalog.relations.iter().take(50).map(|relation| relation.api_name.as_str()).collect::<Vec<_>>(),
+                "actions": catalog.actions.iter().take(20).map(|action| json!({
+                    "api_name": action.api_name,
+                    "runtime_name": action.runtime_name,
+                    "target_object_api_name": action.target_object_api_name,
+                    "execution_mode": action.execution_mode,
+                    "approval_required": action.approval_required,
+                    "input_schema": action.input_schema,
+                })).collect::<Vec<_>>(),
+                "truncated": catalog.objects.len() > 50 || catalog.relations.len() > 50 || catalog.actions.len() > 20,
+            })
+        })
+        .unwrap_or(Value::Null);
     json!({
         "id": release.id,
         "version": release.version,
@@ -1242,6 +1260,7 @@ pub(crate) fn ontology_release_runtime_metadata(release: &OntologyRelease) -> Va
         "relation_count": release.relation_count,
         "action_count": release.action_count,
         "catalog_digest": catalog_digest,
+        "catalog_summary": catalog_summary,
         "source_run_id": release.source_run_id,
         "parent_release_id": release.parent_release_id,
         "rollback_target_release_id": release.rollback_target_release_id,
