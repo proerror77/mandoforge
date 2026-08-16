@@ -34957,16 +34957,22 @@ async fn native_connector_commit_write_enforces_side_effect_scope_and_exact_bind
         .into_iter()
         .find(|job| job.approval_id == approval_id)
         .expect("queued native connector commit");
-    let completed = run_execution_job(&state, job.id, "native-connector-worker")
+    let retryable = run_execution_job(&state, job.id, "native-connector-worker")
         .await
-        .expect("native connector commit executes");
-    assert_eq!(completed.status, ExecutionJobStatus::Completed);
-    let consumed_token = state
+        .expect("unsupported native connector remains retryable");
+    assert_eq!(retryable.status, ExecutionJobStatus::Queued);
+    assert!(
+        retryable
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("no registered executor"))
+    );
+    let unconsumed_token = state
         .approval_commit_token_for_approval(approval_id)
         .await
         .expect("commit token")
         .expect("native approval should keep token record");
-    assert_eq!(consumed_token.status, "consumed");
+    assert_eq!(unconsumed_token.status, "issued");
 
     let tamper_required: Value = request_json(
         app.clone(),
@@ -35042,7 +35048,7 @@ async fn native_connector_commit_write_enforces_side_effect_scope_and_exact_bind
             .last_error
             .as_deref()
             .unwrap_or_default()
-            .contains("approval commit token digest does not match")
+            .contains("no registered executor")
     );
 }
 

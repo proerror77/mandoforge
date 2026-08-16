@@ -567,7 +567,7 @@ pub(crate) async fn run_claimed_execution_job(
             execute_approved_mcp_call(state, &approval, &tool_call, &mut commit).await
         }
         _ => {
-            execute_approved_native_connector_or_generic_tool(
+            execute_approved_native_connector(
                 state,
                 &approval,
                 &tool_call,
@@ -936,51 +936,33 @@ async fn complete_started_execution_job(
     .await
 }
 
-async fn execute_approved_native_connector_or_generic_tool(
+async fn execute_approved_native_connector(
     state: &AppState,
     approval: &Approval,
     tool_call: &ToolCall,
     commit: &mut ExecutionCommit<'_>,
 ) -> Result<(), AppError> {
-    if tool_call.tool_name == "native.connector.call" {
-        let connector_id = tool_call
-            .args
-            .get("connector_id")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        if crate::native_connectors::is_supported_ecommerce_connector(connector_id) {
-            return execute_approved_ecommerce_native_connector(state, approval, tool_call, commit)
-                .await;
-        }
-        if crate::native_connectors::is_supported_github_connector(connector_id) {
-            return execute_approved_github_native_connector(state, approval, tool_call, commit)
-                .await;
-        }
+    if tool_call.tool_name != "native.connector.call" {
+        return Err(AppError::bad_request(format!(
+            "approved tool has no registered executor: {}",
+            tool_call.tool_name
+        )));
     }
-
-    let result = if tool_call.normalized_args_hash.is_some() {
-        commit.begin().await?;
-        let token =
-            crate::consume_valid_approval_commit_token_for_tool_call(state, approval, tool_call)
-                .await?;
-        json!({
-            "approval": "approved",
-            "status": "native_connector_committed",
-            "approval_commit_token_id": token.id,
-            "normalized_args_hash": token.normalized_args_hash,
-            "target_binding": token.target_binding,
-        })
-    } else {
-        commit.begin().await?;
-        json!({"approval": "approved"})
-    };
-    commit
-        .append_tool_outcome(tool_call, "tool.result", result.clone(), true)
-        .await?;
-    state
-        .update_tool_call_status(tool_call.id, "completed", Some(result), None)
-        .await?;
-    Ok(())
+    let connector_id = tool_call
+        .args
+        .get("connector_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if crate::native_connectors::is_supported_ecommerce_connector(connector_id) {
+        return execute_approved_ecommerce_native_connector(state, approval, tool_call, commit)
+            .await;
+    }
+    if crate::native_connectors::is_supported_github_connector(connector_id) {
+        return execute_approved_github_native_connector(state, approval, tool_call, commit).await;
+    }
+    Err(AppError::bad_request(format!(
+        "native connector has no registered executor: {connector_id}"
+    )))
 }
 
 async fn execute_approved_ecommerce_native_connector(
