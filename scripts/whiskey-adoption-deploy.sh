@@ -498,14 +498,33 @@ remote_cmd="$remote_cmd && docker compose -p '$COMPOSE_PROJECT' -f '$REMOTE_COMP
 
 ssh "$REMOTE_HOST" "bash -lc $(printf '%q' "$remote_cmd")"
 
-ssh "$REMOTE_HOST" "IMAGE_TAG=$(printf '%q' "$IMAGE_TAG") GIT_SHA=$(printf '%q' "$GIT_SHA") REMOTE_ROOT=$(printf '%q' "$REMOTE_ROOT") bash -s" <<'REMOTE'
+ssh "$REMOTE_HOST" "IMAGE_TAG=$(printf '%q' "$IMAGE_TAG") GIT_SHA=$(printf '%q' "$GIT_SHA") COMPOSE_PROJECT=$(printf '%q' "$COMPOSE_PROJECT") REMOTE_ROOT=$(printf '%q' "$REMOTE_ROOT") bash -s" <<'REMOTE'
 set -euo pipefail
 
 REMOTE_ENV="$REMOTE_ROOT/whiskey.env"
 REMOTE_ENV_LOADER="$REMOTE_ROOT/load-whiskey-env.sh"
+REMOTE_COMPOSE="$REMOTE_ROOT/docker-compose.yml"
 cd "$REMOTE_ROOT"
 source "$REMOTE_ENV_LOADER"
 load_env_file "$REMOTE_ENV"
+
+api_container_id="$(docker compose -p "$COMPOSE_PROJECT" -f "$REMOTE_COMPOSE" ps -q api)"
+if [[ -z "$api_container_id" ]]; then
+  echo "Whiskey API container is not running" >&2
+  exit 1
+fi
+actual_image_id="$(docker inspect --format '{{.Image}}' "$api_container_id")"
+docker image inspect "$actual_image_id" > "$REMOTE_ROOT/evidence/deployment-image.json"
+baked_tag="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$actual_image_id")"
+baked_sha="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$actual_image_id")"
+if [[ "$baked_tag" != "$IMAGE_TAG" ]]; then
+  echo "Whiskey API baked image tag mismatch: expected $IMAGE_TAG, got ${baked_tag:-missing}" >&2
+  exit 1
+fi
+if [[ "$baked_sha" != "$GIT_SHA" ]]; then
+  echo "Whiskey API baked Git SHA mismatch: expected $GIT_SHA, got ${baked_sha:-missing}" >&2
+  exit 1
+fi
 
 version_json=""
 for _attempt in {1..30}; do
@@ -539,7 +558,7 @@ if [[ -z "$actual_sha" || "$actual_sha" != "$GIT_SHA" ]]; then
   exit 1
 fi
 
-printf 'Whiskey deployment version verified: tag=%s sha=%s\n' "$actual_tag" "${actual_sha:-unknown}"
+printf 'Whiskey deployment version verified: image=%s tag=%s sha=%s\n' "$actual_image_id" "$actual_tag" "$actual_sha"
 REMOTE
 
 echo "Whiskey MandoForge pilot is deployed on $REMOTE_HOST at http://127.0.0.1:18787"

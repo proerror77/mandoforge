@@ -41,9 +41,9 @@ To update the Whiskey adoption stack through GitHub Actions, run the workflow wi
 - `whiskey_remote_user`: optional; falls back to `WHISKEY_REMOTE_USER`, then `root`.
 - `whiskey_remote_root`: defaults to `/opt/mandoforge-adoption`.
 
-Whiskey deployment also requires the `WHISKEY_SSH_PRIVATE_KEY` repository or environment secret. The workflow pushes the image with GitHub's package token, then runs `scripts/whiskey-adoption-deploy.sh` over SSH so Whiskey only pulls and restarts the adoption stack; it does not compile Rust on the Whiskey host. The deployment fails unless the runtime readback contains both the requested image tag and exact Git SHA.
+Whiskey deployment also requires the `WHISKEY_SSH_PRIVATE_KEY` repository or environment secret. The workflow pushes the image with GitHub's package token, then runs `scripts/whiskey-adoption-deploy.sh` over SSH so Whiskey only pulls and restarts the adoption stack; it does not compile Rust on the Whiskey host. The deployment fails unless both the running container's image-baked tag/revision labels and the runtime endpoint match the requested image tag and exact Git SHA. The inspected image metadata is archived separately from the runtime response.
 
-Publishing an image is `Publish` evidence only. A successful environment-gated job plus the script's tag-and-SHA verification is `Deploy` and `Readback` evidence; neither is implied by CI or merge status.
+Publishing an image is `Publish` evidence only. A successful environment-gated job plus the script's independent container-image and runtime readbacks is `Deploy` and `Readback` evidence; neither is implied by CI or merge status.
 
 It does not apply Kubernetes manifests or execute production business actions. Stage 2 high-risk actions remain approval-gated until production policy explicitly enables them.
 

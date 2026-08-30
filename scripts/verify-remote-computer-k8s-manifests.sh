@@ -341,6 +341,9 @@ for deployment_contract in \
   "if: github.ref == 'refs/heads/main'" \
   'scripts/whiskey-adoption-deploy.sh' \
   'if [[ ! "$GIT_SHA" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then' \
+  'deployment-image.json' \
+  'org.opencontainers.image.revision' \
+  'if [[ "$baked_sha" != "$GIT_SHA" ]]; then' \
   'if [[ -z "$actual_sha" || "$actual_sha" != "$GIT_SHA" ]]; then'; do
   if ! grep -Fq "$deployment_contract" "$runtime_publish_workflow" \
     && ! grep -Fq "$deployment_contract" "$whiskey_deploy_script"; then

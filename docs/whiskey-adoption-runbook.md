@@ -35,7 +35,7 @@ Publish or select an image tag first:
 MANDOFORGE_IMAGE_TAG=<tag> scripts/whiskey-adoption-deploy.sh
 ```
 
-The deploy script copies [docker-compose.adoption.yml](../deploy/whiskey/docker-compose.adoption.yml), the Whiskey Codex controller, the Whiskey tenant routing controller, the Whiskey worker load controller, the Whiskey MCP pilot controller, the Whiskey eval/release controller, the Whiskey observability controller, the Whiskey provider rollout controller, the Whiskey approval notification controller, the Whiskey Vault/KMS controller, and the Whiskey finance controller to the remote host, creates `/opt/mandoforge-adoption/whiskey.env` if missing, starts the loopback Codex WebSocket target plus controllers when needed, pulls the configured image, and starts the API, Postgres, and worker.
+The deploy script copies [docker-compose.adoption.yml](../deploy/whiskey/docker-compose.adoption.yml), the Whiskey Codex controller, the Whiskey tenant routing controller, the Whiskey worker load controller, the Whiskey MCP pilot controller, the Whiskey eval/release controller, the Whiskey observability controller, the Whiskey provider rollout controller, the Whiskey approval notification controller, the Whiskey Vault/KMS controller, and the Whiskey finance controller to the remote host, creates `/opt/mandoforge-adoption/whiskey.env` if missing, starts the loopback Codex WebSocket target plus controllers when needed, pulls the configured image, and starts the API, Postgres, and worker. It then verifies the running container's image-baked revision independently of runtime environment variables and stores the image inspection under `evidence/deployment-image.json`.
 
 The default image is:
 
