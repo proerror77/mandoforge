@@ -3004,7 +3004,7 @@ pub(crate) async fn principal_from_request(
     if worker_token_authenticated(headers) {
         return Ok(Principal {
             tenant_id,
-            subject_id: worker_subject_from_headers(headers),
+            subject_id: configured_worker_subject(),
             roles: vec![Role::Worker],
         });
     }
@@ -3185,7 +3185,11 @@ pub(crate) fn resolve_request_tenant_id(
 
     match (state.tenant_runtime_mode, requested_tenant_id) {
         (TenantRuntimeMode::TenantRouted, Some(tenant_id))
-            if insecure_dev_auth_enabled() || trusted_tenant_header_enabled() =>
+            if insecure_dev_auth_enabled()
+                || trusted_tenant_header_enabled()
+                || (worker_token_authenticated(headers)
+                    && state.process_role == ProcessRole::Worker
+                    && tenant_id == state.configured_tenant_id()) =>
         {
             Ok(tenant_id)
         }
@@ -3207,13 +3211,18 @@ pub(crate) fn resolve_request_tenant_id(
     }
 }
 
-fn worker_subject_from_headers(headers: &HeaderMap) -> String {
-    header_value(headers, "x-mandoforge-worker-id")
-        .or_else(|| header_value(headers, "x-mandoforge-worker-pool"))
-        .map(str::trim)
+fn configured_worker_subject() -> String {
+    std::env::var("MANDOFORGE_WORKER_SUBJECT")
+        .ok()
+        .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .unwrap_or("mandoforge-worker")
-        .to_string()
+        .or_else(|| {
+            std::env::var("WORKER_SUBJECT")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or_else(|| "mandoforge-worker".to_string())
 }
 
 pub(crate) fn subject_from_headers(headers: &HeaderMap) -> Result<String, AppError> {

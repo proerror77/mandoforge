@@ -73,6 +73,7 @@ async fn migration_paths_include_stage2_migrations_in_order() {
     assert!(names.contains(&"0076_drop_dynamic_workflow_plans.sql"));
     assert!(names.contains(&"0077_session_event_loop_projection.sql"));
     assert!(names.contains(&"0078_execution_completion_projection.sql"));
+    assert!(names.contains(&"0079_workflow_step_claim_owner_version.sql"));
     assert!(
         names.windows(2).all(|window| window[0] <= window[1]),
         "migrations should run lexicographically: {names:?}"
@@ -89,6 +90,20 @@ fn migration_checksum_is_content_addressed() {
         db_bootstrap::migration_checksum("SELECT 1;"),
         db_bootstrap::migration_checksum("SELECT 2;")
     );
+}
+
+#[test]
+fn workflow_step_claim_owner_migration_fails_legacy_running_claims_closed() {
+    let migration =
+        include_str!("../../../../db/migrations/0079_workflow_step_claim_owner_version.sql");
+    assert!(migration.contains("SET status = CASE WHEN status = 'running' THEN 'failed'"));
+    assert!(migration.contains("'status', 'outcome_unknown'"));
+    assert!(migration.contains("'action', 'manual_reconciliation_required'"));
+    assert!(migration.contains("SET status = 'requires_action'"));
+    assert!(migration.contains("SET status = 'cancelled'"));
+    assert!(migration.contains("step.workflow_run_id = task_grant.workflow_run_id"));
+    assert!(!migration.contains("root_task_grant_id IS DISTINCT FROM task_grant.id"));
+    assert!(!migration.contains("THEN 'queued'"));
 }
 
 #[tokio::test]

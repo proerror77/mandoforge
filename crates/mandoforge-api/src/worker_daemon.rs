@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 use axum::http::{HeaderMap, HeaderValue};
 use chrono::Utc;
 use tokio::time::sleep;
+use uuid::Uuid;
 
 use crate::{
     AppState, RunWorkflowStepRun, StoreBackend,
@@ -108,7 +109,7 @@ impl WorkerDaemonConfig {
         })
     }
 
-    fn worker_headers(&self) -> Result<HeaderMap> {
+    fn worker_headers(&self, tenant_id: Uuid) -> Result<HeaderMap> {
         let mut headers = HeaderMap::new();
         headers.insert(
             "authorization",
@@ -119,6 +120,11 @@ impl WorkerDaemonConfig {
             "x-mandoforge-worker-id",
             HeaderValue::from_str(&self.worker_id)
                 .context("worker id is not a valid header value")?,
+        );
+        headers.insert(
+            "x-mandoforge-tenant-id",
+            HeaderValue::from_str(&tenant_id.to_string())
+                .context("worker tenant id is not a valid header value")?,
         );
         if let Some(environment_id) = self.worker_environment_id.as_deref() {
             headers.insert(
@@ -163,7 +169,7 @@ pub(crate) async fn run_worker_daemon(state: AppState) -> Result<()> {
         bail!("MANDOFORGE_PROCESS_ROLE=worker requires Postgres-backed state");
     }
 
-    let headers = config.worker_headers()?;
+    let headers = config.worker_headers(state.configured_tenant_id())?;
     let mut processed = 0usize;
 
     loop {
@@ -566,7 +572,9 @@ mod tests {
         })
         .expect("worker config");
 
-        let headers = config.worker_headers().expect("worker headers");
+        let tenant_id = uuid::Uuid::new_v4();
+        let tenant_id_header = tenant_id.to_string();
+        let headers = config.worker_headers(tenant_id).expect("worker headers");
         assert_eq!(
             headers
                 .get("authorization")
@@ -584,6 +592,12 @@ mod tests {
                 .get("x-mandoforge-worker-pool")
                 .and_then(|value| value.to_str().ok()),
             Some("isolated")
+        );
+        assert_eq!(
+            headers
+                .get("x-mandoforge-tenant-id")
+                .and_then(|value| value.to_str().ok()),
+            Some(tenant_id_header.as_str())
         );
     }
 

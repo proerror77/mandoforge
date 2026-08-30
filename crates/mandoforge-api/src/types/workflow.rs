@@ -186,6 +186,8 @@ pub(crate) struct WorkflowStepRun {
     pub(crate) approval_ids: Vec<Uuid>,
     pub(crate) tool_call_ids: Vec<Uuid>,
     pub(crate) claimed_by_worker: Option<String>,
+    #[serde(default)]
+    pub(crate) claim_owner_version: i16,
     pub(crate) lease_expires_at: Option<DateTime<Utc>>,
     pub(crate) context_packet_id: Option<Uuid>,
     pub(crate) started_at: Option<DateTime<Utc>>,

@@ -644,6 +644,7 @@ pub(crate) async fn materialize_workflow_handoff_assignment(
         approval_ids: Vec::new(),
         tool_call_ids: Vec::new(),
         claimed_by_worker: None,
+        claim_owner_version: 0,
         lease_expires_at: None,
         context_packet_id: None,
         started_at: None,

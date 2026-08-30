@@ -12,9 +12,10 @@ use crate::{
     AgentTeammate, AppError, AppState, AuthorizationRequest, CreateAgentTeammate, CreateSquad,
     CreateSquadMember, CreateWorkItem, CreateWorkItemAssignment, CreateWorkItemReview, Permission,
     Squad, SquadMember, WorkItem, WorkItemActivityEntry, WorkItemAssignment, WorkItemReview,
-    authorize_request, capability_failure_modes, capability_primary_action,
-    capability_sample_tasks, new_audit_log, principal_from_request,
+    authorize_collection_request, authorize_request, capability_failure_modes,
+    capability_primary_action, capability_sample_tasks, new_audit_log, principal_from_request,
     project_work_item_semantic_object, validate_work_item_semantic_scopes,
+    visible_work_items_for_principal,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -51,15 +52,12 @@ async fn list_work_items(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<WorkItem>>, AppError> {
-    authorize_request(
-        &state,
-        &headers,
-        Permission::SessionsRead,
-        "work_items",
-        None,
-    )
-    .await?;
-    Ok(Json(state.list_work_items().await?))
+    let principal =
+        authorize_collection_request(&state, &headers, Permission::SessionsRead, "work_items")
+            .await?;
+    Ok(Json(
+        visible_work_items_for_principal(&state, &principal).await?,
+    ))
 }
 
 async fn create_work_item(

@@ -88,6 +88,32 @@ pub(crate) async fn visible_session_ids_for_principal(
         .collect())
 }
 
+pub(crate) async fn visible_work_items_for_principal(
+    state: &AppState,
+    principal: &Principal,
+) -> Result<Vec<WorkItem>, AppError> {
+    let work_items = state.list_work_items().await?;
+    if principal.roles.contains(&Role::Admin) {
+        return Ok(work_items);
+    }
+    let mut visible = Vec::new();
+    for work_item in work_items {
+        if scope_visible_to_principal(
+            state,
+            principal,
+            ResourceScope::TeamProject {
+                team_id: work_item.team_id,
+                project_id: work_item.project_id,
+            },
+        )
+        .await?
+        {
+            visible.push(work_item);
+        }
+    }
+    Ok(visible)
+}
+
 async fn session_scope(state: &AppState, session_id: Uuid) -> Result<ResourceScope, AppError> {
     let session = state.get_session(session_id).await?;
     let agent = state.get_agent(session.agent_id).await?;

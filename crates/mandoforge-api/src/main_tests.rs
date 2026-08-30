@@ -4655,6 +4655,7 @@ async fn workflow_step_lease_renewal_is_owner_fenced() {
         now,
     );
     step.claimed_by_worker = Some("worker-a".to_string());
+    step.claim_owner_version = WORKFLOW_STEP_CLAIM_OWNER_VERSION;
     step.lease_expires_at = Some(now + chrono::Duration::seconds(60));
     let step_id = step.id;
     let StoreBackend::Memory(inner) = &state.store else {
@@ -4704,6 +4705,7 @@ async fn workflow_step_requires_action_can_resume_on_new_worker() {
         now,
     );
     step.claimed_by_worker = Some("worker-a".to_string());
+    step.claim_owner_version = WORKFLOW_STEP_CLAIM_OWNER_VERSION;
     step.lease_expires_at = None;
     let StoreBackend::Memory(inner) = &state.store else {
         panic!("test state must use memory store");
@@ -4717,6 +4719,7 @@ async fn workflow_step_requires_action_can_resume_on_new_worker() {
     let mut completed = step.clone();
     completed.status = "completed".to_string();
     completed.claimed_by_worker = Some("worker-b".to_string());
+    completed.claim_owner_version = WORKFLOW_STEP_CLAIM_OWNER_VERSION;
     completed.completed_at = Some(Utc::now());
     let completed = state
         .update_claimed_workflow_step_run(completed, "worker-b")
@@ -4758,6 +4761,7 @@ async fn workflow_step_claim_is_atomic() {
     let mut worker_a = queued.clone();
     worker_a.status = "running".to_string();
     worker_a.claimed_by_worker = Some("worker-a".to_string());
+    worker_a.claim_owner_version = WORKFLOW_STEP_CLAIM_OWNER_VERSION;
     worker_a.lease_expires_at = Some(now + chrono::Duration::minutes(5));
     state
         .claim_workflow_step_run_if_available(worker_a, now)
@@ -4767,12 +4771,68 @@ async fn workflow_step_claim_is_atomic() {
     let mut worker_b = queued;
     worker_b.status = "running".to_string();
     worker_b.claimed_by_worker = Some("worker-b".to_string());
+    worker_b.claim_owner_version = WORKFLOW_STEP_CLAIM_OWNER_VERSION;
     worker_b.lease_expires_at = Some(now + chrono::Duration::minutes(5));
     let stale = state
         .claim_workflow_step_run_if_available(worker_b, now)
         .await
         .expect_err("second worker cannot claim active step");
     assert_eq!(stale.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn legacy_unversioned_workflow_claim_cannot_be_renewed_or_completed() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let now = Utc::now();
+    let mut legacy = test_workflow_step_run(
+        Uuid::new_v4(),
+        "legacy-owner-collision",
+        "running",
+        empty_json_object(),
+        now,
+    );
+    legacy.claimed_by_worker = Some("subject:alice".to_string());
+    legacy.lease_expires_at = Some(now + chrono::Duration::minutes(5));
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test state must use memory store");
+    };
+    inner
+        .write()
+        .await
+        .workflow_step_runs
+        .insert(legacy.id, legacy.clone());
+
+    let renew_error = state
+        .renew_workflow_step_run_lease(legacy.id, "subject:alice", 600)
+        .await
+        .expect_err("new subject owner must not renew a legacy unversioned claim");
+    assert_eq!(renew_error.status, StatusCode::NOT_FOUND);
+
+    inner
+        .write()
+        .await
+        .workflow_step_runs
+        .get_mut(&legacy.id)
+        .expect("legacy step")
+        .lease_expires_at = Some(now - chrono::Duration::seconds(1));
+    let mut replacement = legacy.clone();
+    replacement.claim_owner_version = WORKFLOW_STEP_CLAIM_OWNER_VERSION;
+    replacement.lease_expires_at = Some(now + chrono::Duration::minutes(5));
+    let reclaim_error = state
+        .claim_workflow_step_run_if_available(replacement, now)
+        .await
+        .expect_err("expired legacy unversioned claim must not be replayed");
+    assert_eq!(reclaim_error.status, StatusCode::NOT_FOUND);
+
+    let mut completed = legacy;
+    completed.status = "completed".to_string();
+    completed.claim_owner_version = WORKFLOW_STEP_CLAIM_OWNER_VERSION;
+    completed.completed_at = Some(now);
+    let completion_error = state
+        .update_claimed_workflow_step_run(completed, "subject:alice")
+        .await
+        .expect_err("new subject owner must not complete a legacy unversioned claim");
+    assert_eq!(completion_error.status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -15178,6 +15238,7 @@ async fn workflow_step_key_reservation_is_atomic() {
                     approval_ids: Vec::new(),
                     tool_call_ids: Vec::new(),
                     claimed_by_worker: None,
+                    claim_owner_version: 0,
                     lease_expires_at: None,
                     context_packet_id: None,
                     started_at: None,
@@ -16299,6 +16360,7 @@ fn test_workflow_step_run(
         approval_ids: Vec::new(),
         tool_call_ids: Vec::new(),
         claimed_by_worker: None,
+        claim_owner_version: 0,
         lease_expires_at: None,
         context_packet_id: None,
         started_at: None,
@@ -25141,10 +25203,52 @@ async fn tenant_routed_missing_header_fails_closed() {
 }
 
 #[tokio::test]
-async fn worker_token_principal_ignores_caller_subject_and_binds_worker_identity() {
+async fn tenant_routed_worker_token_is_scoped_by_an_explicit_tenant_header() {
     let _env_guard = env_lock().lock().expect("env lock");
     let _insecure_auth = EnvVarGuard::set("MANDOFORGE_INSECURE_DEV_AUTH", "0");
     let _worker_token = EnvVarGuard::set("MANDOFORGE_WORKER_TOKEN", "worker-token");
+    let _tenant_trust = EnvVarGuard::remove("MANDOFORGE_TRUST_X_MANDOFORGE_TENANT_ID");
+    let mut state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.tenant_runtime_mode = TenantRuntimeMode::TenantRouted;
+    let tenant_id = state.configured_tenant_id();
+    let mut headers = HeaderMap::new();
+    headers.insert("authorization", "Bearer worker-token".parse().unwrap());
+    headers.insert(
+        "x-mandoforge-tenant-id",
+        tenant_id.to_string().parse().unwrap(),
+    );
+
+    state.process_role = ProcessRole::Api;
+    let error = resolve_request_tenant_id(&state, &headers)
+        .expect_err("API process must not accept the direct worker tenant bypass");
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+
+    state.process_role = ProcessRole::Worker;
+    assert_eq!(
+        resolve_request_tenant_id(&state, &headers).expect("worker tenant scope"),
+        tenant_id
+    );
+
+    headers.remove("x-mandoforge-tenant-id");
+    let error = resolve_request_tenant_id(&state, &headers)
+        .expect_err("worker token must not bypass the explicit tenant scope");
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+
+    headers.insert(
+        "x-mandoforge-tenant-id",
+        Uuid::new_v4().to_string().parse().unwrap(),
+    );
+    let error = resolve_request_tenant_id(&state, &headers)
+        .expect_err("worker token must remain bound to its configured tenant");
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn worker_token_principal_uses_stable_configured_subject() {
+    let _env_guard = env_lock().lock().expect("env lock");
+    let _insecure_auth = EnvVarGuard::set("MANDOFORGE_INSECURE_DEV_AUTH", "0");
+    let _worker_token = EnvVarGuard::set("MANDOFORGE_WORKER_TOKEN", "worker-token");
+    let _worker_subject = EnvVarGuard::set("MANDOFORGE_WORKER_SUBJECT", "runtime-worker");
     let _dev_token = EnvVarGuard::remove("MANDOFORGE_DEV_ADMIN_TOKEN");
     let _tenant_trust = EnvVarGuard::remove("MANDOFORGE_TRUST_X_MANDOFORGE_TENANT_ID");
     let _subject_trust = EnvVarGuard::remove("MANDOFORGE_TRUST_X_MANDOFORGE_SUBJECT");
@@ -25158,18 +25262,487 @@ async fn worker_token_principal_ignores_caller_subject_and_binds_worker_identity
     let principal = principal_from_request(&state, &headers)
         .await
         .expect("worker token auth should succeed");
-    assert_eq!(principal.subject_id, "worker-a");
+    assert_eq!(principal.subject_id, "runtime-worker");
     assert_eq!(principal.roles, vec![Role::Worker]);
 
     let mut fallback_headers = HeaderMap::new();
     fallback_headers.insert("authorization", "Bearer worker-token".parse().unwrap());
     fallback_headers.insert("x-mandoforge-subject", "admin-1".parse().unwrap());
+    fallback_headers.insert("x-mandoforge-worker-id", "worker-b".parse().unwrap());
 
     let fallback_principal = principal_from_request(&state, &fallback_headers)
         .await
-        .expect("worker token auth should ignore caller subject without worker id");
-    assert_eq!(fallback_principal.subject_id, "mandoforge-worker");
+        .expect("worker token auth should ignore caller and lease identities");
+    assert_eq!(fallback_principal.subject_id, "runtime-worker");
     assert_eq!(fallback_principal.roles, vec![Role::Worker]);
+}
+
+#[test]
+fn worker_authorization_subject_is_distinct_from_lease_owner() {
+    let principal = Principal {
+        tenant_id: Uuid::new_v4(),
+        subject_id: "runtime-worker".to_string(),
+        roles: vec![Role::Worker],
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert("x-mandoforge-worker-id", "worker-pod-a".parse().unwrap());
+
+    assert_eq!(
+        workflow_step_execution_owner(&principal, &headers).expect("worker lease owner"),
+        "worker:worker-pod-a"
+    );
+
+    headers.insert("x-mandoforge-worker-id", "subject:alice".parse().unwrap());
+    let worker_owner =
+        workflow_step_execution_owner(&principal, &headers).expect("namespaced worker owner");
+    let human_owner = workflow_step_execution_owner(
+        &Principal {
+            tenant_id: principal.tenant_id,
+            subject_id: "alice".to_string(),
+            roles: vec![Role::Operator],
+        },
+        &HeaderMap::new(),
+    )
+    .expect("human lease owner");
+    assert_eq!(worker_owner, "worker:subject:alice");
+    assert_eq!(human_owner, "subject:alice");
+    assert_ne!(worker_owner, human_owner);
+}
+
+#[tokio::test]
+async fn worker_task_board_and_execution_authorization_follow_step_session_scope() {
+    let _env_guard = env_lock().lock().expect("env lock");
+    let _insecure_auth = EnvVarGuard::set("MANDOFORGE_INSECURE_DEV_AUTH", "0");
+    let _worker_token = EnvVarGuard::set("MANDOFORGE_WORKER_TOKEN", "worker-token");
+    let _worker_subject = EnvVarGuard::set("MANDOFORGE_WORKER_SUBJECT", "runtime-worker");
+    let _dev_token = EnvVarGuard::remove("MANDOFORGE_DEV_ADMIN_TOKEN");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let organization = state
+        .create_organization(
+            CreateOrganization {
+                name: "Worker Scope Org".to_string(),
+                slug: "worker-scope-org".to_string(),
+            },
+            None,
+        )
+        .await
+        .expect("organization");
+    let team = state
+        .create_team(
+            organization.id,
+            CreateTeam {
+                name: "Worker Scope Team".to_string(),
+                slug: "worker-scope-team".to_string(),
+            },
+        )
+        .await
+        .expect("team");
+    let visible_project = state
+        .create_project(
+            team.id,
+            CreateProject {
+                name: "Visible Project".to_string(),
+                slug: "visible-project".to_string(),
+            },
+        )
+        .await
+        .expect("visible project");
+    let hidden_project = state
+        .create_project(
+            team.id,
+            CreateProject {
+                name: "Hidden Project".to_string(),
+                slug: "hidden-project".to_string(),
+            },
+        )
+        .await
+        .expect("hidden project");
+    state
+        .create_membership(
+            organization.id,
+            CreateMembership {
+                user_id: "runtime-worker".to_string(),
+                team_id: Some(team.id),
+                project_id: Some(visible_project.id),
+                role: "worker".to_string(),
+            },
+        )
+        .await
+        .expect("worker membership");
+    assert_eq!(
+        state
+            .membership_roles_for_subject("runtime-worker")
+            .await
+            .expect("worker membership roles"),
+        vec![Role::Worker]
+    );
+
+    let now = Utc::now();
+    let create_agent = |name: &str, project_id| Agent {
+        id: Uuid::new_v4(),
+        name: name.to_string(),
+        kind: "specialist".to_string(),
+        team_id: Some(team.id),
+        project_id: Some(project_id),
+        runtime_profile_id: None,
+        agent_role: "specialist".to_string(),
+        provider: "openai-compatible".to_string(),
+        model: "gpt-5.5-mini".to_string(),
+        system_prompt: String::new(),
+        tools: Vec::new(),
+        tool_policy: json!({}),
+        mcp_server_ids: Vec::new(),
+        skill_ids: Vec::new(),
+        workflow_pack_ids: Vec::new(),
+        remote_computer_profile: json!({}),
+        semantic_scopes: json!({}),
+        release_state: "active".to_string(),
+        created_at: now,
+    };
+    let visible_agent = create_agent("Visible Agent", visible_project.id);
+    let hidden_agent = create_agent("Hidden Agent", hidden_project.id);
+    let visible_agent_id = visible_agent.id;
+    let hidden_agent_id = hidden_agent.id;
+    let visible_session = Session {
+        id: Uuid::new_v4(),
+        agent_id: visible_agent.id,
+        agent_version_id: None,
+        environment_id: None,
+        title: "visible session".to_string(),
+        status: SessionStatus::Idle,
+        created_at: now,
+        updated_at: now,
+    };
+    let hidden_session = Session {
+        id: Uuid::new_v4(),
+        agent_id: hidden_agent.id,
+        agent_version_id: None,
+        environment_id: None,
+        title: "hidden session".to_string(),
+        status: SessionStatus::Idle,
+        created_at: now,
+        updated_at: now,
+    };
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test state must use memory store");
+    };
+    {
+        let mut store = inner.write().await;
+        store.agents.insert(visible_agent.id, visible_agent);
+        store.agents.insert(hidden_agent.id, hidden_agent);
+        store
+            .sessions
+            .insert(visible_session.id, visible_session.clone());
+        store
+            .sessions
+            .insert(hidden_session.id, hidden_session.clone());
+    }
+    let hidden_work_item = state
+        .create_work_item(CreateWorkItem {
+            organization_id: Some(organization.id),
+            team_id: Some(team.id),
+            project_id: Some(hidden_project.id),
+            title: "Hidden work item".to_string(),
+            description: None,
+            source: "manual".to_string(),
+            source_url: None,
+            status: "open".to_string(),
+            priority: "high".to_string(),
+            assignee: None,
+            metadata: json!({}),
+        })
+        .await
+        .expect("hidden work item");
+    let definition = state
+        .create_workflow_definition(WorkflowDefinition {
+            id: Uuid::new_v4(),
+            pack_installation_id: None,
+            pack_id: None,
+            pack_version: None,
+            name: "Worker session scope".to_string(),
+            entrypoint: format!("worker-session-scope-{}", Uuid::new_v4()),
+            trigger_type: "manual".to_string(),
+            default_agent_id: visible_agent_id,
+            default_environment_id: None,
+            input_schema_ref: None,
+            output_schema_ref: None,
+            step_graph: json!({
+                "steps": [
+                    {"key": "visible-step", "type": "agent", "start": true},
+                    {"key": "hidden-child-step", "type": "agent", "depends_on": ["visible-step"]},
+                    {
+                        "key": "visible-declared-step",
+                        "type": "agent",
+                        "agent_id": visible_agent_id,
+                        "depends_on": ["visible-step"]
+                    },
+                    {
+                        "key": "hidden-declared-step",
+                        "type": "agent",
+                        "agent_id": hidden_agent_id,
+                        "depends_on": ["visible-declared-step"],
+                        "input": {"private": "hidden-definition-secret"}
+                    }
+                ]
+            }),
+            handoff_rules: json!({}),
+            execution_strategy: "managed_graph".to_string(),
+            runtime_adapter: None,
+            runtime_mode: None,
+            runtime_capability_contract: json!({}),
+            event_ingestion_policy: default_event_ingestion_policy(),
+            approval_policy_ref: None,
+            eval_gate_refs: Vec::new(),
+            release_state: "released".to_string(),
+            created_at: now,
+            updated_at: now,
+            archived_at: None,
+        })
+        .await
+        .expect("workflow definition");
+    let run = state
+        .create_workflow_run(WorkflowRun {
+            id: Uuid::new_v4(),
+            workflow_definition_id: definition.id,
+            pack_installation_id: None,
+            source_event_id: None,
+            source_work_item_id: Some(hidden_work_item.id),
+            source_schedule_id: None,
+            status: "running".to_string(),
+            primary_session_id: visible_session.id,
+            root_task_grant_id: None,
+            input_payload: json!({}),
+            input_digest: "worker-session-scope".to_string(),
+            execution_strategy: "managed_graph".to_string(),
+            runtime_adapter: None,
+            runtime_mode: None,
+            delegation_status: None,
+            external_run_ref: None,
+            runtime_event_cursor: None,
+            runtime_envelope: json!({}),
+            started_at: Some(now),
+            completed_at: None,
+            audit_trace_id: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .expect("workflow run");
+    let mut visible_step = test_workflow_step_run(run.id, "visible-step", "queued", json!({}), now);
+    visible_step.agent_id = Some(visible_agent_id);
+    visible_step.session_id = Some(visible_session.id);
+    visible_step.status = "scheduled".to_string();
+    visible_step.scheduled_at = Some(now - chrono::Duration::seconds(1));
+    let mut hidden_step =
+        test_workflow_step_run(run.id, "hidden-child-step", "queued", json!({}), now);
+    hidden_step.agent_id = Some(hidden_agent_id);
+    hidden_step.session_id = Some(hidden_session.id);
+    hidden_step.status = "scheduled".to_string();
+    hidden_step.scheduled_at = Some(now - chrono::Duration::seconds(1));
+    state
+        .create_workflow_step_run_if_key_absent(visible_step.clone())
+        .await
+        .expect("visible step")
+        .expect("visible step created");
+    state
+        .create_workflow_step_run_if_key_absent(hidden_step.clone())
+        .await
+        .expect("hidden step")
+        .expect("hidden step created");
+    state
+        .create_workflow_transition(WorkflowTransition {
+            id: Uuid::new_v4(),
+            workflow_run_id: run.id,
+            from_step_run_id: Some(visible_step.id),
+            from_step_key: Some(visible_step.step_key.clone()),
+            to_step_run_id: Some(visible_step.id),
+            to_step_key: Some(visible_step.step_key.clone()),
+            transition_type: "visible".to_string(),
+            status: "completed".to_string(),
+            condition_payload: json!({}),
+            result_payload: json!({}),
+            created_at: now,
+        })
+        .await
+        .expect("visible transition");
+    state
+        .create_workflow_transition(WorkflowTransition {
+            id: Uuid::new_v4(),
+            workflow_run_id: run.id,
+            from_step_run_id: Some(visible_step.id),
+            from_step_key: Some(visible_step.step_key.clone()),
+            to_step_run_id: Some(hidden_step.id),
+            to_step_key: Some(hidden_step.step_key.clone()),
+            transition_type: "hidden".to_string(),
+            status: "completed".to_string(),
+            condition_payload: json!({}),
+            result_payload: json!({}),
+            created_at: now,
+        })
+        .await
+        .expect("hidden transition");
+    state
+        .create_workflow_transition(WorkflowTransition {
+            id: Uuid::new_v4(),
+            workflow_run_id: run.id,
+            from_step_run_id: Some(visible_step.id),
+            from_step_key: Some(visible_step.step_key.clone()),
+            to_step_run_id: None,
+            to_step_key: Some("hidden-declared-step".to_string()),
+            transition_type: "hidden_declared".to_string(),
+            status: "pending".to_string(),
+            condition_payload: json!({}),
+            result_payload: json!({}),
+            created_at: now,
+        })
+        .await
+        .expect("hidden declared transition");
+
+    let mut headers = HeaderMap::new();
+    headers.insert("authorization", "Bearer worker-token".parse().unwrap());
+    headers.insert("x-mandoforge-worker-id", "worker-a".parse().unwrap());
+    let board = handlers::workflows::worker_get_task_board(&state, &headers)
+        .await
+        .expect("worker task board");
+    assert_eq!(board.workflow_run_count, 1);
+    assert_eq!(board.workflow_step_count, 1);
+    assert_eq!(board.work_item_count, 0);
+    assert_eq!(board.items.len(), 1);
+    assert_eq!(board.items[0].workflow_step_run_id, visible_step.id);
+    assert_eq!(board.items[0].work_item_id, None);
+    assert_eq!(board.items[0].work_item_title, None);
+    assert_eq!(board.items[0].work_item_priority, None);
+
+    let public_board: TaskBoardSnapshot = request_json(
+        build_router(state.clone()),
+        Request::builder()
+            .uri("/api/task-board")
+            .header("authorization", "Bearer worker-token")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(public_board.workflow_run_count, 1);
+    assert_eq!(public_board.workflow_step_count, 1);
+    assert_eq!(public_board.work_item_count, 0);
+    assert_eq!(public_board.items.len(), 1);
+    assert_eq!(public_board.items[0].workflow_step_run_id, visible_step.id);
+    assert_eq!(public_board.items[0].work_item_id, None);
+
+    let inbox: AgentInboxSnapshot = request_json(
+        build_router(state.clone()),
+        Request::builder()
+            .uri(format!("/api/agents/{visible_agent_id}/inbox"))
+            .header("authorization", "Bearer worker-token")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(inbox.entries.len(), 1);
+    assert!(inbox.entries[0].work_item.is_none());
+
+    let visible_work_items: Vec<WorkItem> = request_json(
+        build_router(state.clone()),
+        Request::builder()
+            .uri("/api/work-items")
+            .header("authorization", "Bearer worker-token")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(visible_work_items.is_empty());
+
+    let visible_steps: Vec<WorkflowStepRun> = request_json(
+        build_router(state.clone()),
+        Request::builder()
+            .uri(format!("/api/workflow-runs/{}/steps", run.id))
+            .header("authorization", "Bearer worker-token")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(visible_steps.len(), 1);
+    assert_eq!(visible_steps[0].id, visible_step.id);
+
+    let visible_transitions: Vec<WorkflowTransition> = request_json(
+        build_router(state.clone()),
+        Request::builder()
+            .uri(format!("/api/workflow-runs/{}/transitions", run.id))
+            .header("authorization", "Bearer worker-token")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(visible_transitions.len(), 1);
+    assert_eq!(visible_transitions[0].transition_type, "visible");
+
+    let graph: WorkflowRunGraphConsole = request_json(
+        build_router(state.clone()),
+        Request::builder()
+            .uri(format!("/api/workflow-runs/{}/graph", run.id))
+            .header("authorization", "Bearer worker-token")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(graph.node_count, 2);
+    assert!(
+        graph
+            .nodes
+            .iter()
+            .any(|node| node.step_key == "visible-step")
+    );
+    assert!(
+        graph
+            .nodes
+            .iter()
+            .any(|node| node.step_key == "visible-declared-step" && node.declared)
+    );
+    assert!(graph.edges.iter().all(|edge| {
+        edge.from_step_key.as_deref() != Some("hidden-child-step")
+            && edge.to_step_key.as_deref() != Some("hidden-child-step")
+            && edge.from_step_key.as_deref() != Some("hidden-declared-step")
+            && edge.to_step_key.as_deref() != Some("hidden-declared-step")
+    }));
+    let graph_json = serde_json::to_string(&graph).expect("serialize graph");
+    assert!(!graph_json.contains("hidden-declared-step"));
+    assert!(!graph_json.contains("hidden-definition-secret"));
+    assert!(!graph_json.contains(&hidden_agent_id.to_string()));
+
+    let activation: WorkflowScheduledStepActivationRun = request_json(
+        build_router(state.clone()),
+        Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/api/workflow-runs/{}/scheduled-steps/run-due",
+                run.id
+            ))
+            .header("authorization", "Bearer worker-token")
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(activation.activated_step_ids, vec![visible_step.id]);
+    assert_eq!(
+        state
+            .get_workflow_step_run(hidden_step.id)
+            .await
+            .expect("hidden step remains")
+            .status,
+        "scheduled"
+    );
+
+    assert_eq!(
+        authorize_workflow_step_session(&state, &headers, &visible_step, &run)
+            .await
+            .expect("visible session authorization"),
+        visible_session.id
+    );
+    let error = authorize_workflow_step_session(&state, &headers, &hidden_step, &run)
+        .await
+        .expect_err("cross-project child session must fail closed");
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
