@@ -101,8 +101,11 @@ pub(crate) fn AgentsView(props: &AgentsProps) -> Html {
         let selected_session_audit_logs = selected_session_audit_logs.clone();
         let session_evidence_status = session_evidence_status.clone();
         use_effect_with(
-            (*selected_session_id_handle).clone(),
-            move |selected_session_id| {
+            (
+                (*selected_session_id_handle).clone(),
+                data.sessions.updated_at_ms.to_bits(),
+            ),
+            move |(selected_session_id, _)| {
                 if selected_session_id.is_empty() {
                     selected_session_detail.set(None);
                     selected_session_events.set(None);
