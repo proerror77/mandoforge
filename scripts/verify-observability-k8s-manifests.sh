@@ -41,21 +41,21 @@ for worker_policy in "${worker_network_policy_manifests[@]}"; do
   fi
 done
 
-collector_identity="$(kubectl create --dry-run=client -f "$network_policy_manifest" \
+collector_identity="$(kubectl patch --local=true --type=merge --patch '{}' -f "$network_policy_manifest" \
   -o jsonpath='{.kind}|{.metadata.name}|{.spec.podSelector.matchLabels.app}')"
 if [[ "$collector_identity" != "NetworkPolicy|mandoforge-otel-collector|mandoforge-otel-collector" ]]; then
   echo "OTel collector NetworkPolicy targets the wrong resource: $collector_identity" >&2
   exit 1
 fi
 
-collector_ingress_apps="$(kubectl create --dry-run=client -f "$network_policy_manifest" \
+collector_ingress_apps="$(kubectl patch --local=true --type=merge --patch '{}' -f "$network_policy_manifest" \
   -o jsonpath='{range .spec.ingress[*].from[*]}{.podSelector.matchLabels.app}{"\n"}{end}' | sort -u)"
 if [[ "$collector_ingress_apps" != $'mandoforge-api\nmandoforge-worker\nmandoforge-worker-isolated' ]]; then
   echo "OTel collector NetworkPolicy has unexpected ingress sources" >&2
   exit 1
 fi
 
-collector_ingress_ports="$(kubectl create --dry-run=client -f "$network_policy_manifest" \
+collector_ingress_ports="$(kubectl patch --local=true --type=merge --patch '{}' -f "$network_policy_manifest" \
   -o jsonpath='{range .spec.ingress[*].ports[*]}{.protocol}:{.port}{"\n"}{end}' | sort -u)"
 if [[ "$collector_ingress_ports" != $'TCP:13133\nTCP:4318' ]]; then
   echo "OTel collector NetworkPolicy has unexpected ingress ports" >&2
