@@ -173,7 +173,7 @@ pub(crate) async fn run_execution_job_with_lease_renewal(
                 };
             }
             _ = renewals.tick() => {
-                handle_lease_renewal(
+                let renewal = handle_lease_renewal(
                     &mut lease_deadline,
                     WORKER_JOB_LEASE_SECONDS,
                     state
@@ -181,7 +181,23 @@ pub(crate) async fn run_execution_job_with_lease_renewal(
                         .renew_started(job_id, worker_id, WORKER_JOB_LEASE_SECONDS)
                         .await,
                     "execution job",
-                )?;
+                );
+                if let Err(error) = renewal {
+                    let current = state.execution_queue.get(job_id).await?;
+                    if execution_job_cancel_requested_by_owner(&current, worker_id)? {
+                        return state
+                            .execution_queue
+                            .acknowledge_canceled_started(job_id, worker_id)
+                            .await;
+                    }
+                    if !matches!(
+                        current.status,
+                        ExecutionJobStatus::Running | ExecutionJobStatus::CancelRequested
+                    ) {
+                        continue;
+                    }
+                    return Err(error);
+                }
             }
             _ = cancellation_checks.tick() => {
                 if let Some(job) = execution_job_interrupt_state(state, job_id, worker_id).await? {

@@ -324,6 +324,10 @@ fn session_event_loop_projection_migration_is_restart_safe() {
     assert!(!migration.contains("NEW.event_type = 'approval.approved'"));
     assert!(migration.contains("NEW.event_type = 'approval.rejected'"));
     assert!(migration.contains("NEW.event_type = 'execution.completed'"));
+    assert!(migration.contains("NEW.event_type = 'tool.result'"));
+    assert!(migration.contains("FROM execution_jobs"));
+    assert!(migration.contains("tool_call_id = NEW.actor_id"));
+    assert!(migration.contains("status IN ('queued', 'running', 'cancel_requested')"));
 }
 
 #[test]

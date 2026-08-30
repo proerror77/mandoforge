@@ -12,12 +12,20 @@ BEGIN
         WHEN NEW.event_type IN (
             'user.message',
             'user.custom_tool_result',
-            'tool.result',
             'session.goal.created',
             'session.goal.updated',
             'session.goal.completed',
             'session.goal.blocked'
         ) THEN NEW.event_type
+        WHEN NEW.event_type = 'tool.result'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM execution_jobs
+              WHERE tenant_id = NEW.tenant_id
+                AND session_id = NEW.session_id
+                AND tool_call_id = NEW.actor_id
+                AND status IN ('queued', 'running', 'cancel_requested')
+          ) THEN NEW.event_type
         WHEN NEW.event_type = 'approval.rejected' THEN 'approval rejected'
         WHEN NEW.event_type = 'execution.completed' THEN 'approved execution completed'
         ELSE NULL
