@@ -302,6 +302,14 @@ async fn postgres_session_event_trigger_and_explicit_projection_converge() -> Re
 fn dynamic_workflow_cleanup_migration_is_restart_safe() {
     let migration = include_str!("../../../../db/migrations/0076_drop_dynamic_workflow_plans.sql");
 
+    assert!(migration.contains("SET execution_strategy = 'native_steps'"));
+    assert!(
+        migration.contains("WHERE execution_strategy IN ('native_dynamic', 'dynamic_workflow')")
+    );
+    assert!(migration.contains("SET runtime_mode = 'normal'"));
+    assert!(migration.contains("WHERE runtime_mode = 'dynamic_workflow'"));
+    assert_eq!(migration.matches("UPDATE workflow_definitions").count(), 2);
+    assert_eq!(migration.matches("UPDATE workflow_runs").count(), 2);
     assert!(migration.contains("DROP TABLE IF EXISTS dynamic_workflow_plans"));
 }
 
@@ -313,6 +321,9 @@ fn session_event_loop_projection_migration_is_restart_safe() {
     assert!(migration.contains("CREATE OR REPLACE FUNCTION project_session_event_to_loop_job"));
     assert!(migration.contains("AFTER INSERT ON session_events"));
     assert!(migration.contains("ON CONFLICT (tenant_id, session_id)"));
+    assert!(!migration.contains("NEW.event_type = 'approval.approved'"));
+    assert!(migration.contains("NEW.event_type = 'approval.rejected'"));
+    assert!(migration.contains("NEW.event_type = 'execution.completed'"));
 }
 
 #[test]

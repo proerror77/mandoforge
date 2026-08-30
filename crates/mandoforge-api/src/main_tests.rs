@@ -33715,6 +33715,7 @@ async fn generic_runtime_diagnostics_replay_api_flow() {
         "policy.requires_approval",
         "approval.requested",
         "llm.response",
+        "session_loop.turn_summary",
         "thread.created",
         "thread.status_changed",
         "session.status_running",
@@ -33729,8 +33730,19 @@ async fn generic_runtime_diagnostics_replay_api_flow() {
             "missing event type {expected}: {event_types:?}"
         );
     }
+    assert_eq!(
+        event_types
+            .iter()
+            .filter(|event_type| **event_type == "llm.response")
+            .count(),
+        event_types
+            .iter()
+            .filter(|event_type| **event_type == "llm.request")
+            .count(),
+        "each provider request must emit exactly one llm.response"
+    );
     assert!(events.iter().any(|event| {
-        event.event_type == "llm.response"
+        event.event_type == "session_loop.turn_summary"
             && event
                 .payload
                 .get("tool_calls")
@@ -33869,7 +33881,7 @@ async fn generic_runtime_diagnostics_replay_api_flow() {
     );
     assert!(event_types_after_approval.contains(&"agent.final"));
     assert!(events_after_approval.iter().any(|event| {
-        event.event_type == "llm.response"
+        event.event_type == "session_loop.turn_summary"
             && event
                 .payload
                 .get("final_message")

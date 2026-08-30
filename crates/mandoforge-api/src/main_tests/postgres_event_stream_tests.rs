@@ -15,6 +15,8 @@ fn tenant_request(method: &str, uri: &str, tenant_id: Uuid, body: Value) -> Requ
 #[tokio::test]
 #[ignore = "requires MANDOFORGE_TEST_POSTGRES_URL"]
 async fn postgres_session_stream_delivers_live_events_without_cross_tenant_leakage() {
+    let _env_guard = env_lock().lock().expect("env lock");
+    let _insecure_auth = EnvVarGuard::set("MANDOFORGE_INSECURE_DEV_AUTH", "1");
     let database_url = std::env::var("MANDOFORGE_TEST_POSTGRES_URL")
         .expect("MANDOFORGE_TEST_POSTGRES_URL is required");
     let bootstrap_pool = PgPoolOptions::new()

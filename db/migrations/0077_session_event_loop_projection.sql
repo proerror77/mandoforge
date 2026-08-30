@@ -18,7 +18,6 @@ BEGIN
             'session.goal.completed',
             'session.goal.blocked'
         ) THEN NEW.event_type
-        WHEN NEW.event_type = 'approval.approved' THEN 'approval approved'
         WHEN NEW.event_type = 'approval.rejected' THEN 'approval rejected'
         WHEN NEW.event_type = 'execution.completed' THEN 'approved execution completed'
         ELSE NULL

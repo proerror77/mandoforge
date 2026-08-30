@@ -830,7 +830,7 @@ pub(crate) async fn run_session_loop(
             "agent",
             None,
             id,
-            "llm.response",
+            "session_loop.turn_summary",
             serde_json::json!({
                 "provider": provider_label,
                 "client": provider.name(),

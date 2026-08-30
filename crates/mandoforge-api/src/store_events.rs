@@ -1,9 +1,9 @@
-use std::sync::OnceLock;
+use std::{sync::OnceLock, time::Duration};
 
 use anyhow::Result;
 use chrono::Utc;
 use serde_json::Value;
-use sqlx::postgres::PgListener;
+use sqlx::postgres::{PgListener, PgPoolOptions};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -12,6 +12,7 @@ use crate::store_rows::event_from_row;
 use crate::{AppError, AppState, SessionEvent};
 
 const SESSION_EVENT_BROADCAST_CAPACITY: usize = 1024;
+const SESSION_EVENT_CATCH_UP_INTERVAL: Duration = Duration::from_secs(15);
 
 pub(crate) enum SessionEventSubscription {
     Memory(broadcast::Receiver<SessionEvent>),
@@ -26,7 +27,11 @@ pub(crate) async fn subscribe_session_events(
             session_event_broadcaster().subscribe(),
         )),
         StoreBackend::Postgres(pool) => {
-            let mut listener = PgListener::connect_with(pool).await?;
+            let listener_pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect_with((*pool.connect_options()).clone())
+                .await?;
+            let mut listener = PgListener::connect_with(&listener_pool).await?;
             listener
                 .listen(&session_event_notify_channel(state.current_tenant_id()))
                 .await?;
@@ -218,13 +223,22 @@ impl SessionEventSubscription {
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(false),
                 }
             },
-            SessionEventSubscription::Postgres(listener) => loop {
-                let notification = listener.recv().await?;
-                match notified_session_id(notification.payload()) {
-                    Some(notified_session_id) if notified_session_id != session_id => {}
-                    _ => return Ok(true),
+            SessionEventSubscription::Postgres(listener) => {
+                let catch_up_deadline =
+                    tokio::time::Instant::now() + SESSION_EVENT_CATCH_UP_INTERVAL;
+                loop {
+                    let notification =
+                        match tokio::time::timeout_at(catch_up_deadline, listener.recv()).await {
+                            Ok(Ok(notification)) => notification,
+                            Ok(Err(error)) => return Err(error.into()),
+                            Err(_) => return Ok(true),
+                        };
+                    match notified_session_id(notification.payload()) {
+                        Some(notified_session_id) if notified_session_id != session_id => {}
+                        _ => return Ok(true),
+                    }
                 }
-            },
+            }
         }
     }
 }
