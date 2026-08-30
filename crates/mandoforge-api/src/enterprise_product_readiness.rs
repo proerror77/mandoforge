@@ -93,7 +93,7 @@ fn build_enterprise_product_completion_lanes(
         ]
     } else {
         vec![
-            "production launch preflight, default Secret exclusion, secret delivery contract, production runtime config, API workspace PVC, or deployment safety verifier evidence is missing",
+            "production launch preflight, default Secret exclusion, secret delivery contract, production runtime config, shared RWX workspace PVC, or deployment safety verifier evidence is missing",
         ]
     };
     let production_deployment_safety_next_actions = if production_deployment_safety_static_ready {
@@ -105,7 +105,7 @@ fn build_enterprise_product_completion_lanes(
         vec![
             "remove example Secrets from default deployment paths",
             "restore deploy/k8s/secret-delivery-contract.yaml",
-            "replace API workspace emptyDir with a PVC or object-storage-backed workspace",
+            "restore the mandoforge-workspaces ReadWriteMany PVC and shared storage class contract",
             "restore ./scripts/production-launch-preflight.sh",
         ]
     };
@@ -1088,10 +1088,7 @@ fn production_deployment_safety_static_ready() -> bool {
         })
         && project_file_content("deploy/k8s/workspace-pvc.yaml")
             .as_deref()
-            .is_some_and(|content| {
-                content.contains("ReadWriteMany")
-                    && content.contains("storageClassName: mandoforge-shared-workspaces-rwx")
-            })
+            .is_some_and(workspace_pvc_uses_shared_rwx_contract)
         && worker_manifest.as_deref().is_some_and(|content| {
             workload_disables_service_account_token(content)
                 && !content.contains("mountPath: /var/run/secrets/kubernetes.io/serviceaccount")
@@ -1326,6 +1323,11 @@ fn project_file_content(path: &str) -> Option<String> {
     project_file_path(path).and_then(|path| std::fs::read_to_string(path).ok())
 }
 
+fn workspace_pvc_uses_shared_rwx_contract(content: &str) -> bool {
+    content.contains("ReadWriteMany")
+        && content.contains("storageClassName: mandoforge-shared-workspaces-rwx")
+}
+
 #[cfg(unix)]
 fn project_file_is_executable(path: &str) -> bool {
     use std::os::unix::fs::PermissionsExt;
@@ -1380,5 +1382,20 @@ mod tests {
         );
         assert_ne!(token_enabled, worker, "fixture mutation must enable token");
         assert!(!workload_disables_service_account_token(&token_enabled));
+    }
+
+    #[test]
+    fn workspace_pvc_requires_shared_rwx_contract() {
+        let workspace_pvc = include_str!("../../../deploy/k8s/workspace-pvc.yaml");
+        assert!(workspace_pvc_uses_shared_rwx_contract(workspace_pvc));
+        assert!(!workspace_pvc_uses_shared_rwx_contract(
+            &workspace_pvc.replace("ReadWriteMany", "ReadWriteOnce")
+        ));
+        assert!(!workspace_pvc_uses_shared_rwx_contract(
+            &workspace_pvc.replace(
+                "mandoforge-shared-workspaces-rwx",
+                "single-node-block-storage",
+            )
+        ));
     }
 }

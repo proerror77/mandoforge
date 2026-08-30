@@ -19,24 +19,22 @@ spec:
         - protocol: TCP
           port: 5432
     - to:
-        - ipBlock:
-            cidr: 0.0.0.0/0
-            except:
-              - 10.0.0.0/8
-              - 127.0.0.0/8
-              - 169.254.0.0/16
-              - 172.16.0.0/12
-              - 192.168.0.0/16
-        - ipBlock:
-            cidr: ::/0
-            except:
-              - ::1/128
-              - fc00::/7
-              - fe80::/10
+        - podSelector:
+            matchLabels:
+              app: mandoforge-otel-collector
       ports:
         - protocol: TCP
-          port: 443
-    - ports:
+          port: 4318
+        - protocol: TCP
+          port: 13133
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
         - protocol: UDP
           port: 53
         - protocol: TCP

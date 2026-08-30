@@ -224,21 +224,16 @@ verify_worker_runtime_contracts() {
           (.to // []) == [{"podSelector":{"matchLabels":{"app":"mandoforge-postgres"}}}]
           and ports_exact([{"protocol":"TCP","port":5432}]))
         and any($spec.egress[];
-          ((.to // []) | length) == 2
-          and all(.to[]; keys == ["ipBlock"])
-          and ([.to[].ipBlock.cidr] | sort) == (["0.0.0.0/0", "::/0"] | sort)
-          and any(.to[];
-            .ipBlock.cidr == "0.0.0.0/0"
-            and (["10.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16"] - (.ipBlock.except // []) | length) == 0)
-          and any(.to[];
-            .ipBlock.cidr == "::/0"
-            and (["::1/128", "fc00::/7", "fe80::/10"] - (.ipBlock.except // []) | length) == 0)
-          and ports_exact([{"protocol":"TCP","port":443}]))
+          (.to // []) == [{"podSelector":{"matchLabels":{"app":"mandoforge-otel-collector"}}}]
+          and ports_exact([{"protocol":"TCP","port":4318},{"protocol":"TCP","port":13133}]))
         and any($spec.egress[];
-          ((.to // []) | length) == 0
+          (.to // []) == [{
+            "namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"kube-system"}},
+            "podSelector":{"matchLabels":{"k8s-app":"kube-dns"}}
+          }]
           and ports_exact([{"protocol":"UDP","port":53},{"protocol":"TCP","port":53}]))
     ' <<<"$policy_json" >/dev/null; then
-      echo "$policy_manifest must deny ingress and allow only Postgres, DNS, and bounded HTTPS egress" >&2
+      echo "$policy_manifest must deny ingress and allow only Postgres, DNS, and in-cluster OTel egress" >&2
       exit 1
     fi
   done
