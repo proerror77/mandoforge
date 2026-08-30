@@ -2,6 +2,7 @@
 target = "index.html"
 dist = "../web"
 public_url = "/"
+filehash = false
 no_sri = true
 
 [watch]

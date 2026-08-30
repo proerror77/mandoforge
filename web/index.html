@@ -9,16 +9,16 @@
 
 
 
-    <link rel="stylesheet" href="/styles-f46b9c90e84099e.css"/>
+    <link rel="stylesheet" href="/styles.css"/>
     <script src="/vendor/cytoscape.min.js"></script>
     <script src="/ontology-graph.js"></script>
-  <link rel="modulepreload" href="/mandoforge-web-ui-aad8ca12b112f844.js" crossorigin="anonymous"><link rel="preload" href="/mandoforge-web-ui-aad8ca12b112f844_bg.wasm" crossorigin="anonymous" as="fetch" type="application/wasm"></head>
+  <link rel="modulepreload" href="/mandoforge-web-ui.js" crossorigin="anonymous"><link rel="preload" href="/mandoforge-web-ui_bg.wasm" crossorigin="anonymous" as="fetch" type="application/wasm"></head>
   <body>
     <div id="root"></div>
 
 <script type="module">
-import init, * as bindings from '/mandoforge-web-ui-aad8ca12b112f844.js';
-const wasm = await init({ module_or_path: '/mandoforge-web-ui-aad8ca12b112f844_bg.wasm' });
+import init, * as bindings from '/mandoforge-web-ui.js';
+const wasm = await init({ module_or_path: '/mandoforge-web-ui_bg.wasm' });
 
 
 window.wasmBindings = bindings;
