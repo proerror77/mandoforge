@@ -72,6 +72,7 @@ async fn migration_paths_include_stage2_migrations_in_order() {
     assert!(names.contains(&"0075_agent_release_promoted_unique.sql"));
     assert!(names.contains(&"0076_drop_dynamic_workflow_plans.sql"));
     assert!(names.contains(&"0077_session_event_loop_projection.sql"));
+    assert!(names.contains(&"0078_execution_completion_projection.sql"));
     assert!(
         names.windows(2).all(|window| window[0] <= window[1]),
         "migrations should run lexicographically: {names:?}"
@@ -223,8 +224,11 @@ async fn postgres_session_event_trigger_and_explicit_projection_converge() -> Re
             .map_err(|error| anyhow::anyhow!(error.message))?;
         let explicit_job = project_session_event_to_loop(&state, &second_event)
             .await
-            .map_err(|error| anyhow::anyhow!(error.message))?
-            .ok_or_else(|| anyhow::anyhow!("user event was not explicitly projected"))?;
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        anyhow::ensure!(
+            explicit_job.is_none(),
+            "database trigger projection should suppress explicit replay"
+        );
 
         let jobs = state
             .list_session_loop_jobs()
@@ -235,7 +239,6 @@ async fn postgres_session_event_trigger_and_explicit_projection_converge() -> Re
             "expected one converged queued job: {jobs:?}"
         );
         let first_job = &jobs[0];
-        anyhow::ensure!(first_job.id == explicit_job.id);
         anyhow::ensure!(first_job.status == SessionLoopJobStatus::Queued);
         anyhow::ensure!(first_job.pending_event_seq_start == Some(1));
         anyhow::ensure!(first_job.pending_event_seq_end == Some(2));
@@ -274,13 +277,417 @@ async fn postgres_session_event_trigger_and_explicit_projection_converge() -> Re
                 == running[0].pending_event_seq_end.map(|seq| seq + 1)
         );
         anyhow::ensure!(queued[0].pending_event_seq_end == Some(next_event.seq));
+
+        let interleaved_session_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sessions (id, tenant_id, agent_id, title, status)
+             VALUES ($1, $2, $3, 'Interleaved execution projection', 'idle')",
+        )
+        .bind(interleaved_session_id)
+        .bind(tenant_id)
+        .bind(agent_id)
+        .execute(&pool)
+        .await?;
+        let tool_call_ids = [Uuid::new_v4(), Uuid::new_v4()];
+        let approval_ids = [Uuid::new_v4(), Uuid::new_v4()];
+        for index in 0..2 {
+            sqlx::query(
+                "INSERT INTO tool_calls
+                    (id, tenant_id, session_id, tool_name, args, status, risk_level, policy_decision)
+                 VALUES ($1, $2, $3, 'shell.exec', '{}'::jsonb, 'running', 'medium', '{}'::jsonb)",
+            )
+            .bind(tool_call_ids[index])
+            .bind(tenant_id)
+            .bind(interleaved_session_id)
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                "INSERT INTO approvals
+                    (id, tenant_id, session_id, tool_call_id, action, risk_level, reason, status)
+                 VALUES ($1, $2, $3, $4, 'shell.exec', 'medium', 'interleaving test', 'approved')",
+            )
+            .bind(approval_ids[index])
+            .bind(tenant_id)
+            .bind(interleaved_session_id)
+            .bind(tool_call_ids[index])
+            .execute(&pool)
+            .await?;
+        }
+        let mut executing_jobs = Vec::new();
+        let mut result_events = Vec::new();
+        for index in 0..2 {
+            let job = state
+                .execution_queue
+                .enqueue(ExecutionJobRequest {
+                    session_id: interleaved_session_id,
+                    environment_id: None,
+                    approval_id: approval_ids[index],
+                    tool_call_id: tool_call_ids[index],
+                    tool_name: "shell.exec".to_string(),
+                    max_attempts: None,
+                })
+                .await
+                .map_err(|error| anyhow::anyhow!(error.message))?;
+            let running = state
+                .execution_queue
+                .start(job.id, "postgres-interleaving-worker")
+                .await
+                .map_err(|error| anyhow::anyhow!(error.message))?;
+            let executing = state
+                .execution_queue
+                .begin_executing_started(
+                    job.id,
+                    "postgres-interleaving-worker",
+                    running.claim_generation,
+                )
+                .await
+                .map_err(|error| anyhow::anyhow!(error.message))?;
+            let result = state
+                .append_event_once_for_execution_claim(
+                    &executing,
+                    ExecutionJobStatus::Executing,
+                    Uuid::new_v4(),
+                    "tool",
+                    Some(tool_call_ids[index]),
+                    interleaved_session_id,
+                    "tool.result",
+                    json!({
+                        "execution_job_id": executing.id,
+                        "tool_call_id": tool_call_ids[index],
+                        "tool": executing.tool_name,
+                        "content": {"approval": "approved", "index": index},
+                        "execution_outcome_known": true,
+                        "attempt_count": executing.attempt_count,
+                        "claim_generation": executing.claim_generation
+                    }),
+                )
+                .await
+                .map_err(|error| anyhow::anyhow!(error.message))?;
+            executing_jobs.push(executing);
+            result_events.push(result);
+        }
+        for (index, executing) in executing_jobs.iter().enumerate() {
+            let finalizing = state
+                .execution_queue
+                .begin_finalizing_started(
+                    executing.id,
+                    "postgres-interleaving-worker",
+                    executing.claim_generation,
+                    None,
+                    json!({"stage": "tool_execution"}),
+                )
+                .await
+                .map_err(|error| anyhow::anyhow!(error.message))?;
+            state
+                .execution_queue
+                .finish_finalizing_started(
+                    executing.id,
+                    "postgres-interleaving-worker",
+                    finalizing.claim_generation,
+                    false,
+                )
+                .await
+                .map_err(|error| anyhow::anyhow!(error.message))?;
+            let interleaved_jobs = state
+                .list_session_loop_jobs()
+                .await
+                .map_err(|error| anyhow::anyhow!(error.message))?
+                .into_iter()
+                .filter(|job| job.session_id == interleaved_session_id)
+                .collect::<Vec<_>>();
+            if index == 0 {
+                anyhow::ensure!(
+                    interleaved_jobs.is_empty(),
+                    "first completion must stay blocked by the second result: {interleaved_jobs:?}"
+                );
+            } else {
+                anyhow::ensure!(interleaved_jobs.len() == 1);
+                let completion_seq = state
+                    .list_events(interleaved_session_id)
+                    .await
+                    .map_err(|error| anyhow::anyhow!(error.message))?
+                    .into_iter()
+                    .filter(|event| event.event_type == "execution.completed")
+                    .map(|event| event.seq)
+                    .max()
+                    .context("latest completion event")?;
+                anyhow::ensure!(
+                    interleaved_jobs[0].pending_event_seq_start == Some(result_events[0].seq)
+                );
+                anyhow::ensure!(
+                    interleaved_jobs[0].pending_event_seq_end == Some(completion_seq)
+                );
+            }
+        }
         Ok(())
     }
     .await;
 
     let cleanup: Result<()> = async {
         let mut transaction = pool.begin().await?;
-        for table in ["session_loop_jobs", "session_events", "sessions", "agents"] {
+        for table in [
+            "session_loop_jobs",
+            "execution_jobs",
+            "approvals",
+            "tool_calls",
+            "session_events",
+            "sessions",
+            "agents",
+        ] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE tenant_id = $1"))
+                .bind(tenant_id)
+                .execute(&mut *transaction)
+                .await?;
+        }
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(tenant_id)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+    .await;
+    cleanup?;
+    outcome
+}
+
+#[tokio::test]
+#[ignore = "requires MANDOFORGE_TEST_POSTGRES_URL"]
+async fn postgres_execution_completion_migration_backfills_safe_legacy_range() -> Result<()> {
+    let database_url = std::env::var("MANDOFORGE_TEST_POSTGRES_URL")
+        .expect("MANDOFORGE_TEST_POSTGRES_URL is required");
+    let bootstrap_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await?;
+    run_migrations(&bootstrap_pool).await?;
+    drop(bootstrap_pool);
+
+    let tenant_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+    let session_id = Uuid::new_v4();
+    let tool_call_ids = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+    let approval_ids = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+    let execution_job_ids = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+    let completion_event_ids = [Uuid::new_v4(), Uuid::new_v4()];
+    let tenant_setting = format!("SET mandoforge.tenant_id = '{tenant_id}'");
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .after_connect(move |connection, _| {
+            let tenant_setting = tenant_setting.clone();
+            Box::pin(async move {
+                connection.execute(tenant_setting.as_str()).await?;
+                Ok(())
+            })
+        })
+        .connect(&database_url)
+        .await?;
+
+    let outcome: Result<()> = async {
+        sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3)")
+            .bind(tenant_id)
+            .bind("Legacy execution completion test")
+            .bind(format!("legacy-execution-completion-{}", tenant_id.simple()))
+            .execute(&pool)
+            .await?;
+        sqlx::query(
+            "INSERT INTO agents (id, tenant_id, name, kind, provider, model, system_prompt)
+             VALUES ($1, $2, $3, 'orchestrator', 'test', 'test', '')",
+        )
+        .bind(agent_id)
+        .bind(tenant_id)
+        .bind("Legacy execution completion test agent")
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO sessions (id, tenant_id, agent_id, title, status)
+             VALUES ($1, $2, $3, $4, 'idle')",
+        )
+        .bind(session_id)
+        .bind(tenant_id)
+        .bind(agent_id)
+        .bind("Legacy execution completion test session")
+        .execute(&pool)
+        .await?;
+        for (index, tool_call_id) in tool_call_ids.iter().enumerate() {
+            let status = if index < 2 { "completed" } else { "running" };
+            sqlx::query(
+                "INSERT INTO tool_calls
+                    (id, tenant_id, session_id, tool_name, args, status, risk_level, policy_decision)
+                 VALUES ($1, $2, $3, 'shell.exec', '{}'::jsonb, $4, 'medium', '{}'::jsonb)",
+            )
+            .bind(tool_call_id)
+            .bind(tenant_id)
+            .bind(session_id)
+            .bind(status)
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                "INSERT INTO approvals
+                    (id, tenant_id, session_id, tool_call_id, action, risk_level, reason, status)
+                 VALUES ($1, $2, $3, $4, 'shell.exec', 'medium', 'legacy test', 'approved')",
+            )
+            .bind(approval_ids[index])
+            .bind(tenant_id)
+            .bind(session_id)
+            .bind(tool_call_id)
+            .execute(&pool)
+            .await?;
+        }
+        for index in 0..2 {
+            sqlx::query(
+                "INSERT INTO execution_jobs
+                    (id, tenant_id, session_id, approval_id, tool_call_id, tool_name, status,
+                     completed_at, worker_id, claim_generation, finalization_details,
+                     attempt_count, max_attempts)
+                 VALUES ($1, $2, $3, $4, $5, 'shell.exec', 'completed', now(), 'legacy-worker',
+                         $6, '{\"stage\":\"completion_published\"}'::jsonb, 1, 3)",
+            )
+            .bind(execution_job_ids[index])
+            .bind(tenant_id)
+            .bind(session_id)
+            .bind(approval_ids[index])
+            .bind(tool_call_ids[index])
+            .bind(7_i64 + index as i64)
+            .execute(&pool)
+            .await?;
+        }
+        sqlx::query(
+            "INSERT INTO execution_jobs
+                (id, tenant_id, session_id, approval_id, tool_call_id, tool_name, status,
+                 worker_id, claim_generation, finalization_details, attempt_count, max_attempts)
+             VALUES ($1, $2, $3, $4, $5, 'shell.exec', 'executing', 'active-worker',
+                     9, '{}'::jsonb, 1, 3)",
+        )
+        .bind(execution_job_ids[2])
+        .bind(tenant_id)
+        .bind(session_id)
+        .bind(approval_ids[2])
+        .bind(tool_call_ids[2])
+        .execute(&pool)
+        .await?;
+        for index in 0..2 {
+            let result_seq = 1_i64 + (index as i64 * 2);
+            let completion_seq = result_seq + 1;
+            sqlx::query(
+                "INSERT INTO session_events
+                    (id, tenant_id, session_id, seq, actor_type, actor_id, event_type, payload)
+                 VALUES
+                    ($1, $2, $3, $4, 'tool', $5, 'tool.result', $6),
+                    ($7, $2, $3, $8, 'worker', $9, 'execution.completed', $10)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(tenant_id)
+            .bind(session_id)
+            .bind(result_seq)
+            .bind(tool_call_ids[index])
+            .bind(json!({
+                "tool_call_id": tool_call_ids[index],
+                "content": {"approval": "approved"}
+            }))
+            .bind(completion_event_ids[index])
+            .bind(completion_seq)
+            .bind(execution_job_ids[index])
+            .bind(json!({
+                "execution_job_id": execution_job_ids[index],
+                "approval_id": approval_ids[index],
+                "tool_call_id": tool_call_ids[index],
+                "tool": "shell.exec",
+                "status": "completed",
+                "worker_id": "legacy-worker",
+                "reason": "approved execution completed"
+            }))
+            .execute(&pool)
+            .await?;
+        }
+        sqlx::query(
+            "INSERT INTO session_events
+                (id, tenant_id, session_id, seq, actor_type, actor_id, event_type, payload)
+             VALUES ($1, $2, $3, 5, 'tool', $4, 'tool.result', $5)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(tenant_id)
+        .bind(session_id)
+        .bind(tool_call_ids[2])
+        .bind(json!({
+            "tool_call_id": tool_call_ids[2],
+            "content": {"approval": "approved", "value": "still hidden"}
+        }))
+        .execute(&pool)
+        .await?;
+
+        let pre_migration_jobs = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM session_loop_jobs WHERE tenant_id = $1 AND session_id = $2",
+        )
+        .bind(tenant_id)
+        .bind(session_id)
+        .fetch_one(&pool)
+        .await?;
+        anyhow::ensure!(pre_migration_jobs == 0);
+
+        sqlx::raw_sql(include_str!(
+            "../../../../db/migrations/0078_execution_completion_projection.sql"
+        ))
+        .execute(&pool)
+        .await?;
+
+        for (index, completion_event_id) in completion_event_ids.iter().enumerate() {
+            let payload = sqlx::query_scalar::<_, Value>(
+                "SELECT payload FROM session_events WHERE tenant_id = $1 AND id = $2",
+            )
+            .bind(tenant_id)
+            .bind(completion_event_id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(payload["attempt_count"] == json!(1));
+            anyhow::ensure!(payload["claim_generation"] == json!(7_i64 + index as i64));
+        }
+
+        let migrated_ranges = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM session_loop_jobs
+             WHERE tenant_id = $1 AND session_id = $2 AND status = 'queued'",
+        )
+        .bind(tenant_id)
+        .bind(session_id)
+        .fetch_one(&pool)
+        .await?;
+        anyhow::ensure!(migrated_ranges == 1);
+
+        sqlx::query(
+            "INSERT INTO session_events
+                (id, tenant_id, session_id, seq, actor_type, event_type, payload)
+             VALUES ($1, $2, $3, 6, 'user', 'user.message', jsonb_build_object('message', 'continue'))",
+        )
+        .bind(Uuid::new_v4())
+        .bind(tenant_id)
+        .bind(session_id)
+        .execute(&pool)
+        .await?;
+        let range = sqlx::query_as::<_, (Option<i64>, Option<i64>)>(
+            "SELECT pending_event_seq_start, pending_event_seq_end
+             FROM session_loop_jobs
+             WHERE tenant_id = $1 AND session_id = $2 AND status = 'queued'",
+        )
+        .bind(tenant_id)
+        .bind(session_id)
+        .fetch_one(&pool)
+        .await?;
+        anyhow::ensure!(range == (Some(1), Some(4)), "unexpected recovery range: {range:?}");
+        Ok(())
+    }
+    .await;
+
+    let cleanup: Result<()> = async {
+        let mut transaction = pool.begin().await?;
+        for table in [
+            "session_loop_jobs",
+            "execution_jobs",
+            "approvals",
+            "tool_calls",
+            "session_events",
+            "sessions",
+            "agents",
+        ] {
             sqlx::query(&format!("DELETE FROM {table} WHERE tenant_id = $1"))
                 .bind(tenant_id)
                 .execute(&mut *transaction)
@@ -328,6 +735,68 @@ fn session_event_loop_projection_migration_is_restart_safe() {
     assert!(migration.contains("FROM execution_jobs"));
     assert!(migration.contains("tool_call_id = NEW.actor_id"));
     assert!(migration.contains("status IN ('queued', 'running', 'cancel_requested')"));
+}
+
+#[test]
+fn execution_completion_projection_migration_is_restart_safe() {
+    let migration =
+        include_str!("../../../../db/migrations/0078_execution_completion_projection.sql");
+
+    assert!(migration.contains("CREATE OR REPLACE FUNCTION project_session_event_to_loop_job"));
+    assert!(migration.contains("UPDATE remote_computer_job_assignments AS assignment"));
+    assert!(migration.contains("ADD COLUMN IF NOT EXISTS claim_generation BIGINT"));
+    assert!(migration.contains("ADD COLUMN IF NOT EXISTS finalization_details JSONB"));
+    assert!(migration.contains("jsonb_typeof(assignment.metadata) = 'object'"));
+    assert!(migration.contains("jsonb_build_object('legacy_metadata', assignment.metadata)"));
+    assert!(migration.contains("UPDATE session_events AS event"));
+    assert!(migration.contains("WITH backfilled_completion_events AS"));
+    assert!(migration.contains("unresolved_boundaries AS"));
+    assert!(migration.contains("safe_completion_events AS"));
+    assert!(migration.contains("completion_recovery_ranges AS"));
+    assert!(migration.contains("SELECT DISTINCT ON (tenant_id, session_id)"));
+    assert!(migration.contains("completion_seq AS pending_end"));
+    assert!(!migration.contains("tail.seq AS pending_end"));
+    assert!(migration.contains("INSERT INTO session_loop_jobs"));
+    assert!(migration.contains("GREATEST(tool_result_seq, high_watermark + 1)"));
+    assert!(migration.contains("NOT event.payload ? 'attempt_count'"));
+    assert!(migration.contains("NOT event.payload ? 'claim_generation'"));
+    assert!(migration.contains("event.actor_id = job.id"));
+    assert!(migration.contains("event.payload ->> 'execution_job_id' = job.id::text"));
+    assert!(migration.contains("event.payload ->> 'tool_call_id' = job.tool_call_id::text"));
+    assert!(migration.contains("'execution_attempt_count'"));
+    assert!(migration.contains("'execution_claim_generation'"));
+    assert!(migration.contains("NEW.event_type = 'tool.result'"));
+    assert!(migration.contains("FROM execution_jobs"));
+    assert!(migration.contains("tool_call_id = NEW.actor_id"));
+    assert!(!migration.contains("AND status IN"));
+    assert!(migration.contains("NEW.actor_type = 'worker'"));
+    assert!(migration.contains("NEW.payload ->> 'status' = 'completed'"));
+    assert!(migration.contains("status = 'completed'"));
+    assert!(migration.contains("claim_generation::text = NEW.payload ->> 'claim_generation'"));
+    assert!(migration.contains("tool_call_id::text = NEW.payload ->> 'tool_call_id'"));
+    assert!(migration.contains("seq > COALESCE(projected_high_watermark, 0)"));
+    assert!(migration.contains("cursor_high_watermark := execution_tool_result_seq - 1"));
+    assert!(migration.contains("SELECT MIN(result.seq)"));
+    assert!(migration.contains("JOIN execution_jobs AS completed_job"));
+    assert!(migration.contains("completed_job.id = NEW.actor_id"));
+    assert!(migration.contains("hidden_result.seq <= NEW.seq"));
+    assert!(migration.contains("hidden_job.status <> 'completed'"));
+    assert!(migration.contains("completion.event_type = 'execution.completed'"));
+    assert!(
+        migration.contains(
+            "completion.payload ->> 'claim_generation' = hidden_job.claim_generation::text"
+        )
+    );
+    assert!(migration.contains("CREATE OR REPLACE FUNCTION record_completed_execution_event"));
+    assert!(migration.contains("pg_advisory_xact_lock"));
+    assert!(migration.contains("INSERT INTO session_events"));
+    assert!(migration.contains("'execution.completed'"));
+    assert!(migration.contains("'claim_generation', NEW.claim_generation"));
+    assert!(migration.contains("AFTER UPDATE OF status ON execution_jobs"));
+    assert!(migration.contains("EXECUTE FUNCTION record_completed_execution_event()"));
+    assert!(!migration.contains("IF completion_event_seq IS NULL"));
+    assert!(!migration.contains("UPDATE sessions"));
+    assert!(!migration.contains("UPDATE session_threads"));
 }
 
 #[test]

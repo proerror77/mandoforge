@@ -204,29 +204,6 @@ pub(crate) async fn ensure_primary_session_thread(
     Ok(thread)
 }
 
-pub(crate) async fn set_primary_session_thread_status(
-    state: &AppState,
-    session_id: Uuid,
-    status: &str,
-) -> Result<(), AppError> {
-    let thread = ensure_primary_session_thread(state, session_id).await?;
-    if thread.status != status {
-        let updated = state
-            .update_session_thread_status(thread.id, status)
-            .await?;
-        state
-            .append_event(
-                "system",
-                Some(updated.id),
-                session_id,
-                "thread.status_changed",
-                session_thread_event_payload(&updated),
-            )
-            .await?;
-    }
-    Ok(())
-}
-
 pub(crate) fn managed_thread_status_for_session(status: &SessionStatus) -> &'static str {
     match status {
         SessionStatus::Idle => "idle",
@@ -270,13 +247,22 @@ pub(crate) async fn set_managed_session_status(
     reason: &str,
 ) -> Result<Session, AppError> {
     let terminal = matches!(status, SessionStatus::Terminated | SessionStatus::Failed);
-    let session = state.set_session_status(session_id, status).await?;
-    set_primary_session_thread_status(
-        state,
-        session_id,
-        managed_thread_status_for_session(&session.status),
-    )
-    .await?;
+    let thread = ensure_primary_session_thread(state, session_id).await?;
+    let thread_status = managed_thread_status_for_session(&status);
+    let (session, updated_thread) = state
+        .set_session_and_primary_thread_status(session_id, thread.id, status, thread_status)
+        .await?;
+    if let Some(updated_thread) = updated_thread {
+        state
+            .append_event(
+                "system",
+                Some(updated_thread.id),
+                session_id,
+                "thread.status_changed",
+                session_thread_event_payload(&updated_thread),
+            )
+            .await?;
+    }
     state
         .append_event(
             "system",

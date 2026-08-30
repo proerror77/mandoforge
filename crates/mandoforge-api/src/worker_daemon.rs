@@ -292,6 +292,29 @@ async fn process_execution_jobs(state: &AppState, headers: &HeaderMap, job_budge
         if processed >= job_budget {
             break;
         }
+        if job.status == crate::ExecutionJobStatus::Executing {
+            match execution_jobs::worker_record_execution_outcome_unknown(state, job.id, headers)
+                .await
+            {
+                Ok(updated) => {
+                    processed += 1;
+                    println!(
+                        "execution outcome requires reconciliation: {} status={:?}",
+                        updated.id, updated.status
+                    );
+                }
+                Err(error) if worker_claim_rejected(&error) => {
+                    eprintln!("execution outcome already reconciled: {}", job.id);
+                }
+                Err(error) => {
+                    eprintln!(
+                        "record unknown execution outcome {} failed: {}",
+                        job.id, error.message
+                    );
+                }
+            }
+            continue;
+        }
         if job.status == crate::ExecutionJobStatus::CancelRequested {
             match execution_jobs::worker_recover_execution_cancellation(state, job.id, headers)
                 .await
@@ -339,9 +362,14 @@ fn execution_job_ready_for_worker(
     now: chrono::DateTime<Utc>,
 ) -> bool {
     job.status == crate::ExecutionJobStatus::Queued
+        || (job.status == crate::ExecutionJobStatus::Completed
+            && job.finalization_details["stage"] == "completion_pending")
         || (matches!(
             job.status,
-            crate::ExecutionJobStatus::Running | crate::ExecutionJobStatus::CancelRequested
+            crate::ExecutionJobStatus::Running
+                | crate::ExecutionJobStatus::Executing
+                | crate::ExecutionJobStatus::Finalizing
+                | crate::ExecutionJobStatus::CancelRequested
         ) && job
             .lease_expires_at
             .is_none_or(|lease_expires_at| lease_expires_at <= now))
@@ -441,6 +469,8 @@ mod tests {
             completed_at: None,
             worker_id: None,
             lease_expires_at,
+            claim_generation: 1,
+            finalization_details: serde_json::json!({}),
             attempt_count: 0,
             max_attempts: 3,
             last_error: None,
@@ -476,6 +506,14 @@ mod tests {
             now
         ));
         assert!(execution_job_ready_for_worker(
+            &execution_job(crate::ExecutionJobStatus::Executing, expired),
+            now
+        ));
+        assert!(execution_job_ready_for_worker(
+            &execution_job(crate::ExecutionJobStatus::Finalizing, expired),
+            now
+        ));
+        assert!(execution_job_ready_for_worker(
             &execution_job(crate::ExecutionJobStatus::CancelRequested, expired),
             now
         ));
@@ -484,7 +522,23 @@ mod tests {
             now
         ));
         assert!(!execution_job_ready_for_worker(
+            &execution_job(crate::ExecutionJobStatus::Executing, active),
+            now
+        ));
+        assert!(!execution_job_ready_for_worker(
+            &execution_job(crate::ExecutionJobStatus::Finalizing, active),
+            now
+        ));
+        let mut completion_pending = execution_job(crate::ExecutionJobStatus::Completed, None);
+        completion_pending.finalization_details =
+            serde_json::json!({"stage": "completion_pending"});
+        assert!(execution_job_ready_for_worker(&completion_pending, now));
+        assert!(!execution_job_ready_for_worker(
             &execution_job(crate::ExecutionJobStatus::Completed, None),
+            now
+        ));
+        assert!(!execution_job_ready_for_worker(
+            &execution_job(crate::ExecutionJobStatus::OutcomeUnknown, None),
             now
         ));
     }

@@ -15,7 +15,8 @@ use uuid::Uuid;
 use crate::{
     AppError,
     execution_queue::{
-        ExecutionJob, ExecutionJobRequest, ExecutionJobStatus, ExecutionQueueBackend,
+        ExecutionClaimGuard, ExecutionJob, ExecutionJobRequest, ExecutionJobStatus,
+        ExecutionQueueBackend,
     },
 };
 
@@ -192,6 +193,8 @@ impl RedisExecutionJobPayload {
             completed_at: None,
             worker_id: None,
             lease_expires_at: None,
+            claim_generation: 0,
+            finalization_details: json!({}),
             attempt_count: 0,
             max_attempts,
             last_error: None,
@@ -1163,6 +1166,8 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
             completed_at: None,
             worker_id: None,
             lease_expires_at: None,
+            claim_generation: 0,
+            finalization_details: json!({}),
             attempt_count: 0,
             max_attempts: request.max_attempts.unwrap_or(3).clamp(1, 10),
             last_error: None,
@@ -1188,15 +1193,28 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
 
     async fn start(&self, job_id: Uuid, worker_id: &str) -> Result<ExecutionJob, AppError> {
         self.broker_config().await?;
+        let now = Utc::now();
         let mut pending = self.pending.write().await;
         let pending_job = pending
             .get_mut(&job_id)
             .ok_or_else(|| AppError::not_found("execution job not found"))?;
+        if pending_job.job.status != ExecutionJobStatus::Queued
+            && !(pending_job.job.status == ExecutionJobStatus::Running
+                && pending_job
+                    .job
+                    .lease_expires_at
+                    .is_none_or(|lease_expires_at| lease_expires_at <= now))
+        {
+            return Err(AppError::not_found("execution job not found"));
+        }
         pending_job.job.status = ExecutionJobStatus::Running;
-        pending_job.job.started_at = Some(Utc::now());
+        pending_job.job.started_at = Some(now);
         pending_job.job.worker_id = Some(worker_id.to_string());
-        pending_job.job.lease_expires_at = Some(Utc::now() + chrono::Duration::minutes(5));
+        pending_job.job.lease_expires_at = Some(now + chrono::Duration::minutes(5));
+        pending_job.job.claim_generation += 1;
         pending_job.job.attempt_count += 1;
+        pending_job.job.last_error = None;
+        pending_job.job.finalization_details = json!({});
         Ok(pending_job.job.clone())
     }
 
@@ -1224,29 +1242,312 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
         Ok(pending_job.job.clone())
     }
 
-    async fn complete_started(
+    async fn begin_executing_started(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+        claim_generation: i64,
+    ) -> Result<ExecutionJob, AppError> {
+        self.broker_config().await?;
+        let now = Utc::now();
+        let mut pending = self.pending.write().await;
+        let pending_job = pending
+            .get_mut(&job_id)
+            .ok_or_else(|| AppError::not_found("execution job not found"))?;
+        if pending_job.job.status != ExecutionJobStatus::Running
+            || pending_job.job.worker_id.as_deref() != Some(worker_id)
+            || pending_job.job.claim_generation != claim_generation
+            || pending_job
+                .job
+                .lease_expires_at
+                .is_none_or(|lease_expires_at| lease_expires_at <= now)
+        {
+            return Err(AppError::not_found("execution job not found"));
+        }
+        pending_job.job.status = ExecutionJobStatus::Executing;
+        Ok(pending_job.job.clone())
+    }
+
+    async fn begin_finalizing_started(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+        claim_generation: i64,
+        error: Option<&str>,
+        finalization_details: Value,
+    ) -> Result<ExecutionJob, AppError> {
+        self.broker_config().await?;
+        let now = Utc::now();
+        let mut pending = self.pending.write().await;
+        let pending_job = pending
+            .get_mut(&job_id)
+            .ok_or_else(|| AppError::not_found("execution job not found"))?;
+        if !(pending_job.job.status == ExecutionJobStatus::Executing
+            || (error.is_some() && pending_job.job.status == ExecutionJobStatus::Running))
+            || pending_job.job.worker_id.as_deref() != Some(worker_id)
+            || pending_job.job.claim_generation != claim_generation
+            || pending_job
+                .job
+                .lease_expires_at
+                .is_none_or(|lease_expires_at| lease_expires_at <= now)
+        {
+            return Err(AppError::not_found("execution job not found"));
+        }
+        pending_job.job.status = ExecutionJobStatus::Finalizing;
+        pending_job.job.last_error = error.map(str::to_string);
+        pending_job.job.finalization_details = finalization_details;
+        Ok(pending_job.job.clone())
+    }
+
+    async fn resume_finalizing(
         &self,
         job_id: Uuid,
         worker_id: &str,
     ) -> Result<ExecutionJob, AppError> {
+        self.broker_config().await?;
+        let now = Utc::now();
+        let mut pending = self.pending.write().await;
+        let pending_job = pending
+            .get_mut(&job_id)
+            .ok_or_else(|| AppError::not_found("execution job not found"))?;
+        if pending_job.job.status != ExecutionJobStatus::Finalizing
+            || pending_job
+                .job
+                .lease_expires_at
+                .is_some_and(|lease_expires_at| lease_expires_at > now)
+        {
+            return Err(AppError::not_found("execution job not found"));
+        }
+        pending_job.job.worker_id = Some(worker_id.to_string());
+        pending_job.job.lease_expires_at = Some(now + chrono::Duration::minutes(5));
+        pending_job.job.claim_generation += 1;
+        Ok(pending_job.job.clone())
+    }
+
+    async fn recover_expired_executing(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+        error: Option<&str>,
+        finalization_details: Value,
+    ) -> Result<ExecutionJob, AppError> {
+        self.broker_config().await?;
+        let now = Utc::now();
+        let mut pending = self.pending.write().await;
+        let pending_job = pending
+            .get_mut(&job_id)
+            .ok_or_else(|| AppError::not_found("execution job not found"))?;
+        if pending_job.job.status != ExecutionJobStatus::Executing
+            || pending_job
+                .job
+                .lease_expires_at
+                .is_some_and(|lease_expires_at| lease_expires_at > now)
+        {
+            return Err(AppError::not_found("execution job not found"));
+        }
+        pending_job.job.status = ExecutionJobStatus::Finalizing;
+        pending_job.job.worker_id = Some(worker_id.to_string());
+        pending_job.job.lease_expires_at = Some(now + chrono::Duration::minutes(5));
+        pending_job.job.claim_generation += 1;
+        pending_job.job.last_error = error.map(str::to_string);
+        pending_job.job.finalization_details = finalization_details;
+        Ok(pending_job.job.clone())
+    }
+
+    async fn finish_finalizing_started(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+        claim_generation: i64,
+        retryable_failure: bool,
+    ) -> Result<ExecutionJob, AppError> {
+        let config = self.broker_config().await?;
+        let now = Utc::now();
+        let (job, message_id) = {
+            let mut pending = self.pending.write().await;
+            let pending_job = pending
+                .get_mut(&job_id)
+                .ok_or_else(|| AppError::not_found("execution job not found"))?;
+            if pending_job.job.status != ExecutionJobStatus::Finalizing
+                || pending_job.job.worker_id.as_deref() != Some(worker_id)
+                || pending_job.job.claim_generation != claim_generation
+                || pending_job
+                    .job
+                    .lease_expires_at
+                    .is_none_or(|lease_expires_at| lease_expires_at <= now)
+            {
+                return Err(AppError::not_found("execution job not found"));
+            }
+            let terminal = if pending_job.job.last_error.is_none() {
+                pending_job.job.status = ExecutionJobStatus::Completed;
+                true
+            } else if retryable_failure
+                && pending_job.job.attempt_count < pending_job.job.max_attempts
+            {
+                pending_job.job.status = ExecutionJobStatus::Queued;
+                pending_job.job.started_at = None;
+                pending_job.job.worker_id = None;
+                false
+            } else {
+                pending_job.job.status = ExecutionJobStatus::Failed;
+                true
+            };
+            pending_job.job.completed_at = terminal.then_some(now);
+            pending_job.job.lease_expires_at = None;
+            let completion_pending = pending_job.job.status == ExecutionJobStatus::Completed
+                && pending_job.job.finalization_details["stage"] == "completion_pending";
+            (
+                pending_job.job.clone(),
+                (terminal && !completion_pending).then(|| pending_job.message_id.clone()),
+            )
+        };
+        if let Some(message_id) = message_id {
+            self.ack_message_id(config, message_id).await?;
+        }
+        Ok(job)
+    }
+
+    async fn set_finalizing_failure(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+        claim_generation: i64,
+        error: &str,
+        finalization_details: Value,
+    ) -> Result<ExecutionJob, AppError> {
+        self.broker_config().await?;
+        let now = Utc::now();
+        let mut pending = self.pending.write().await;
+        let pending_job = pending
+            .get_mut(&job_id)
+            .ok_or_else(|| AppError::not_found("execution job not found"))?;
+        if pending_job.job.status != ExecutionJobStatus::Finalizing
+            || pending_job.job.worker_id.as_deref() != Some(worker_id)
+            || pending_job.job.claim_generation != claim_generation
+            || pending_job
+                .job
+                .lease_expires_at
+                .is_none_or(|lease_expires_at| lease_expires_at <= now)
+        {
+            return Err(AppError::not_found("execution job not found"));
+        }
+        pending_job.job.last_error = Some(error.to_string());
+        pending_job.job.finalization_details = finalization_details;
+        Ok(pending_job.job.clone())
+    }
+
+    async fn mark_outcome_unknown_finalizing(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+        claim_generation: i64,
+        error: &str,
+    ) -> Result<ExecutionJob, AppError> {
+        let config = self.broker_config().await?;
+        let now = Utc::now();
+        let (job, message_id) = {
+            let mut pending = self.pending.write().await;
+            let pending_job = pending
+                .get_mut(&job_id)
+                .ok_or_else(|| AppError::not_found("execution job not found"))?;
+            if pending_job.job.status != ExecutionJobStatus::Finalizing
+                || pending_job.job.worker_id.as_deref() != Some(worker_id)
+                || pending_job.job.claim_generation != claim_generation
+                || pending_job.job.finalization_details["stage"] != "outcome_reconciliation"
+                || pending_job
+                    .job
+                    .lease_expires_at
+                    .is_none_or(|lease_expires_at| lease_expires_at <= now)
+            {
+                return Err(AppError::not_found("execution job not found"));
+            }
+            pending_job.job.status = ExecutionJobStatus::OutcomeUnknown;
+            pending_job.job.completed_at = Some(now);
+            pending_job.job.lease_expires_at = None;
+            pending_job.job.last_error = Some(error.to_string());
+            (pending_job.job.clone(), pending_job.message_id.clone())
+        };
+        self.ack_message_id(config, message_id).await?;
+        Ok(job)
+    }
+
+    async fn prepare_completion_tail(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+        claim_generation: i64,
+    ) -> Result<ExecutionJob, AppError> {
+        self.broker_config().await?;
+        let now = Utc::now();
+        let mut pending = self.pending.write().await;
+        let pending_job = pending
+            .get_mut(&job_id)
+            .ok_or_else(|| AppError::not_found("execution job not found"))?;
+        if pending_job.job.status != ExecutionJobStatus::Finalizing
+            || pending_job.job.worker_id.as_deref() != Some(worker_id)
+            || pending_job.job.claim_generation != claim_generation
+            || pending_job.job.last_error.is_some()
+            || pending_job
+                .job
+                .lease_expires_at
+                .is_none_or(|lease_expires_at| lease_expires_at <= now)
+        {
+            return Err(AppError::not_found("execution job not found"));
+        }
+        pending_job.job.finalization_details = json!({"stage": "completion_pending"});
+        Ok(pending_job.job.clone())
+    }
+
+    async fn mark_completion_published(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
         let config = self.broker_config().await?;
         let (job, message_id) = {
             let mut pending = self.pending.write().await;
             let pending_job = pending
                 .get_mut(&job_id)
                 .ok_or_else(|| AppError::not_found("execution job not found"))?;
-            if pending_job.job.status != ExecutionJobStatus::Running
-                || pending_job.job.worker_id.as_deref() != Some(worker_id)
+            if pending_job.job.status != ExecutionJobStatus::Completed
+                || !matches!(
+                    pending_job.job.finalization_details["stage"].as_str(),
+                    Some("completion_pending" | "completion_published")
+                )
             {
                 return Err(AppError::not_found("execution job not found"));
             }
-            pending_job.job.status = ExecutionJobStatus::Completed;
-            pending_job.job.completed_at = Some(Utc::now());
-            pending_job.job.lease_expires_at = None;
+            pending_job.job.finalization_details = json!({"stage": "completion_published"});
             (pending_job.job.clone(), pending_job.message_id.clone())
         };
         self.ack_message_id(config, message_id).await?;
         Ok(job)
+    }
+
+    async fn mark_outcome_unknown_started(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+        claim_generation: i64,
+        error: &str,
+    ) -> Result<ExecutionJob, AppError> {
+        self.broker_config().await?;
+        let now = Utc::now();
+        let mut pending = self.pending.write().await;
+        let pending_job = pending
+            .get_mut(&job_id)
+            .ok_or_else(|| AppError::not_found("execution job not found"))?;
+        if pending_job.job.status != ExecutionJobStatus::Executing
+            || pending_job.job.worker_id.as_deref() != Some(worker_id)
+            || pending_job.job.claim_generation != claim_generation
+            || pending_job
+                .job
+                .lease_expires_at
+                .is_none_or(|lease_expires_at| lease_expires_at <= now)
+        {
+            return Err(AppError::not_found("execution job not found"));
+        }
+        pending_job.job.status = ExecutionJobStatus::OutcomeUnknown;
+        pending_job.job.completed_at = Some(now);
+        pending_job.job.lease_expires_at = None;
+        pending_job.job.last_error = Some(error.to_string());
+        Ok(pending_job.job.clone())
     }
 
     async fn fail(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
@@ -1274,26 +1575,112 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
     }
 
     async fn cancel(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
-        match self.kind {
-            BrokerQueueKind::Redis => {
-                let config = self.redis_config().await?;
-                self.ack_redis_job(config, job_id).await?;
-            }
-            BrokerQueueKind::Nats => {
-                self.broker_config().await?;
-            }
-            BrokerQueueKind::NatsJetstream => {
-                let config = self.broker_config().await?;
-                self.ack_jetstream_job(config, job_id).await?;
-            }
-        }
+        self.broker_config().await?;
         let mut pending = self.pending.write().await;
         let pending_job = pending
             .get_mut(&job_id)
             .ok_or_else(|| AppError::not_found("execution job not found"))?;
-        pending_job.job.status = ExecutionJobStatus::Canceled;
-        pending_job.job.completed_at = Some(Utc::now());
-        pending_job.job.lease_expires_at = None;
+        match pending_job.job.status {
+            ExecutionJobStatus::Queued | ExecutionJobStatus::Running => {
+                pending_job.job.status = ExecutionJobStatus::CancelRequested;
+                pending_job.job.finalization_details = json!({"stage": "cancellation_pending"});
+            }
+            ExecutionJobStatus::Executing
+            | ExecutionJobStatus::Finalizing
+            | ExecutionJobStatus::CancelRequested
+            | ExecutionJobStatus::Completed
+            | ExecutionJobStatus::Failed
+            | ExecutionJobStatus::OutcomeUnknown
+            | ExecutionJobStatus::Canceled => {}
+        }
+        Ok(pending_job.job.clone())
+    }
+
+    async fn acknowledge_canceled(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+        claim_generation: i64,
+    ) -> Result<ExecutionJob, AppError> {
+        let config = self.broker_config().await?;
+        let now = Utc::now();
+        let (job, message_id) = {
+            let mut pending = self.pending.write().await;
+            let pending_job = pending
+                .get_mut(&job_id)
+                .ok_or_else(|| AppError::not_found("execution job not found"))?;
+            if pending_job.job.status != ExecutionJobStatus::CancelRequested
+                || pending_job.job.worker_id.as_deref() != Some(worker_id)
+                || pending_job.job.claim_generation != claim_generation
+                || pending_job.job.finalization_details["stage"] != "cancellation_cleanup"
+                || pending_job
+                    .job
+                    .lease_expires_at
+                    .is_none_or(|lease_expires_at| lease_expires_at <= now)
+            {
+                return Err(AppError::not_found("execution job not found"));
+            }
+            pending_job.job.status = ExecutionJobStatus::Canceled;
+            pending_job.job.completed_at = Some(now);
+            pending_job.job.lease_expires_at = None;
+            (pending_job.job.clone(), pending_job.message_id.clone())
+        };
+        self.ack_message_id(config, message_id).await?;
+        Ok(job)
+    }
+
+    async fn begin_cancellation_cleanup(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+        claim_generation: i64,
+    ) -> Result<ExecutionJob, AppError> {
+        self.broker_config().await?;
+        let now = Utc::now();
+        let mut pending = self.pending.write().await;
+        let pending_job = pending
+            .get_mut(&job_id)
+            .ok_or_else(|| AppError::not_found("execution job not found"))?;
+        if pending_job.job.status != ExecutionJobStatus::CancelRequested
+            || pending_job.job.worker_id.as_deref() != Some(worker_id)
+            || pending_job.job.claim_generation != claim_generation
+            || pending_job.job.finalization_details["stage"] != "cancellation_pending"
+            || pending_job
+                .job
+                .lease_expires_at
+                .is_none_or(|lease_expires_at| lease_expires_at <= now)
+        {
+            return Err(AppError::not_found("execution job not found"));
+        }
+        pending_job.job.claim_generation += 1;
+        pending_job.job.finalization_details = json!({"stage": "cancellation_cleanup"});
+        pending_job.job.lease_expires_at = Some(now + chrono::Duration::minutes(5));
+        Ok(pending_job.job.clone())
+    }
+
+    async fn claim_cancellation(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+    ) -> Result<ExecutionJob, AppError> {
+        self.broker_config().await?;
+        let now = Utc::now();
+        let mut pending = self.pending.write().await;
+        let pending_job = pending
+            .get_mut(&job_id)
+            .ok_or_else(|| AppError::not_found("execution job not found"))?;
+        if pending_job.job.status != ExecutionJobStatus::CancelRequested
+            || pending_job
+                .job
+                .lease_expires_at
+                .is_some_and(|lease_expires_at| lease_expires_at > now)
+        {
+            return Err(AppError::not_found("execution job not found"));
+        }
+        pending_job.job.worker_id = Some(worker_id.to_string());
+        pending_job.job.lease_expires_at = Some(now + chrono::Duration::minutes(5));
+        pending_job.job.claim_generation += 1;
+        pending_job.job.finalization_details = json!({"stage": "cancellation_pending"});
         Ok(pending_job.job.clone())
     }
 
@@ -1334,47 +1721,6 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
                 }
                 BrokerQueueKind::Nats => {}
             }
-        }
-        Ok(job)
-    }
-
-    async fn retry_or_fail_started(
-        &self,
-        job_id: Uuid,
-        worker_id: &str,
-        error: &str,
-    ) -> Result<ExecutionJob, AppError> {
-        let config = self.broker_config().await?;
-        let (job, message_id) = {
-            let mut pending = self.pending.write().await;
-            let pending_job = pending
-                .get_mut(&job_id)
-                .ok_or_else(|| AppError::not_found("execution job not found"))?;
-            if pending_job.job.status != ExecutionJobStatus::Running
-                || pending_job.job.worker_id.as_deref() != Some(worker_id)
-            {
-                return Err(AppError::not_found("execution job not found"));
-            }
-            pending_job.job.last_error = Some(error.to_string());
-            if pending_job.job.attempt_count < pending_job.job.max_attempts {
-                pending_job.job.status = ExecutionJobStatus::Queued;
-                pending_job.job.started_at = None;
-                pending_job.job.completed_at = None;
-                pending_job.job.worker_id = None;
-                pending_job.job.lease_expires_at = None;
-                (pending_job.job.clone(), None)
-            } else {
-                pending_job.job.status = ExecutionJobStatus::Failed;
-                pending_job.job.completed_at = Some(Utc::now());
-                pending_job.job.lease_expires_at = None;
-                (
-                    pending_job.job.clone(),
-                    Some(pending_job.message_id.clone()),
-                )
-            }
-        };
-        if let Some(message_id) = message_id {
-            self.ack_message_id(config, message_id).await?;
         }
         Ok(job)
     }
@@ -1424,6 +1770,33 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
             .map(|pending| pending.job.clone())
             .ok_or_else(|| AppError::not_found("execution job not found"))
     }
+
+    async fn lock_owned_claim(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+        claim_generation: i64,
+        status: ExecutionJobStatus,
+    ) -> Result<Box<dyn ExecutionClaimGuard>, AppError> {
+        self.broker_config().await?;
+        let guard = self.pending.clone().read_owned().await;
+        let now = Utc::now();
+        let owned = guard.get(&job_id).is_some_and(|pending| {
+            pending.job.status == status
+                && pending.job.worker_id.as_deref() == Some(worker_id)
+                && pending.job.claim_generation == claim_generation
+                && pending
+                    .job
+                    .lease_expires_at
+                    .is_some_and(|lease_expires_at| lease_expires_at > now)
+        });
+        if !owned {
+            return Err(AppError::not_found(
+                "execution job claim is no longer owned",
+            ));
+        }
+        Ok(Box::new(guard))
+    }
 }
 
 #[cfg(test)]
@@ -1436,6 +1809,7 @@ mod tests {
         redis_tcp_addr,
     };
     use crate::execution_queue::{ExecutionJobRequest, ExecutionJobStatus, ExecutionQueueBackend};
+    use serde_json::json;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
@@ -1924,12 +2298,27 @@ mod tests {
             .expect("start job");
         assert_eq!(running.status, ExecutionJobStatus::Running);
         let stale_complete = queue
-            .complete_started(jobs[0].id, "worker-2")
+            .begin_executing_started(jobs[0].id, "worker-2", running.claim_generation)
             .await
-            .expect_err("stale worker cannot complete started broker job");
+            .expect_err("stale worker cannot commit started broker job");
         assert!(format!("{stale_complete:?}").contains("execution job not found"));
+        queue
+            .begin_executing_started(jobs[0].id, "worker-1", running.claim_generation)
+            .await
+            .expect("commit execution attempt");
+        let finalizing = queue
+            .begin_finalizing_started(
+                jobs[0].id,
+                "worker-1",
+                running.claim_generation,
+                None,
+                json!({}),
+            )
+            .await
+            .expect("begin finalization");
+        assert_eq!(finalizing.status, ExecutionJobStatus::Finalizing);
         let completed = queue
-            .complete_started(jobs[0].id, "worker-1")
+            .finish_finalizing_started(jobs[0].id, "worker-1", finalizing.claim_generation, false)
             .await
             .expect("ack complete");
         assert_eq!(completed.status, ExecutionJobStatus::Completed);
@@ -2166,12 +2555,33 @@ mod tests {
         assert_eq!(running.worker_id.as_deref(), Some("worker-1"));
 
         let stale_retry = queue
-            .retry_or_fail_started(job_id, "worker-2", "late failure")
+            .begin_finalizing_started(
+                job_id,
+                "worker-2",
+                running.claim_generation,
+                Some("late failure"),
+                json!({}),
+            )
             .await
             .expect_err("stale worker cannot retry started broker job");
         assert!(format!("{stale_retry:?}").contains("execution job not found"));
+        queue
+            .begin_executing_started(job_id, "worker-1", running.claim_generation)
+            .await
+            .expect("commit execution attempt");
+        let finalizing = queue
+            .begin_finalizing_started(
+                job_id,
+                "worker-1",
+                running.claim_generation,
+                None,
+                json!({}),
+            )
+            .await
+            .expect("begin finalization");
+        assert_eq!(finalizing.status, ExecutionJobStatus::Finalizing);
         let completed = queue
-            .complete_started(job_id, "worker-1")
+            .finish_finalizing_started(job_id, "worker-1", finalizing.claim_generation, false)
             .await
             .expect("ack job");
         assert_eq!(completed.status, ExecutionJobStatus::Completed);

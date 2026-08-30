@@ -35,6 +35,23 @@ const DEFAULT_TENANT_ID: &str = "00000000-0000-4000-8000-000000000001";
 const CONSOLE_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-S8gqf4aiLM0nZQ8fK0Dda8kz4a2DvOeHeeoIWg3Pu7w='; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
 const CONSOLE_DEV_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-S8gqf4aiLM0nZQ8fK0Dda8kz4a2DvOeHeeoIWg3Pu7w='; connect-src 'self' http://127.0.0.1:* http://localhost:*; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
 
+pub(crate) fn deterministic_record_id(namespace_id: Uuid, kind: &str, parts: &[&str]) -> Uuid {
+    let mut hasher = Sha256::new();
+    hasher.update(b"mandoforge-durable-record-v1");
+    hasher.update(namespace_id.as_bytes());
+    hasher.update(kind.as_bytes());
+    for part in parts {
+        hasher.update([0]);
+        hasher.update(part.as_bytes());
+    }
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
+
 mod agent_release_automation;
 mod agent_runtime_profile_release;
 mod approval_runtime;
@@ -187,10 +204,11 @@ use eval_judge::{EvalJudgeRequest, EvalJudgeResponse, ReservedEvalJudgeClient};
 pub(crate) use eval_runtime::*;
 use execution::{
     AgentCliRequest, ExecutionWorker, ExecutionWorkerOutcome, InlineExecutionWorker,
-    QueueBackedExecutionWorker, run_agent_cli, run_execution_job, truncate_output,
+    QueueBackedExecutionWorker, claim_execution_job, run_agent_cli, run_claimed_execution_job,
+    truncate_output,
 };
 #[cfg(test)]
-use execution::{codex_jsonl_event_type, parse_codex_jsonl};
+use execution::{codex_jsonl_event_type, parse_codex_jsonl, run_execution_job};
 #[cfg(test)]
 use execution_queue::{ExecutionJobRequest, ExecutionQueueBackend};
 use execution_queue::{ExecutionJobStatus, ExecutionQueue};
@@ -239,6 +257,7 @@ pub(crate) use provider_governance_runtime::*;
 pub(crate) use provider_mcp_runtime::*;
 pub(crate) use remote_computer_events::{
     record_remote_computer_attachment_event, record_remote_computer_job_assignment_event,
+    record_remote_computer_job_assignment_event_for_execution_claim,
     record_remote_computer_lease_event, record_remote_computer_sidecar_heartbeat_event,
     record_remote_computer_state_lock_event,
 };
@@ -257,7 +276,8 @@ pub(crate) use remote_computer_runtime::{
     cleanup_remote_computer_lease_runtime, cleanup_remote_computer_session_runtimes,
     delete_remote_computer_runtime_resource, metadata_with_remote_computer_runtime_identity,
     remote_computer_runner_request_is_exec, remote_computer_runner_response_for_audit,
-    remote_computer_runtime_identity, required_remote_computer_runtime_identity,
+    remote_computer_runtime_identity, replay_remote_computer_lease_runtime_cleanup_evidence,
+    required_remote_computer_runtime_identity,
 };
 pub(crate) use remote_computer_sidecars::{
     build_remote_computer_sidecar_recovery_readiness, build_remote_computer_sidecar_supervision,

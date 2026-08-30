@@ -2,7 +2,8 @@ use serde_json::json;
 
 use crate::{
     AppError, AppState, RemoteComputerAttachment, RemoteComputerJobAssignment, RemoteComputerLease,
-    RemoteComputerSidecarHeartbeat, RemoteComputerStateLock, execution_queue, new_audit_log,
+    RemoteComputerSidecarHeartbeat, RemoteComputerStateLock, deterministic_record_id,
+    execution_queue, new_audit_log,
 };
 
 pub(crate) async fn record_remote_computer_lease_event(
@@ -86,6 +87,34 @@ pub(crate) async fn record_remote_computer_job_assignment_event(
     job: &execution_queue::ExecutionJob,
     event_type: &str,
 ) -> Result<(), AppError> {
+    record_remote_computer_job_assignment_event_inner(state, assignment, job, event_type, None)
+        .await
+}
+
+pub(crate) async fn record_remote_computer_job_assignment_event_for_execution_claim(
+    state: &AppState,
+    assignment: &RemoteComputerJobAssignment,
+    job: &execution_queue::ExecutionJob,
+    event_type: &str,
+    owner_status: crate::ExecutionJobStatus,
+) -> Result<(), AppError> {
+    record_remote_computer_job_assignment_event_inner(
+        state,
+        assignment,
+        job,
+        event_type,
+        Some(owner_status),
+    )
+    .await
+}
+
+async fn record_remote_computer_job_assignment_event_inner(
+    state: &AppState,
+    assignment: &RemoteComputerJobAssignment,
+    job: &execution_queue::ExecutionJob,
+    event_type: &str,
+    owner_status: Option<crate::ExecutionJobStatus>,
+) -> Result<(), AppError> {
     let details = json!({
         "assignment_id": assignment.id,
         "execution_job_id": assignment.execution_job_id,
@@ -100,26 +129,53 @@ pub(crate) async fn record_remote_computer_job_assignment_event(
         "metadata": assignment.metadata,
         "execution_enabled": false
     });
-    state
-        .append_event(
-            "system",
-            None,
-            assignment.session_id,
-            event_type,
-            details.clone(),
-        )
-        .await?;
-    state
-        .append_audit_log(new_audit_log(
-            Some(assignment.session_id),
-            "system",
-            None,
-            event_type,
-            "remote_computer_job_assignment",
-            Some(assignment.id),
-            details,
-        ))
-        .await?;
+    let event_id = deterministic_record_id(
+        assignment.id,
+        "remote-computer-assignment-event",
+        &[event_type],
+    );
+    if let Some(status) = owner_status.as_ref() {
+        state
+            .append_event_once_for_execution_claim(
+                job,
+                status.clone(),
+                event_id,
+                "system",
+                None,
+                assignment.session_id,
+                event_type,
+                details.clone(),
+            )
+            .await?;
+    } else {
+        state
+            .append_event_once(
+                event_id,
+                "system",
+                None,
+                assignment.session_id,
+                event_type,
+                details.clone(),
+            )
+            .await?;
+    }
+    let mut audit = new_audit_log(
+        Some(assignment.session_id),
+        "system",
+        None,
+        event_type,
+        "remote_computer_job_assignment",
+        Some(assignment.id),
+        details,
+    );
+    audit.id = deterministic_record_id(event_id, "audit", &[event_type]);
+    if let Some(status) = owner_status {
+        state
+            .append_audit_log_for_execution_claim(job, status, audit)
+            .await?;
+    } else {
+        state.append_audit_log(audit).await?;
+    }
     Ok(())
 }
 

@@ -25,6 +25,7 @@ pub(crate) async fn build_worker_readiness(
     let mut running_jobs = 0usize;
     let mut completed_jobs = 0usize;
     let mut failed_jobs = 0usize;
+    let mut outcome_unknown_jobs = 0usize;
     let mut retryable_jobs = 0usize;
     let mut leased_jobs = 0usize;
     let mut stale_leases = 0usize;
@@ -40,25 +41,39 @@ pub(crate) async fn build_worker_readiness(
                     _ => job.enqueued_at,
                 });
             }
-            ExecutionJobStatus::Running | ExecutionJobStatus::CancelRequested => running_jobs += 1,
+            ExecutionJobStatus::Running
+            | ExecutionJobStatus::Executing
+            | ExecutionJobStatus::Finalizing
+            | ExecutionJobStatus::CancelRequested => running_jobs += 1,
             ExecutionJobStatus::Completed => completed_jobs += 1,
             ExecutionJobStatus::Failed => failed_jobs += 1,
+            ExecutionJobStatus::OutcomeUnknown => {
+                failed_jobs += 1;
+                outcome_unknown_jobs += 1;
+            }
             ExecutionJobStatus::Canceled => {}
         }
         if job.attempt_count > 0
             && job.attempt_count < job.max_attempts
-            && job.status != ExecutionJobStatus::Completed
-            && job.status != ExecutionJobStatus::Canceled
+            && (matches!(
+                job.status,
+                ExecutionJobStatus::Queued | ExecutionJobStatus::Running
+            ) || (job.status == ExecutionJobStatus::Finalizing && job.last_error.is_some()))
         {
             retryable_jobs += 1;
         }
         if job.lease_expires_at.is_some() {
             leased_jobs += 1;
         }
-        if job.status == ExecutionJobStatus::Running
-            && job
-                .lease_expires_at
-                .is_some_and(|lease_expires_at| lease_expires_at < generated_at)
+        if matches!(
+            job.status,
+            ExecutionJobStatus::Running
+                | ExecutionJobStatus::Executing
+                | ExecutionJobStatus::Finalizing
+                | ExecutionJobStatus::CancelRequested
+        ) && job
+            .lease_expires_at
+            .is_some_and(|lease_expires_at| lease_expires_at < generated_at)
         {
             stale_leases += 1;
             if let Some(lease_expires_at) = job.lease_expires_at {
@@ -161,12 +176,22 @@ pub(crate) async fn build_worker_readiness(
             ),
         });
     }
-    if failed_jobs > 0 {
+    let exhausted_failed_jobs = failed_jobs - outcome_unknown_jobs;
+    if exhausted_failed_jobs > 0 {
         attention_items.push(WorkerReadinessAttentionItem {
             kind: "failed_jobs_present".to_string(),
             severity: "critical".to_string(),
             message: format!(
-                "{failed_jobs} execution job(s) exhausted attempts and require triage"
+                "{exhausted_failed_jobs} execution job(s) exhausted attempts and require triage"
+            ),
+        });
+    }
+    if outcome_unknown_jobs > 0 {
+        attention_items.push(WorkerReadinessAttentionItem {
+            kind: "outcome_unknown_jobs_present".to_string(),
+            severity: "critical".to_string(),
+            message: format!(
+                "{outcome_unknown_jobs} execution job outcome(s) require reconciliation before retry"
             ),
         });
     }

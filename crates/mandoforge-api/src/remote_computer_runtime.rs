@@ -9,7 +9,7 @@ use crate::remote_computer_runner::{
 };
 use crate::{
     AppError, AppState, RemoteComputer, RemoteComputerJobAssignment, RemoteComputerLease,
-    UpdateRemoteComputerLease, new_audit_log, record_remote_computer_lease_event,
+    UpdateRemoteComputerLease, deterministic_record_id, new_audit_log,
 };
 
 pub(crate) const REMOTE_COMPUTER_RUNTIME_IDENTITY_METADATA_KEY: &str = "runtime_identity";
@@ -295,6 +295,8 @@ pub(crate) async fn cleanup_remote_computer_lease_runtime(
         ));
     }
     if lease.status != "leased" {
+        replay_remote_computer_lease_runtime_cleanup_evidence(state, lease, assignment, reason)
+            .await?;
         return Ok(json!({
             "status": "already_converged",
             "lease_id": lease.id,
@@ -411,12 +413,7 @@ pub(crate) async fn cleanup_remote_computer_lease_runtime(
             },
         )
         .await?;
-    record_remote_computer_lease_event(
-        state,
-        &updated_lease,
-        "remote_computer.lease_runtime_cleaned",
-    )
-    .await?;
+    record_remote_computer_lease_runtime_cleaned_event(state, &updated_lease).await?;
     record_remote_computer_runtime_cleanup_evidence(
         state,
         &updated_lease,
@@ -437,6 +434,75 @@ pub(crate) async fn cleanup_remote_computer_lease_runtime(
         "remote_computer_status": if on_demand { "attention" } else { "available" },
         "runtime": runtime_evidence,
     }))
+}
+
+pub(crate) async fn replay_remote_computer_lease_runtime_cleanup_evidence(
+    state: &AppState,
+    lease: &RemoteComputerLease,
+    assignment: Option<&RemoteComputerJobAssignment>,
+    reason: &str,
+) -> Result<(), AppError> {
+    if lease.metadata["runtime_cleanup_reason"].as_str() != Some(reason) {
+        return Ok(());
+    }
+    let runtime = lease
+        .metadata
+        .get("runtime_cleanup")
+        .cloned()
+        .unwrap_or_else(|| json!({"delete_attempted": false, "delete_status": "not_required"}));
+    record_remote_computer_lease_runtime_cleaned_event(state, lease).await?;
+    record_remote_computer_runtime_cleanup_evidence(
+        state,
+        lease,
+        assignment,
+        reason,
+        "completed",
+        &runtime,
+    )
+    .await
+}
+
+async fn record_remote_computer_lease_runtime_cleaned_event(
+    state: &AppState,
+    lease: &RemoteComputerLease,
+) -> Result<(), AppError> {
+    let event_type = "remote_computer.lease_runtime_cleaned";
+    let details = json!({
+        "lease_id": lease.id,
+        "remote_computer_id": lease.remote_computer_id,
+        "session_id": lease.session_id,
+        "status": lease.status,
+        "worker_id": lease.worker_id,
+        "lease_expires_at": lease.lease_expires_at,
+        "heartbeat_at": lease.heartbeat_at,
+        "metadata": lease.metadata,
+        "execution_enabled": false
+    });
+    let event_id = deterministic_record_id(lease.id, "remote-computer-lease-event", &[event_type]);
+    if let Some(session_id) = lease.session_id {
+        state
+            .append_event_once(
+                event_id,
+                "system",
+                None,
+                session_id,
+                event_type,
+                details.clone(),
+            )
+            .await?;
+    }
+    let mut audit = new_audit_log(
+        lease.session_id,
+        "system",
+        None,
+        event_type,
+        "remote_computer_lease",
+        Some(lease.id),
+        details,
+    );
+    audit.id = deterministic_record_id(event_id, "audit", &[event_type]);
+    state.append_audit_log(audit).await?;
+    Ok(())
 }
 
 pub(crate) async fn cleanup_remote_computer_session_runtimes(
@@ -495,21 +561,38 @@ async fn record_remote_computer_runtime_cleanup_evidence(
         "runtime": runtime,
     });
     if let Some(session_id) = lease.session_id {
+        let event_id = deterministic_record_id(
+            lease.id,
+            "remote-computer-runtime-cleanup-event",
+            &[reason, status],
+        );
         state
-            .append_event("system", None, session_id, event_type, details.clone())
+            .append_event_once(
+                event_id,
+                "system",
+                None,
+                session_id,
+                event_type,
+                details.clone(),
+            )
             .await?;
     }
-    state
-        .append_audit_log(new_audit_log(
-            lease.session_id,
-            "system",
-            None,
-            event_type,
-            "remote_computer",
-            Some(lease.remote_computer_id),
-            details,
-        ))
-        .await?;
+    let event_id = deterministic_record_id(
+        lease.id,
+        "remote-computer-runtime-cleanup-event",
+        &[reason, status],
+    );
+    let mut audit = new_audit_log(
+        lease.session_id,
+        "system",
+        None,
+        event_type,
+        "remote_computer",
+        Some(lease.remote_computer_id),
+        details,
+    );
+    audit.id = deterministic_record_id(event_id, "audit", &[event_type]);
+    state.append_audit_log(audit).await?;
     Ok(())
 }
 

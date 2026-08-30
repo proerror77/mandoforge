@@ -12,20 +12,24 @@ use std::{
 };
 use uuid::Uuid;
 
+use crate::execution::{
+    publish_execution_completion_tail, recover_expired_execution_with_durable_outcome,
+};
 use crate::{
     AppError, AppState, CreateRemoteComputerJobAssignment, ExecutionJobStatus, Permission,
     RemoteComputerJobAssignment, Role, SessionLoopJob, SessionStatus, StoreBackend,
     WorkerLoadValidationRun, WorkerReadinessReport, authorize_collection_request,
     authorize_execution_job_run, authorize_request, authorize_session_loop_job_run,
-    build_worker_readiness, cleanup_remote_computer_lease_runtime,
+    build_worker_readiness, cleanup_remote_computer_lease_runtime, deterministic_record_id,
     enforce_worker_environment_binding, enforce_worker_pool_binding,
     ensure_http_execution_process_role, ensure_worker_process_role, environment_worker_pool,
     execute_worker_load_validation, header_value, new_audit_log, principal_from_request,
     reconcile_workflow_steps_after_session_loop_job, record_remote_computer_job_assignment_event,
-    run_execution_job_with_lease_renewal, run_session_loop_with_lease_renewal,
-    session_accepts_worker_execution, set_managed_session_status,
-    visible_session_ids_for_principal, worker_environment_scope_required,
-    worker_scope_headers_present,
+    record_remote_computer_job_assignment_event_for_execution_claim,
+    replay_remote_computer_lease_runtime_cleanup_evidence, run_execution_job_with_lease_renewal,
+    run_session_loop_with_lease_renewal, session_accepts_worker_execution,
+    set_managed_session_status, visible_session_ids_for_principal,
+    worker_environment_scope_required, worker_scope_headers_present,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -103,11 +107,13 @@ pub(crate) async fn worker_list_execution_jobs(
     let worker_pool = worker_pool_from_headers(headers);
     let worker_pool_environment_ids =
         worker_pool_environment_ids(state, worker_pool.as_deref()).await?;
+    let visible_session_ids = visible_session_ids_for_principal(state, &principal).await?;
     Ok(state
         .execution_queue
         .list()
         .await?
         .into_iter()
+        .filter(|job| visible_session_ids.contains(&job.session_id))
         .filter(|job| {
             has_worker_scope || !worker_environment_scope_required() || job.environment_id.is_none()
         })
@@ -142,10 +148,12 @@ pub(crate) async fn worker_list_session_loop_jobs(
     let worker_pool = worker_pool_from_headers(headers);
     let worker_pool_environment_ids =
         worker_pool_environment_ids(state, worker_pool.as_deref()).await?;
+    let visible_session_ids = visible_session_ids_for_principal(state, &principal).await?;
     Ok(state
         .list_session_loop_jobs()
         .await?
         .into_iter()
+        .filter(|job| visible_session_ids.contains(&job.session_id))
         .filter(|job| {
             has_worker_scope || !worker_environment_scope_required() || job.environment_id.is_none()
         })
@@ -170,6 +178,7 @@ pub(crate) async fn worker_run_session_loop_job(
 ) -> Result<SessionLoopJob, AppError> {
     let principal = principal_from_request(state, headers).await?;
     trusted_worker_principal(state, &principal)?;
+    authorize_session_loop_job_run(state, headers, id).await?;
     let worker_id = trusted_worker_id(headers)?;
     run_session_loop_job_as_worker(state, id, headers, &worker_id).await
 }
@@ -181,6 +190,7 @@ pub(crate) async fn worker_run_execution_job(
 ) -> Result<crate::execution_queue::ExecutionJob, AppError> {
     let principal = principal_from_request(state, headers).await?;
     trusted_worker_principal(state, &principal)?;
+    authorize_execution_job_run(state, headers, id).await?;
     let worker_id = trusted_worker_id(headers)?;
     run_execution_job_as_worker(state, id, headers, &worker_id).await
 }
@@ -313,9 +323,30 @@ async fn run_execution_job_as_worker(
     let job = state.execution_queue.get(id).await?;
     enforce_worker_environment_binding(state, headers, job.session_id, job.environment_id).await?;
     enforce_worker_pool_binding(state, headers, job.session_id, job.environment_id).await?;
+    if job.status == ExecutionJobStatus::Completed
+        && job.finalization_details["stage"] == "completion_pending"
+    {
+        publish_execution_completion_tail(state, &job).await?;
+        return state.execution_queue.get(id).await;
+    }
+    if job.status == ExecutionJobStatus::CancelRequested {
+        let owned = job.worker_id.as_deref() == Some(worker_id)
+            && job
+                .lease_expires_at
+                .is_some_and(|lease_expires_at| lease_expires_at > chrono::Utc::now());
+        let claimed = if owned {
+            job
+        } else {
+            state
+                .execution_queue
+                .claim_cancellation(id, worker_id)
+                .await?
+        };
+        return finalize_execution_cancellation(state, &claimed).await;
+    }
     let finished = run_execution_job_with_lease_renewal(state, id, worker_id).await?;
-    if finished.status == ExecutionJobStatus::Canceled {
-        record_execution_canceled(state, &finished, worker_id, "worker lease loop").await?;
+    if finished.status == ExecutionJobStatus::CancelRequested {
+        return finalize_execution_cancellation(state, &finished).await;
     }
     Ok(finished)
 }
@@ -327,58 +358,124 @@ pub(crate) async fn worker_recover_execution_cancellation(
 ) -> Result<crate::execution_queue::ExecutionJob, AppError> {
     let principal = principal_from_request(state, headers).await?;
     trusted_worker_principal(state, &principal)?;
+    authorize_execution_job_run(state, headers, id).await?;
     let worker_id = trusted_worker_id(headers)?;
     let job = state.execution_queue.get(id).await?;
     enforce_worker_environment_binding(state, headers, job.session_id, job.environment_id).await?;
     enforce_worker_pool_binding(state, headers, job.session_id, job.environment_id).await?;
-    let canceled = state
+    if job.status != ExecutionJobStatus::CancelRequested {
+        return Err(AppError::not_found("execution job not found"));
+    }
+    let claimed = state
         .execution_queue
-        .acknowledge_canceled_expired(id, chrono::Utc::now())
+        .claim_cancellation(job.id, &worker_id)
         .await?;
-    record_execution_canceled(state, &canceled, &worker_id, "expired cancel request").await?;
-    Ok(canceled)
+    finalize_execution_cancellation(state, &claimed).await
 }
 
-async fn record_execution_canceled(
+pub(crate) async fn worker_record_execution_outcome_unknown(
+    state: &AppState,
+    id: Uuid,
+    headers: &HeaderMap,
+) -> Result<crate::execution_queue::ExecutionJob, AppError> {
+    let principal = principal_from_request(state, headers).await?;
+    trusted_worker_principal(state, &principal)?;
+    authorize_execution_job_run(state, headers, id).await?;
+    let worker_id = trusted_worker_id(headers)?;
+    let job = state.execution_queue.get(id).await?;
+    enforce_worker_environment_binding(state, headers, job.session_id, job.environment_id).await?;
+    enforce_worker_pool_binding(state, headers, job.session_id, job.environment_id).await?;
+    let now = chrono::Utc::now();
+    if job.status != ExecutionJobStatus::Executing
+        || job
+            .lease_expires_at
+            .is_some_and(|lease_expires_at| lease_expires_at > now)
+    {
+        return Err(AppError::not_found("execution job not found"));
+    }
+    recover_expired_execution_with_durable_outcome(state, &job, &worker_id).await
+}
+
+async fn finalize_execution_cancellation(
     state: &AppState,
     job: &crate::execution_queue::ExecutionJob,
-    worker_id: &str,
-    reason: &str,
-) -> Result<(), AppError> {
+) -> Result<crate::execution_queue::ExecutionJob, AppError> {
+    let job = state
+        .execution_queue
+        .begin_cancellation_cleanup(
+            job.id,
+            job.worker_id.as_deref().unwrap_or(""),
+            job.claim_generation,
+        )
+        .await?;
+    record_execution_cancel_requested(state, &job).await?;
+    propagate_remote_computer_execution_cancel(state, &job).await?;
+    ensure_execution_cancellation_claim(state, &job).await?;
+    let event_type = "execution.canceled";
+    let event_id = deterministic_record_id(job.id, "execution-cancellation-event", &[event_type]);
+    let details = json!({
+        "execution_job_id": job.id,
+        "approval_id": job.approval_id,
+        "tool_call_id": job.tool_call_id,
+        "tool": job.tool_name,
+        "attempt_count": job.attempt_count,
+        "cancellation_confirmed": true,
+        "reason": "remote cleanup completed before cancellation terminal state",
+    });
     state
-        .append_event(
+        .append_event_once_for_execution_claim(
+            &job,
+            ExecutionJobStatus::CancelRequested,
+            event_id,
             "worker",
             Some(job.id),
             job.session_id,
-            "execution.canceled",
-            json!({
-                "execution_job_id": job.id,
-                "approval_id": job.approval_id,
-                "tool_call_id": job.tool_call_id,
-                "tool": job.tool_name,
-                "worker_id": worker_id,
-                "cancellation_confirmed": true,
-                "reason": reason,
-            }),
+            event_type,
+            details.clone(),
         )
         .await?;
+    let mut audit = new_audit_log(
+        Some(job.session_id),
+        "worker",
+        Some(job.id),
+        event_type,
+        "execution_job",
+        Some(job.id),
+        details,
+    );
+    audit.id = deterministic_record_id(event_id, "audit", &[event_type]);
     state
-        .append_audit_log(new_audit_log(
-            Some(job.session_id),
-            "worker",
-            Some(job.id),
-            "execution.canceled",
-            "execution_job",
-            Some(job.id),
-            json!({
-                "tool": job.tool_name,
-                "worker_id": worker_id,
-                "cancellation_confirmed": true,
-                "reason": reason,
-            }),
-        ))
+        .append_audit_log_for_execution_claim(&job, ExecutionJobStatus::CancelRequested, audit)
         .await?;
-    Ok(())
+    ensure_execution_cancellation_claim(state, &job).await?;
+    state
+        .execution_queue
+        .acknowledge_canceled(
+            job.id,
+            job.worker_id.as_deref().unwrap_or(""),
+            job.claim_generation,
+        )
+        .await
+}
+
+async fn ensure_execution_cancellation_claim(
+    state: &AppState,
+    job: &crate::execution_queue::ExecutionJob,
+) -> Result<(), AppError> {
+    let current = state.execution_queue.get(job.id).await?;
+    if current.status == ExecutionJobStatus::CancelRequested
+        && current.worker_id == job.worker_id
+        && current.claim_generation == job.claim_generation
+        && current
+            .lease_expires_at
+            .is_some_and(|lease_expires_at| lease_expires_at > chrono::Utc::now())
+    {
+        Ok(())
+    } else {
+        Err(AppError::not_found(
+            "execution cancellation claim is no longer owned",
+        ))
+    }
 }
 
 async fn list_execution_jobs(
@@ -556,62 +653,83 @@ async fn cancel_execution_job_route(
     .await?;
     if matches!(
         job.status,
-        ExecutionJobStatus::CancelRequested
+        ExecutionJobStatus::Executing
+            | ExecutionJobStatus::Finalizing
             | ExecutionJobStatus::Completed
             | ExecutionJobStatus::Failed
+            | ExecutionJobStatus::OutcomeUnknown
             | ExecutionJobStatus::Canceled
     ) {
         return Ok(Json(job));
     }
-    let propagation = propagate_remote_computer_execution_cancel(&state, &job).await?;
-    let canceled = state.execution_queue.cancel(id).await?;
-    let cancellation_pending = canceled.status == ExecutionJobStatus::CancelRequested;
-    let event_type = if cancellation_pending {
-        "execution.cancel_requested"
-    } else {
-        "execution.canceled"
+    let cancel_requested = state.execution_queue.cancel(id).await?;
+    if cancel_requested.status != ExecutionJobStatus::CancelRequested {
+        return Ok(Json(cancel_requested));
+    }
+    if job.status == ExecutionJobStatus::Running {
+        record_execution_cancel_requested(&state, &cancel_requested).await?;
+        return Ok(Json(cancel_requested));
+    }
+    let claimed = match state
+        .execution_queue
+        .claim_cancellation(cancel_requested.id, "api-cancel")
+        .await
+    {
+        Ok(claimed) => claimed,
+        Err(_) => return Ok(Json(state.execution_queue.get(cancel_requested.id).await?)),
     };
+    Ok(Json(
+        finalize_execution_cancellation(&state, &claimed).await?,
+    ))
+}
+
+async fn record_execution_cancel_requested(
+    state: &AppState,
+    job: &crate::execution_queue::ExecutionJob,
+) -> Result<(), AppError> {
+    let event_type = "execution.cancel_requested";
+    let event_id = deterministic_record_id(job.id, "execution-cancellation-event", &[event_type]);
+    let details = json!({
+        "execution_job_id": job.id,
+        "approval_id": job.approval_id,
+        "tool_call_id": job.tool_call_id,
+        "tool": job.tool_name,
+        "attempt_count": job.attempt_count,
+        "reason": "authorized cancellation awaiting worker cleanup",
+    });
     state
-        .append_event(
+        .append_event_once_for_execution_claim(
+            job,
+            ExecutionJobStatus::CancelRequested,
+            event_id,
             "worker",
-            Some(canceled.id),
-            canceled.session_id,
+            Some(job.id),
+            job.session_id,
             event_type,
-            json!({
-                "execution_job_id": canceled.id,
-                "approval_id": canceled.approval_id,
-                "tool_call_id": canceled.tool_call_id,
-                "tool": canceled.tool_name,
-                "previous_status": job.status,
-                "remote_computer": propagation,
-                "cancellation_confirmed": !cancellation_pending,
-            }),
+            details.clone(),
         )
         .await?;
+    let mut audit = new_audit_log(
+        Some(job.session_id),
+        "worker",
+        Some(job.id),
+        event_type,
+        "execution_job",
+        Some(job.id),
+        details,
+    );
+    audit.id = deterministic_record_id(event_id, "audit", &[event_type]);
     state
-        .append_audit_log(new_audit_log(
-            Some(canceled.session_id),
-            "worker",
-            Some(canceled.id),
-            event_type,
-            "execution_job",
-            Some(canceled.id),
-            json!({
-                "tool": canceled.tool_name,
-                "previous_status": job.status,
-                "remote_computer": propagation,
-                "cancellation_confirmed": !cancellation_pending,
-            }),
-        ))
-        .await?;
-    Ok(Json(canceled))
+        .append_audit_log_for_execution_claim(job, ExecutionJobStatus::CancelRequested, audit)
+        .await
+        .map(|_| ())
 }
 
 async fn assign_execution_job_remote_computer_lease(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     headers: HeaderMap,
-    Json(input): Json<CreateRemoteComputerJobAssignment>,
+    Json(mut input): Json<CreateRemoteComputerJobAssignment>,
 ) -> Result<Json<RemoteComputerJobAssignment>, AppError> {
     let job = state.execution_queue.get(id).await?;
     authorize_request(
@@ -627,6 +745,28 @@ async fn assign_execution_job_remote_computer_lease(
             "only queued or running execution jobs can be assigned to remote computer leases",
         ));
     }
+    let attempt_count = if job.status == ExecutionJobStatus::Queued {
+        job.attempt_count + 1
+    } else {
+        job.attempt_count
+    };
+    let claim_generation = if job.status == ExecutionJobStatus::Queued {
+        job.claim_generation + 1
+    } else {
+        job.claim_generation
+    };
+    let mut metadata = input.metadata.take().unwrap_or_else(|| json!({}));
+    let Some(metadata) = metadata.as_object_mut() else {
+        return Err(AppError::bad_request(
+            "remote computer assignment metadata must be an object",
+        ));
+    };
+    metadata.insert("execution_attempt_count".to_string(), json!(attempt_count));
+    metadata.insert(
+        "execution_claim_generation".to_string(),
+        json!(claim_generation),
+    );
+    input.metadata = Some(Value::Object(metadata.clone()));
     let assignment = state
         .create_remote_computer_job_assignment(id, job.session_id, input)
         .await?;
@@ -723,14 +863,22 @@ pub(crate) async fn propagate_remote_computer_execution_cancel(
     state: &AppState,
     job: &crate::execution_queue::ExecutionJob,
 ) -> Result<Value, AppError> {
-    let Some(assignment) = state
-        .list_remote_computer_job_assignments()
-        .await?
-        .into_iter()
-        .find(|assignment| {
+    let attempt_count = job.attempt_count.max(1);
+    let assignments = state.list_remote_computer_job_assignments().await?;
+    let assignment = assignments.iter().find(|assignment| {
+        assignment.execution_job_id == job.id
+            && assignment.metadata["execution_attempt_count"].as_i64()
+                == Some(i64::from(attempt_count))
+            && matches!(assignment.status.as_str(), "assigned" | "canceled")
+    });
+    let Some(assignment) = assignment else {
+        if assignments.iter().any(|assignment| {
             assignment.execution_job_id == job.id && assignment.status == "assigned"
-        })
-    else {
+        }) {
+            return Err(AppError::internal(
+                "active Remote Computer assignment does not match the canceled execution attempt",
+            ));
+        }
         return Ok(json!({"assigned": false, "pod_delete_attempted": false}));
     };
     let lease = state
@@ -739,25 +887,86 @@ pub(crate) async fn propagate_remote_computer_execution_cancel(
         .into_iter()
         .find(|lease| lease.id == assignment.lease_id)
         .ok_or_else(|| AppError::not_found("Remote computer lease not found"))?;
+    if assignment.status == "canceled" {
+        replay_remote_computer_lease_runtime_cleanup_evidence(
+            state,
+            &lease,
+            None,
+            "execution_job_cancel",
+        )
+        .await?;
+        record_remote_computer_job_assignment_event_for_execution_claim(
+            state,
+            assignment,
+            job,
+            "remote_computer.execution_handoff_canceled",
+            ExecutionJobStatus::CancelRequested,
+        )
+        .await?;
+        return Ok(json!({
+            "assigned": false,
+            "assignment_id": assignment.id,
+            "remote_computer_id": assignment.remote_computer_id,
+            "lease_id": assignment.lease_id,
+            "cancellation_evidence_replayed": true,
+        }));
+    }
+    let cleanup_operation_id = deterministic_record_id(
+        job.id,
+        "execution-cancellation-cleanup",
+        &[attempt_count.to_string().as_str()],
+    );
+    state
+        .finalize_remote_computer_job_assignment_for_attempt(
+            assignment.id,
+            job.id,
+            attempt_count,
+            job.claim_generation,
+            job.worker_id.as_deref().unwrap_or(""),
+            ExecutionJobStatus::CancelRequested,
+            "assigned",
+            json!({
+                "execution_cancellation_cleanup": {
+                    "operation_id": cleanup_operation_id,
+                    "status": "started"
+                }
+            }),
+        )
+        .await?;
     let cleanup = cleanup_remote_computer_lease_runtime(
         state,
         &lease,
-        Some(&assignment),
+        None,
         "execution_job_cancel",
         "canceled",
     )
     .await?;
+    ensure_execution_cancellation_claim(state, job).await?;
     let updated = state
-        .list_remote_computer_job_assignments()
-        .await?
-        .into_iter()
-        .find(|candidate| candidate.id == assignment.id)
-        .ok_or_else(|| AppError::not_found("Remote computer job assignment not found"))?;
-    record_remote_computer_job_assignment_event(
+        .finalize_remote_computer_job_assignment_for_attempt(
+            assignment.id,
+            job.id,
+            attempt_count,
+            job.claim_generation,
+            job.worker_id.as_deref().unwrap_or(""),
+            ExecutionJobStatus::CancelRequested,
+            "canceled",
+            json!({
+                "execution_cancellation_confirmed": true,
+                "execution_cancellation_cleanup": {
+                    "operation_id": cleanup_operation_id,
+                    "status": "completed",
+                    "result": cleanup.clone()
+                }
+            }),
+        )
+        .await?;
+    record_remote_computer_job_assignment_event_for_execution_claim(
         state,
         &updated,
         job,
         "remote_computer.execution_handoff_canceled",
+        ExecutionJobStatus::CancelRequested,
     )
     .await?;
     Ok(json!({

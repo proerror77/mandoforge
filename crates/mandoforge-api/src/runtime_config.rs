@@ -41,7 +41,14 @@ pub(crate) fn select_execution_queue_backend(
         } else {
             ExecutionQueueBackendSelection::Memory
         }),
-        "memory" => Ok(ExecutionQueueBackendSelection::Memory),
+        "memory" => {
+            if has_postgres {
+                anyhow::bail!(
+                    "MANDOFORGE_EXECUTION_QUEUE_BACKEND=memory cannot be combined with a Postgres store because claim fencing requires the queue and store to share one source of truth"
+                );
+            }
+            Ok(ExecutionQueueBackendSelection::Memory)
+        }
         "postgres" => {
             if has_postgres {
                 Ok(ExecutionQueueBackendSelection::Postgres)
@@ -114,7 +121,12 @@ pub(crate) fn execution_queue_from_env(
         matches!(store, StoreBackend::Postgres(_)),
     )?;
     match (selection, store) {
-        (ExecutionQueueBackendSelection::Memory, _) => Ok(ExecutionQueue::default()),
+        (ExecutionQueueBackendSelection::Memory, StoreBackend::Memory(_)) => {
+            Ok(ExecutionQueue::default())
+        }
+        (ExecutionQueueBackendSelection::Memory, StoreBackend::Postgres(_)) => {
+            anyhow::bail!("in-memory execution queue selected with a Postgres store")
+        }
         (ExecutionQueueBackendSelection::Postgres, StoreBackend::Postgres(pool)) => {
             Ok(ExecutionQueue::postgres(pool.clone(), tenant_id))
         }

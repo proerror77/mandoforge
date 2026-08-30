@@ -10,6 +10,7 @@ use tracing::error;
 pub(crate) struct AppError {
     pub(crate) status: StatusCode,
     pub(crate) message: String,
+    pub(crate) execution_outcome_known: bool,
 }
 
 impl AppError {
@@ -17,6 +18,7 @@ impl AppError {
         Self {
             status: StatusCode::UNAUTHORIZED,
             message: message.into(),
+            execution_outcome_known: false,
         }
     }
 
@@ -24,6 +26,7 @@ impl AppError {
         Self {
             status: StatusCode::NOT_FOUND,
             message: message.into(),
+            execution_outcome_known: false,
         }
     }
 
@@ -31,6 +34,7 @@ impl AppError {
         Self {
             status: StatusCode::BAD_REQUEST,
             message: message.into(),
+            execution_outcome_known: false,
         }
     }
 
@@ -38,6 +42,7 @@ impl AppError {
         Self {
             status: StatusCode::CONFLICT,
             message: message.into(),
+            execution_outcome_known: false,
         }
     }
 
@@ -45,6 +50,7 @@ impl AppError {
         Self {
             status: StatusCode::FORBIDDEN,
             message: message.into(),
+            execution_outcome_known: false,
         }
     }
 
@@ -54,7 +60,13 @@ impl AppError {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: "internal server error".to_string(),
+            execution_outcome_known: false,
         }
+    }
+
+    pub(crate) fn with_known_execution_outcome(mut self) -> Self {
+        self.execution_outcome_known = true;
+        self
     }
 }
 
@@ -70,6 +82,7 @@ impl From<anyhow::Error> for AppError {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: error.to_string(),
+            execution_outcome_known: false,
         }
     }
 }
@@ -92,6 +105,7 @@ impl From<sqlx::Error> for AppError {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: error.to_string(),
+            execution_outcome_known: false,
         }
     }
 }
@@ -102,6 +116,7 @@ impl From<reqwest::Error> for AppError {
         Self {
             status: StatusCode::BAD_GATEWAY,
             message: "provider transport error".to_string(),
+            execution_outcome_known: false,
         }
     }
 }
@@ -117,6 +132,7 @@ impl From<StatusCode> for AppError {
         Self {
             status,
             message: status.to_string(),
+            execution_outcome_known: false,
         }
     }
 }

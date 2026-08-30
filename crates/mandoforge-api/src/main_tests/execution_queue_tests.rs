@@ -1,5 +1,4 @@
 use super::*;
-use chrono::{Duration as ChronoDuration, Utc};
 
 #[test]
 fn in_memory_store_requires_explicit_local_opt_in() {
@@ -22,8 +21,12 @@ fn selects_execution_queue_backend_fail_closed() {
         select_execution_queue_backend(Some("auto"), true).expect("auto postgres"),
         ExecutionQueueBackendSelection::Postgres
     );
+    assert!(
+        select_execution_queue_backend(Some("memory"), true).is_err(),
+        "Postgres store with a memory queue would split claim fencing across sources of truth"
+    );
     assert_eq!(
-        select_execution_queue_backend(Some("memory"), true).expect("forced memory"),
+        select_execution_queue_backend(Some("memory"), false).expect("local memory"),
         ExecutionQueueBackendSelection::Memory
     );
     assert!(
@@ -164,7 +167,7 @@ async fn api_process_http_run_routes_require_insecure_dev_auth() {
 }
 
 #[tokio::test]
-async fn expired_execution_cancellation_can_be_recovered_after_lease_expiry() {
+async fn cancellation_acknowledgement_requires_a_pending_request() {
     let queue = ExecutionQueue::default();
     let job = queue
         .enqueue(ExecutionJobRequest {
@@ -178,18 +181,29 @@ async fn expired_execution_cancellation_can_be_recovered_after_lease_expiry() {
         .await
         .expect("queue job");
 
-    queue.start(job.id, "dead-worker").await.expect("start job");
+    let running = queue.start(job.id, "worker-a").await.expect("start job");
+    queue
+        .acknowledge_canceled(job.id, "worker-a", running.claim_generation)
+        .await
+        .expect_err("running job is not ready for cancellation acknowledgement");
     queue.cancel(job.id).await.expect("request cancellation");
 
+    let cleanup = queue
+        .begin_cancellation_cleanup(job.id, "worker-a", running.claim_generation)
+        .await
+        .expect("begin cancellation cleanup");
+    let fresh = queue
+        .get(job.id)
+        .await
+        .expect("read cancellation cleanup claim");
     queue
-        .acknowledge_canceled_expired(job.id, Utc::now())
+        .begin_cancellation_cleanup(job.id, "worker-a", fresh.claim_generation)
         .await
-        .expect_err("live lease should not be recoverable");
-
+        .expect_err("fresh generation cannot claim cleanup twice");
     let recovered = queue
-        .acknowledge_canceled_expired(job.id, Utc::now() + ChronoDuration::minutes(10))
+        .acknowledge_canceled(job.id, "worker-a", cleanup.claim_generation)
         .await
-        .expect("expired cancel request should recover");
+        .expect("cleanup owner acknowledges the pending cancellation");
     assert_eq!(recovered.status, ExecutionJobStatus::Canceled);
     assert!(recovered.completed_at.is_some());
 }

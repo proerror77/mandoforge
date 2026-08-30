@@ -21,6 +21,14 @@ const SESSION_EVENT_BROADCAST_CAPACITY: usize = 1024;
 const SESSION_EVENT_CATCH_UP_INTERVAL: Duration = Duration::from_secs(15);
 const POSTGRES_SESSION_EVENT_CHANNEL: &str = "mf_session_events";
 
+#[derive(Clone)]
+struct ExecutionClaimFence {
+    job_id: Uuid,
+    worker_id: String,
+    claim_generation: i64,
+    status: crate::ExecutionJobStatus,
+}
+
 pub(crate) enum SessionEventSubscription {
     Memory(broadcast::Receiver<SessionEvent>),
     Postgres(PostgresSessionEventSubscription),
@@ -138,6 +146,79 @@ fn session_event_broadcaster() -> &'static broadcast::Sender<SessionEvent> {
 }
 
 impl AppState {
+    pub(crate) async fn has_unresolved_execution_result_at_or_before(
+        &self,
+        session_id: Uuid,
+        event_seq: i64,
+    ) -> Result<bool, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let jobs = self.execution_queue.list().await?;
+                let store = inner.read().await;
+                let Some(events) = store.events.get(&session_id) else {
+                    return Ok(false);
+                };
+                let hidden_tool_call_ids =
+                    jobs.iter()
+                        .filter(|job| {
+                            job.session_id == session_id && !events.iter().any(|event| {
+                                crate::session_loop_runtime::execution_completion_event_matches_job(
+                                    event, job,
+                                )
+                            })
+                        })
+                        .map(|job| job.tool_call_id)
+                        .collect::<std::collections::HashSet<_>>();
+                Ok(events.iter().any(|event| {
+                    event.seq <= event_seq
+                        && event.event_type == "tool.result"
+                        && event
+                            .actor_id
+                            .is_some_and(|actor_id| hidden_tool_call_ids.contains(&actor_id))
+                }))
+            }
+            StoreBackend::Postgres(pool) => {
+                let blocked = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS(
+                         SELECT 1
+                         FROM session_events AS event
+                         JOIN execution_jobs AS job
+                           ON job.tenant_id = event.tenant_id
+                          AND job.session_id = event.session_id
+                          AND job.tool_call_id = event.actor_id
+                         WHERE event.tenant_id = $1
+                           AND event.session_id = $2
+                           AND event.event_type = 'tool.result'
+                           AND event.seq <= $3
+                           AND (
+                               job.status <> 'completed'
+                               OR NOT EXISTS (
+                                   SELECT 1
+                                   FROM session_events AS completion
+                                   WHERE completion.tenant_id = job.tenant_id
+                                     AND completion.session_id = job.session_id
+                                     AND completion.event_type = 'execution.completed'
+                                     AND completion.actor_type = 'worker'
+                                     AND completion.actor_id = job.id
+                                     AND completion.payload ->> 'status' = 'completed'
+                                     AND completion.payload ->> 'execution_job_id' = job.id::text
+                                     AND completion.payload ->> 'tool_call_id' = job.tool_call_id::text
+                                     AND completion.payload ->> 'attempt_count' = job.attempt_count::text
+                                     AND completion.payload ->> 'claim_generation' = job.claim_generation::text
+                               )
+                           )
+                     )",
+                )
+                .bind(self.current_tenant_id())
+                .bind(session_id)
+                .bind(event_seq)
+                .fetch_one(pool)
+                .await?;
+                Ok(blocked)
+            }
+        }
+    }
+
     pub(crate) async fn list_events(
         &self,
         session_id: Uuid,
@@ -197,18 +278,115 @@ impl AppState {
         event_type: &str,
         payload: Value,
     ) -> Result<SessionEvent, AppError> {
+        self.append_event_with_id(
+            Uuid::new_v4(),
+            false,
+            None,
+            actor_type,
+            actor_id,
+            session_id,
+            event_type,
+            payload,
+        )
+        .await
+    }
+
+    pub(crate) async fn append_event_once(
+        &self,
+        event_id: Uuid,
+        actor_type: &str,
+        actor_id: Option<Uuid>,
+        session_id: Uuid,
+        event_type: &str,
+        payload: Value,
+    ) -> Result<SessionEvent, AppError> {
+        self.append_event_with_id(
+            event_id, true, None, actor_type, actor_id, session_id, event_type, payload,
+        )
+        .await
+    }
+
+    pub(crate) async fn append_event_once_for_execution_claim(
+        &self,
+        job: &crate::execution_queue::ExecutionJob,
+        status: crate::ExecutionJobStatus,
+        event_id: Uuid,
+        actor_type: &str,
+        actor_id: Option<Uuid>,
+        session_id: Uuid,
+        event_type: &str,
+        payload: Value,
+    ) -> Result<SessionEvent, AppError> {
+        let worker_id = job
+            .worker_id
+            .clone()
+            .ok_or_else(|| AppError::not_found("execution job claim has no worker"))?;
+        self.append_event_with_id(
+            event_id,
+            true,
+            Some(ExecutionClaimFence {
+                job_id: job.id,
+                worker_id,
+                claim_generation: job.claim_generation,
+                status,
+            }),
+            actor_type,
+            actor_id,
+            session_id,
+            event_type,
+            payload,
+        )
+        .await
+    }
+
+    async fn append_event_with_id(
+        &self,
+        event_id: Uuid,
+        idempotent: bool,
+        execution_claim: Option<ExecutionClaimFence>,
+        actor_type: &str,
+        actor_id: Option<Uuid>,
+        session_id: Uuid,
+        event_type: &str,
+        payload: Value,
+    ) -> Result<SessionEvent, AppError> {
         let event = match &self.store {
             StoreBackend::Memory(inner) => {
+                let _claim_guard = match execution_claim.as_ref() {
+                    Some(claim) => Some(
+                        self.execution_queue
+                            .lock_owned_claim(
+                                claim.job_id,
+                                &claim.worker_id,
+                                claim.claim_generation,
+                                claim.status.clone(),
+                            )
+                            .await?,
+                    ),
+                    None => None,
+                };
                 let mut store = inner.write().await;
                 if !store.sessions.contains_key(&session_id) {
                     return Err(AppError::not_found("session not found"));
+                }
+                if idempotent
+                    && let Some(existing) = store
+                        .events
+                        .values()
+                        .flatten()
+                        .find(|event| event.id == event_id)
+                {
+                    validate_idempotent_event_identity(
+                        existing, actor_type, actor_id, session_id, event_type, &payload,
+                    )?;
+                    return Ok(existing.clone());
                 }
                 let seq = store
                     .events
                     .get(&session_id)
                     .map_or(1, |events| events.len() as i64 + 1);
                 let event = SessionEvent {
-                    id: Uuid::new_v4(),
+                    id: event_id,
                     session_id,
                     seq,
                     parent_event_id: None,
@@ -231,6 +409,31 @@ impl AppState {
                     return Err(AppError::not_found("session not found"));
                 }
                 let mut tx = pool.begin().await?;
+                if let Some(claim) = execution_claim.as_ref() {
+                    let owned = sqlx::query_scalar::<_, i32>(
+                        "SELECT 1
+                         FROM execution_jobs
+                         WHERE tenant_id = $1
+                           AND id = $2
+                           AND status = $3
+                           AND worker_id = $4
+                           AND claim_generation = $5
+                           AND lease_expires_at > now()
+                         FOR UPDATE",
+                    )
+                    .bind(tenant_id)
+                    .bind(claim.job_id)
+                    .bind(claim.status.as_str())
+                    .bind(&claim.worker_id)
+                    .bind(claim.claim_generation)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+                    if owned.is_none() {
+                        return Err(AppError::not_found(
+                            "execution job claim is no longer owned",
+                        ));
+                    }
+                }
                 sqlx::query(
                     "SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2::uuid::text, 0))",
                 )
@@ -238,6 +441,25 @@ impl AppState {
                 .bind(session_id)
                 .execute(&mut *tx)
                 .await?;
+                if idempotent {
+                    let existing = sqlx::query(
+                        "SELECT id, session_id, seq, parent_event_id, actor_type, actor_id, event_type, payload, created_at
+                         FROM session_events
+                         WHERE tenant_id = $1 AND id = $2",
+                    )
+                    .bind(tenant_id)
+                    .bind(event_id)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+                    if let Some(row) = existing {
+                        let event = event_from_row(row)?;
+                        validate_idempotent_event_identity(
+                            &event, actor_type, actor_id, session_id, event_type, &payload,
+                        )?;
+                        tx.commit().await?;
+                        return Ok(event);
+                    }
+                }
                 let row = sqlx::query(
                     "WITH next_seq AS (
                         SELECT COALESCE(MAX(seq), 0) + 1 AS seq
@@ -252,7 +474,7 @@ impl AppState {
                 )
                 .bind(tenant_id)
                 .bind(session_id)
-                .bind(Uuid::new_v4())
+                .bind(event_id)
                 .bind(actor_type)
                 .bind(actor_id)
                 .bind(event_type)
@@ -275,6 +497,28 @@ impl AppState {
             publish_session_event(&event);
         }
         Ok(event)
+    }
+}
+
+fn validate_idempotent_event_identity(
+    event: &SessionEvent,
+    actor_type: &str,
+    actor_id: Option<Uuid>,
+    session_id: Uuid,
+    event_type: &str,
+    payload: &Value,
+) -> Result<(), AppError> {
+    if event.actor_type == actor_type
+        && event.actor_id == actor_id
+        && event.session_id == session_id
+        && event.event_type == event_type
+        && event.payload == *payload
+    {
+        Ok(())
+    } else {
+        Err(AppError::bad_request(
+            "idempotent session event identity collision",
+        ))
     }
 }
 

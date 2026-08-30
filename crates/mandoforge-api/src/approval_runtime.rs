@@ -176,6 +176,49 @@ pub(crate) async fn consume_valid_approval_commit_token_for_tool_call(
     approval: &Approval,
     tool_call: &ToolCall,
 ) -> Result<ApprovalCommitToken, AppError> {
+    let token = validate_approval_commit_token_for_tool_call(state, approval, tool_call).await?;
+    let consumed = state.consume_approval_commit_token(token.id).await?;
+    state
+        .append_event(
+            "system",
+            Some(consumed.id),
+            approval.session_id,
+            "approval_commit_token.consumed",
+            json!({
+                "approval_commit_token_id": consumed.id,
+                "approval_id": approval.id,
+                "tool_call_id": tool_call.id,
+                "task_grant_id": consumed.task_grant_id,
+                "tool": consumed.tool_name,
+                "normalized_args_hash": consumed.normalized_args_hash
+            }),
+        )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(approval.session_id),
+            "worker",
+            Some(consumed.id),
+            "approval_commit_token.consumed",
+            "approval_commit_token",
+            Some(consumed.id),
+            json!({
+                "approval_id": approval.id,
+                "tool_call_id": tool_call.id,
+                "task_grant_id": consumed.task_grant_id,
+                "tool": consumed.tool_name,
+                "normalized_args_hash": consumed.normalized_args_hash
+            }),
+        ))
+        .await?;
+    Ok(consumed)
+}
+
+pub(crate) async fn validate_approval_commit_token_for_tool_call(
+    state: &AppState,
+    approval: &Approval,
+    tool_call: &ToolCall,
+) -> Result<ApprovalCommitToken, AppError> {
     let token = state
         .approval_commit_token_for_approval(approval.id)
         .await?
@@ -232,41 +275,7 @@ pub(crate) async fn consume_valid_approval_commit_token_for_tool_call(
             "approval commit token digest does not match current tool call args",
         ));
     }
-    let consumed = state.consume_approval_commit_token(token.id).await?;
-    state
-        .append_event(
-            "system",
-            Some(consumed.id),
-            approval.session_id,
-            "approval_commit_token.consumed",
-            json!({
-                "approval_commit_token_id": consumed.id,
-                "approval_id": approval.id,
-                "tool_call_id": tool_call.id,
-                "task_grant_id": consumed.task_grant_id,
-                "tool": consumed.tool_name,
-                "normalized_args_hash": consumed.normalized_args_hash
-            }),
-        )
-        .await?;
-    state
-        .append_audit_log(new_audit_log(
-            Some(approval.session_id),
-            "worker",
-            Some(consumed.id),
-            "approval_commit_token.consumed",
-            "approval_commit_token",
-            Some(consumed.id),
-            json!({
-                "approval_id": approval.id,
-                "tool_call_id": tool_call.id,
-                "task_grant_id": consumed.task_grant_id,
-                "tool": consumed.tool_name,
-                "normalized_args_hash": consumed.normalized_args_hash
-            }),
-        ))
-        .await?;
-    Ok(consumed)
+    Ok(token)
 }
 
 async fn record_rejected_approval_tool_result(

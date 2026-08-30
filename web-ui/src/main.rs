@@ -1893,16 +1893,24 @@ pub(crate) fn operator_queue_rows(data: &ConsoleData) -> Vec<(String, String, St
 pub(crate) fn is_active_status(status: &str) -> bool {
     matches!(
         status,
-        "running" | "queued" | "claimed" | "in_progress" | "requires_action"
+        "running"
+            | "executing"
+            | "finalizing"
+            | "cancel_requested"
+            | "queued"
+            | "claimed"
+            | "in_progress"
+            | "requires_action"
     )
 }
 
 pub(crate) fn board_column(status: &str) -> &'static str {
     match status {
         "ready" | "queued" | "claimable" => "ready",
-        "running" | "claimed" | "in_progress" => "running",
-        "review" | "requires_review" | "requires_action" | "pending_approval" => "review",
-        "blocked" | "failed" | "cancelled" => "blocked",
+        "running" | "executing" | "finalizing" | "claimed" | "in_progress" => "running",
+        "review" | "requires_review" | "requires_action" | "pending_approval"
+        | "cancel_requested" => "review",
+        "blocked" | "failed" | "outcome_unknown" | "canceled" | "cancelled" => "blocked",
         "completed" | "done" | "succeeded" => "done",
         _ => "backlog",
     }
@@ -1917,12 +1925,13 @@ pub(crate) fn status_tone(status: &str) -> &'static str {
         | "promoted"
         | "released"
         | "enterprise_product_complete" => "good",
-        "running" | "queued" | "claimed" | "in_progress" | "installed" | "staged" => "info",
-        "pending" | "requires_action" | "review" | "warning" | "attention" | "pilot_ready" => {
-            "warn"
-        }
+        "running" | "executing" | "finalizing" | "queued" | "claimed" | "in_progress"
+        | "installed" | "staged" => "info",
+        "pending" | "requires_action" | "cancel_requested" | "review" | "warning" | "attention"
+        | "pilot_ready" => "warn",
         "active_trigger_failed" => "warn",
-        "failed" | "blocked" | "critical" | "cancelled" | "rolled_back" => "bad",
+        "failed" | "outcome_unknown" | "blocked" | "critical" | "canceled" | "cancelled"
+        | "rolled_back" => "bad",
         _ => "neutral",
     }
 }

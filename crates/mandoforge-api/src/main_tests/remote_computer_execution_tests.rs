@@ -66,11 +66,48 @@ async fn execution_cancel_converges_assignment_lease_and_repeated_call() {
             CreateRemoteComputerJobAssignment {
                 lease_id: lease.id,
                 assigned_by: Some("cancel-worker".to_string()),
-                metadata: None,
+                metadata: Some(json!({
+                    "execution_attempt_count": 1,
+                    "execution_claim_generation": 1
+                })),
             },
         )
         .await
         .expect("create assignment");
+    state
+        .execution_queue
+        .cancel(job.id)
+        .await
+        .expect("request cancellation");
+    let job = state
+        .execution_queue
+        .claim_cancellation(job.id, "cancel-worker")
+        .await
+        .expect("claim cancellation cleanup");
+    let (first, second) = tokio::join!(
+        state.execution_queue.begin_cancellation_cleanup(
+            job.id,
+            "cancel-worker",
+            job.claim_generation
+        ),
+        state.execution_queue.begin_cancellation_cleanup(
+            job.id,
+            "cancel-worker",
+            job.claim_generation
+        )
+    );
+    assert_ne!(first.is_ok(), second.is_ok());
+    let job = first.or(second).expect("one cleanup future owns the claim");
+    let fresh = state
+        .execution_queue
+        .get(job.id)
+        .await
+        .expect("read current cleanup claim");
+    state
+        .execution_queue
+        .begin_cancellation_cleanup(job.id, "cancel-worker", fresh.claim_generation)
+        .await
+        .expect_err("cleanup cannot be claimed twice with a fresh generation");
 
     let cleanup =
         handlers::execution_jobs::propagate_remote_computer_execution_cancel(&state, &job)
@@ -78,11 +115,27 @@ async fn execution_cancel_converges_assignment_lease_and_repeated_call() {
             .expect("cancel cleanup");
     assert_eq!(cleanup["assigned"], true);
     assert_eq!(cleanup["runtime_cleanup"]["lease_status"], "released");
+    inner
+        .write()
+        .await
+        .events
+        .get_mut(&session.id)
+        .expect("session events")
+        .retain(|event| event.event_type != "remote_computer.execution_handoff_canceled");
     let repeated =
         handlers::execution_jobs::propagate_remote_computer_execution_cancel(&state, &job)
             .await
             .expect("repeated cancel cleanup");
     assert_eq!(repeated["assigned"], false);
+    assert_eq!(repeated["cancellation_evidence_replayed"], true);
+    assert!(
+        state
+            .list_events(session.id)
+            .await
+            .expect("list cancellation events")
+            .iter()
+            .any(|event| event.event_type == "remote_computer.execution_handoff_canceled")
+    );
 
     let persisted_assignment = state
         .list_remote_computer_job_assignments()

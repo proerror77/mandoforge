@@ -4236,12 +4236,12 @@ async fn execution_queue_tracks_job_lifecycle() {
     assert!(running.lease_expires_at.is_some());
 
     let renewed = queue
-        .renew_started(queued.id, "test-worker", 600)
+        .renew_started(queued.id, "test-worker", running.claim_generation, 600)
         .await
         .expect("owning worker renews job lease");
     assert!(renewed.lease_expires_at > running.lease_expires_at);
     let stale_renewal = queue
-        .renew_started(queued.id, "stale-worker", 600)
+        .renew_started(queued.id, "stale-worker", running.claim_generation, 600)
         .await
         .expect_err("stale worker cannot renew job lease");
     assert_eq!(stale_renewal.status, StatusCode::NOT_FOUND);
@@ -4261,19 +4261,35 @@ async fn execution_queue_tracks_job_lifecycle() {
         })
         .await
         .expect("queue fenced job");
-    queue
+    let fenced_running = queue
         .start(fenced.id, "worker-a")
         .await
         .expect("start fenced job");
     let stale_complete = queue
-        .complete_started(fenced.id, "worker-b")
+        .begin_executing_started(fenced.id, "worker-b", fenced_running.claim_generation)
         .await
-        .expect_err("stale worker cannot complete running job");
+        .expect_err("stale worker cannot commit running job");
     assert_eq!(stale_complete.status, StatusCode::NOT_FOUND);
-    let fenced_requeued = queue
-        .retry_or_fail_started(fenced.id, "worker-a", "transient")
+    let retry_finalizing = queue
+        .begin_finalizing_started(
+            fenced.id,
+            "worker-a",
+            fenced_running.claim_generation,
+            Some("transient"),
+            json!({"stage": "transient"}),
+        )
         .await
-        .expect("owning worker can retry running job");
+        .expect("owning worker can finalize a failed attempt");
+    assert_eq!(retry_finalizing.status, ExecutionJobStatus::Finalizing);
+    let fenced_requeued = queue
+        .finish_finalizing_started(
+            fenced.id,
+            "worker-a",
+            retry_finalizing.claim_generation,
+            true,
+        )
+        .await
+        .expect("owning worker can requeue a finalized failed attempt");
     assert_eq!(fenced_requeued.status, ExecutionJobStatus::Queued);
     let fenced_restart = queue
         .start(fenced.id, "worker-b")
@@ -4281,12 +4297,38 @@ async fn execution_queue_tracks_job_lifecycle() {
         .expect("restart fenced job");
     assert_eq!(fenced_restart.worker_id.as_deref(), Some("worker-b"));
     let stale_retry = queue
-        .retry_or_fail_started(fenced.id, "worker-a", "late failure")
+        .begin_finalizing_started(
+            fenced.id,
+            "worker-a",
+            fenced_running.claim_generation,
+            Some("late failure"),
+            json!({"stage": "late_failure"}),
+        )
         .await
         .expect_err("stale worker cannot retry another worker's job");
     assert_eq!(stale_retry.status, StatusCode::NOT_FOUND);
+    queue
+        .begin_executing_started(fenced.id, "worker-b", fenced_restart.claim_generation)
+        .await
+        .expect("owning worker commits execution attempt");
+    let completion_finalizing = queue
+        .begin_finalizing_started(
+            fenced.id,
+            "worker-b",
+            fenced_restart.claim_generation,
+            None,
+            json!({}),
+        )
+        .await
+        .expect("owning worker begins completion finalization");
+    assert_eq!(completion_finalizing.status, ExecutionJobStatus::Finalizing);
     let fenced_completed = queue
-        .complete_started(fenced.id, "worker-b")
+        .finish_finalizing_started(
+            fenced.id,
+            "worker-b",
+            completion_finalizing.claim_generation,
+            false,
+        )
         .await
         .expect("owning worker completes running job");
     assert_eq!(fenced_completed.status, ExecutionJobStatus::Completed);
@@ -4346,7 +4388,29 @@ async fn execution_queue_tracks_job_lifecycle() {
         })
         .await
         .expect("queue cancelable job");
-    let canceled = queue.cancel(cancelable.id).await.expect("cancel job");
+    let cancel_requested = queue.cancel(cancelable.id).await.expect("cancel job");
+    assert_eq!(cancel_requested.status, ExecutionJobStatus::CancelRequested);
+    assert!(cancel_requested.completed_at.is_none());
+    let cancellation_claim = queue
+        .claim_cancellation(cancelable.id, "cancel-owner")
+        .await
+        .expect("claim cancellation cleanup");
+    let cancellation_cleanup = queue
+        .begin_cancellation_cleanup(
+            cancelable.id,
+            "cancel-owner",
+            cancellation_claim.claim_generation,
+        )
+        .await
+        .expect("begin cancellation cleanup");
+    let canceled = queue
+        .acknowledge_canceled(
+            cancelable.id,
+            "cancel-owner",
+            cancellation_cleanup.claim_generation,
+        )
+        .await
+        .expect("acknowledge cleanup");
     assert_eq!(canceled.status, ExecutionJobStatus::Canceled);
     assert!(canceled.completed_at.is_some());
     assert!(canceled.lease_expires_at.is_none());
@@ -4362,7 +4426,7 @@ async fn execution_queue_tracks_job_lifecycle() {
         })
         .await
         .expect("queue running cancellation job");
-    queue
+    let running_cancel_claim = queue
         .start(running_cancel.id, "cancel-owner")
         .await
         .expect("start running cancellation job");
@@ -4372,16 +4436,142 @@ async fn execution_queue_tracks_job_lifecycle() {
         .expect("request running cancellation");
     assert_eq!(requested.status, ExecutionJobStatus::CancelRequested);
     assert!(requested.completed_at.is_none());
-    queue
-        .acknowledge_canceled_started(running_cancel.id, "stale-worker")
+    let running_cancel_cleanup = queue
+        .begin_cancellation_cleanup(
+            running_cancel.id,
+            "cancel-owner",
+            running_cancel_claim.claim_generation,
+        )
         .await
-        .expect_err("stale worker cannot acknowledge cancellation");
+        .expect("begin running cancellation cleanup");
     let confirmed = queue
-        .acknowledge_canceled_started(running_cancel.id, "cancel-owner")
+        .acknowledge_canceled(
+            running_cancel.id,
+            "cancel-owner",
+            running_cancel_cleanup.claim_generation,
+        )
         .await
-        .expect("owning worker acknowledges cancellation");
+        .expect("cleanup owner acknowledges cancellation");
     assert_eq!(confirmed.status, ExecutionJobStatus::Canceled);
     assert!(confirmed.completed_at.is_some());
+}
+
+#[tokio::test]
+async fn deterministic_session_event_append_is_idempotent_and_collision_safe() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "idempotent event".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create session");
+    let event_id = Uuid::new_v4();
+
+    let first = state
+        .append_event_once(
+            event_id,
+            "worker",
+            Some(event_id),
+            session.id,
+            "execution.completed",
+            json!({"attempt": 1}),
+        )
+        .await
+        .expect("append event once");
+    let replay = state
+        .append_event_once(
+            event_id,
+            "worker",
+            Some(event_id),
+            session.id,
+            "execution.completed",
+            json!({"attempt": 1}),
+        )
+        .await
+        .expect("replay same event identity");
+
+    assert_eq!(replay.id, first.id);
+    assert_eq!(replay.seq, first.seq);
+    assert_eq!(replay.payload, json!({"attempt": 1}));
+    assert_eq!(
+        state
+            .list_events(session.id)
+            .await
+            .expect("list events")
+            .into_iter()
+            .filter(|event| event.id == event_id)
+            .count(),
+        1
+    );
+    let payload_collision = state
+        .append_event_once(
+            event_id,
+            "worker",
+            Some(event_id),
+            session.id,
+            "execution.completed",
+            json!({"attempt": 2}),
+        )
+        .await
+        .expect_err("same id cannot change event payload");
+    assert_eq!(payload_collision.status, StatusCode::BAD_REQUEST);
+    let collision = state
+        .append_event_once(
+            event_id,
+            "worker",
+            Some(event_id),
+            session.id,
+            "execution.failed",
+            json!({}),
+        )
+        .await
+        .expect_err("same id cannot name another event");
+    assert_eq!(collision.status, StatusCode::BAD_REQUEST);
+
+    let audit_id = Uuid::new_v4();
+    let mut audit = new_audit_log(
+        Some(session.id),
+        "worker",
+        Some(event_id),
+        "execution.completed",
+        "execution_job",
+        Some(event_id),
+        json!({"attempt": 1}),
+    );
+    audit.id = audit_id;
+    state
+        .append_audit_log(audit.clone())
+        .await
+        .expect("append audit once");
+    let replay = state
+        .append_audit_log(audit.clone())
+        .await
+        .expect("replay same audit identity");
+    assert_eq!(replay.details, json!({"attempt": 1}));
+    audit.details = json!({"attempt": 2});
+    let details_collision = state
+        .append_audit_log(audit.clone())
+        .await
+        .expect_err("same id cannot change audit details");
+    assert_eq!(details_collision.status, StatusCode::BAD_REQUEST);
+    audit.details = json!({"attempt": 1});
+    audit.action = "execution.failed".to_string();
+    let collision = state
+        .append_audit_log(audit)
+        .await
+        .expect_err("same id cannot name another audit action");
+    assert_eq!(collision.status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -4675,6 +4865,18 @@ async fn execution_job_cancel_route_marks_job_canceled_and_audits() {
     .await;
     assert_eq!(canceled.status, ExecutionJobStatus::Canceled);
     assert!(canceled.completed_at.is_some());
+    let repeated: execution_queue::ExecutionJob = request_json(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/execution-jobs/{}/cancel", job.id))
+            .header("x-mandoforge-subject", "operator-1")
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(repeated.status, ExecutionJobStatus::Canceled);
 
     let events: Vec<SessionEvent> = request_json(
         app.clone(),
@@ -4684,10 +4886,16 @@ async fn execution_job_cancel_route_marks_job_canceled_and_audits() {
             .expect("valid request"),
     )
     .await;
-    assert!(events.iter().any(|event| {
-        event.event_type == "execution.canceled"
-            && event.payload["execution_job_id"] == json!(job.id)
-    }));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| {
+                event.event_type == "execution.canceled"
+                    && event.payload["execution_job_id"] == json!(job.id)
+            })
+            .count(),
+        1
+    );
 
     let audit_logs: Vec<AuditLog> = request_json(
         app,
@@ -4699,10 +4907,91 @@ async fn execution_job_cancel_route_marks_job_canceled_and_audits() {
             .expect("valid request"),
     )
     .await;
-    assert!(
+    assert_eq!(
         audit_logs
             .iter()
-            .any(|log| { log.action == "execution.canceled" && log.resource_id == Some(job.id) })
+            .filter(|log| { log.action == "execution.canceled" && log.resource_id == Some(job.id) })
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn running_execution_cancel_waits_for_worker_cleanup_acknowledgement() {
+    let state = test_state_with_worker(Arc::new(QueueBackedExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "running cancellation".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create session");
+    let job = state
+        .execution_queue
+        .enqueue(ExecutionJobRequest {
+            session_id: session.id,
+            environment_id: None,
+            approval_id: Uuid::new_v4(),
+            tool_call_id: Uuid::new_v4(),
+            tool_name: "shell.exec".to_string(),
+            max_attempts: None,
+        })
+        .await
+        .expect("enqueue job");
+    state
+        .execution_queue
+        .start(job.id, "cancel-owner")
+        .await
+        .expect("start job");
+    let app = build_router(state.clone());
+
+    let requested: execution_queue::ExecutionJob = request_json(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/execution-jobs/{}/cancel", job.id))
+            .header("x-mandoforge-subject", "operator-1")
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid cancel request"),
+    )
+    .await;
+    assert_eq!(requested.status, ExecutionJobStatus::CancelRequested);
+    assert!(requested.completed_at.is_none());
+
+    let canceled: execution_queue::ExecutionJob = request_json(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/execution-jobs/{}/run", job.id))
+            .header("x-mandoforge-worker-id", "cancel-owner")
+            .body(Body::empty())
+            .expect("valid worker acknowledgement"),
+    )
+    .await;
+    assert_eq!(canceled.status, ExecutionJobStatus::Canceled);
+    assert!(canceled.completed_at.is_some());
+
+    let events = state.list_events(session.id).await.expect("list events");
+    assert!(
+        events
+            .iter()
+            .any(|event| event.event_type == "execution.cancel_requested")
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event.event_type == "execution.canceled")
     );
 }
 
@@ -20530,6 +20819,813 @@ fn complete_agent_sandbox_production_checks() -> Value {
 }
 
 #[tokio::test]
+async fn execution_result_is_hidden_until_completion_and_fake_completion_is_ignored() {
+    let state = test_state_with_worker(Arc::new(QueueBackedExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "execution projection trust".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create session");
+    let tool_call_id = Uuid::new_v4();
+    let job = state
+        .execution_queue
+        .enqueue(ExecutionJobRequest {
+            session_id: session.id,
+            environment_id: None,
+            approval_id: Uuid::new_v4(),
+            tool_call_id,
+            tool_name: "shell.exec".to_string(),
+            max_attempts: None,
+        })
+        .await
+        .expect("enqueue execution");
+    let running = state
+        .execution_queue
+        .start(job.id, "projection-worker")
+        .await
+        .expect("start execution");
+    let executing = state
+        .execution_queue
+        .begin_executing_started(job.id, "projection-worker", running.claim_generation)
+        .await
+        .expect("commit execution");
+    let tool_result = state
+        .append_event_once_for_execution_claim(
+            &executing,
+            ExecutionJobStatus::Executing,
+            Uuid::new_v4(),
+            "tool",
+            Some(tool_call_id),
+            session.id,
+            "tool.result",
+            json!({
+                "execution_job_id": job.id,
+                "tool_call_id": tool_call_id,
+                "tool": "shell.exec",
+                "content": {"approval": "approved"},
+                "execution_outcome_known": true,
+                "attempt_count": executing.attempt_count,
+                "claim_generation": executing.claim_generation
+            }),
+        )
+        .await
+        .expect("append tool result");
+
+    let hidden = build_harness_context(
+        &state,
+        session.id,
+        Some(tool_result.seq),
+        Some(tool_result.seq),
+    )
+    .await
+    .expect("build hidden context");
+    assert_eq!(hidden.pending_event_count, 0);
+    assert_eq!(hidden.approved_tool_result_count, 0);
+
+    let finalizing = state
+        .execution_queue
+        .begin_finalizing_started(
+            job.id,
+            "projection-worker",
+            executing.claim_generation,
+            None,
+            json!({"stage": "tool_execution"}),
+        )
+        .await
+        .expect("begin finalization");
+    let pending = state
+        .execution_queue
+        .prepare_completion_tail(job.id, "projection-worker", finalizing.claim_generation)
+        .await
+        .expect("prepare completion publication");
+    let completed = state
+        .execution_queue
+        .finish_finalizing_started(job.id, "projection-worker", pending.claim_generation, false)
+        .await
+        .expect("commit terminal execution state");
+    assert_eq!(completed.status, ExecutionJobStatus::Completed);
+    assert_eq!(
+        completed.finalization_details["stage"],
+        "completion_pending"
+    );
+    assert!(
+        state
+            .list_events(session.id)
+            .await
+            .expect("list pre-publication events")
+            .iter()
+            .all(|event| !execution_completion_event_matches_job(event, &completed))
+    );
+
+    let fake_completion = state
+        .append_event(
+            "worker",
+            Some(completed.id),
+            session.id,
+            "execution.completed",
+            json!({
+                "execution_job_id": completed.id,
+                "approval_id": completed.approval_id,
+                "tool_call_id": completed.tool_call_id,
+                "tool": completed.tool_name,
+                "status": "completed",
+                "worker_id": completed.worker_id,
+                "attempt_count": completed.attempt_count,
+                "claim_generation": completed.claim_generation - 1,
+                "reason": "stale execution generation"
+            }),
+        )
+        .await
+        .expect("append stale completion");
+    assert!(
+        project_session_event_to_loop(&state, &fake_completion)
+            .await
+            .expect("reject stale completion")
+            .is_none()
+    );
+
+    let later_user_message = state
+        .append_event(
+            "user",
+            None,
+            session.id,
+            "user.message",
+            json!({"message": "do not skip the hidden result"}),
+        )
+        .await
+        .expect("append later user message");
+    assert!(
+        project_session_event_to_loop(&state, &later_user_message)
+            .await
+            .expect("hold projection behind hidden result")
+            .is_none()
+    );
+
+    let still_hidden = build_harness_context(
+        &state,
+        session.id,
+        Some(tool_result.seq),
+        Some(tool_result.seq),
+    )
+    .await
+    .expect("completed status without marker stays hidden");
+    assert_eq!(still_hidden.pending_event_count, 0);
+    assert_eq!(still_hidden.approved_tool_result_count, 0);
+
+    let attempt_count = completed.attempt_count.to_string();
+    let claim_generation = completed.claim_generation.to_string();
+    let completion_event_id = deterministic_record_id(
+        completed.id,
+        "execution-completion-event",
+        &[attempt_count.as_str(), claim_generation.as_str()],
+    );
+    let completion_event = state
+        .append_event_once(
+            completion_event_id,
+            "worker",
+            Some(completed.id),
+            session.id,
+            "execution.completed",
+            json!({
+                "execution_job_id": completed.id,
+                "approval_id": completed.approval_id,
+                "tool_call_id": completed.tool_call_id,
+                "tool": completed.tool_name,
+                "status": "completed",
+                "worker_id": completed.worker_id,
+                "attempt_count": completed.attempt_count,
+                "claim_generation": completed.claim_generation,
+                "reason": "approved execution completed"
+            }),
+        )
+        .await
+        .expect("persist completion marker before simulated projection crash");
+    let post_marker_message = state
+        .append_event(
+            "user",
+            None,
+            session.id,
+            "user.message",
+            json!({"message": "arrived while completion projection was pending"}),
+        )
+        .await
+        .expect("append message after completion marker");
+    let recovered_projection = project_session_event_to_loop(&state, &post_marker_message)
+        .await
+        .expect("project later message with the pending completion floor")
+        .expect("later message repairs the completion projection gap");
+    assert_eq!(
+        recovered_projection.pending_event_seq_start,
+        Some(tool_result.seq)
+    );
+    assert_eq!(
+        recovered_projection.pending_event_seq_end,
+        Some(post_marker_message.seq)
+    );
+
+    execution::publish_execution_completion_tail(&state, &completed)
+        .await
+        .expect("publish completion after terminal state");
+    let published = state
+        .execution_queue
+        .get(completed.id)
+        .await
+        .expect("read published completion state");
+    assert_eq!(
+        published.finalization_details["stage"],
+        "completion_published"
+    );
+    let trusted_completion = state
+        .list_events(session.id)
+        .await
+        .expect("list completion events")
+        .into_iter()
+        .find(|event| execution_completion_event_matches_job(event, &published))
+        .expect("trusted completion marker");
+    assert_eq!(trusted_completion.id, completion_event.id);
+    assert!(trusted_completion.seq > later_user_message.seq);
+    let projected = state
+        .list_session_loop_jobs()
+        .await
+        .expect("list projected jobs")
+        .into_iter()
+        .find(|job| {
+            job.session_id == session.id
+                && job.pending_event_seq_start == Some(tool_result.seq)
+                && job.pending_event_seq_end == Some(post_marker_message.seq)
+        })
+        .expect("completion recovery projects the full deferred range");
+    assert_eq!(projected.pending_event_seq_start, Some(tool_result.seq));
+    assert_eq!(
+        projected.pending_event_seq_end,
+        Some(post_marker_message.seq)
+    );
+    let released = build_harness_context(
+        &state,
+        session.id,
+        projected.pending_event_seq_start,
+        projected.pending_event_seq_end,
+    )
+    .await
+    .expect("build released context");
+    assert_eq!(released.approved_tool_result_count, 1);
+    assert_eq!(released.execution_completed_count, 1);
+}
+
+#[tokio::test]
+async fn interleaved_execution_completions_release_the_earliest_pending_result() {
+    let state = test_state_with_worker(Arc::new(QueueBackedExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "interleaved completion projection".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create session");
+
+    let mut executing_jobs = Vec::new();
+    let mut result_events = Vec::new();
+    for label in ["A", "B"] {
+        let tool_call_id = Uuid::new_v4();
+        let job = state
+            .execution_queue
+            .enqueue(ExecutionJobRequest {
+                session_id: session.id,
+                environment_id: None,
+                approval_id: Uuid::new_v4(),
+                tool_call_id,
+                tool_name: "shell.exec".to_string(),
+                max_attempts: None,
+            })
+            .await
+            .expect("enqueue execution");
+        let running = state
+            .execution_queue
+            .start(job.id, "interleaved-worker")
+            .await
+            .expect("start execution");
+        let executing = state
+            .execution_queue
+            .begin_executing_started(job.id, "interleaved-worker", running.claim_generation)
+            .await
+            .expect("commit execution");
+        let result = state
+            .append_event_once_for_execution_claim(
+                &executing,
+                ExecutionJobStatus::Executing,
+                Uuid::new_v4(),
+                "tool",
+                Some(tool_call_id),
+                session.id,
+                "tool.result",
+                json!({
+                    "execution_job_id": executing.id,
+                    "tool_call_id": tool_call_id,
+                    "tool": executing.tool_name,
+                    "content": {"approval": "approved", "label": label},
+                    "execution_outcome_known": true,
+                    "attempt_count": executing.attempt_count,
+                    "claim_generation": executing.claim_generation
+                }),
+            )
+            .await
+            .expect("persist interleaved result");
+        executing_jobs.push(executing);
+        result_events.push(result);
+    }
+
+    let mut completed_jobs = Vec::new();
+    for executing in &executing_jobs {
+        let finalizing = state
+            .execution_queue
+            .begin_finalizing_started(
+                executing.id,
+                "interleaved-worker",
+                executing.claim_generation,
+                None,
+                json!({"stage": "tool_execution"}),
+            )
+            .await
+            .expect("begin finalization");
+        let pending = state
+            .execution_queue
+            .prepare_completion_tail(
+                executing.id,
+                "interleaved-worker",
+                finalizing.claim_generation,
+            )
+            .await
+            .expect("prepare completion");
+        let completed = state
+            .execution_queue
+            .finish_finalizing_started(
+                executing.id,
+                "interleaved-worker",
+                pending.claim_generation,
+                false,
+            )
+            .await
+            .expect("finish execution");
+        execution::publish_execution_completion_tail(&state, &completed)
+            .await
+            .expect("publish completion tail");
+        completed_jobs.push(completed);
+    }
+
+    let first_pending = state
+        .execution_queue
+        .get(completed_jobs[0].id)
+        .await
+        .expect("read first completion");
+    assert_eq!(
+        first_pending.finalization_details["stage"],
+        "completion_pending"
+    );
+    execution::publish_execution_completion_tail(&state, &first_pending)
+        .await
+        .expect("publish first completion after second releases the barrier");
+
+    let mut published_jobs = Vec::new();
+    for job in &completed_jobs {
+        published_jobs.push(
+            state
+                .execution_queue
+                .get(job.id)
+                .await
+                .expect("read published job"),
+        );
+    }
+    assert!(
+        published_jobs
+            .iter()
+            .all(|job| { job.finalization_details["stage"] == "completion_published" })
+    );
+    let events = state.list_events(session.id).await.expect("list events");
+    let last_completion_seq = events
+        .iter()
+        .filter(|event| {
+            published_jobs
+                .iter()
+                .any(|job| execution_completion_event_matches_job(event, job))
+        })
+        .map(|event| event.seq)
+        .max()
+        .expect("completion markers");
+    let projected = state
+        .list_session_loop_jobs()
+        .await
+        .expect("list projected jobs")
+        .into_iter()
+        .find(|job| job.session_id == session.id && job.status == SessionLoopJobStatus::Queued)
+        .expect("queued projection");
+    assert_eq!(
+        projected.pending_event_seq_start,
+        Some(result_events[0].seq)
+    );
+    assert_eq!(projected.pending_event_seq_end, Some(last_completion_seq));
+    let released = build_harness_context(
+        &state,
+        session.id,
+        projected.pending_event_seq_start,
+        projected.pending_event_seq_end,
+    )
+    .await
+    .expect("build released interleaved context");
+    assert_eq!(released.approved_tool_result_count, 2);
+    assert_eq!(released.execution_completed_count, 2);
+}
+
+#[tokio::test]
+async fn terminal_session_acknowledges_pending_execution_completion() {
+    let state = test_state_with_worker(Arc::new(QueueBackedExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "terminal completion publication".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create session");
+    let tool_call_id = Uuid::new_v4();
+    let job = state
+        .execution_queue
+        .enqueue(ExecutionJobRequest {
+            session_id: session.id,
+            environment_id: None,
+            approval_id: Uuid::new_v4(),
+            tool_call_id,
+            tool_name: "shell.exec".to_string(),
+            max_attempts: None,
+        })
+        .await
+        .expect("enqueue execution");
+    let running = state
+        .execution_queue
+        .start(job.id, "terminal-worker")
+        .await
+        .expect("start execution");
+    let executing = state
+        .execution_queue
+        .begin_executing_started(job.id, "terminal-worker", running.claim_generation)
+        .await
+        .expect("commit execution");
+    state
+        .append_event_once_for_execution_claim(
+            &executing,
+            ExecutionJobStatus::Executing,
+            Uuid::new_v4(),
+            "tool",
+            Some(tool_call_id),
+            session.id,
+            "tool.result",
+            json!({
+                "execution_job_id": executing.id,
+                "tool_call_id": tool_call_id,
+                "tool": executing.tool_name,
+                "content": {"approval": "approved"},
+                "execution_outcome_known": true,
+                "attempt_count": executing.attempt_count,
+                "claim_generation": executing.claim_generation
+            }),
+        )
+        .await
+        .expect("persist result");
+    let finalizing = state
+        .execution_queue
+        .begin_finalizing_started(
+            job.id,
+            "terminal-worker",
+            executing.claim_generation,
+            None,
+            json!({"stage": "tool_execution"}),
+        )
+        .await
+        .expect("begin finalization");
+    let pending = state
+        .execution_queue
+        .prepare_completion_tail(job.id, "terminal-worker", finalizing.claim_generation)
+        .await
+        .expect("prepare completion");
+    let completed = state
+        .execution_queue
+        .finish_finalizing_started(job.id, "terminal-worker", pending.claim_generation, false)
+        .await
+        .expect("finish execution");
+    set_managed_session_status(
+        &state,
+        session.id,
+        SessionStatus::Terminated,
+        "operator stopped session before completion projection",
+    )
+    .await
+    .expect("terminate session");
+
+    execution::publish_execution_completion_tail(&state, &completed)
+        .await
+        .expect("acknowledge terminal completion");
+    let published = state
+        .execution_queue
+        .get(job.id)
+        .await
+        .expect("read completion state");
+    assert_eq!(
+        published.finalization_details["stage"],
+        "completion_published"
+    );
+    assert!(
+        state
+            .list_session_loop_jobs()
+            .await
+            .expect("list loop jobs")
+            .into_iter()
+            .all(|job| job.session_id != session.id)
+    );
+}
+
+#[tokio::test]
+async fn expired_executing_recovers_known_outcomes_without_replaying_tools() {
+    let state = test_state_with_worker(Arc::new(QueueBackedExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "expired durable outcomes".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create session");
+    let mut jobs = Vec::new();
+    for name in ["result", "error", "unknown"] {
+        let now = Utc::now();
+        let tool_call = state
+            .insert_tool_call(ToolCall {
+                id: Uuid::new_v4(),
+                session_id: session.id,
+                event_id: None,
+                tool_name: "shell.exec".to_string(),
+                args: json!({"case": name}),
+                task_grant_id: None,
+                normalized_args_hash: None,
+                target_binding: json!({}),
+                status: "running".to_string(),
+                risk_level: "medium".to_string(),
+                policy_decision: json!({}),
+                result: None,
+                error: None,
+                started_at: Some(now),
+                completed_at: None,
+                created_at: now,
+            })
+            .await
+            .expect("insert tool call");
+        let job = state
+            .execution_queue
+            .enqueue(ExecutionJobRequest {
+                session_id: session.id,
+                environment_id: None,
+                approval_id: Uuid::new_v4(),
+                tool_call_id: tool_call.id,
+                tool_name: tool_call.tool_name,
+                max_attempts: Some(1),
+            })
+            .await
+            .expect("enqueue execution");
+        let running = state
+            .execution_queue
+            .start(job.id, "expired-owner")
+            .await
+            .expect("start execution");
+        let executing = state
+            .execution_queue
+            .begin_executing_started(job.id, "expired-owner", running.claim_generation)
+            .await
+            .expect("commit execution");
+        let executing = state
+            .execution_queue
+            .renew_started(job.id, "expired-owner", executing.claim_generation, 1)
+            .await
+            .expect("shorten execution lease");
+        jobs.push(executing);
+    }
+    state
+        .append_event_once_for_execution_claim(
+            &jobs[0],
+            ExecutionJobStatus::Executing,
+            Uuid::new_v4(),
+            "tool",
+            Some(jobs[0].tool_call_id),
+            session.id,
+            "tool.result",
+            json!({
+                "execution_job_id": jobs[0].id,
+                "tool_call_id": jobs[0].tool_call_id,
+                "tool": jobs[0].tool_name,
+                "content": {"approval": "approved", "value": "once"},
+                "execution_outcome_known": true,
+                "attempt_count": jobs[0].attempt_count,
+                "claim_generation": jobs[0].claim_generation
+            }),
+        )
+        .await
+        .expect("persist tool result");
+    state
+        .append_event_once_for_execution_claim(
+            &jobs[1],
+            ExecutionJobStatus::Executing,
+            Uuid::new_v4(),
+            "tool",
+            Some(jobs[1].tool_call_id),
+            session.id,
+            "tool.error",
+            json!({
+                "execution_job_id": jobs[1].id,
+                "tool_call_id": jobs[1].tool_call_id,
+                "tool": jobs[1].tool_name,
+                "content": {"error": "known failure"},
+                "execution_outcome_known": true,
+                "attempt_count": jobs[1].attempt_count,
+                "claim_generation": jobs[1].claim_generation
+            }),
+        )
+        .await
+        .expect("persist tool error");
+    state
+        .append_event_once_for_execution_claim(
+            &jobs[2],
+            ExecutionJobStatus::Executing,
+            Uuid::new_v4(),
+            "tool",
+            Some(jobs[2].tool_call_id),
+            session.id,
+            "tool.error",
+            json!({
+                "execution_job_id": jobs[2].id,
+                "tool_call_id": jobs[2].tool_call_id,
+                "tool": jobs[2].tool_name,
+                "content": {"error": "transport timeout"},
+                "execution_outcome_known": false,
+                "attempt_count": jobs[2].attempt_count,
+                "claim_generation": jobs[2].claim_generation
+            }),
+        )
+        .await
+        .expect("persist uncertain tool error");
+    let unknown_event_type = "execution.outcome_unknown";
+    let unknown_attempt = jobs[2].attempt_count.to_string();
+    state
+        .append_event_once_for_execution_claim(
+            &jobs[2],
+            ExecutionJobStatus::Executing,
+            deterministic_record_id(
+                jobs[2].id,
+                "execution-attempt-event",
+                &[unknown_attempt.as_str(), unknown_event_type],
+            ),
+            "worker",
+            Some(jobs[2].id),
+            session.id,
+            unknown_event_type,
+            json!({
+                "execution_job_id": jobs[2].id,
+                "approval_id": jobs[2].approval_id,
+                "tool_call_id": jobs[2].tool_call_id,
+                "tool": jobs[2].tool_name,
+                "attempt_count": jobs[2].attempt_count,
+                "reason": "execution outcome after side-effect commit requires reconciliation",
+                "requires_reconciliation": true
+            }),
+        )
+        .await
+        .expect("persist unknown evidence before simulated state-transition crash");
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+
+    let completed = crate::execution::recover_expired_execution_with_durable_outcome(
+        &state,
+        &jobs[0],
+        "recovery-worker",
+    )
+    .await
+    .expect("recover durable result");
+    let failed_finalizing = state
+        .execution_queue
+        .recover_expired_executing(
+            jobs[1].id,
+            "recovery-worker",
+            None,
+            json!({"stage": "outcome_reconciliation"}),
+        )
+        .await
+        .expect("claim durable error for reconciliation");
+    let failed =
+        crate::execution::run_claimed_execution_job(&state, &failed_finalizing, "recovery-worker")
+            .await
+            .expect("resume reconciliation after claim crash");
+    let unknown_finalizing = state
+        .execution_queue
+        .recover_expired_executing(
+            jobs[2].id,
+            "recovery-worker",
+            None,
+            json!({"stage": "outcome_reconciliation"}),
+        )
+        .await
+        .expect("claim unknown outcome for reconciliation");
+    let unknown =
+        crate::execution::run_claimed_execution_job(&state, &unknown_finalizing, "recovery-worker")
+            .await
+            .expect("resume unknown reconciliation after claim crash");
+    state
+        .append_event_once_for_execution_claim(
+            &jobs[2],
+            ExecutionJobStatus::Executing,
+            Uuid::new_v4(),
+            "tool",
+            Some(jobs[2].tool_call_id),
+            session.id,
+            "tool.result",
+            json!({
+                "execution_job_id": jobs[2].id,
+                "tool_call_id": jobs[2].tool_call_id,
+                "tool": jobs[2].tool_name,
+                "content": {"approval": "approved"},
+                "execution_outcome_known": true,
+                "attempt_count": jobs[2].attempt_count,
+                "claim_generation": jobs[2].claim_generation
+            }),
+        )
+        .await
+        .expect_err("expired owner cannot append an outcome after recovery claims the job");
+
+    assert_eq!(completed.status, ExecutionJobStatus::Completed);
+    assert_eq!(failed.status, ExecutionJobStatus::Failed);
+    assert_eq!(failed.last_error.as_deref(), Some("known failure"));
+    assert_eq!(unknown.status, ExecutionJobStatus::OutcomeUnknown);
+    let events = state.list_events(session.id).await.expect("list events");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| {
+                event.event_type == "execution.completed" && event.actor_id == Some(completed.id)
+            })
+            .count(),
+        1
+    );
+    assert!(!events.iter().any(|event| {
+        event.event_type == "execution.outcome_unknown"
+            && matches!(event.actor_id, Some(id) if id == completed.id || id == failed.id)
+    }));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| {
+                event.event_type == "execution.outcome_unknown"
+                    && event.actor_id == Some(unknown.id)
+            })
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn run_execution_job_emits_completion_event_and_projects_loop_without_route() {
     let state = test_state_with_worker(Arc::new(QueueBackedExecutionWorker));
     state.seed_demo_agent().await.expect("seed demo agent");
@@ -20602,6 +21698,10 @@ async fn run_execution_job_emits_completion_event_and_projects_loop_without_rout
                 && event.payload["execution_job_id"] == json!(completed.id)
         })
         .expect("execution lifecycle should emit durable completion event");
+    assert_eq!(
+        execution_completed_event.payload["attempt_count"],
+        json!(completed.attempt_count)
+    );
     let queued_resume_jobs = state
         .list_session_loop_jobs()
         .await
@@ -20614,53 +21714,6 @@ async fn run_execution_job_emits_completion_event_and_projects_loop_without_rout
                 && job.trigger_event_id == Some(execution_completed_event.id)
         }),
         "execution lifecycle should project completion event to session loop: {queued_resume_jobs:?}"
-    );
-
-    let recovery_job = state
-        .execution_queue
-        .enqueue(execution_queue::ExecutionJobRequest {
-            session_id: job.session_id,
-            environment_id: job.environment_id,
-            approval_id: job.approval_id,
-            tool_call_id: job.tool_call_id,
-            tool_name: job.tool_name.clone(),
-            max_attempts: None,
-        })
-        .await
-        .expect("enqueue completion recovery job");
-    state
-        .append_event(
-            "worker",
-            Some(recovery_job.id),
-            session.id,
-            "execution.completed",
-            json!({"execution_job_id": recovery_job.id}),
-        )
-        .await
-        .expect("record durable completion before simulated worker loss");
-    let tool_result_count = state
-        .list_events(session.id)
-        .await
-        .expect("list events before completion recovery")
-        .iter()
-        .filter(|event| event.event_type == "tool.result")
-        .count();
-
-    let recovered = run_execution_job(&state, recovery_job.id, "recovery-worker")
-        .await
-        .expect("recover job from durable completion event");
-
-    assert_eq!(recovered.status, ExecutionJobStatus::Completed);
-    assert_eq!(
-        state
-            .list_events(session.id)
-            .await
-            .expect("list events after completion recovery")
-            .iter()
-            .filter(|event| event.event_type == "tool.result")
-            .count(),
-        tool_result_count,
-        "completion recovery must not execute the approved side effect again"
     );
 }
 
@@ -26465,6 +27518,8 @@ async fn approved_codex_exec_can_use_app_server_strategy() {
 
 #[tokio::test]
 async fn queue_backed_worker_runs_codex_app_server_polling() {
+    let _env_guard = env_lock().lock().expect("env lock");
+    let _insecure_auth = EnvVarGuard::set("MANDOFORGE_INSECURE_DEV_AUTH", "1");
     let codex_client = Arc::new(RecordingCodexAppServerClient::default());
     let state = AppState {
         process_role: ProcessRole::Worker,
@@ -26705,7 +27760,9 @@ async fn queue_backed_worker_runs_codex_app_server_polling() {
 }
 
 #[tokio::test]
-async fn queue_backed_worker_retries_codex_app_server_across_leases() {
+async fn queue_backed_worker_does_not_replay_uncertain_codex_app_server_turn() {
+    let _env_guard = env_lock().lock().expect("env lock");
+    let _insecure_auth = EnvVarGuard::set("MANDOFORGE_INSECURE_DEV_AUTH", "1");
     let codex_client = Arc::new(RecordingCodexAppServerClient::with_poll_statuses(vec![
         "running",
         "completed",
@@ -26756,7 +27813,7 @@ async fn queue_backed_worker_retries_codex_app_server_across_leases() {
         json_request(
             "POST",
             "/api/sessions",
-            json!({"agent_id": agents[0].id, "title": "retry codex app server"}),
+            json!({"agent_id": agents[0].id, "title": "uncertain codex app server"}),
         ),
     )
     .await;
@@ -26768,7 +27825,7 @@ async fn queue_backed_worker_retries_codex_app_server_across_leases() {
             json!({
                 "session_id": session.id,
                 "args": {
-                    "task": "Keep polling through worker retries",
+                    "task": "Do not replay an uncertain turn",
                     "sandbox_mode": "workspace-write",
                     "execution_strategy": "app-server",
                     "poll_attempts": 1,
@@ -26800,7 +27857,7 @@ async fn queue_backed_worker_retries_codex_app_server_across_leases() {
         .expect("queued codex job")
         .id;
 
-    let requeued: execution_queue::ExecutionJob = request_json(
+    let uncertain: execution_queue::ExecutionJob = request_json(
         app.clone(),
         Request::builder()
             .method("POST")
@@ -26810,25 +27867,12 @@ async fn queue_backed_worker_retries_codex_app_server_across_leases() {
             .expect("valid request"),
     )
     .await;
-    assert_eq!(requeued.status, ExecutionJobStatus::Queued);
-    assert_eq!(requeued.attempt_count, 1);
+    assert_eq!(uncertain.status, ExecutionJobStatus::OutcomeUnknown);
+    assert_eq!(uncertain.attempt_count, 1);
     assert_eq!(
-        requeued.last_error.as_deref(),
+        uncertain.last_error.as_deref(),
         Some("Codex App Server turn ended with status running")
     );
-
-    let completed: execution_queue::ExecutionJob = request_json(
-        app.clone(),
-        Request::builder()
-            .method("POST")
-            .uri(format!("/api/execution-jobs/{job_id}/run"))
-            .header("x-mandoforge-worker-id", "codex-worker-b")
-            .body(Body::empty())
-            .expect("valid request"),
-    )
-    .await;
-    assert_eq!(completed.status, ExecutionJobStatus::Completed);
-    assert_eq!(completed.attempt_count, 2);
 
     let events: Vec<SessionEvent> = request_json(
         app.clone(),
@@ -26838,16 +27882,25 @@ async fn queue_backed_worker_retries_codex_app_server_across_leases() {
             .expect("valid request"),
     )
     .await;
+    assert!(events.iter().any(|event| {
+        event.event_type == "execution.outcome_unknown"
+            && event.payload["execution_job_id"] == json!(job_id)
+            && event.payload["requires_reconciliation"] == true
+    }));
     assert!(
-        events
+        !events
             .iter()
             .any(|event| event.event_type == "execution.retry_queued")
     );
-    assert!(events.iter().any(|event| {
-        event.event_type == "codex.task.completed"
-            && event.payload["runner"] == "app-server"
-            && event.payload["status"] == "completed"
-    }));
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.event_type == "execution.completed")
+    );
+    assert_eq!(
+        codex_client.calls.lock().await.as_slice(),
+        ["thread", "turn:thread-1", "poll:turn-1"]
+    );
 }
 
 #[tokio::test]
@@ -26998,7 +28051,7 @@ async fn queue_backed_worker_runs_allowlisted_agent_cli_profile() {
 }
 
 #[tokio::test]
-async fn queue_backed_worker_marks_nonzero_agent_cli_as_failed() {
+async fn queue_backed_worker_marks_nonzero_agent_cli_as_known_failure() {
     let _env_guard = env_lock().lock().expect("env lock");
     let shim_dir = test_workspace_root().join("agent-cli-shims");
     fs::create_dir_all(&shim_dir).expect("create shim dir");
@@ -27074,7 +28127,7 @@ async fn queue_backed_worker_marks_nonzero_agent_cli_as_failed() {
         .expect("agent CLI execution job queued")
         .id;
 
-    let requeued: execution_queue::ExecutionJob = request_json(
+    let (status, body) = request_value(
         app.clone(),
         Request::builder()
             .method("POST")
@@ -27084,41 +28137,13 @@ async fn queue_backed_worker_marks_nonzero_agent_cli_as_failed() {
             .expect("valid request"),
     )
     .await;
-    assert_eq!(requeued.status, ExecutionJobStatus::Queued);
-    assert_eq!(requeued.attempt_count, 1);
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
-        requeued
-            .last_error
-            .as_deref()
+        body["error"]
+            .as_str()
             .unwrap_or_default()
             .contains("exit code")
     );
-
-    let second_requeue: execution_queue::ExecutionJob = request_json(
-        app.clone(),
-        Request::builder()
-            .method("POST")
-            .uri(format!("/api/execution-jobs/{job_id}/run"))
-            .header("x-mandoforge-worker-id", "agent-cli-worker-fail-2")
-            .body(Body::empty())
-            .expect("valid request"),
-    )
-    .await;
-    assert_eq!(second_requeue.status, ExecutionJobStatus::Queued);
-    assert_eq!(second_requeue.attempt_count, 2);
-
-    let (status, error) = request_value(
-        app.clone(),
-        Request::builder()
-            .method("POST")
-            .uri(format!("/api/execution-jobs/{job_id}/run"))
-            .header("x-mandoforge-worker-id", "agent-cli-worker-fail-3")
-            .body(Body::empty())
-            .expect("valid request"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(error["error"].as_str().unwrap().contains("exit code"));
 
     let jobs: Vec<execution_queue::ExecutionJob> = request_json(
         app.clone(),
@@ -27133,6 +28158,7 @@ async fn queue_backed_worker_marks_nonzero_agent_cli_as_failed() {
         .find(|job| job.id == job_id)
         .expect("failed job");
     assert_eq!(failed_job.status, ExecutionJobStatus::Failed);
+    assert_eq!(failed_job.attempt_count, 1);
     assert!(
         failed_job
             .last_error
@@ -27155,6 +28181,28 @@ async fn queue_backed_worker_marks_nonzero_agent_cli_as_failed() {
         .expect("agent CLI tool call");
     assert_eq!(agent_cli_call.status, "failed");
     assert!(agent_cli_call.error.is_some());
+
+    let events: Vec<SessionEvent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/sessions/{}/events", session.id))
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(events.iter().any(|event| {
+        event.event_type == "execution.failed" && event.payload["execution_job_id"] == json!(job_id)
+    }));
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.event_type == "execution.outcome_unknown")
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.event_type == "execution.retry_queued")
+    );
 
     unsafe {
         std::env::remove_var("MANDOFORGE_ALLOW_REQUESTED_AGENT_CLI_PROFILE");
@@ -32482,6 +33530,35 @@ async fn mcp_commit_write_uses_approval_commit_token_exact_binding() {
     assert_eq!(requests[0].args["content"], json!("Approved post"));
     drop(requests);
 
+    let duplicate_job = state
+        .execution_queue
+        .enqueue(ExecutionJobRequest {
+            session_id: completed.session_id,
+            environment_id: completed.environment_id,
+            approval_id: completed.approval_id,
+            tool_call_id: completed.tool_call_id,
+            tool_name: completed.tool_name.clone(),
+            max_attempts: Some(3),
+        })
+        .await
+        .expect("enqueue duplicate recovery attempt");
+    let uncertain = run_execution_job(&state, duplicate_job.id, "mcp-recovery-worker")
+        .await
+        .expect("consumed commit token should stop duplicate execution");
+    assert_eq!(uncertain.status, ExecutionJobStatus::OutcomeUnknown);
+    assert!(
+        uncertain
+            .last_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("already consumed")
+    );
+    assert_eq!(
+        mcp_client.requests.lock().await.len(),
+        1,
+        "consumed commit token must prevent another gateway call"
+    );
+
     let tamper_required: Value = request_json(
         app.clone(),
         Request::builder()
@@ -34786,6 +35863,63 @@ async fn terminal_session_rejects_new_event_driven_loop_work() {
     assert!(
         jobs.is_empty(),
         "terminal event append must not create loop work: {jobs:?}"
+    );
+}
+
+#[tokio::test]
+async fn terminal_session_cannot_be_resurrected_by_concurrent_idle_transition() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "terminal transition race".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create session");
+    ensure_primary_session_thread(&state, session.id)
+        .await
+        .expect("create primary thread");
+
+    let (idle, terminated) = tokio::join!(
+        set_managed_session_status(&state, session.id, SessionStatus::Idle, "loop completion"),
+        set_managed_session_status(
+            &state,
+            session.id,
+            SessionStatus::Terminated,
+            "operator stop"
+        )
+    );
+
+    terminated.expect("terminal transition succeeds");
+    if let Err(error) = idle {
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
+    assert_eq!(
+        state
+            .get_session(session.id)
+            .await
+            .expect("read session")
+            .status,
+        SessionStatus::Terminated
+    );
+    assert_eq!(
+        state
+            .primary_session_thread(session.id)
+            .await
+            .expect("read primary thread")
+            .expect("primary thread")
+            .status,
+        "terminated"
     );
 }
 

@@ -139,7 +139,9 @@ pub(crate) async fn run_execution_job_with_lease_renewal(
     job_id: Uuid,
     worker_id: &str,
 ) -> Result<crate::execution_queue::ExecutionJob, AppError> {
-    let work = run_execution_job(state, job_id, worker_id);
+    let claimed = claim_execution_job(state, job_id, worker_id).await?;
+    let claim_generation = claimed.claim_generation;
+    let work = run_claimed_execution_job(state, &claimed, worker_id);
     tokio::pin!(work);
     let renew_interval = lease_renewal_interval(WORKER_JOB_LEASE_SECONDS);
     let mut renewals = tokio::time::interval_at(Instant::now() + renew_interval, renew_interval);
@@ -159,12 +161,10 @@ pub(crate) async fn run_execution_job_with_lease_renewal(
                         let current = state.execution_queue.get(job_id).await?;
                         match current.status {
                             ExecutionJobStatus::CancelRequested
-                                if current.worker_id.as_deref() == Some(worker_id) =>
+                                if current.worker_id.as_deref() == Some(worker_id)
+                                    && current.claim_generation == claim_generation =>
                             {
-                                state
-                                    .execution_queue
-                                    .acknowledge_canceled_started(job_id, worker_id)
-                                    .await
+                                Ok(current)
                             }
                             ExecutionJobStatus::Canceled => Ok(current),
                             _ => Err(error),
@@ -178,26 +178,54 @@ pub(crate) async fn run_execution_job_with_lease_renewal(
                     WORKER_JOB_LEASE_SECONDS,
                     state
                         .execution_queue
-                        .renew_started(job_id, worker_id, WORKER_JOB_LEASE_SECONDS)
+                        .renew_started(
+                            job_id,
+                            worker_id,
+                            claim_generation,
+                            WORKER_JOB_LEASE_SECONDS,
+                        )
                         .await,
                     "execution job",
                 );
                 if let Err(error) = renewal {
                     let current = state.execution_queue.get(job_id).await?;
-                    if execution_job_cancel_requested_by_owner(&current, worker_id)? {
-                        return state
-                            .execution_queue
-                            .acknowledge_canceled_started(job_id, worker_id)
-                            .await;
+                    if execution_job_cancel_requested_by_owner(
+                        &current,
+                        worker_id,
+                        claim_generation,
+                    )? {
+                        return Ok(current);
                     }
-                    if matches!(current.status, ExecutionJobStatus::Running) {
+                    if current.claim_generation == claim_generation
+                        && matches!(
+                            current.status,
+                            ExecutionJobStatus::Queued
+                                | ExecutionJobStatus::Completed
+                                | ExecutionJobStatus::Failed
+                                | ExecutionJobStatus::OutcomeUnknown
+                                | ExecutionJobStatus::Canceled
+                        )
+                    {
+                        continue;
+                    }
+                    if matches!(
+                        current.status,
+                        ExecutionJobStatus::Running
+                            | ExecutionJobStatus::Executing
+                            | ExecutionJobStatus::Finalizing
+                    ) {
                         return Err(error);
                     }
                     return Ok(current);
                 }
             }
             _ = cancellation_checks.tick() => {
-                if let Some(job) = execution_job_interrupt_state(state, job_id, worker_id).await? {
+                if let Some(job) = execution_job_interrupt_state(
+                    state,
+                    job_id,
+                    worker_id,
+                    claim_generation,
+                ).await? {
                     return Ok(job);
                 }
             }
@@ -209,14 +237,15 @@ async fn execution_job_interrupt_state(
     state: &AppState,
     job_id: Uuid,
     worker_id: &str,
+    claim_generation: i64,
 ) -> Result<Option<crate::execution_queue::ExecutionJob>, AppError> {
     let job = state.execution_queue.get(job_id).await?;
-    if execution_job_cancel_requested_by_owner(&job, worker_id)? {
-        state
-            .execution_queue
-            .acknowledge_canceled_started(job_id, worker_id)
-            .await
-            .map(Some)
+    if execution_job_cancel_requested_by_owner(&job, worker_id, claim_generation)? {
+        Ok(Some(job))
+    } else if job.claim_generation != claim_generation {
+        Err(AppError::not_found(
+            "execution job lease is no longer owned by this worker claim",
+        ))
     } else {
         Ok(None)
     }
@@ -225,18 +254,38 @@ async fn execution_job_interrupt_state(
 fn execution_job_cancel_requested_by_owner(
     job: &crate::execution_queue::ExecutionJob,
     worker_id: &str,
+    claim_generation: i64,
 ) -> Result<bool, AppError> {
     match job.status {
-        ExecutionJobStatus::Running if job.worker_id.as_deref() == Some(worker_id) => Ok(false),
-        ExecutionJobStatus::CancelRequested if job.worker_id.as_deref() == Some(worker_id) => {
+        ExecutionJobStatus::Running
+        | ExecutionJobStatus::Executing
+        | ExecutionJobStatus::Finalizing
+            if job.worker_id.as_deref() == Some(worker_id) =>
+        {
+            if job.claim_generation == claim_generation {
+                Ok(false)
+            } else {
+                Err(AppError::not_found(
+                    "execution job lease is no longer owned by this worker claim",
+                ))
+            }
+        }
+        ExecutionJobStatus::CancelRequested
+            if job.worker_id.as_deref() == Some(worker_id)
+                && job.claim_generation == claim_generation =>
+        {
             Ok(true)
         }
-        ExecutionJobStatus::Running | ExecutionJobStatus::CancelRequested => Err(
-            AppError::not_found("execution job lease is no longer owned by this worker"),
-        ),
+        ExecutionJobStatus::Running
+        | ExecutionJobStatus::Executing
+        | ExecutionJobStatus::Finalizing
+        | ExecutionJobStatus::CancelRequested => Err(AppError::not_found(
+            "execution job lease is no longer owned by this worker",
+        )),
         ExecutionJobStatus::Queued
         | ExecutionJobStatus::Completed
         | ExecutionJobStatus::Failed
+        | ExecutionJobStatus::OutcomeUnknown
         | ExecutionJobStatus::Canceled => Ok(false),
     }
 }
@@ -430,6 +479,8 @@ mod tests {
             completed_at: None,
             worker_id: Some("worker-a".to_string()),
             lease_expires_at: None,
+            claim_generation: 1,
+            finalization_details: json!({}),
             attempt_count: 1,
             max_attempts: 3,
             last_error: None,
@@ -446,6 +497,7 @@ mod tests {
                 Err(AppError {
                     status: axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                     message: "temporary store failure".to_string(),
+                    execution_outcome_known: false,
                 }),
                 "test lease",
             )
@@ -460,6 +512,7 @@ mod tests {
                 Err(AppError {
                     status: axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                     message: "persistent store failure".to_string(),
+                    execution_outcome_known: false,
                 }),
                 "test lease",
             )
@@ -483,12 +536,15 @@ mod tests {
         for status in [
             ExecutionJobStatus::Queued,
             ExecutionJobStatus::Running,
+            ExecutionJobStatus::Executing,
+            ExecutionJobStatus::Finalizing,
             ExecutionJobStatus::Completed,
             ExecutionJobStatus::Failed,
+            ExecutionJobStatus::OutcomeUnknown,
             ExecutionJobStatus::Canceled,
         ] {
             assert!(
-                !execution_job_cancel_requested_by_owner(&execution_job(status), "worker-a")
+                !execution_job_cancel_requested_by_owner(&execution_job(status), "worker-a", 1)
                     .expect("natural status should not interrupt work")
             );
         }
@@ -496,6 +552,7 @@ mod tests {
             execution_job_cancel_requested_by_owner(
                 &execution_job(ExecutionJobStatus::CancelRequested),
                 "worker-a",
+                1,
             )
             .expect("owned cancellation should interrupt work")
         );
@@ -503,6 +560,7 @@ mod tests {
             execution_job_cancel_requested_by_owner(
                 &execution_job(ExecutionJobStatus::Running),
                 "worker-b",
+                1,
             )
             .is_err()
         );
