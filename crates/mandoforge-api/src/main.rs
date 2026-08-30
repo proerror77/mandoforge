@@ -52,6 +52,7 @@ mod eval_judge;
 mod eval_runtime;
 mod execution;
 mod execution_queue;
+#[cfg(test)]
 mod execution_queue_broker;
 mod handlers;
 mod http_shell;

@@ -6,11 +6,39 @@ use uuid::Uuid;
 
 use crate::*;
 
-const WORKER_JOB_LEASE_SECONDS: i64 = 300;
-const WORKER_LEASE_RENEW_INTERVAL: Duration = Duration::from_secs(60);
-// ponytail: bounded polling keeps cancellation durable across processes; replace with NOTIFY if
-// concurrent running-job volume makes two checks per second material.
+pub(crate) const WORKER_JOB_LEASE_SECONDS: i64 = 300;
 const WORKER_CANCELLATION_CHECK_INTERVAL: Duration = Duration::from_millis(500);
+
+pub(crate) fn lease_renewal_interval(lease_seconds: i64) -> Duration {
+    Duration::from_millis(((lease_seconds.max(1) as u64 * 1_000) / 3).clamp(100, 60_000))
+}
+
+pub(crate) fn handle_lease_renewal<T>(
+    deadline: &mut Instant,
+    lease_seconds: i64,
+    result: Result<T, AppError>,
+    lease_name: &str,
+) -> Result<(), AppError> {
+    let now = Instant::now();
+    match result {
+        Ok(_) => {
+            *deadline = now + Duration::from_secs(lease_seconds.max(1) as u64);
+            Ok(())
+        }
+        Err(error)
+            if error.status.is_server_error()
+                && now + lease_renewal_interval(lease_seconds) < *deadline =>
+        {
+            tracing::warn!(
+                lease = lease_name,
+                error = %error.message,
+                "lease renewal failed; continuing within the current lease"
+            );
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
 
 fn worker_environment_id_from_headers(headers: &HeaderMap) -> Result<Option<Uuid>, AppError> {
     let Some(value) = header_value(headers, "x-mandoforge-environment-id")
@@ -66,22 +94,40 @@ pub(crate) async fn run_session_loop_with_lease_renewal(
 ) -> Result<Session, AppError> {
     let work = run_session_loop(state, job);
     tokio::pin!(work);
-    let mut renewals = tokio::time::interval_at(
-        Instant::now() + WORKER_LEASE_RENEW_INTERVAL,
-        WORKER_LEASE_RENEW_INTERVAL,
-    );
+    let renew_interval = workflow_step
+        .map(|(_, lease_seconds)| lease_renewal_interval(lease_seconds))
+        .unwrap_or_else(|| lease_renewal_interval(WORKER_JOB_LEASE_SECONDS))
+        .min(lease_renewal_interval(WORKER_JOB_LEASE_SECONDS));
+    let mut renewals = tokio::time::interval_at(Instant::now() + renew_interval, renew_interval);
     renewals.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut job_lease_deadline =
+        Instant::now() + Duration::from_secs(WORKER_JOB_LEASE_SECONDS as u64);
+    let mut workflow_step_lease_deadline = workflow_step.map(|(_, lease_seconds)| {
+        Instant::now() + Duration::from_secs(lease_seconds.max(1) as u64)
+    });
     loop {
         tokio::select! {
             result = &mut work => return result,
             _ = renewals.tick() => {
-                state
-                    .renew_session_loop_job_lease(job.id, worker_id, WORKER_JOB_LEASE_SECONDS)
-                    .await?;
-                if let Some((step_id, lease_seconds)) = workflow_step {
+                handle_lease_renewal(
+                    &mut job_lease_deadline,
+                    WORKER_JOB_LEASE_SECONDS,
                     state
-                        .renew_workflow_step_run_lease(step_id, worker_id, lease_seconds)
-                        .await?;
+                        .renew_session_loop_job_lease(job.id, worker_id, WORKER_JOB_LEASE_SECONDS)
+                        .await,
+                    "session-loop job",
+                )?;
+                if let (Some((step_id, lease_seconds)), Some(deadline)) =
+                    (workflow_step, workflow_step_lease_deadline.as_mut())
+                {
+                    handle_lease_renewal(
+                        deadline,
+                        lease_seconds,
+                        state
+                            .renew_workflow_step_run_lease(step_id, worker_id, lease_seconds)
+                            .await,
+                        "workflow-step run",
+                    )?;
                 }
             }
         }
@@ -95,11 +141,10 @@ pub(crate) async fn run_execution_job_with_lease_renewal(
 ) -> Result<crate::execution_queue::ExecutionJob, AppError> {
     let work = run_execution_job(state, job_id, worker_id);
     tokio::pin!(work);
-    let mut renewals = tokio::time::interval_at(
-        Instant::now() + WORKER_LEASE_RENEW_INTERVAL,
-        WORKER_LEASE_RENEW_INTERVAL,
-    );
+    let renew_interval = lease_renewal_interval(WORKER_JOB_LEASE_SECONDS);
+    let mut renewals = tokio::time::interval_at(Instant::now() + renew_interval, renew_interval);
     renewals.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut lease_deadline = Instant::now() + Duration::from_secs(WORKER_JOB_LEASE_SECONDS as u64);
     let mut cancellation_checks = tokio::time::interval_at(
         Instant::now() + WORKER_CANCELLATION_CHECK_INTERVAL,
         WORKER_CANCELLATION_CHECK_INTERVAL,
@@ -128,10 +173,15 @@ pub(crate) async fn run_execution_job_with_lease_renewal(
                 };
             }
             _ = renewals.tick() => {
-                state
-                    .execution_queue
-                    .renew_started(job_id, worker_id, WORKER_JOB_LEASE_SECONDS)
-                    .await?;
+                handle_lease_renewal(
+                    &mut lease_deadline,
+                    WORKER_JOB_LEASE_SECONDS,
+                    state
+                        .execution_queue
+                        .renew_started(job_id, worker_id, WORKER_JOB_LEASE_SECONDS)
+                        .await,
+                    "execution job",
+                )?;
             }
             _ = cancellation_checks.tick() => {
                 if let Some(job) = execution_job_interrupt_state(state, job_id, worker_id).await? {
@@ -148,20 +198,33 @@ async fn execution_job_interrupt_state(
     worker_id: &str,
 ) -> Result<Option<crate::execution_queue::ExecutionJob>, AppError> {
     let job = state.execution_queue.get(job_id).await?;
-    match job.status {
-        ExecutionJobStatus::Running if job.worker_id.as_deref() == Some(worker_id) => Ok(None),
-        ExecutionJobStatus::CancelRequested if job.worker_id.as_deref() == Some(worker_id) => state
+    if execution_job_cancel_requested_by_owner(&job, worker_id)? {
+        state
             .execution_queue
             .acknowledge_canceled_started(job_id, worker_id)
             .await
-            .map(Some),
+            .map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+fn execution_job_cancel_requested_by_owner(
+    job: &crate::execution_queue::ExecutionJob,
+    worker_id: &str,
+) -> Result<bool, AppError> {
+    match job.status {
+        ExecutionJobStatus::Running if job.worker_id.as_deref() == Some(worker_id) => Ok(false),
+        ExecutionJobStatus::CancelRequested if job.worker_id.as_deref() == Some(worker_id) => {
+            Ok(true)
+        }
         ExecutionJobStatus::Running | ExecutionJobStatus::CancelRequested => Err(
             AppError::not_found("execution job lease is no longer owned by this worker"),
         ),
         ExecutionJobStatus::Queued
         | ExecutionJobStatus::Completed
         | ExecutionJobStatus::Failed
-        | ExecutionJobStatus::Canceled => Ok(Some(job)),
+        | ExecutionJobStatus::Canceled => Ok(false),
     }
 }
 
@@ -334,4 +397,101 @@ pub(crate) fn wrap_read_only_sql_for_json(sql: &str, max_rows: i64) -> String {
         "SELECT COALESCE(jsonb_agg(to_jsonb(t)), '[]'::jsonb) \
          FROM (SELECT * FROM ({inner}) AS query_result LIMIT {bounded_max_rows}) AS t"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn execution_job(status: ExecutionJobStatus) -> crate::execution_queue::ExecutionJob {
+        crate::execution_queue::ExecutionJob {
+            id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            environment_id: None,
+            approval_id: Uuid::new_v4(),
+            tool_call_id: Uuid::new_v4(),
+            tool_name: "shell.exec".to_string(),
+            status,
+            enqueued_at: chrono::Utc::now(),
+            started_at: None,
+            completed_at: None,
+            worker_id: Some("worker-a".to_string()),
+            lease_expires_at: None,
+            attempt_count: 1,
+            max_attempts: 3,
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn transient_renewal_failure_is_tolerated_only_before_safety_window() {
+        let mut deadline = Instant::now() + Duration::from_secs(300);
+        assert!(
+            handle_lease_renewal::<()>(
+                &mut deadline,
+                300,
+                Err(AppError {
+                    status: axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    message: "temporary store failure".to_string(),
+                }),
+                "test lease",
+            )
+            .is_ok()
+        );
+
+        deadline = Instant::now() + Duration::from_secs(30);
+        assert!(
+            handle_lease_renewal::<()>(
+                &mut deadline,
+                300,
+                Err(AppError {
+                    status: axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    message: "persistent store failure".to_string(),
+                }),
+                "test lease",
+            )
+            .is_err()
+        );
+
+        deadline = Instant::now() + Duration::from_secs(300);
+        assert!(
+            handle_lease_renewal::<()>(
+                &mut deadline,
+                300,
+                Err(AppError::not_found("lease ownership lost")),
+                "test lease",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn only_owned_cancel_requests_interrupt_execution_work() {
+        for status in [
+            ExecutionJobStatus::Queued,
+            ExecutionJobStatus::Running,
+            ExecutionJobStatus::Completed,
+            ExecutionJobStatus::Failed,
+            ExecutionJobStatus::Canceled,
+        ] {
+            assert!(
+                !execution_job_cancel_requested_by_owner(&execution_job(status), "worker-a")
+                    .expect("natural status should not interrupt work")
+            );
+        }
+        assert!(
+            execution_job_cancel_requested_by_owner(
+                &execution_job(ExecutionJobStatus::CancelRequested),
+                "worker-a",
+            )
+            .expect("owned cancellation should interrupt work")
+        );
+        assert!(
+            execution_job_cancel_requested_by_owner(
+                &execution_job(ExecutionJobStatus::Running),
+                "worker-b",
+            )
+            .is_err()
+        );
+    }
 }

@@ -167,17 +167,33 @@ pub(crate) async fn run_worker_daemon(state: AppState) -> Result<()> {
     let mut processed = 0usize;
 
     loop {
-        processed += process_session_loop_jobs(&state, &headers).await;
+        processed += process_session_loop_jobs(
+            &state,
+            &headers,
+            remaining_job_budget(config.max_jobs, processed),
+        )
+        .await;
         if should_stop(&config, processed) {
             return Ok(());
         }
 
-        processed += process_execution_jobs(&state, &headers).await;
+        processed += process_execution_jobs(
+            &state,
+            &headers,
+            remaining_job_budget(config.max_jobs, processed),
+        )
+        .await;
         if should_stop(&config, processed) {
             return Ok(());
         }
 
-        processed += process_workflow_step_jobs(&state, &headers, &config).await;
+        processed += process_workflow_step_jobs(
+            &state,
+            &headers,
+            &config,
+            remaining_job_budget(config.max_jobs, processed),
+        )
+        .await;
         if should_stop(&config, processed) {
             return Ok(());
         }
@@ -194,7 +210,22 @@ fn should_stop(config: &WorkerDaemonConfig, processed: usize) -> bool {
     config.max_jobs != 0 && processed >= config.max_jobs
 }
 
-async fn process_session_loop_jobs(state: &AppState, headers: &HeaderMap) -> usize {
+fn remaining_job_budget(max_jobs: usize, processed: usize) -> usize {
+    if max_jobs == 0 {
+        usize::MAX
+    } else {
+        max_jobs.saturating_sub(processed)
+    }
+}
+
+async fn process_session_loop_jobs(
+    state: &AppState,
+    headers: &HeaderMap,
+    job_budget: usize,
+) -> usize {
+    if job_budget == 0 {
+        return 0;
+    }
     let jobs = match execution_jobs::worker_list_session_loop_jobs(state, headers).await {
         Ok(jobs) => jobs,
         Err(error) => {
@@ -208,6 +239,9 @@ async fn process_session_loop_jobs(state: &AppState, headers: &HeaderMap) -> usi
         .into_iter()
         .filter(|job| session_loop_job_ready_for_worker(job, now))
     {
+        if processed >= job_budget {
+            break;
+        }
         match execution_jobs::worker_run_session_loop_job(state, job.id, headers).await {
             Ok(updated) => {
                 processed += 1;
@@ -238,7 +272,10 @@ fn session_loop_job_ready_for_worker(
                 .is_none_or(|lease_expires_at| lease_expires_at <= now))
 }
 
-async fn process_execution_jobs(state: &AppState, headers: &HeaderMap) -> usize {
+async fn process_execution_jobs(state: &AppState, headers: &HeaderMap, job_budget: usize) -> usize {
+    if job_budget == 0 {
+        return 0;
+    }
     let jobs = match execution_jobs::worker_list_execution_jobs(state, headers).await {
         Ok(jobs) => jobs,
         Err(error) => {
@@ -252,6 +289,9 @@ async fn process_execution_jobs(state: &AppState, headers: &HeaderMap) -> usize 
         .into_iter()
         .filter(|job| execution_job_ready_for_worker(job, now))
     {
+        if processed >= job_budget {
+            break;
+        }
         if job.status == crate::ExecutionJobStatus::CancelRequested {
             match execution_jobs::worker_recover_execution_cancellation(state, job.id, headers)
                 .await
@@ -311,7 +351,11 @@ async fn process_workflow_step_jobs(
     state: &AppState,
     headers: &HeaderMap,
     config: &WorkerDaemonConfig,
+    job_budget: usize,
 ) -> usize {
+    if job_budget == 0 {
+        return 0;
+    }
     let board = match workflows::worker_get_task_board(state, headers).await {
         Ok(board) => board,
         Err(error) => {
@@ -326,6 +370,9 @@ async fn process_workflow_step_jobs(
         .filter(|item| item.claimable)
         .filter(|item| item.status == "queued" || item.status == "scheduled")
     {
+        if processed >= job_budget {
+            break;
+        }
         let Some(agent_id) = item.agent_id else {
             eprintln!(
                 "workflow step not runnable: {} missing agent_id",
@@ -404,6 +451,14 @@ mod tests {
     fn process_role_defaults_to_api() {
         let role = ProcessRole::from_lookup(&|_| None).expect("default process role");
         assert_eq!(role, ProcessRole::Api);
+    }
+
+    #[test]
+    fn max_jobs_budget_is_hard_bounded() {
+        assert_eq!(remaining_job_budget(0, 42), usize::MAX);
+        assert_eq!(remaining_job_budget(3, 1), 2);
+        assert_eq!(remaining_job_budget(3, 3), 0);
+        assert_eq!(remaining_job_budget(3, 4), 0);
     }
 
     #[test]

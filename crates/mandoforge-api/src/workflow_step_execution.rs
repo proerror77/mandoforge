@@ -274,20 +274,43 @@ pub(crate) async fn run_workflow_delegated_runtime_step(
         }
     };
     tokio::pin!(execution);
-    let renew_interval = std::time::Duration::from_secs(60);
+    let renew_interval =
+        lease_renewal_interval(lease_seconds).min(lease_renewal_interval(WORKER_JOB_LEASE_SECONDS));
     let mut renewals =
         tokio::time::interval_at(tokio::time::Instant::now() + renew_interval, renew_interval);
     renewals.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut session_loop_lease_deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_secs(WORKER_JOB_LEASE_SECONDS as u64);
+    let mut workflow_step_lease_deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_secs(lease_seconds as u64);
     let execution = loop {
         tokio::select! {
             result = &mut execution => break result,
             _ = renewals.tick() => {
-                state
-                    .renew_session_loop_job_lease(running_job.id, &worker_id, 300)
-                    .await?;
-                state
-                    .renew_workflow_step_run_lease(claim.step.id, &worker_id, lease_seconds)
-                    .await?;
+                handle_lease_renewal(
+                    &mut session_loop_lease_deadline,
+                    WORKER_JOB_LEASE_SECONDS,
+                    state
+                        .renew_session_loop_job_lease(
+                            running_job.id,
+                            &worker_id,
+                            WORKER_JOB_LEASE_SECONDS,
+                        )
+                        .await,
+                    "delegated session-loop job",
+                )?;
+                handle_lease_renewal(
+                    &mut workflow_step_lease_deadline,
+                    lease_seconds,
+                    state
+                        .renew_workflow_step_run_lease(
+                            claim.step.id,
+                            &worker_id,
+                            lease_seconds,
+                        )
+                        .await,
+                    "delegated workflow-step run",
+                )?;
             }
         }
     };
