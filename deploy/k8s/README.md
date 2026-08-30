@@ -22,8 +22,8 @@ It contains:
 - Scheduler CronJob for due policy, approval, release, and MCP automation, using a dedicated ServiceAccount with token automount disabled and Secret-sourced scheduler subject, role, and shared token headers.
 - Postgres StatefulSet and Service.
 - ConfigMap for runtime configuration.
-- Example Secret template for local/dev credentials. It is intentionally not part of the default kustomization; create `mandoforge-secrets` out of band before starting Pods.
-- Secret delivery contract ConfigMap documenting that production must supply `mandoforge-secrets` through an external secret manager, External Secrets Operator, SealedSecret, or equivalent controlled path.
+- Example Secret templates for local/dev control-plane and worker credentials. They are intentionally not part of the default kustomization; create `mandoforge-secrets` and the narrower `mandoforge-worker-secrets` out of band before starting Pods.
+- Secret delivery contract ConfigMap documenting that production must supply both Secrets through an external secret manager, External Secrets Operator, SealedSecret, or equivalent controlled path. Worker Pods reference only `DATABASE_URL`, the worker token, and optional provider/Vault data-plane keys from `mandoforge-worker-secrets`.
 - Durable workspace PVC for API-owned workspaces.
 
 Install the pinned Agent Sandbox controller, create a local/dev Secret, then
@@ -38,6 +38,7 @@ kubectl apply -f /tmp/agent-sandbox-manifest.yaml
 kubectl apply -f /tmp/agent-sandbox-extensions.yaml
 kubectl apply -f deploy/k8s/namespace.yaml
 kubectl apply -n agent-os -f deploy/k8s/secret.example.yaml
+kubectl apply -n agent-os -f deploy/k8s/worker-secret.example.yaml
 kubectl apply -k deploy/k8s
 kubectl -n agent-os port-forward svc/mandoforge-api 8787:8787
 ```
@@ -63,7 +64,7 @@ kubectl kustomize deploy/agent-sandbox-smoke --load-restrictor LoadRestrictionsN
 
 Production notes:
 
-- Do not apply `secret.example.yaml` to production. The default manifests include only the secret delivery contract; create `mandoforge-secrets` from a secret manager, External Secrets Operator, SealedSecret, or equivalent reviewed delivery path.
+- Do not apply `secret.example.yaml` or `worker-secret.example.yaml` to production. The default manifests include only the secret delivery contract; create `mandoforge-secrets` and `mandoforge-worker-secrets` from a reviewed secret-delivery path, and never expose scheduler, admin, controller, KMS, or Postgres-admin credentials to worker Pods.
 - Prefer external Postgres or a mature Postgres Operator for production.
 - Review the workspace PVC storage class, backup policy, and retention policy before long-running workers.
 - The default worker NetworkPolicies allow only Postgres, cluster DNS, and the in-cluster OTel collector. Add reviewed destination-aware egress through a CNI FQDN policy or egress proxy before enabling provider, HTTP, or MCP calls in shared clusters.

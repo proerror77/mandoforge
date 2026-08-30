@@ -4,7 +4,7 @@ set -euo pipefail
 BASE_URL="${BASE_URL:-http://127.0.0.1:8787}"
 SUBJECT="${MANDOFORGE_WORKFLOW_RUNTIME_GATE_SUBJECT:-managed-workflow-runtime-evidence-gate}"
 ROLES="${MANDOFORGE_WORKFLOW_RUNTIME_GATE_ROLES:-admin}"
-AUTH_TOKEN="${MANDOFORGE_WORKFLOW_RUNTIME_GATE_TOKEN:-${MANDOFORGE_STAGE2_GATE_TOKEN:-${MANDOFORGE_DEV_ADMIN_TOKEN:-${MANDOFORGE_WORKER_TOKEN:-}}}}"
+AUTH_TOKEN="${MANDOFORGE_WORKFLOW_RUNTIME_GATE_TOKEN:-${MANDOFORGE_STAGE2_GATE_TOKEN:-${MANDOFORGE_DEV_ADMIN_TOKEN:-}}}"
 SCHEDULER_TOKEN="${MANDOFORGE_SCHEDULER_TOKEN:-}"
 EVIDENCE_DIR="${EVIDENCE_DIR:-.mandoforge/managed-workflow-runtime-evidence}"
 RUN_ID="${MANDOFORGE_WORKFLOW_RUNTIME_GATE_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM:-0}}"
@@ -14,20 +14,6 @@ RUN_ID="${MANDOFORGE_WORKFLOW_RUNTIME_GATE_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$
 # api-workflow-runtime-proof-graph.json
 # api-workflow-runtime-proof-transitions.json
 # api-workflow-runtime-proof-memory-governance-partition.json
-
-auth_headers=()
-if [[ -n "$AUTH_TOKEN" ]]; then
-  auth_headers+=(-H "authorization: Bearer $AUTH_TOKEN")
-else
-  auth_headers+=(
-    -H "x-mandoforge-subject: $SUBJECT"
-    -H "x-mandoforge-roles: $ROLES"
-  )
-fi
-
-if [[ -n "$SCHEDULER_TOKEN" ]]; then
-  auth_headers+=(-H "x-mandoforge-scheduler-token: $SCHEDULER_TOKEN")
-fi
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -50,8 +36,10 @@ fetch_json() {
   local payload
   local label="${4:-$(slugify "$path")}"
   local expected_prefix="${5:-2}"
+  local request_subject="${6:-$SUBJECT}"
   local target="$EVIDENCE_DIR/$label.json"
   local request_target="$EVIDENCE_DIR/$label.request.json"
+  local request_auth_headers=()
   local response_body
   local response_json
   local http_status
@@ -64,10 +52,25 @@ fetch_json() {
   fi
   printf '%s' "$payload" >"$request_target"
 
-  if [[ "$method" == "GET" ]]; then
-    http_status="$(curl -sS -o "$response_body" -w "%{http_code}" "${auth_headers[@]}" "$BASE_URL$path")"
+  if [[ -n "$AUTH_TOKEN" ]]; then
+    request_auth_headers+=(
+      -H "authorization: Bearer $AUTH_TOKEN"
+      -H "x-mandoforge-subject: $request_subject"
+    )
   else
-    http_status="$(curl -sS -o "$response_body" -w "%{http_code}" -X "$method" "${auth_headers[@]}" \
+    request_auth_headers+=(
+      -H "x-mandoforge-subject: $request_subject"
+      -H "x-mandoforge-roles: $ROLES"
+    )
+  fi
+  if [[ -n "$SCHEDULER_TOKEN" ]]; then
+    request_auth_headers+=(-H "x-mandoforge-scheduler-token: $SCHEDULER_TOKEN")
+  fi
+
+  if [[ "$method" == "GET" ]]; then
+    http_status="$(curl -sS -o "$response_body" -w "%{http_code}" "${request_auth_headers[@]}" "$BASE_URL$path")"
+  else
+    http_status="$(curl -sS -o "$response_body" -w "%{http_code}" -X "$method" "${request_auth_headers[@]}" \
       -H "content-type: application/json" \
       -d "$payload" \
       "$BASE_URL$path")"
@@ -217,15 +220,13 @@ collect_b_step_id="$(workflow_step_id_by_key "$steps_file" collect_b)"
 
 collect_b_initial_claim_file="$(fetch_json POST "/api/workflow-step-runs/$collect_b_step_id/claim" "$(jq -nc --arg agent_id "$agent_id" '{
   agent_id: $agent_id,
-  worker_id: "managed-workflow-lease-drill-a",
   lease_seconds: 1
-}')" api-workflow-runtime-proof-step-collect-b-initial-claim)"
+}')" api-workflow-runtime-proof-step-collect-b-initial-claim 2 managed-workflow-lease-drill-a)"
 sleep 2
 collect_b_reclaim_file="$(fetch_json POST "/api/workflow-step-runs/$collect_b_step_id/claim" "$(jq -nc --arg agent_id "$agent_id" '{
   agent_id: $agent_id,
-  worker_id: "managed-workflow-lease-drill-b",
   lease_seconds: 300
-}')" api-workflow-runtime-proof-step-collect-b-lease-reclaim)"
+}')" api-workflow-runtime-proof-step-collect-b-lease-reclaim 2 managed-workflow-lease-drill-b)"
 
 fetch_json PATCH "/api/workflow-step-runs/$collect_a_step_id" \
   '{"status":"failed","output_payload":{"error":"transient source failure for retry proof"}}' \
@@ -357,8 +358,8 @@ jq -n \
       and (($transitions[0].response | map(.transition_type) | index("fan_in")) != null)
       and (($transitions[0].response | map(.transition_type) | index("complete")) != null)
       and ($initial_claim[0].response.step.id == $reclaim[0].response.step.id)
-      and ($initial_claim[0].response.step.claimed_by_worker == "managed-workflow-lease-drill-a")
-      and ($reclaim[0].response.step.claimed_by_worker == "managed-workflow-lease-drill-b")
+      and ($initial_claim[0].response.step.claimed_by_worker == "subject:managed-workflow-lease-drill-a")
+      and ($reclaim[0].response.step.claimed_by_worker == "subject:managed-workflow-lease-drill-b")
       and ($initial_claim[0].response.step.lease_expires_at != $reclaim[0].response.step.lease_expires_at)
       and (($artifacts[0].response | length) >= 1)
       and ($graph[0].response.status == "completed")
@@ -370,8 +371,8 @@ jq -n \
     transition_types: ($transitions[0].response | map(.transition_type) | unique),
     lease_expiry_reclaim: {
       status: (if ($initial_claim[0].response.step.id == $reclaim[0].response.step.id
-        and $initial_claim[0].response.step.claimed_by_worker == "managed-workflow-lease-drill-a"
-        and $reclaim[0].response.step.claimed_by_worker == "managed-workflow-lease-drill-b"
+        and $initial_claim[0].response.step.claimed_by_worker == "subject:managed-workflow-lease-drill-a"
+        and $reclaim[0].response.step.claimed_by_worker == "subject:managed-workflow-lease-drill-b"
         and $initial_claim[0].response.step.lease_expires_at != $reclaim[0].response.step.lease_expires_at)
         then "passed" else "failed" end),
       workflow_step_run_id: $reclaim[0].response.step.id,

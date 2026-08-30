@@ -64,6 +64,11 @@ remote_root="${REMOTE_ROOT:-/opt/mandoforge-adoption}"
 namespace="${NAMESPACE:-agent-os}"
 remote_env="$remote_root/whiskey.env"
 
+[[ -f "$remote_env" && ! -L "$remote_env" ]] || { echo "$remote_env must be a regular non-symlink file" >&2; exit 1; }
+[[ "$(stat -c '%u' "$remote_env")" == "$(id -u)" ]] || { echo "$remote_env must be owned by the deployment user" >&2; exit 1; }
+chmod 0600 "$remote_env"
+[[ "$(stat -c '%a' "$remote_env")" == "600" ]] || { echo "$remote_env must have mode 0600" >&2; exit 1; }
+
 read_env() {
   local key="$1"
   if [[ -f "$remote_env" ]]; then
@@ -78,19 +83,10 @@ fi
 
 api_token="$(read_env MANDOFORGE_DEV_ADMIN_TOKEN)"
 if [[ -z "$api_token" ]]; then
-  api_token="$(read_env MANDOFORGE_WORKER_TOKEN)"
-fi
-if [[ -z "$api_token" ]]; then
   api_token="$(docker inspect mandoforge-adoption-api-1 --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null | sed -n 's/^MANDOFORGE_DEV_ADMIN_TOKEN=//p' | head -n 1 || true)"
 fi
-if [[ -n "$api_token" ]]; then
-  auth_headers=(-H "authorization: Bearer $api_token")
-else
-  auth_headers=(
-    -H "x-mandoforge-subject: whiskey-adoption-admin"
-    -H "x-mandoforge-roles: admin"
-  )
-fi
+[[ -n "$api_token" ]] || { echo "MANDOFORGE_DEV_ADMIN_TOKEN is required for state-provider readiness" >&2; exit 1; }
+auth_headers=(-H "authorization: Bearer $api_token")
 
 readiness_json="$(curl -fsS "${auth_headers[@]}" "http://127.0.0.1:${api_port}/api/remote-computers/readiness")"
 runner_json="$(curl -fsS "${auth_headers[@]}" "http://127.0.0.1:${api_port}/api/remote-computers/runner/readiness")"

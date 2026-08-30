@@ -325,7 +325,7 @@ Local-only HTTP worker compatibility:
 MANDOFORGE_INSECURE_DEV_AUTH=true \
 MANDOFORGE_ALLOW_IN_MEMORY_STORE=1 \
 MANDOFORGE_EXECUTION_WORKER=queue \
-MANDOFORGE_DEV_ADMIN_TOKEN=local-worker-token \
+MANDOFORGE_DEV_ADMIN_TOKEN=local-admin-token \
 MANDOFORGE_WORKER_TOKEN=local-worker-token \
 cargo run -p mandoforge-api
 
@@ -342,12 +342,18 @@ API binary, a durable Postgres queue, and no HTTP `/run` endpoint:
 ```bash
 DATABASE_URL=postgres://mandoforge:mandoforge@127.0.0.1:5432/mandoforge \
 MANDOFORGE_PROCESS_ROLE=worker \
+MANDOFORGE_TENANT_ID=00000000-0000-4000-8000-000000000001 \
 MANDOFORGE_WORKER_TOKEN=... \
+MANDOFORGE_WORKER_SUBJECT=mandoforge-worker \
 WORKER_ID=worker-1 \
 cargo run -p mandoforge-api
 ```
 
 The worker drains both session-loop jobs and approved execution jobs.
+Each worker process is scoped to `MANDOFORGE_TENANT_ID` and maps its token to
+the stable `MANDOFORGE_WORKER_SUBJECT`. Provision that subject as a member of
+each team or project whose sessions it may execute. `WORKER_ID` is the
+ephemeral lease owner (for example, a Pod name), not the authorization subject.
 `WORKER_ENVIRONMENT_ID` binds it to one Environment id; `WORKER_POOL` or
 `WORKER_QUEUE` binds it to Environments whose `worker_queue_binding` names the
 same pool.

@@ -46,6 +46,11 @@ spec:
                 secretKeyRef:
                   name: mandoforge-secrets
                   key: MANDOFORGE_SCHEDULER_TOKEN
+            - name: MANDOFORGE_DEV_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mandoforge-secrets
+                  key: MANDOFORGE_DEV_ADMIN_TOKEN
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

@@ -30,12 +30,22 @@ trim() {
   printf '%s' \"\$1\" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
 }
 
+secure_env_file() {
+  local env_file=\"\$1\"
+  [[ -f \"\$env_file\" && ! -L \"\$env_file\" ]] || { echo \"\$env_file must be a regular non-symlink file\" >&2; return 1; }
+  [[ \"\$(stat -c '%u' \"\$env_file\")\" == \"\$(id -u)\" ]] || { echo \"\$env_file must be owned by the deployment user\" >&2; return 1; }
+  chmod 0600 \"\$env_file\"
+  [[ \"\$(stat -c '%a' \"\$env_file\")\" == \"600\" ]] || { echo \"\$env_file must have mode 0600\" >&2; return 1; }
+}
+
 load_env_file() {
   local env_file=\"\$1\"
   local line
   local name
   local value
   local line_number=0
+
+  secure_env_file \"\$env_file\"
 
   while IFS= read -r line || [[ -n \"\$line\" ]]; do
     line_number=\$((line_number + 1))
@@ -59,6 +69,17 @@ load_env_file() {
     fi
     export \"\$name=\$value\"
   done <\"\$env_file\"
+}
+
+require_distinct_runtime_tokens() {
+  local admin_token=\"\${MANDOFORGE_DEV_ADMIN_TOKEN:-}\"
+  local worker_token=\"\${MANDOFORGE_WORKER_TOKEN:-}\"
+  local scheduler_token=\"\${MANDOFORGE_SCHEDULER_TOKEN:-}\"
+  [[ -n \"\$admin_token\" ]] || { echo \"MANDOFORGE_DEV_ADMIN_TOKEN is required in whiskey.env\" >&2; return 1; }
+  [[ -n \"\$worker_token\" ]] || { echo \"MANDOFORGE_WORKER_TOKEN is required in whiskey.env\" >&2; return 1; }
+  [[ -n \"\$scheduler_token\" ]] || { echo \"MANDOFORGE_SCHEDULER_TOKEN is required in whiskey.env\" >&2; return 1; }
+  [[ \"\$admin_token\" != \"\$worker_token\" && \"\$admin_token\" != \"\$scheduler_token\" && \"\$worker_token\" != \"\$scheduler_token\" ]] \
+    || { echo \"Whiskey admin, worker, and scheduler tokens must be distinct\" >&2; return 1; }
 }
 ENV_LOADER
 chmod 0700 '$REMOTE_ENV_LOADER'"
@@ -307,12 +328,9 @@ source '$REMOTE_ENV_LOADER'
 load_env_file '$REMOTE_ENV'
 
 curl() {
-  local token="\${MANDOFORGE_STAGE2_GATE_TOKEN:-\${MANDOFORGE_DEV_ADMIN_TOKEN:-\${MANDOFORGE_WORKER_TOKEN:-}}}"
-  if [[ -n "\$token" ]]; then
-    command curl -H "authorization: Bearer \$token" "\$@"
-  else
-    command curl "\$@"
-  fi
+  local token="\${MANDOFORGE_STAGE2_GATE_TOKEN:-\${MANDOFORGE_DEV_ADMIN_TOKEN:-}}"
+  [[ -n "\$token" ]] || { echo "Whiskey evidence requires MANDOFORGE_STAGE2_GATE_TOKEN or MANDOFORGE_DEV_ADMIN_TOKEN" >&2; return 1; }
+  command curl -H "authorization: Bearer \$token" "\$@"
 }
 
 base_url="http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787}"
@@ -449,12 +467,9 @@ source '$REMOTE_ENV_LOADER'
 load_env_file '$REMOTE_ENV'
 
 curl() {
-  local token="\${MANDOFORGE_STAGE2_GATE_TOKEN:-\${MANDOFORGE_DEV_ADMIN_TOKEN:-\${MANDOFORGE_WORKER_TOKEN:-}}}"
-  if [[ -n "\$token" ]]; then
-    command curl -H "authorization: Bearer \$token" "\$@"
-  else
-    command curl "\$@"
-  fi
+  local token="\${MANDOFORGE_STAGE2_GATE_TOKEN:-\${MANDOFORGE_DEV_ADMIN_TOKEN:-}}"
+  [[ -n "\$token" ]] || { echo "Whiskey evidence requires MANDOFORGE_STAGE2_GATE_TOKEN or MANDOFORGE_DEV_ADMIN_TOKEN" >&2; return 1; }
+  command curl -H "authorization: Bearer \$token" "\$@"
 }
 
 base_url="http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787}"
@@ -547,12 +562,9 @@ source '$REMOTE_ENV_LOADER'
 load_env_file '$REMOTE_ENV'
 
 curl() {
-  local token="\${MANDOFORGE_STAGE2_GATE_TOKEN:-\${MANDOFORGE_DEV_ADMIN_TOKEN:-\${MANDOFORGE_WORKER_TOKEN:-}}}"
-  if [[ -n "\$token" ]]; then
-    command curl -H "authorization: Bearer \$token" "\$@"
-  else
-    command curl "\$@"
-  fi
+  local token="\${MANDOFORGE_STAGE2_GATE_TOKEN:-\${MANDOFORGE_DEV_ADMIN_TOKEN:-}}"
+  [[ -n "\$token" ]] || { echo "Whiskey evidence requires MANDOFORGE_STAGE2_GATE_TOKEN or MANDOFORGE_DEV_ADMIN_TOKEN" >&2; return 1; }
+  command curl -H "authorization: Bearer \$token" "\$@"
 }
 
 base_url="http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787}"
@@ -702,12 +714,9 @@ source '$REMOTE_ENV_LOADER'
 load_env_file '$REMOTE_ENV'
 
 curl() {
-  local token="\${MANDOFORGE_STAGE2_GATE_TOKEN:-\${MANDOFORGE_DEV_ADMIN_TOKEN:-\${MANDOFORGE_WORKER_TOKEN:-}}}"
-  if [[ -n "\$token" ]]; then
-    command curl -H "authorization: Bearer \$token" "\$@"
-  else
-    command curl "\$@"
-  fi
+  local token="\${MANDOFORGE_STAGE2_GATE_TOKEN:-\${MANDOFORGE_DEV_ADMIN_TOKEN:-}}"
+  [[ -n "\$token" ]] || { echo "Whiskey evidence requires MANDOFORGE_STAGE2_GATE_TOKEN or MANDOFORGE_DEV_ADMIN_TOKEN" >&2; return 1; }
+  command curl -H "authorization: Bearer \$token" "\$@"
 }
 
 base_url="http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787}"
@@ -801,12 +810,9 @@ source '$REMOTE_ENV_LOADER'
 load_env_file '$REMOTE_ENV'
 
 curl() {
-  local token="\${MANDOFORGE_STAGE2_GATE_TOKEN:-\${MANDOFORGE_DEV_ADMIN_TOKEN:-\${MANDOFORGE_WORKER_TOKEN:-}}}"
-  if [[ -n "\$token" ]]; then
-    command curl -H "authorization: Bearer \$token" "\$@"
-  else
-    command curl "\$@"
-  fi
+  local token="\${MANDOFORGE_STAGE2_GATE_TOKEN:-\${MANDOFORGE_DEV_ADMIN_TOKEN:-}}"
+  [[ -n "\$token" ]] || { echo "Whiskey evidence requires MANDOFORGE_STAGE2_GATE_TOKEN or MANDOFORGE_DEV_ADMIN_TOKEN" >&2; return 1; }
+  command curl -H "authorization: Bearer \$token" "\$@"
 }
 
 base_url="http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787}"
@@ -963,12 +969,9 @@ source '$REMOTE_ENV_LOADER'
 load_env_file '$REMOTE_ENV'
 
 curl() {
-  local token="\${MANDOFORGE_STAGE2_GATE_TOKEN:-\${MANDOFORGE_DEV_ADMIN_TOKEN:-\${MANDOFORGE_WORKER_TOKEN:-}}}"
-  if [[ -n "\$token" ]]; then
-    command curl -H "authorization: Bearer \$token" "\$@"
-  else
-    command curl "\$@"
-  fi
+  local token="\${MANDOFORGE_STAGE2_GATE_TOKEN:-\${MANDOFORGE_DEV_ADMIN_TOKEN:-}}"
+  [[ -n "\$token" ]] || { echo "Whiskey evidence requires MANDOFORGE_STAGE2_GATE_TOKEN or MANDOFORGE_DEV_ADMIN_TOKEN" >&2; return 1; }
+  command curl -H "authorization: Bearer \$token" "\$@"
 }
 
 base_url="http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787}"
@@ -1054,6 +1057,7 @@ collect_mcp_lark_docs_login_prompt_artifact
 
 ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && test -f '$REMOTE_COMPOSE' && test -f '$REMOTE_ENV'"
 install_remote_env_loader
+ssh "$REMOTE_HOST" "source '$REMOTE_ENV_LOADER' && load_env_file '$REMOTE_ENV' && require_distinct_runtime_tokens"
 ssh "$REMOTE_HOST" "mkdir -p '$REMOTE_ROOT/evidence' '$REMOTE_ROOT/archives' '$REMOTE_ROOT/scripts' '$REMOTE_ROOT/deploy/stage2-evidence' '$REMOTE_ROOT/deploy/stage2-production-evidence' && chown -R 1000:1000 '$REMOTE_ROOT/evidence' && chmod 0750 '$REMOTE_ROOT/evidence'"
 rsync -az scripts/ "$REMOTE_HOST:$REMOTE_ROOT/scripts/"
 rsync -az packs/ "$REMOTE_HOST:$REMOTE_ROOT/packs/"
@@ -1064,12 +1068,9 @@ ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && source '$REMOTE_ENV_LOADER' && load_env
   docker compose -p '$COMPOSE_PROJECT' -f '$REMOTE_COMPOSE' exec -T api bash -lc '
     set -euo pipefail
     curl() {
-      local token=\"\${MANDOFORGE_STAGE2_GATE_TOKEN:-\${MANDOFORGE_DEV_ADMIN_TOKEN:-\${MANDOFORGE_WORKER_TOKEN:-}}}\"
-      if [[ -n \"\$token\" ]]; then
-        command curl -H \"authorization: Bearer \$token\" \"\$@\"
-      else
-        command curl \"\$@\"
-      fi
+      local token=\"\${MANDOFORGE_STAGE2_GATE_TOKEN:-\${MANDOFORGE_DEV_ADMIN_TOKEN:-}}\"
+      [[ -n \"\$token\" ]] || { echo \"Whiskey evidence requires MANDOFORGE_STAGE2_GATE_TOKEN or MANDOFORGE_DEV_ADMIN_TOKEN\" >&2; return 1; }
+      command curl -H \"authorization: Bearer \$token\" \"\$@\"
     }
     mkdir -p /evidence
     curl -fsS http://127.0.0.1:8787/healthz >/dev/null
@@ -1178,7 +1179,7 @@ seed_vault_kms_evidence "$REMOTE_ROOT/evidence/stage2-production" "Whiskey stric
 seed_provider_rollout_evidence "$REMOTE_ROOT/evidence/stage2-production" "Whiskey strict provider rollout refresh after Vault lifecycle evidence"
 
 ssh "$REMOTE_HOST" "cd '$REMOTE_ROOT' && source '$REMOTE_ENV_LOADER' && load_env_file '$REMOTE_ENV' && \
-  curl() { token=\"\${MANDOFORGE_STAGE2_GATE_TOKEN:-\${MANDOFORGE_DEV_ADMIN_TOKEN:-\${MANDOFORGE_WORKER_TOKEN:-}}}\"; if [[ -n \"\$token\" ]]; then command curl -H \"authorization: Bearer \$token\" \"\$@\"; else command curl \"\$@\"; fi; }; \
+  curl() { token=\"\${MANDOFORGE_STAGE2_GATE_TOKEN:-\${MANDOFORGE_DEV_ADMIN_TOKEN:-}}\"; [[ -n \"\$token\" ]] || { echo 'Whiskey evidence requires MANDOFORGE_STAGE2_GATE_TOKEN or MANDOFORGE_DEV_ADMIN_TOKEN' >&2; return 1; }; command curl -H \"authorization: Bearer \$token\" \"\$@\"; }; \
   org_id=\$(curl -fsS -H \"x-mandoforge-subject: whiskey-adoption-admin\" -H \"x-mandoforge-roles: admin\" http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787}/api/organizations | jq -r '.[0].id // empty') && \
   team_id=\$(curl -fsS -H \"x-mandoforge-subject: whiskey-adoption-admin\" -H \"x-mandoforge-roles: admin\" http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787}/api/organizations/\$org_id/teams | jq -r 'map(select(.slug == \"whiskey-pilot\")) | .[0].id // empty') && \
   server_json=\$(curl -fsS -H \"x-mandoforge-subject: whiskey-adoption-admin\" -H \"x-mandoforge-roles: admin\" http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787}/api/teams/\$team_id/mcp-servers | jq 'map(select(.name == \"whiskey-docs\")) | .[0]') && \

@@ -140,9 +140,13 @@ render_named_resource_json() {
 }
 
 verify_worker_runtime_contracts() {
-  local api_json pvc_json worker_json policy_json
-  local worker_contract worker_manifest worker_name
+  local api_json config_json pvc_json worker_json policy_json
+  local worker_contract worker_manifest worker_name worker_service_name
   local policy_contract policy_manifest policy_name policy_app
+
+  config_json="$(render_named_resource_json deploy/k8s/configmap.yaml ConfigMap mandoforge-config)"
+  jq -e '.data.MANDOFORGE_WORKER_SUBJECT == "mandoforge-worker"' <<<"$config_json" >/dev/null \
+    || { echo "worker authorization subject must be a stable configured service identity" >&2; exit 1; }
 
   api_json="$(render_named_resource_json deploy/k8s/api.yaml Deployment mandoforge-api)"
   jq -e '
@@ -163,11 +167,11 @@ verify_worker_runtime_contracts() {
     || { echo "API Deployment must bind the api role and shared workspace PVC to its api container" >&2; exit 1; }
 
   for worker_contract in \
-    'deploy/k8s/worker.yaml|mandoforge-worker' \
-    'deploy/k8s/worker-isolated-pool.yaml|mandoforge-worker-isolated'; do
-    IFS='|' read -r worker_manifest worker_name <<<"$worker_contract"
+    'deploy/k8s/worker.yaml|mandoforge-worker|mandoforge-worker' \
+    'deploy/k8s/worker-isolated-pool.yaml|mandoforge-worker-isolated|mandoforge-worker-isolated'; do
+    IFS='|' read -r worker_manifest worker_name worker_service_name <<<"$worker_contract"
     worker_json="$(render_named_resource_json "$worker_manifest" Deployment "$worker_name")"
-    if ! jq -e '
+    if ! jq -e --arg worker_service_name "$worker_service_name" '
       .spec.template.spec as $pod
       | [$pod.containers[]? | select(.name == "worker")] as $containers
       | ($pod.containers | length) == 1
@@ -179,6 +183,24 @@ verify_worker_runtime_contracts() {
           $containers[0].env[]?
           | select(.name == "MANDOFORGE_PROCESS_ROLE")
         ] == [{"name":"MANDOFORGE_PROCESS_ROLE","value":"worker"}])
+        and ([
+          $containers[0].env[]?
+          | select(.name == "MANDOFORGE_SERVICE_NAME")
+        ] == [{"name":"MANDOFORGE_SERVICE_NAME","value":$worker_service_name}])
+        and ([$containers[0].envFrom[]? | select(has("secretRef"))] | length) == 0
+        and ([$containers[0].env[]? | select(.valueFrom.secretKeyRef != null) | .name] | sort)
+          == ([
+            "DATABASE_URL",
+            "DEEPSEEK_API_KEY",
+            "MANDOFORGE_PROVIDER_API_KEY",
+            "MANDOFORGE_VAULT_TOKEN",
+            "MANDOFORGE_WORKER_TOKEN"
+          ] | sort)
+        and all($containers[0].env[]? | select(.valueFrom.secretKeyRef != null);
+          .valueFrom.secretKeyRef.name == "mandoforge-worker-secrets"
+          and .valueFrom.secretKeyRef.key == .name)
+        and all($containers[0].env[]?;
+          (.name | test("(ADMIN|SCHEDULER|CONTROLLER|KMS|POSTGRES_PASSWORD)")) | not)
         and any($containers[0].volumeMounts[]?;
           .name == "workspaces" and .mountPath == "/var/lib/mandoforge/workspaces")
         and any($pod.volumes[]?;
@@ -193,7 +215,7 @@ verify_worker_runtime_contracts() {
           | select(has("serviceAccountToken"))
         ] | length == 0)
     ' <<<"$worker_json" >/dev/null; then
-      echo "$worker_manifest must bind the worker role and shared workspace PVC to one credential-free mandoforge-api container" >&2
+      echo "$worker_manifest must bind the worker role, telemetry identity, worker-only secret whitelist, and shared workspace PVC to one mandoforge-api container" >&2
       exit 1
     fi
   done

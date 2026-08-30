@@ -518,7 +518,7 @@ h1 {
 
 .visual-command-deck {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(180px, 0.6fr) minmax(160px, 0.45fr);
+  grid-template-columns: minmax(180px, 0.48fr) minmax(590px, 1.62fr) minmax(170px, 0.42fr) minmax(138px, 0.34fr);
   align-items: center;
   gap: 16px;
   border-bottom: 1px solid #cfd9d4;
@@ -541,6 +541,7 @@ h1 {
 .flow-meter small,
 .pipeline-stage small,
 .mosaic-tile small,
+.fleet-cell span,
 .radar-dial small {
   color: var(--muted);
   font-size: 11px;
@@ -555,6 +556,118 @@ h1 {
 .deck-copy strong {
   font-size: 20px;
   line-height: 1.1;
+}
+
+.dynamic-workflow-canvas {
+  position: relative;
+  display: grid;
+  min-height: 260px;
+  align-content: center;
+  gap: 18px;
+  overflow: hidden;
+  border: 1px solid #cfd9d4;
+  border-radius: 7px;
+  background:
+    linear-gradient(90deg, rgba(17, 120, 95, 0.1), transparent 36%),
+    linear-gradient(135deg, transparent 0 48%, rgba(17, 23, 21, 0.08) 48.2% 48.8%, transparent 49%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.88), rgba(251, 250, 245, 0.94));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  padding: 18px;
+}
+
+.workflow-canvas-summary {
+  display: grid;
+  gap: 8px;
+  max-width: 720px;
+}
+
+.workflow-canvas-summary span {
+  color: var(--green);
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.workflow-canvas-summary strong {
+  overflow: hidden;
+  color: var(--black);
+  font-size: 18px;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workflow-canvas-summary small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.workflow-canvas-track {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(76px, 1fr));
+  gap: 8px;
+}
+
+.workflow-step-card {
+  position: relative;
+  display: grid;
+  min-height: 118px;
+  align-content: space-between;
+  border: 1px solid #cfd9d4;
+  border-radius: 7px;
+  background: #ffffff;
+  padding: 11px;
+  box-shadow: 0 12px 24px rgba(23, 32, 29, 0.08);
+}
+
+.workflow-step-card:not(:last-child)::after {
+  position: absolute;
+  right: -11px;
+  top: 50%;
+  z-index: 2;
+  width: 14px;
+  height: 2px;
+  background: #28352f;
+  content: "";
+}
+
+.workflow-step-card span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.workflow-step-card strong {
+  color: var(--black);
+  font-size: 13px;
+  line-height: 1.08;
+}
+
+.workflow-step-card b {
+  display: inline-grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 50%;
+  background: #edf2ef;
+  color: var(--ink);
+  font-size: 15px;
+}
+
+.workflow-step-card.good {
+  border-color: rgba(17, 120, 95, 0.35);
+  background: #f0fbf6;
+}
+
+.workflow-step-card.info {
+  border-color: rgba(46, 111, 189, 0.35);
+  background: #eef7fd;
+}
+
+.workflow-step-card.bad {
+  border-color: rgba(188, 54, 44, 0.36);
+  background: #fff2ef;
 }
 
 .deck-orbit,
@@ -624,7 +737,8 @@ h1 {
 .graph-stats,
 .semantic-stats,
 .mosaic-side,
-.radar-bars {
+.radar-bars,
+.fleet-summary {
   display: grid;
   gap: 8px;
 }
@@ -1597,6 +1711,7 @@ h2 {
 .semantic-map,
 .pack-mosaic,
 .workflow-graph,
+.fleet-shape,
 .context-preview {
   display: grid;
   gap: 14px;
@@ -3206,6 +3321,57 @@ h2 {
   white-space: nowrap;
 }
 
+.fleet-shape {
+  grid-template-columns: repeat(auto-fit, minmax(82px, 1fr));
+  align-items: center;
+}
+
+.fleet-cell {
+  display: grid;
+  width: var(--cell-size);
+  height: var(--cell-size);
+  min-width: 54px;
+  min-height: 54px;
+  place-items: center;
+  justify-self: center;
+  border: 1px solid rgba(255, 255, 255, 0.74);
+  border-radius: 50%;
+  background: var(--blue);
+  color: #ffffff;
+  box-shadow: 0 14px 28px rgba(23, 32, 29, 0.18);
+}
+
+.fleet-cell strong {
+  font-size: 14px;
+}
+
+.fleet-cell span {
+  max-width: 76px;
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.82);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fleet-empty {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(3, 54px);
+  justify-content: center;
+  gap: 14px;
+  padding: 22px 0;
+}
+
+.fleet-empty i {
+  display: block;
+  width: 54px;
+  height: 54px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #dfe8e3, #ffffff);
+  animation: fleet-pulse 1.8s ease-in-out infinite;
+  animation-delay: var(--delay);
+}
+
 .semantic-canvas::before {
   content: "";
 }
@@ -3852,6 +4018,10 @@ h2 {
     grid-template-columns: 1fr 1fr;
   }
 
+  .dynamic-workflow-canvas {
+    grid-column: 1 / -1;
+  }
+
   .agent-os-cockpit {
     grid-template-columns: 1fr;
   }
@@ -4120,6 +4290,18 @@ h2 {
   .operator-task-card,
   .wizard-step {
     min-height: 0;
+  }
+
+  .dynamic-workflow-canvas {
+    min-height: 0;
+  }
+
+  .workflow-canvas-track {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .workflow-step-card:not(:last-child)::after {
+    display: none;
   }
 
   .deck-gauge,

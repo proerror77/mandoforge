@@ -127,7 +127,7 @@ BASE_URL=http://127.0.0.1:8787 ./scripts/stage1-demo.sh
 
 Before shared-cluster use:
 
-- Do not apply `deploy/k8s/secret.example.yaml` to production. The default manifests include only `deploy/k8s/secret-delivery-contract.yaml`; create `mandoforge-secrets` through a reviewed secret delivery path before applying `deploy/k8s`.
+- Do not apply `deploy/k8s/secret.example.yaml` or `deploy/k8s/worker-secret.example.yaml` to production. The default manifests include only `deploy/k8s/secret-delivery-contract.yaml`; create separate `mandoforge-secrets` and worker-only `mandoforge-worker-secrets` through a reviewed delivery path. Worker Pods must receive only `DATABASE_URL`, `MANDOFORGE_WORKER_TOKEN`, and the explicitly allowed optional provider/Vault keys.
 - Add NetworkPolicy before enabling shell, Codex, HTTP, or MCP workers.
 - Review the workspace PVC, backup policy, and retention policy.
 - Split sandbox and Codex execution into separate worker Deployments.

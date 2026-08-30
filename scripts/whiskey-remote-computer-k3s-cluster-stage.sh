@@ -100,18 +100,29 @@ merge_remote_runtime_env() {
   rsync -az "$runtime_env_file" "$remote_host:$remote_tmp"
   ssh "$remote_host" "REMOTE_ENV='$remote_env' REMOTE_TMP='$remote_tmp' bash -s" <<'REMOTE'
 set -euo pipefail
+umask 077
 
+[[ -f "$REMOTE_TMP" && ! -L "$REMOTE_TMP" ]] || { echo "$REMOTE_TMP must be a regular non-symlink file" >&2; exit 1; }
+[[ "$(stat -c '%u' "$REMOTE_TMP")" == "$(id -u)" ]] || { echo "$REMOTE_TMP must be owned by the deployment user" >&2; exit 1; }
+chmod 0600 "$REMOTE_TMP"
+if [[ -e "$REMOTE_ENV" ]]; then
+  [[ -f "$REMOTE_ENV" && ! -L "$REMOTE_ENV" ]] || { echo "$REMOTE_ENV must be a regular non-symlink file" >&2; exit 1; }
+  [[ "$(stat -c '%u' "$REMOTE_ENV")" == "$(id -u)" ]] || { echo "$REMOTE_ENV must be owned by the deployment user" >&2; exit 1; }
+fi
 touch "$REMOTE_ENV"
+chmod 0600 "$REMOTE_ENV"
 while IFS= read -r line || [[ -n "$line" ]]; do
   [[ -z "$line" || "$line" == \#* ]] && continue
   key="${line%%=*}"
   value="${line#*=}"
+  [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { echo "invalid runtime env key: $key" >&2; exit 1; }
   if grep -q "^${key}=" "$REMOTE_ENV"; then
     sed -i "s#^${key}=.*#${key}=${value}#" "$REMOTE_ENV"
   else
     printf '%s\n' "${key}=${value}" >>"$REMOTE_ENV"
   fi
 done <"$REMOTE_TMP"
+chmod 0600 "$REMOTE_ENV"
 rm -f "$REMOTE_TMP"
 REMOTE
 }

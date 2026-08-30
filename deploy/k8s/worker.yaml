@@ -26,8 +26,6 @@ spec:
           envFrom:
             - configMapRef:
                 name: mandoforge-config
-            - secretRef:
-                name: mandoforge-secrets
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -35,8 +33,38 @@ spec:
               drop:
                 - ALL
           env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: mandoforge-worker-secrets
+                  key: DATABASE_URL
+            - name: MANDOFORGE_WORKER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mandoforge-worker-secrets
+                  key: MANDOFORGE_WORKER_TOKEN
+            - name: MANDOFORGE_PROVIDER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mandoforge-worker-secrets
+                  key: MANDOFORGE_PROVIDER_API_KEY
+                  optional: true
+            - name: DEEPSEEK_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mandoforge-worker-secrets
+                  key: DEEPSEEK_API_KEY
+                  optional: true
+            - name: MANDOFORGE_VAULT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mandoforge-worker-secrets
+                  key: MANDOFORGE_VAULT_TOKEN
+                  optional: true
             - name: MANDOFORGE_PROCESS_ROLE
               value: "worker"
+            - name: MANDOFORGE_SERVICE_NAME
+              value: "mandoforge-worker"
             - name: WORKER_ID
               valueFrom:
                 fieldRef:

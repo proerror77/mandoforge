@@ -32,8 +32,6 @@ use uuid::Uuid;
 use worker_daemon::ProcessRole;
 
 const DEFAULT_TENANT_ID: &str = "00000000-0000-4000-8000-000000000001";
-const CONSOLE_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-S8gqf4aiLM0nZQ8fK0Dda8kz4a2DvOeHeeoIWg3Pu7w='; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
-const CONSOLE_DEV_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-S8gqf4aiLM0nZQ8fK0Dda8kz4a2DvOeHeeoIWg3Pu7w='; connect-src 'self' http://127.0.0.1:* http://localhost:*; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
 
 pub(crate) fn deterministic_record_id(namespace_id: Uuid, kind: &str, parts: &[&str]) -> Uuid {
     let mut hasher = Sha256::new();
