@@ -63,6 +63,7 @@ async fn postgres_session_stream_delivers_live_events_without_cross_tenant_leaka
         .connect(&database_url)
         .await
         .expect("connect tenant-routed postgres");
+    let observer_pool = pool.clone();
 
     let mut state = test_state_with_worker(Arc::new(InlineExecutionWorker));
     state.process_role = ProcessRole::Api;
@@ -113,6 +114,17 @@ async fn postgres_session_stream_delivers_live_events_without_cross_tenant_leaka
     )
     .await;
 
+    let listener_count_before: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM pg_stat_activity
+         WHERE datname = current_database()
+           AND usename = current_user
+           AND query LIKE 'LISTEN %mf_session_events%'",
+    )
+    .fetch_one(&observer_pool)
+    .await
+    .expect("count existing Postgres listeners");
+
     let response = app
         .clone()
         .oneshot(
@@ -130,6 +142,37 @@ async fn postgres_session_stream_delivers_live_events_without_cross_tenant_leaka
         .await
         .expect("open postgres stream");
     assert_eq!(response.status(), StatusCode::OK);
+    let _second_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/sessions/{}/stream?after_seq={}",
+                    session_a.id, baseline[0].seq
+                ))
+                .header("x-mandoforge-subject", "admin-1")
+                .header("x-mandoforge-roles", "admin")
+                .header("x-mandoforge-tenant-id", tenant_a.to_string())
+                .body(Body::empty())
+                .expect("valid second stream request"),
+        )
+        .await
+        .expect("open second postgres stream");
+    let listener_count_after: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM pg_stat_activity
+         WHERE datname = current_database()
+           AND usename = current_user
+           AND query LIKE 'LISTEN %mf_session_events%'",
+    )
+    .fetch_one(&observer_pool)
+    .await
+    .expect("count shared Postgres listeners");
+    assert_eq!(
+        listener_count_after,
+        listener_count_before + 1,
+        "concurrent SSE streams must share one Postgres listener connection"
+    );
 
     let _: Vec<SessionEvent> = request_json(
         app.clone(),
