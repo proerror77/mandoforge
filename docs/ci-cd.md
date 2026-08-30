@@ -9,7 +9,7 @@ Mandoforge keeps the default CI path fast and moves full evidence runs to explic
 - `Static gates` builds the Yew/Trunk WebAssembly web UI into `web/`, verifies the emitted static assets, checks JavaScript and shell syntax, Kubernetes manifest renderability, and evidence manifest validators without compiling the API workspace.
 - `Rust tests` installs the repository's pinned Rust toolchain, restores Cargo registry and `target/` cache, runs `cargo fetch --locked`, checks formatting and Clippy, and runs `cargo test --workspace --locked --all-targets -- --test-threads=1`.
 
-Local development and GitHub Actions use Rust 1.96.0. Update `rust-toolchain.toml` and every `dtolnay/rust-toolchain` workflow reference together when intentionally upgrading it.
+Local development, GitHub Actions, and the Agent Sandbox runtime use Rust 1.97.0. Update `rust-toolchain.toml`, the sandbox runtime image, and every `dtolnay/rust-toolchain` workflow reference together when intentionally upgrading it.
 
 The Rust job intentionally does not run both `cargo check` and `cargo test` on every PR. `cargo test --all-targets` already compiles the workspace test targets and avoids a second full compile path in ordinary CI.
 

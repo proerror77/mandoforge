@@ -81,7 +81,7 @@ jobs:
           [[ "$RUNTIME_IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]
       - name: Build Agent Sandbox runtime image
         run: MANDOFORGE_AGENT_SANDBOX_IMAGE="$RUNTIME_IMAGE_NAME:$RUNTIME_IMAGE_TAG" scripts/build-agent-sandbox-runtime-image.sh --platform linux/amd64
-      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: dtolnay/rust-toolchain@1.97.0
         if: inputs.runtime_only != 'true'
         with:
           targets: wasm32-unknown-unknown
