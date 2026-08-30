@@ -20,7 +20,7 @@ require_text() {
   fi
 }
 
-for command in find grep sed; do
+for command in find grep node sed; do
   if ! command -v "$command" >/dev/null 2>&1; then
     echo "missing required command: $command" >&2
     exit 1
@@ -97,5 +97,7 @@ if grep -R -q "window.prompt" "$ASSET_ROOT"; then
   echo "static UI must not use window.prompt" >&2
   exit 1
 fi
+
+node scripts/verify-static-ui-csp-hash.mjs
 
 echo "static UI asset verification ok"
