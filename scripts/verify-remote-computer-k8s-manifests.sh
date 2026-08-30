@@ -24,6 +24,7 @@ runtime_launcher_source="crates/mandoforge-api/src/bin/mandoforge-sandbox-runtim
 runtime_dockerfile="Dockerfile.agent-sandbox"
 runtime_build_script="scripts/build-agent-sandbox-runtime-image.sh"
 runtime_publish_workflow=".github/workflows/deploy.yml"
+whiskey_deploy_script="scripts/whiskey-adoption-deploy.sh"
 agent_sandbox_contract="deploy/k8s/agent-sandbox-controller-contract.yaml"
 
 for manifest in "${dry_run_manifests[@]}"; do
@@ -317,6 +318,7 @@ fi
 for publish_contract in \
   'runtime_only:' \
   'RUNTIME_IMAGE_NAME: ghcr.io/${{ github.repository }}/mandoforge-agent-sandbox-runtime' \
+  'IMAGE_TAG: ${{ inputs.image_tag || github.sha }}' \
   'RUNTIME_IMAGE_TAG: ${{ inputs.runtime_image_tag }}' \
   'MANDOFORGE_AGENT_SANDBOX_IMAGE="$RUNTIME_IMAGE_NAME:$RUNTIME_IMAGE_TAG"' \
   "if: inputs.runtime_only != 'true'" \
@@ -324,6 +326,25 @@ for publish_contract in \
   'docker push "$RUNTIME_IMAGE_NAME:$RUNTIME_IMAGE_TAG"'; do
   if ! grep -Fq "$publish_contract" "$runtime_publish_workflow"; then
     echo "Agent Sandbox deploy workflow is missing publish contract: $publish_contract" >&2
+    exit 1
+  fi
+done
+
+if sed -n '/^  build-image:/,/^  deploy-whiskey:/p' "$runtime_publish_workflow" | grep -q 'environment:' \
+  || ! sed -n '/^  deploy-whiskey:/,$p' "$runtime_publish_workflow" | grep -q 'environment: stage2-production'; then
+  echo "Only the Whiskey deployment job may use the stage2-production environment" >&2
+  exit 1
+fi
+
+for deployment_contract in \
+  'needs: build-image' \
+  "if: github.ref == 'refs/heads/main'" \
+  'scripts/whiskey-adoption-deploy.sh' \
+  'if [[ ! "$GIT_SHA" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then' \
+  'if [[ -z "$actual_sha" || "$actual_sha" != "$GIT_SHA" ]]; then'; do
+  if ! grep -Fq "$deployment_contract" "$runtime_publish_workflow" \
+    && ! grep -Fq "$deployment_contract" "$whiskey_deploy_script"; then
+    echo "Whiskey deployment is missing identity contract: $deployment_contract" >&2
     exit 1
   fi
 done

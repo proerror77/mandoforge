@@ -4,10 +4,12 @@ Mandoforge keeps the default CI path fast and moves full evidence runs to explic
 
 ## Fast CI
 
-`.github/workflows/ci.yml` runs on every push and pull request:
+`.github/workflows/ci.yml` runs on pull requests and pushes to `main`:
 
 - `Static gates` builds the Yew/Trunk WebAssembly web UI into `web/`, verifies the emitted static assets, checks JavaScript and shell syntax, Kubernetes manifest renderability, and evidence manifest validators without compiling the API workspace.
-- `Rust tests` installs the stable Rust toolchain, restores Cargo registry and `target/` cache, runs `cargo fetch --locked`, checks formatting, and runs `cargo test --workspace --locked --all-targets -- --test-threads=1`.
+- `Rust tests` installs the repository's pinned Rust toolchain, restores Cargo registry and `target/` cache, runs `cargo fetch --locked`, checks formatting and Clippy, and runs `cargo test --workspace --locked --all-targets -- --test-threads=1`.
+
+Local development and GitHub Actions use Rust 1.96.0. Update `rust-toolchain.toml` and every `dtolnay/rust-toolchain` workflow reference together when intentionally upgrading it.
 
 The Rust job intentionally does not run both `cargo check` and `cargo test` on every PR. `cargo test --all-targets` already compiles the workspace test targets and avoids a second full compile path in ordinary CI.
 
@@ -28,18 +30,20 @@ path unless the change requires them.
 
 ## Deploy
 
-`.github/workflows/deploy.yml` is manual and uses the `stage2-production` GitHub Environment. It builds the Yew/Trunk WebAssembly web UI, builds a `linux/amd64` Docker image, and pushes it to GHCR by default.
+`.github/workflows/deploy.yml` is manual. Its build job publishes images without creating a production deployment record. Only a run dispatched from `main` can start the optional Whiskey deployment job, which uses the `stage2-production` GitHub Environment.
 
 To update the Whiskey adoption stack through GitHub Actions, run the workflow with:
 
-- `image_tag`: the release tag to deploy, for example `whiskey-YYYYMMDD-<sha>`.
+- `image_tag`: optional; defaults to the exact source commit SHA.
 - `publish_image`: `true`.
 - `deploy_whiskey`: `true`.
 - `whiskey_remote_host`: the Whiskey host or IP, unless the `WHISKEY_REMOTE_HOST` secret is configured.
 - `whiskey_remote_user`: optional; falls back to `WHISKEY_REMOTE_USER`, then `root`.
 - `whiskey_remote_root`: defaults to `/opt/mandoforge-adoption`.
 
-Whiskey deployment also requires the `WHISKEY_SSH_PRIVATE_KEY` repository or environment secret. The workflow pushes the image with GitHub's package token, then runs `scripts/whiskey-adoption-deploy.sh` over SSH so Whiskey only pulls and restarts the adoption stack; it does not compile Rust on the Whiskey host.
+Whiskey deployment also requires the `WHISKEY_SSH_PRIVATE_KEY` repository or environment secret. The workflow pushes the image with GitHub's package token, then runs `scripts/whiskey-adoption-deploy.sh` over SSH so Whiskey only pulls and restarts the adoption stack; it does not compile Rust on the Whiskey host. The deployment fails unless the runtime readback contains both the requested image tag and exact Git SHA.
+
+Publishing an image is `Publish` evidence only. A successful environment-gated job plus the script's tag-and-SHA verification is `Deploy` and `Readback` evidence; neither is implied by CI or merge status.
 
 It does not apply Kubernetes manifests or execute production business actions. Stage 2 high-risk actions remain approval-gated until production policy explicitly enables them.
 

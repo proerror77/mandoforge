@@ -83,6 +83,11 @@ FINANCE_EXPORT_DELIVERY_MODE="${WHISKEY_FINANCE_EXPORT_DELIVERY_MODE:-lark_drive
 FINANCE_EXPORT_LARK_AS="${WHISKEY_FINANCE_EXPORT_LARK_AS:-user}"
 FINANCE_EXPORT_LARK_FOLDER_TOKEN="${WHISKEY_FINANCE_EXPORT_LARK_FOLDER_TOKEN:-}"
 
+if [[ ! "$GIT_SHA" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then
+  echo "Whiskey deployment requires an exact Git SHA via MANDOFORGE_GIT_SHA or the current checkout" >&2
+  exit 1
+fi
+
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
     echo "whiskey adoption deploy requires $1" >&2
@@ -528,8 +533,8 @@ if [[ "$actual_tag" != "$IMAGE_TAG" ]]; then
   cat "$REMOTE_ROOT/evidence/deployment-version.json" >&2
   exit 1
 fi
-if [[ "$GIT_SHA" != "unknown" && -n "$actual_sha" && "$actual_sha" != "$GIT_SHA" ]]; then
-  echo "Whiskey API git SHA mismatch: expected $GIT_SHA, got $actual_sha" >&2
+if [[ -z "$actual_sha" || "$actual_sha" != "$GIT_SHA" ]]; then
+  echo "Whiskey API git SHA mismatch: expected $GIT_SHA, got ${actual_sha:-missing}" >&2
   cat "$REMOTE_ROOT/evidence/deployment-version.json" >&2
   exit 1
 fi

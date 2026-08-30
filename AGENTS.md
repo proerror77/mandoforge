@@ -20,6 +20,13 @@
 - Pull requests must be reviewed before merge. Do not merge a PR until the review result is `APPROVE` or all blocking findings have been fixed and re-reviewed.
 - Merge only the reviewed PR contents. Do not include unrelated local worktree changes, generated artifacts, or cleanup unless they are explicitly part of the reviewed PR scope.
 
+## Delivery Discipline
+
+- Substantial work starts from a GitHub issue with explicit acceptance criteria, and its branch and pull request reference that issue.
+- Refresh `origin/main` before branching. Keep local `main` aligned with `origin/main`; do not use it for unpublished commits.
+- Open substantial pull requests as drafts early. Do not stack unrelated work on an unreviewed pull request.
+- Report `Code`, `CI`, `Review`, `Merge`, `Publish`, `Deploy`, `Runtime`, and `Readback` separately. Never treat an earlier state as proof of a later one.
+
 ## Project Notes
 
 - This repo is the Rust-native Managed Agents / Enterprise Agent OS runtime described in the Stage 1 PRD.
