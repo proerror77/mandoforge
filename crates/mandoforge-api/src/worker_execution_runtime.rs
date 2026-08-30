@@ -190,13 +190,10 @@ pub(crate) async fn run_execution_job_with_lease_renewal(
                             .acknowledge_canceled_started(job_id, worker_id)
                             .await;
                     }
-                    if !matches!(
-                        current.status,
-                        ExecutionJobStatus::Running | ExecutionJobStatus::CancelRequested
-                    ) {
-                        continue;
+                    if matches!(current.status, ExecutionJobStatus::Running) {
+                        return Err(error);
                     }
-                    return Err(error);
+                    return Ok(current);
                 }
             }
             _ = cancellation_checks.tick() => {

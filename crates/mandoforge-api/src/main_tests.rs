@@ -20615,6 +20615,53 @@ async fn run_execution_job_emits_completion_event_and_projects_loop_without_rout
         }),
         "execution lifecycle should project completion event to session loop: {queued_resume_jobs:?}"
     );
+
+    let recovery_job = state
+        .execution_queue
+        .enqueue(execution_queue::ExecutionJobRequest {
+            session_id: job.session_id,
+            environment_id: job.environment_id,
+            approval_id: job.approval_id,
+            tool_call_id: job.tool_call_id,
+            tool_name: job.tool_name.clone(),
+            max_attempts: None,
+        })
+        .await
+        .expect("enqueue completion recovery job");
+    state
+        .append_event(
+            "worker",
+            Some(recovery_job.id),
+            session.id,
+            "execution.completed",
+            json!({"execution_job_id": recovery_job.id}),
+        )
+        .await
+        .expect("record durable completion before simulated worker loss");
+    let tool_result_count = state
+        .list_events(session.id)
+        .await
+        .expect("list events before completion recovery")
+        .iter()
+        .filter(|event| event.event_type == "tool.result")
+        .count();
+
+    let recovered = run_execution_job(&state, recovery_job.id, "recovery-worker")
+        .await
+        .expect("recover job from durable completion event");
+
+    assert_eq!(recovered.status, ExecutionJobStatus::Completed);
+    assert_eq!(
+        state
+            .list_events(session.id)
+            .await
+            .expect("list events after completion recovery")
+            .iter()
+            .filter(|event| event.event_type == "tool.result")
+            .count(),
+        tool_result_count,
+        "completion recovery must not execute the approved side effect again"
+    );
 }
 
 #[tokio::test]

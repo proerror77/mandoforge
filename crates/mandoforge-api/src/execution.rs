@@ -14,7 +14,7 @@ use tokio::process::Command;
 use uuid::Uuid;
 
 use crate::codex_app_server::{CodexThreadRequest, CodexTurnRequest, CodexTurnResponse};
-use crate::execution_queue::{ExecutionJob, ExecutionJobRequest, ExecutionJobStatus};
+use crate::execution_queue::{ExecutionJob, ExecutionJobRequest};
 use crate::mcp_gateway::McpCallRequest;
 use crate::remote_computer_runner::{
     RemoteComputerRunnerConfig, RemoteComputerRunnerDryRunRequest, poll_agent_sandbox_binding,
@@ -172,6 +172,16 @@ pub(crate) async fn run_execution_job(
     worker_id: &str,
 ) -> Result<ExecutionJob, AppError> {
     let job = state.execution_queue.start(job_id, worker_id).await?;
+    if execution_completed_event_for_job(state, &job)
+        .await?
+        .is_some()
+    {
+        record_execution_completed_event(state, &job).await?;
+        return state
+            .execution_queue
+            .complete_started(job.id, worker_id)
+            .await;
+    }
     if !crate::session_accepts_worker_execution(state, job.session_id).await? {
         return retry_or_fail_started_execution_job(
             state,
@@ -450,21 +460,8 @@ pub(crate) async fn run_execution_job(
         _ => execute_approved_native_connector_or_generic_tool(state, &approval, &tool_call).await,
     };
     if result.is_ok() {
-        let completed = state
-            .execution_queue
-            .complete_started(job.id, worker_id)
-            .await?;
-        finalize_remote_computer_assignment_for_job(
-            state,
-            &job,
-            remote_computer_assignment.as_ref(),
-            "completed",
-            "remote_computer.execution_handoff_completed",
-            json!({"execution_job_status": "completed"}),
-        )
-        .await?;
-        record_execution_completed_event(state, &completed).await?;
-        Ok(completed)
+        complete_started_execution_job(state, &job, remote_computer_assignment.as_ref(), worker_id)
+            .await
     } else {
         let error = result.expect_err("checked error");
         retry_or_fail_started_execution_job(
@@ -476,6 +473,28 @@ pub(crate) async fn run_execution_job(
         )
         .await
     }
+}
+
+async fn complete_started_execution_job(
+    state: &AppState,
+    job: &ExecutionJob,
+    assignment: Option<&RemoteComputerJobAssignment>,
+    worker_id: &str,
+) -> Result<ExecutionJob, AppError> {
+    finalize_remote_computer_assignment_for_job(
+        state,
+        job,
+        assignment,
+        "completed",
+        "remote_computer.execution_handoff_completed",
+        json!({"execution_job_status": "completed"}),
+    )
+    .await?;
+    record_execution_completed_event(state, job).await?;
+    state
+        .execution_queue
+        .complete_started(job.id, worker_id)
+        .await
 }
 
 async fn execute_approved_native_connector_or_generic_tool(
@@ -690,26 +709,52 @@ async fn record_execution_completed_event(
     state: &AppState,
     job: &ExecutionJob,
 ) -> Result<(), AppError> {
-    let event = state
-        .append_event(
-            "worker",
-            Some(job.id),
-            job.session_id,
-            "execution.completed",
-            json!({
-                "execution_job_id": job.id,
-                "approval_id": job.approval_id,
-                "tool_call_id": job.tool_call_id,
-                "tool": job.tool_name,
-                "status": job.status,
-                "worker_id": job.worker_id,
-                "reason": "approved execution completed"
-            }),
-        )
-        .await?;
+    let event = match execution_completed_event_for_job(state, job).await? {
+        Some(event) => event,
+        None => {
+            state
+                .append_event(
+                    "worker",
+                    Some(job.id),
+                    job.session_id,
+                    "execution.completed",
+                    json!({
+                        "execution_job_id": job.id,
+                        "approval_id": job.approval_id,
+                        "tool_call_id": job.tool_call_id,
+                        "tool": job.tool_name,
+                        "status": "completed",
+                        "worker_id": job.worker_id,
+                        "reason": "approved execution completed"
+                    }),
+                )
+                .await?
+        }
+    };
     project_latest_tool_result_for_execution_job(state, job).await?;
     crate::project_session_event_to_loop(state, &event).await?;
     Ok(())
+}
+
+async fn execution_completed_event_for_job(
+    state: &AppState,
+    job: &ExecutionJob,
+) -> Result<Option<crate::SessionEvent>, AppError> {
+    Ok(state
+        .list_events(job.session_id)
+        .await?
+        .into_iter()
+        .find(|event| {
+            event.event_type == "execution.completed"
+                && event.actor_type == "worker"
+                && event.actor_id == Some(job.id)
+                && event
+                    .payload
+                    .get("execution_job_id")
+                    .and_then(Value::as_str)
+                    .and_then(|value| Uuid::parse_str(value).ok())
+                    == Some(job.id)
+        }))
 }
 
 async fn project_latest_tool_result_for_execution_job(
@@ -739,15 +784,7 @@ async fn retry_or_fail_started_execution_job(
     details: Value,
 ) -> Result<ExecutionJob, AppError> {
     let error_message = error.message.clone();
-    let updated = state
-        .execution_queue
-        .retry_or_fail_started(
-            job.id,
-            job.worker_id.as_deref().unwrap_or(""),
-            &error_message,
-        )
-        .await?;
-    let queued = updated.status == ExecutionJobStatus::Queued;
+    let queued = job.attempt_count < job.max_attempts;
     let assignment_status = if queued { "released" } else { "failed" };
     let assignment_event = if queued {
         "remote_computer.execution_handoff_released"
@@ -762,10 +799,10 @@ async fn retry_or_fail_started_execution_job(
         assignment_event,
         merge_json_object(
             json!({
-                "execution_job_status": updated.status.clone(),
-                "attempt_count": updated.attempt_count,
-                "max_attempts": updated.max_attempts,
-                "last_error": updated.last_error.clone(),
+                "execution_job_status": if queued { "queued" } else { "failed" },
+                "attempt_count": job.attempt_count,
+                "max_attempts": job.max_attempts,
+                "last_error": error_message.clone(),
             }),
             details.clone(),
         ),
@@ -790,12 +827,20 @@ async fn retry_or_fail_started_execution_job(
                     "assignment_id": assignment.map(|assignment| assignment.id),
                     "remote_computer_id": assignment.map(|assignment| assignment.remote_computer_id),
                     "lease_id": assignment.map(|assignment| assignment.lease_id),
-                    "attempt_count": updated.attempt_count,
-                    "max_attempts": updated.max_attempts,
-                    "last_error": updated.last_error.clone(),
+                    "attempt_count": job.attempt_count,
+                    "max_attempts": job.max_attempts,
+                    "last_error": error_message.clone(),
                 }),
                 details,
             ),
+        )
+        .await?;
+    let updated = state
+        .execution_queue
+        .retry_or_fail_started(
+            job.id,
+            job.worker_id.as_deref().unwrap_or(""),
+            &error_message,
         )
         .await?;
     if queued { Ok(updated) } else { Err(error) }
