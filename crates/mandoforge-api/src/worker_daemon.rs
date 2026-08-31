@@ -370,6 +370,8 @@ fn execution_job_ready_for_worker(
     job.status == crate::ExecutionJobStatus::Queued
         || (job.status == crate::ExecutionJobStatus::Completed
             && job.finalization_details["stage"] == "completion_pending")
+        || (job.status == crate::ExecutionJobStatus::Failed
+            && job.finalization_details["stage"] == "failure_pending")
         || (matches!(
             job.status,
             crate::ExecutionJobStatus::Running
@@ -398,12 +400,7 @@ async fn process_workflow_step_jobs(
         }
     };
     let mut processed = 0usize;
-    for item in board
-        .items
-        .into_iter()
-        .filter(|item| item.claimable)
-        .filter(|item| item.status == "queued" || item.status == "scheduled")
-    {
+    for item in board.items.into_iter().filter(|item| item.claimable) {
         if processed >= job_budget {
             break;
         }
@@ -539,6 +536,9 @@ mod tests {
         completion_pending.finalization_details =
             serde_json::json!({"stage": "completion_pending"});
         assert!(execution_job_ready_for_worker(&completion_pending, now));
+        let mut failure_pending = execution_job(crate::ExecutionJobStatus::Failed, None);
+        failure_pending.finalization_details = serde_json::json!({"stage": "failure_pending"});
+        assert!(execution_job_ready_for_worker(&failure_pending, now));
         assert!(!execution_job_ready_for_worker(
             &execution_job(crate::ExecutionJobStatus::Completed, None),
             now
