@@ -136,7 +136,7 @@ write_summary() {
     delivery_delivered="$(jq -r '(.response.delivered_count // 0) > 0' "$delivery_evidence_file")"
   fi
   if [[ -s "$observer_file" ]]; then
-    delivery_observer_status="$(jq -r '.status // "ok"' "$observer_file")"
+    delivery_observer_status="$(jq -r '.status // "unknown"' "$observer_file")"
     delivery_mode="$(jq -r '.delivery.delivery_mode // "unknown"' "$observer_file")"
     delivery_forwarding_status="$(jq -r '.delivery.latest_forwarding_status // "unknown"' "$observer_file")"
     delivery_forwarding_channel="$(jq -r '.delivery.latest_forwarding_channel // "unknown"' "$observer_file")"

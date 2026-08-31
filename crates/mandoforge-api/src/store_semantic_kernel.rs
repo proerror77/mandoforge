@@ -74,13 +74,15 @@ impl AppState {
         input: CreateSemanticSource,
     ) -> Result<SemanticSource, AppError> {
         let now = Utc::now();
+        let (owner_type, owner_id) =
+            normalize_semantic_source_owner(input.owner_type, input.owner_id)?;
         let source = SemanticSource {
             id: Uuid::new_v4(),
             source_type: normalize_semantic_source_type(&input.source_type)?,
             source_uri: normalize_required_text(&input.source_uri, "semantic source_uri")?,
             display_name: normalize_required_text(&input.display_name, "semantic display_name")?,
-            owner_type: input.owner_type.and_then(normalize_optional_text),
-            owner_id: input.owner_id,
+            owner_type,
+            owner_id,
             metadata: validate_json_object(input.metadata, "semantic source metadata")?,
             provenance: validate_json_object(input.provenance, "semantic source provenance")?,
             freshness: validate_json_object(input.freshness, "semantic source freshness")?,
@@ -148,6 +150,10 @@ impl AppState {
         if let Some(owner_id) = input.owner_id {
             source.owner_id = owner_id;
         }
+        let (owner_type, owner_id) =
+            normalize_semantic_source_owner(source.owner_type.take(), source.owner_id)?;
+        source.owner_type = owner_type;
+        source.owner_id = owner_id;
         if let Some(metadata) = input.metadata {
             source.metadata = validate_json_object(metadata, "semantic source metadata")?;
         }
@@ -765,6 +771,37 @@ fn normalize_optional_text(value: String) -> Option<String> {
         None
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+fn normalize_semantic_source_owner(
+    owner_type: Option<String>,
+    owner_id: Option<Uuid>,
+) -> Result<(Option<String>, Option<Uuid>), AppError> {
+    let owner_type = owner_type
+        .and_then(normalize_optional_text)
+        .map(|value| value.to_ascii_lowercase().replace('-', "_"));
+    match (owner_type, owner_id) {
+        (None, None) => Ok((None, None)),
+        (None, Some(_)) | (Some(_), None) => Err(AppError::bad_request(
+            "semantic source owner_type and owner_id must be provided together",
+        )),
+        (Some(owner_type), Some(owner_id))
+            if matches!(
+                owner_type.as_str(),
+                "project"
+                    | "team"
+                    | "agent"
+                    | "session"
+                    | "work_item"
+                    | "workflow_pack_installation"
+            ) =>
+        {
+            Ok((Some(owner_type), Some(owner_id)))
+        }
+        (Some(_), Some(_)) => Err(AppError::bad_request(
+            "semantic source owner_type is not supported",
+        )),
     }
 }
 

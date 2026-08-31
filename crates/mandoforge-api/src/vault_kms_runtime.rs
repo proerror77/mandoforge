@@ -234,17 +234,9 @@ where
         request = request.bearer_auth(token);
     }
     let response = request.send().await?;
-    let http_status = response.status();
-    let response_body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
-    if !http_status.is_success() {
-        return Err(AppError::bad_request(format!(
-            "external KMS rotation endpoint failed with status {http_status}"
-        )));
-    }
-    let response_status = response_body
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("validated");
+    let (http_status, response_body) =
+        controller_response_json(response, "external KMS rotation endpoint").await?;
+    let response_status = required_controller_status(&response_body)?;
     let validated = matches!(response_status, "validated" | "rotated" | "ok" | "success");
     let rotated_secret_record_ids = response_body
         .get("rotated_secret_record_ids")

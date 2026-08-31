@@ -133,11 +133,7 @@ where
         .await
         {
             Ok(execution) => {
-                let execution_status = execution
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .unwrap_or("failed")
-                    .to_string();
+                let execution_status = required_controller_status(&execution)?.to_string();
                 close_controller_execution = execution;
                 actions.push("usage_finance_close_controller_executed".to_string());
                 if execution_status != "closed" {
@@ -333,17 +329,9 @@ where
         request = request.bearer_auth(token);
     }
     let response = request.send().await?;
-    let http_status = response.status();
-    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
-    if !http_status.is_success() {
-        return Err(AppError::bad_request(format!(
-            "finance close controller failed with status {http_status}"
-        )));
-    }
-    let controller_status = body
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("closed");
+    let (http_status, body) =
+        controller_response_json(response, "finance close controller").await?;
+    let controller_status = required_controller_status(&body)?;
     let closed = matches!(controller_status, "closed" | "success" | "ok" | "validated");
     Ok(json!({
         "attempted": true,
@@ -404,17 +392,9 @@ where
         request = request.bearer_auth(token);
     }
     let response = request.send().await?;
-    let http_status = response.status();
-    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
-    if !http_status.is_success() {
-        return Err(AppError::bad_request(format!(
-            "finance reconciliation controller failed with status {http_status}"
-        )));
-    }
-    let controller_status = body
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("reconciled");
+    let (http_status, body) =
+        controller_response_json(response, "finance reconciliation controller").await?;
+    let controller_status = required_controller_status(&body)?;
     let reconciled = matches!(
         controller_status,
         "reconciled" | "success" | "ok" | "validated"
