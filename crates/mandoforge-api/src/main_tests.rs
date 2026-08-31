@@ -9083,7 +9083,7 @@ async fn semantic_collections_filter_project_scoped_resources() {
         ),
     )
     .await;
-    let partial_owner_source: SemanticSource = request_json(
+    let (partial_owner_status, partial_owner_error) = request_value(
         app.clone(),
         json_request_with_headers(
             "POST",
@@ -9098,6 +9098,36 @@ async fn semantic_collections_filter_project_scoped_resources() {
         ),
     )
     .await;
+    assert_eq!(partial_owner_status, StatusCode::BAD_REQUEST);
+    assert!(
+        partial_owner_error["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("owner_type and owner_id must be provided together")
+    );
+    let (unknown_owner_status, unknown_owner_error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/semantic-sources",
+            json!({
+                "source_type": "repo_doc",
+                "source_uri": "repo://unknown-owner/semantic.md",
+                "display_name": "Unknown Owner Semantic Source",
+                "owner_type": "future_scope",
+                "owner_id": Uuid::new_v4()
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    assert_eq!(unknown_owner_status, StatusCode::BAD_REQUEST);
+    assert!(
+        unknown_owner_error["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("owner_type is not supported")
+    );
     let visible_object: SemanticObject = request_json(
         app.clone(),
         json_request_with_headers(
@@ -9109,24 +9139,6 @@ async fn semantic_collections_filter_project_scoped_resources() {
                 "object_key": "decision:visible-semantic-scope",
                 "title": "Visible semantic scope",
                 "summary": "Visible to the project member.",
-                "trust_level": "human_verified",
-                "freshness": "current"
-            }),
-            &admin_headers,
-        ),
-    )
-    .await;
-    let partial_owner_object: SemanticObject = request_json(
-        app.clone(),
-        json_request_with_headers(
-            "POST",
-            "/api/semantic-objects",
-            json!({
-                "source_id": partial_owner_source.id,
-                "object_type": "decision",
-                "object_key": "decision:partial-owner-semantic-scope",
-                "title": "Partial owner semantic scope",
-                "summary": "Hidden because the source owner is incomplete.",
                 "trust_level": "human_verified",
                 "freshness": "current"
             }),
@@ -9247,11 +9259,6 @@ async fn semantic_collections_filter_project_scoped_resources() {
     .await;
     assert!(sources.iter().any(|source| source.id == visible_source.id));
     assert!(!sources.iter().any(|source| source.id == hidden_source.id));
-    assert!(
-        !sources
-            .iter()
-            .any(|source| source.id == partial_owner_source.id)
-    );
 
     let objects: Vec<SemanticObject> = request_json(
         app.clone(),
@@ -9265,11 +9272,6 @@ async fn semantic_collections_filter_project_scoped_resources() {
             .any(|object| object.id == visible_text_scoped_object.id)
     );
     assert!(!objects.iter().any(|object| object.id == hidden_object.id));
-    assert!(
-        !objects
-            .iter()
-            .any(|object| object.id == partial_owner_object.id)
-    );
     assert!(
         !objects
             .iter()

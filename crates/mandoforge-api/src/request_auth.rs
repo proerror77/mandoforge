@@ -289,7 +289,11 @@ async fn semantic_source_scope(
                 project_id: work_item.project_id,
             })
         }
-        _ => Ok(ResourceScope::Tenant),
+        "workflow_pack_installation" => {
+            state.get_workflow_pack_installation(owner_id).await?;
+            Ok(ResourceScope::Tenant)
+        }
+        _ => Ok(ResourceScope::ScopedUnknown),
     }
 }
 
