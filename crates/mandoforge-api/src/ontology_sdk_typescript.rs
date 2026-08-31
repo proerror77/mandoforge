@@ -5,6 +5,7 @@ use serde_json::Value;
 use crate::{
     AppError, OntologyReleaseCatalogV1, OntologySdkCatalogAction, OntologySdkCatalogObject,
     OntologySdkCatalogProperty, OntologySdkCatalogRelation,
+    ontology_action_schema_value_matches_type,
 };
 
 pub(crate) fn generate_typescript_sdk(
@@ -108,7 +109,7 @@ pub(crate) fn generate_typescript_sdk(
 
     writeln!(output, "\n  public readonly objects = {{").unwrap();
     for object in &catalog.objects {
-        let object_type = ts_type_name(&object.api_name);
+        let object_type = object_type_name(&object.api_name);
         let object_literal = json_string_literal(&object.api_name);
         let object_path = &object.api_name;
         writeln!(
@@ -121,7 +122,7 @@ pub(crate) fn generate_typescript_sdk(
 
     writeln!(output, "  public readonly relations = {{").unwrap();
     for relation in &catalog.relations {
-        let relation_type = format!("{}Relation", ts_type_name(&relation.api_name));
+        let relation_type = relation_type_name(&relation.api_name);
         let relation_literal = json_string_literal(&relation.api_name);
         writeln!(
             output,
@@ -133,7 +134,7 @@ pub(crate) fn generate_typescript_sdk(
 
     writeln!(output, "  public readonly actions = {{").unwrap();
     for action in &catalog.actions {
-        let action_type = ts_type_name(&action.api_name);
+        let action_type = action_type_name(&action.api_name);
         let action_literal = json_string_literal(&action.api_name);
         let action_path = &action.api_name;
         writeln!(
@@ -148,7 +149,7 @@ pub(crate) fn generate_typescript_sdk(
 }
 
 fn write_object_types(output: &mut String, object: &OntologySdkCatalogObject) {
-    let type_name = ts_type_name(&object.api_name);
+    let type_name = object_type_name(&object.api_name);
     writeln!(output, "export interface {type_name}Properties {{").unwrap();
     for property in &object.properties {
         write_property(output, property, 2, true);
@@ -166,8 +167,8 @@ fn write_object_types(output: &mut String, object: &OntologySdkCatalogObject) {
 }
 
 fn write_relation_type(output: &mut String, relation: &OntologySdkCatalogRelation) {
-    let type_name = ts_type_name(&relation.api_name);
-    writeln!(output, "export interface {type_name}Relation {{").unwrap();
+    let type_name = relation_type_name(&relation.api_name);
+    writeln!(output, "export interface {type_name} {{").unwrap();
     writeln!(output, "  readonly id: string;").unwrap();
     writeln!(output, "  readonly api_name: string;").unwrap();
     writeln!(output, "  readonly relation_type: string;").unwrap();
@@ -180,7 +181,7 @@ fn write_action_types(
     output: &mut String,
     action: &OntologySdkCatalogAction,
 ) -> Result<(), AppError> {
-    let type_name = ts_type_name(&action.api_name);
+    let type_name = action_type_name(&action.api_name);
     writeln!(output, "export interface {type_name}Parameters {{").unwrap();
     let (properties, required) = schema_properties(&action.input_schema)?;
     for (name, schema) in properties {
@@ -296,7 +297,9 @@ fn schema_type(schema: &Value) -> String {
                         object
                             .get("type")
                             .and_then(Value::as_str)
-                            .is_none_or(|expected| schema_value_matches_type(value, expected))
+                            .is_none_or(|expected| {
+                                ontology_action_schema_value_matches_type(value, expected)
+                            })
                     })
                     .map(Value::to_string)
                     .collect::<Vec<_>>();
@@ -326,33 +329,6 @@ fn schema_type(schema: &Value) -> String {
         }
         _ => "unknown".to_string(),
     }
-}
-
-fn schema_value_matches_type(value: &Value, expected: &str) -> bool {
-    match expected.trim().to_ascii_lowercase().as_str() {
-        "string" | "text" | "uuid" | "date" | "timestamp" | "datetime" => value.is_string(),
-        "integer" | "int" | "int32" | "int64" => schema_integer_literal(value),
-        "number" | "decimal" | "float" | "double" => value.is_number(),
-        "boolean" | "bool" => value.is_boolean(),
-        "object" | "json" => value.is_object(),
-        "array" => value.is_array(),
-        "null" => value.is_null(),
-        _ => false,
-    }
-}
-
-fn schema_integer_literal(value: &Value) -> bool {
-    if value.as_i64().is_some() || value.as_u64().is_some() {
-        return true;
-    }
-    value.as_f64().is_some_and(|number| {
-        number.is_finite()
-            && number.fract() == 0.0
-            && (((-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&number)
-                && (number as i64) as f64 == number)
-                || ((0.0..18_446_744_073_709_551_616.0).contains(&number)
-                    && (number as u64) as f64 == number))
-    })
 }
 
 fn schema_inline_object(properties: &Value, required: Option<&Value>) -> Option<String> {
@@ -388,7 +364,8 @@ fn primitive_type(value: &str) -> String {
             "number"
         }
         "boolean" | "bool" => "boolean",
-        "object" | "json" => "JsonRecord",
+        "object" => "JsonRecord",
+        "json" => "unknown",
         "array" => "Array<unknown>",
         "null" => "null",
         _ => "unknown",
@@ -406,6 +383,18 @@ fn ts_type_name(api_name: &str) -> String {
         ),
         None => "OntologyValue".to_string(),
     }
+}
+
+fn object_type_name(api_name: &str) -> String {
+    format!("OntologyObject{}", ts_type_name(api_name))
+}
+
+fn relation_type_name(api_name: &str) -> String {
+    format!("OntologyRelation{}", ts_type_name(api_name))
+}
+
+fn action_type_name(api_name: &str) -> String {
+    format!("OntologyAction{}", ts_type_name(api_name))
 }
 
 fn json_string_literal(value: &str) -> String {
@@ -579,5 +568,18 @@ mod tests {
         assert!(output.contains("readonly \"integral_priority\"?: 1.0;"));
         assert!(output.contains("readonly \"approved\"?: true | false;"));
         assert!(output.contains("readonly \"mixed_number\"?: 1 | 2.5;"));
+    }
+
+    #[test]
+    fn generated_sdk_namespaces_symbols_that_normalize_to_the_same_name() {
+        let mut catalog = fixture_catalog();
+        catalog.objects[0].api_name = "RefundParameters".to_string();
+        catalog.actions[0].api_name = "refund".to_string();
+
+        let output = generate_typescript_sdk(uuid::Uuid::nil(), &catalog).expect("SDK output");
+
+        assert!(output.contains("export interface OntologyObjectRefundParameters"));
+        assert!(output.contains("export interface OntologyActionRefundParameters"));
+        assert!(!output.contains("export interface RefundParameters {"));
     }
 }

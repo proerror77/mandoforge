@@ -13,24 +13,24 @@ export const MANDOFORGE_APPLICATION_ID: string = "00000000-0000-0000-0000-000000
 
 export interface MandoForgeOntologySdkOptions { baseUrl: string; headers?: Record<string, string> }
 
-export interface CustomerProperties {
+export interface OntologyObjectCustomerProperties {
   readonly "createdAt"?: string | null;
   readonly "email"?: string | null;
   readonly "id"?: string | null;
   readonly "name"?: string | null;
 }
 
-export interface Customer {
+export interface OntologyObjectCustomer {
   readonly id: string;
   readonly api_name: string;
   readonly object_type: string;
   readonly object_key: string;
   readonly title: string;
   readonly summary: string;
-  readonly properties: CustomerProperties;
+  readonly properties: OntologyObjectCustomerProperties;
 }
 
-export interface SupportTicketProperties {
+export interface OntologyObjectSupportTicketProperties {
   readonly "customerId"?: string | null;
   readonly "id"?: string | null;
   readonly "orderId"?: string | null;
@@ -38,17 +38,17 @@ export interface SupportTicketProperties {
   readonly "topic"?: string | null;
 }
 
-export interface SupportTicket {
+export interface OntologyObjectSupportTicket {
   readonly id: string;
   readonly api_name: string;
   readonly object_type: string;
   readonly object_key: string;
   readonly title: string;
   readonly summary: string;
-  readonly properties: SupportTicketProperties;
+  readonly properties: OntologyObjectSupportTicketProperties;
 }
 
-export interface CustomerCreatesSupportTicketRelation {
+export interface OntologyRelationCustomerCreatesSupportTicket {
   readonly id: string;
   readonly api_name: string;
   readonly relation_type: string;
@@ -56,17 +56,17 @@ export interface CustomerCreatesSupportTicketRelation {
   readonly to_object_id: string;
 }
 
-export interface AdjustInventoryParameters {
+export interface OntologyActionAdjustInventoryParameters {
   readonly "delta_quantity": number;
   readonly "inventory_item_id": string;
   readonly "reason": string;
 }
 
-export interface AdjustInventoryProposalRequest {
+export interface OntologyActionAdjustInventoryProposalRequest {
   readonly sessionId: string;
   readonly taskGrantId: string;
   readonly contextPacketId: string;
-  readonly parameters: AdjustInventoryParameters;
+  readonly parameters: OntologyActionAdjustInventoryParameters;
 }
 
 export class MandoForgeOntologySdk {
@@ -99,29 +99,29 @@ export class MandoForgeOntologySdk {
 
   public readonly objects = {
     "Customer": {
-      list: (query: MandoForgeConsumerReadQuery = {}): Promise<Customer[]> =>
-        this.request<Customer[]>(this.withQuery(`/api/ontology-sdk/applications/${MANDOFORGE_APPLICATION_ID}/objects/Customer`, { task_grant_id: query.taskGrantId })),
-      get: (id: string, query: MandoForgeConsumerReadQuery = {}): Promise<Customer> =>
-        this.request<Customer>(this.withQuery(`/api/ontology-sdk/applications/${MANDOFORGE_APPLICATION_ID}/objects/Customer/${encodeURIComponent(id)}`, { task_grant_id: query.taskGrantId })),
+      list: (query: MandoForgeConsumerReadQuery = {}): Promise<OntologyObjectCustomer[]> =>
+        this.request<OntologyObjectCustomer[]>(this.withQuery(`/api/ontology-sdk/applications/${MANDOFORGE_APPLICATION_ID}/objects/Customer`, { task_grant_id: query.taskGrantId })),
+      get: (id: string, query: MandoForgeConsumerReadQuery = {}): Promise<OntologyObjectCustomer> =>
+        this.request<OntologyObjectCustomer>(this.withQuery(`/api/ontology-sdk/applications/${MANDOFORGE_APPLICATION_ID}/objects/Customer/${encodeURIComponent(id)}`, { task_grant_id: query.taskGrantId })),
     },
     "SupportTicket": {
-      list: (query: MandoForgeConsumerReadQuery = {}): Promise<SupportTicket[]> =>
-        this.request<SupportTicket[]>(this.withQuery(`/api/ontology-sdk/applications/${MANDOFORGE_APPLICATION_ID}/objects/SupportTicket`, { task_grant_id: query.taskGrantId })),
-      get: (id: string, query: MandoForgeConsumerReadQuery = {}): Promise<SupportTicket> =>
-        this.request<SupportTicket>(this.withQuery(`/api/ontology-sdk/applications/${MANDOFORGE_APPLICATION_ID}/objects/SupportTicket/${encodeURIComponent(id)}`, { task_grant_id: query.taskGrantId })),
+      list: (query: MandoForgeConsumerReadQuery = {}): Promise<OntologyObjectSupportTicket[]> =>
+        this.request<OntologyObjectSupportTicket[]>(this.withQuery(`/api/ontology-sdk/applications/${MANDOFORGE_APPLICATION_ID}/objects/SupportTicket`, { task_grant_id: query.taskGrantId })),
+      get: (id: string, query: MandoForgeConsumerReadQuery = {}): Promise<OntologyObjectSupportTicket> =>
+        this.request<OntologyObjectSupportTicket>(this.withQuery(`/api/ontology-sdk/applications/${MANDOFORGE_APPLICATION_ID}/objects/SupportTicket/${encodeURIComponent(id)}`, { task_grant_id: query.taskGrantId })),
     },
   } as const;
 
   public readonly relations = {
     "customerCreatesSupportTicket": {
-      list: (query: MandoForgeConsumerReadQuery = {}): Promise<CustomerCreatesSupportTicketRelation[]> =>
-        this.request<CustomerCreatesSupportTicketRelation[]>(this.withQuery(`/api/ontology-sdk/applications/${MANDOFORGE_APPLICATION_ID}/relations`, { task_grant_id: query.taskGrantId, object_id: query.objectId, relation_api_name: "customerCreatesSupportTicket" })),
+      list: (query: MandoForgeConsumerReadQuery = {}): Promise<OntologyRelationCustomerCreatesSupportTicket[]> =>
+        this.request<OntologyRelationCustomerCreatesSupportTicket[]>(this.withQuery(`/api/ontology-sdk/applications/${MANDOFORGE_APPLICATION_ID}/relations`, { task_grant_id: query.taskGrantId, object_id: query.objectId, relation_api_name: "customerCreatesSupportTicket" })),
     },
   } as const;
 
   public readonly actions = {
     "adjustInventory": {
-      propose: (input: AdjustInventoryProposalRequest): Promise<OntologyActionResult> =>
+      propose: (input: OntologyActionAdjustInventoryProposalRequest): Promise<OntologyActionResult> =>
         this.request<OntologyActionResult>(`/api/ontology-sdk/applications/${MANDOFORGE_APPLICATION_ID}/actions/adjustInventory`, {
           method: "POST",
           body: JSON.stringify({ session_id: input.sessionId, task_grant_id: input.taskGrantId, context_packet_id: input.contextPacketId, parameters: input.parameters }),

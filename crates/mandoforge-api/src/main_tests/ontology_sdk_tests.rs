@@ -128,7 +128,21 @@ fn ontology_action_parameters_accept_object_schema_without_explicit_type() {
             "amount": {"type": "number"},
             "attempt": {"type": "number", "enum": [1]},
             "integral_attempt": {"type": "integer", "enum": [1.0]},
-            "status": {"type": "string", "enum": ["open", "closed"]}
+            "status": {"type": "string", "enum": ["open", "closed"]},
+            "request_id": {"type": "uuid"},
+            "metadata": {"type": "json"},
+            "lines": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "sku": {"type": "text"},
+                        "quantity": {"type": "int64"},
+                        "active": {"type": "bool"}
+                    },
+                    "required": ["sku", "quantity"]
+                }
+            }
         },
         "required": ["order_id"]
     });
@@ -143,6 +157,16 @@ fn ontology_action_parameters_accept_object_schema_without_explicit_type() {
         &json!({"order_id": "order-1", "integral_attempt": 1}),
     )
     .expect("integer schemas must accept equivalent integral floating enum members");
+    validate_ontology_action_parameters(
+        &schema,
+        &json!({
+            "order_id": "order-1",
+            "request_id": "8b783dbc-d482-46df-8fc6-1812fe94b8a7",
+            "metadata": ["arbitrary", 1],
+            "lines": [{"sku": "sku-1", "quantity": 2.0, "active": true}]
+        }),
+    )
+    .expect("nested schemas and published aliases must share generated SDK semantics");
     let error = validate_ontology_action_parameters(
         &schema,
         &json!({"order_id": "order-1", "status": "pending"}),
@@ -152,6 +176,26 @@ fn ontology_action_parameters_accept_object_schema_without_explicit_type() {
     let error = validate_ontology_action_parameters(&schema, &json!({"amount": 12.5}))
         .expect_err("required properties must still be enforced");
     assert!(error.message.contains("missing required field order_id"));
+    let error = validate_ontology_action_parameters(
+        &schema,
+        &json!({"order_id": "order-1", "lines": [{"sku": "sku-1", "quantity": "two"}]}),
+    )
+    .expect_err("nested item types must be enforced");
+    assert!(
+        error
+            .message
+            .contains("parameters.lines[0].quantity must be int64")
+    );
+    let error = validate_ontology_action_parameters(
+        &schema,
+        &json!({"order_id": "order-1", "lines": [{"sku": "sku-1", "quantity": 2, "extra": true}]}),
+    )
+    .expect_err("nested undeclared fields must fail closed");
+    assert!(
+        error
+            .message
+            .contains("parameters.lines[0].extra is not declared")
+    );
 }
 
 #[test]
@@ -216,8 +260,22 @@ fn ontology_sdk_catalog_rejects_non_array_action_enums() {
             "selector": {"type": "object", "enum": [{"enum": "literal"}]}
         }
     });
-    build_ontology_release_catalog("commerce", &[order, action], None)
+    build_ontology_release_catalog("commerce", &[order.clone(), action.clone()], None)
         .expect("schema property names and enum member objects are data, not schema keywords");
+
+    action.content["inputs"] = json!({
+        "status": {"type": "string", "enum": []}
+    });
+    let error = build_ontology_release_catalog("commerce", &[order.clone(), action.clone()], None)
+        .expect_err("empty action enums must fail before publication");
+    assert!(error.message.contains("enum must not be empty"));
+
+    action.content["inputs"] = json!({
+        "status": {"type": "string", "enum": ["open", 1]}
+    });
+    let error = build_ontology_release_catalog("commerce", &[order, action], None)
+        .expect_err("type-mismatched action enum members must fail before publication");
+    assert!(error.message.contains("enum member must be string"));
 }
 
 #[test]

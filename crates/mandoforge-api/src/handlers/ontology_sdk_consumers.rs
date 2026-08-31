@@ -37,10 +37,6 @@ pub(crate) fn router() -> Router<AppState> {
             "/api/ontology-sdk/applications/{application_id}/actions/{api_name}",
             post(propose_action),
         )
-        .route(
-            "/api/ontology-sdk/applications/{application_id}/actions/{api_name}/proposal",
-            post(propose_action),
-        )
 }
 
 async fn list_objects(

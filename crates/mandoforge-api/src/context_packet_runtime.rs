@@ -2873,13 +2873,10 @@ pub(crate) fn validate_ontology_action_parameters(
                 )));
             }
         }
-        let mut normalized_schema = input_schema.clone();
-        if normalized_schema.get("type").is_none() {
-            normalized_schema["type"] = json!("object");
-        }
-        return validate_handoff_payload_schema(
+        return validate_ontology_action_schema_value(
             &Value::Object(parameters.clone()),
-            Some(&normalized_schema),
+            input_schema,
+            "parameters",
         );
     }
     let declarations = input_schema.as_object().ok_or_else(|| {
@@ -2893,17 +2890,10 @@ pub(crate) fn validate_ontology_action_parameters(
         }
     }
     for (name, declaration) in declarations {
-        let (expected_type, required) = match declaration {
-            Value::String(expected_type) => (Some(expected_type.as_str()), true),
-            Value::Object(declaration) => (
-                declaration.get("type").and_then(Value::as_str),
-                declaration
-                    .get("required")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(true),
-            ),
-            _ => (None, true),
-        };
+        let required = declaration
+            .get("required")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
         let Some(value) = parameters.get(name) else {
             if required {
                 return Err(AppError::bad_request(format!(
@@ -2912,41 +2902,110 @@ pub(crate) fn validate_ontology_action_parameters(
             }
             continue;
         };
-        let Some(expected_type) = expected_type else {
+        validate_ontology_action_schema_value(value, declaration, name)?;
+    }
+    Ok(())
+}
+
+fn validate_ontology_action_schema_value(
+    value: &Value,
+    schema: &Value,
+    field: &str,
+) -> Result<(), AppError> {
+    let (declaration, expected_type) = match schema {
+        Value::String(expected_type) => (None, Some(expected_type.as_str())),
+        Value::Object(declaration) => {
+            let expected_type = declaration
+                .get("type")
+                .and_then(Value::as_str)
+                .or_else(|| declaration.get("properties").map(|_| "object"));
+            (Some(declaration), expected_type)
+        }
+        _ => (None, None),
+    };
+    if let Some(expected_type) = expected_type {
+        if !ontology_action_schema_type_supported(expected_type) {
             return Err(AppError::bad_request(format!(
-                "ontology action parameter {name} has no supported type declaration"
-            )));
-        };
-        let matches_type = match expected_type {
-            "string" => value.is_string(),
-            "decimal" | "number" => value.is_number(),
-            "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
-            "boolean" => value.is_boolean(),
-            "object" => value.is_object(),
-            "array" => value.is_array(),
-            _ => {
-                return Err(AppError::bad_request(format!(
-                    "ontology action parameter {name} has unsupported type {expected_type}"
-                )));
-            }
-        };
-        if !matches_type {
-            return Err(AppError::bad_request(format!(
-                "ontology action parameter {name} must be {expected_type}"
+                "ontology action parameter {field} has unsupported type {expected_type}"
             )));
         }
-        if let Some(allowed_values) = declaration.get("enum") {
-            let allowed_values = allowed_values.as_array().ok_or_else(|| {
-                AppError::bad_request(format!(
-                    "ontology action parameter {name} enum must be an array"
-                ))
-            })?;
-            if !json_schema_enum_contains(allowed_values, value) {
-                return Err(AppError::bad_request(format!(
-                    "ontology action parameter {name} is not an allowed enum value"
-                )));
+        if !ontology_action_schema_value_matches_type(value, expected_type) {
+            return Err(AppError::bad_request(format!(
+                "ontology action parameter {field} must be {expected_type}"
+            )));
+        }
+    } else if declaration.and_then(|value| value.get("enum")).is_none() {
+        return Err(AppError::bad_request(format!(
+            "ontology action parameter {field} has no supported type declaration"
+        )));
+    }
+    if let Some(allowed_values) = declaration.and_then(|value| value.get("enum")) {
+        let allowed_values = allowed_values.as_array().ok_or_else(|| {
+            AppError::bad_request(format!(
+                "ontology action parameter {field} enum must be an array"
+            ))
+        })?;
+        if !json_schema_enum_contains(allowed_values, value) {
+            return Err(AppError::bad_request(format!(
+                "ontology action parameter {field} is not an allowed enum value"
+            )));
+        }
+    }
+    match expected_type.map(|value| value.trim().to_ascii_lowercase()) {
+        Some(value_type) if value_type == "object" => {
+            let value = value.as_object().expect("object type checked above");
+            let Some(properties) = declaration
+                .and_then(|value| value.get("properties"))
+                .and_then(Value::as_object)
+            else {
+                return Ok(());
+            };
+            for name in value.keys() {
+                if !properties.contains_key(name) {
+                    return Err(AppError::bad_request(format!(
+                        "ontology action parameter {field}.{name} is not declared by the published contract"
+                    )));
+                }
+            }
+            if let Some(required) = declaration
+                .and_then(|value| value.get("required"))
+                .and_then(Value::as_array)
+            {
+                for name in required.iter().filter_map(Value::as_str) {
+                    if !value.contains_key(name) {
+                        return Err(AppError::bad_request(format!(
+                            "ontology action missing required field {name}"
+                        )));
+                    }
+                }
+            }
+            for (name, property_schema) in properties {
+                if let Some(property_value) = value.get(name) {
+                    validate_ontology_action_schema_value(
+                        property_value,
+                        property_schema,
+                        &format!("{field}.{name}"),
+                    )?;
+                }
             }
         }
+        Some(value_type) if value_type == "array" => {
+            if let Some(items) = declaration.and_then(|value| value.get("items")) {
+                for (index, item) in value
+                    .as_array()
+                    .expect("array type checked above")
+                    .iter()
+                    .enumerate()
+                {
+                    validate_ontology_action_schema_value(
+                        item,
+                        items,
+                        &format!("{field}[{index}]"),
+                    )?;
+                }
+            }
+        }
+        _ => {}
     }
     Ok(())
 }

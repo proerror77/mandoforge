@@ -786,45 +786,177 @@ pub(crate) fn ontology_catalog_property_type(value_type: &str) -> Option<&'stati
     }
 }
 
-fn validate_action_schema_enums(schema: &Value) -> Result<(), AppError> {
+pub(crate) fn ontology_action_schema_type_supported(value_type: &str) -> bool {
+    matches!(
+        value_type.trim().to_ascii_lowercase().as_str(),
+        "string"
+            | "text"
+            | "uuid"
+            | "date"
+            | "timestamp"
+            | "datetime"
+            | "integer"
+            | "int"
+            | "int32"
+            | "int64"
+            | "number"
+            | "decimal"
+            | "float"
+            | "double"
+            | "boolean"
+            | "bool"
+            | "object"
+            | "json"
+            | "array"
+            | "null"
+    )
+}
+
+pub(crate) fn ontology_action_schema_value_matches_type(value: &Value, expected: &str) -> bool {
+    match expected.trim().to_ascii_lowercase().as_str() {
+        "string" | "text" | "uuid" | "date" | "timestamp" | "datetime" => value.is_string(),
+        "integer" | "int" | "int32" | "int64" => ontology_action_schema_integer(value),
+        "number" | "decimal" | "float" | "double" => value.is_number(),
+        "boolean" | "bool" => value.is_boolean(),
+        "object" => value.is_object(),
+        "json" => true,
+        "array" => value.is_array(),
+        "null" => value.is_null(),
+        _ => false,
+    }
+}
+
+fn ontology_action_schema_integer(value: &Value) -> bool {
+    if value.as_i64().is_some() || value.as_u64().is_some() {
+        return true;
+    }
+    value.as_f64().is_some_and(|number| {
+        number.is_finite()
+            && number.fract() == 0.0
+            && (((-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&number)
+                && (number as i64) as f64 == number)
+                || ((0.0..18_446_744_073_709_551_616.0).contains(&number)
+                    && (number as u64) as f64 == number))
+    })
+}
+
+fn validate_action_schema(schema: &Value) -> Result<(), AppError> {
     let Some(object) = schema.as_object() else {
         return Ok(());
     };
     let is_object_schema = object.get("type").and_then(Value::as_str) == Some("object")
         || (object.get("type").is_none() && object.get("properties").is_some());
     if is_object_schema {
-        validate_action_schema_node(schema)?;
+        validate_action_schema_node(schema, false)?;
     } else {
         for declaration in object.values() {
-            validate_action_schema_node(declaration)?;
+            validate_action_schema_node(declaration, true)?;
         }
     }
     Ok(())
 }
 
-fn validate_action_schema_node(schema: &Value) -> Result<(), AppError> {
-    let Some(object) = schema.as_object() else {
-        return Ok(());
-    };
-    if object.get("enum").is_some_and(|value| !value.is_array()) {
-        return Err(AppError::forbidden(
-            "ontology release catalog action input schema enum must be an array",
-        ));
+fn validate_action_schema_node(
+    schema: &Value,
+    shorthand_declaration: bool,
+) -> Result<(), AppError> {
+    if let Some(value_type) = schema.as_str() {
+        return if ontology_action_schema_type_supported(value_type) {
+            Ok(())
+        } else {
+            Err(AppError::forbidden(format!(
+                "ontology release catalog action input schema type {value_type} is unsupported"
+            )))
+        };
     }
-    if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+    let Some(object) = schema.as_object() else {
+        return Err(AppError::forbidden(
+            "ontology release catalog action input schema declaration must be an object or type name",
+        ));
+    };
+    for keyword in ["allOf", "anyOf", "oneOf"] {
+        if object.contains_key(keyword) {
+            return Err(AppError::forbidden(format!(
+                "ontology release catalog action input schema keyword {keyword} is unsupported"
+            )));
+        }
+    }
+    let value_type = match object.get("type") {
+        Some(Value::String(value_type)) if ontology_action_schema_type_supported(value_type) => {
+            Some(value_type.as_str())
+        }
+        Some(Value::String(value_type)) => {
+            return Err(AppError::forbidden(format!(
+                "ontology release catalog action input schema type {value_type} is unsupported"
+            )));
+        }
+        Some(_) => {
+            return Err(AppError::forbidden(
+                "ontology release catalog action input schema type must be a string",
+            ));
+        }
+        None if object.get("properties").is_some() => Some("object"),
+        None => None,
+    };
+    if let Some(values) = object.get("enum") {
+        let values = values.as_array().ok_or_else(|| {
+            AppError::forbidden(
+                "ontology release catalog action input schema enum must be an array",
+            )
+        })?;
+        if values.is_empty() {
+            return Err(AppError::forbidden(
+                "ontology release catalog action input schema enum must not be empty",
+            ));
+        }
+        if let Some(value_type) = value_type
+            && values
+                .iter()
+                .any(|value| !ontology_action_schema_value_matches_type(value, value_type))
+        {
+            return Err(AppError::forbidden(format!(
+                "ontology release catalog action input schema enum member must be {value_type}"
+            )));
+        }
+    }
+    if let Some(properties_value) = object.get("properties") {
+        let properties = properties_value.as_object().ok_or_else(|| {
+            AppError::forbidden(
+                "ontology release catalog action input schema properties must be an object",
+            )
+        })?;
         for property in properties.values() {
-            validate_action_schema_node(property)?;
+            validate_action_schema_node(property, false)?;
+        }
+        if let Some(required) = object.get("required") {
+            if !(shorthand_declaration && required.is_boolean()) {
+                let required = required.as_array().ok_or_else(|| {
+                    AppError::forbidden(
+                        "ontology release catalog action input schema required must be an array",
+                    )
+                })?;
+                for name in required {
+                    let name = name.as_str().ok_or_else(|| {
+                        AppError::forbidden(
+                            "ontology release catalog action input schema required names must be strings",
+                        )
+                    })?;
+                    if !properties.contains_key(name) {
+                        return Err(AppError::forbidden(format!(
+                            "ontology release catalog action input schema required field {name} is undeclared"
+                        )));
+                    }
+                }
+            }
         }
     }
     if let Some(items) = object.get("items") {
-        validate_action_schema_node(items)?;
+        validate_action_schema_node(items, false)?;
     }
-    for keyword in ["allOf", "anyOf", "oneOf"] {
-        if let Some(schemas) = object.get(keyword).and_then(Value::as_array) {
-            for schema in schemas {
-                validate_action_schema_node(schema)?;
-            }
-        }
+    if value_type.is_none() && object.get("enum").is_none() {
+        return Err(AppError::forbidden(
+            "ontology release catalog action input schema declaration has no supported type",
+        ));
     }
     Ok(())
 }
@@ -938,7 +1070,7 @@ fn validate_catalog(catalog: &OntologyReleaseCatalogV1) -> Result<(), AppError> 
                 "ontology release catalog action input schema must be a JSON object",
             ));
         }
-        validate_action_schema_enums(&action.input_schema)?;
+        validate_action_schema(&action.input_schema)?;
     }
     for object in &catalog.objects {
         validate_api_name(object.api_name.clone(), ApiNameKind::Object)?;
