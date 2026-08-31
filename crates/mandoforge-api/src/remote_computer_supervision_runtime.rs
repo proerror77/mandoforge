@@ -101,23 +101,89 @@ pub(crate) async fn execute_remote_computer_stale_reclaim(
     let mut reclaimed_leases = Vec::new();
     let assignments = state.list_remote_computer_job_assignments().await?;
     for lease in &expired_leases {
-        let assignment = assignments
-            .iter()
-            .find(|assignment| assignment.lease_id == lease.id && assignment.status == "assigned");
+        let retry_scheduled = lease
+            .metadata
+            .get(REMOTE_COMPUTER_RUNTIME_CLEANUP_RETRY_MARKER)
+            .and_then(Value::as_bool)
+            == Some(true);
+        let (assignment, reason, assignment_status) = if retry_scheduled {
+            let Some(reason) = lease
+                .metadata
+                .get("runtime_cleanup_retry_reason")
+                .and_then(Value::as_str)
+                .filter(|reason| !reason.trim().is_empty())
+            else {
+                tracing::error!(
+                    lease_id = %lease.id,
+                    "Remote Computer cleanup retry is missing its original reason"
+                );
+                continue;
+            };
+            let Some(assignment_status) = lease
+                .metadata
+                .get("runtime_cleanup_retry_assignment_status")
+                .and_then(Value::as_str)
+                .filter(|status| matches!(*status, "canceled" | "released" | "failed"))
+            else {
+                tracing::error!(
+                    lease_id = %lease.id,
+                    "Remote Computer cleanup retry has an invalid assignment status"
+                );
+                continue;
+            };
+            let assignment = match lease.metadata.get("runtime_cleanup_assignment_id") {
+                Some(Value::Null) => None,
+                Some(Value::String(assignment_id)) => {
+                    let Some(assignment) = Uuid::parse_str(assignment_id)
+                        .ok()
+                        .and_then(|id| assignments.iter().find(|assignment| assignment.id == id))
+                    else {
+                        tracing::error!(
+                            lease_id = %lease.id,
+                            "Remote Computer cleanup retry assignment is missing"
+                        );
+                        continue;
+                    };
+                    Some(assignment)
+                }
+                _ => {
+                    tracing::error!(
+                        lease_id = %lease.id,
+                        "Remote Computer cleanup retry has invalid assignment metadata"
+                    );
+                    continue;
+                }
+            };
+            (assignment, reason, assignment_status)
+        } else {
+            (
+                assignments.iter().find(|assignment| {
+                    assignment.lease_id == lease.id && assignment.status == "assigned"
+                }),
+                "expired_lease_reclaim",
+                "released",
+            )
+        };
         let cleanup = cleanup_remote_computer_lease_runtime(
             state,
             lease,
             assignment,
-            "expired_lease_reclaim",
-            "released",
+            reason,
+            assignment_status,
         )
         .await;
-        if let Err(error) = cleanup {
-            tracing::error!(
-                lease_id = %lease.id,
-                error = %error.message,
-                "Remote Computer stale reclaim deferred a failed runtime cleanup"
-            );
+        let cleanup = match cleanup {
+            Ok(cleanup) => cleanup,
+            Err(error) => {
+                tracing::error!(
+                    lease_id = %lease.id,
+                    error = %error.message,
+                    "Remote Computer stale reclaim deferred a failed runtime cleanup"
+                );
+                continue;
+            }
+        };
+        if cleanup["status"] == "runtime_cleanup_in_progress" {
             continue;
         }
         let reclaimed = state

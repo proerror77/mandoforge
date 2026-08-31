@@ -1271,3 +1271,60 @@ async fn scheduler_due_run_records_task_error_and_continues_remaining_tasks() {
         json!("policy_rollout")
     );
 }
+
+#[tokio::test]
+async fn scheduler_due_run_surfaces_deferred_remote_computer_reclaim() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let computer = state
+        .create_remote_computer(CreateRemoteComputer {
+            id: None,
+            name: "scheduler-reclaim-attention".to_string(),
+            profile: Some("agent-sandbox".to_string()),
+            namespace: None,
+            pod_name: Some("scheduler-reclaim-attention-pod".to_string()),
+            workspace_path: None,
+            state_mount_path: None,
+            metadata: Some(json!({"on_demand": true})),
+        })
+        .await
+        .expect("create on-demand computer");
+    let lease = state
+        .create_remote_computer_lease(
+            computer.id,
+            CreateRemoteComputerLease {
+                session_id: None,
+                worker_id: Some("scheduler-reclaim-worker".to_string()),
+                lease_seconds: Some(60),
+                metadata: Some(json!({"on_demand": true})),
+            },
+        )
+        .await
+        .expect("create lease");
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test requires memory store");
+    };
+    inner
+        .write()
+        .await
+        .remote_computer_leases
+        .get_mut(&lease.id)
+        .expect("persisted lease")
+        .lease_expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+
+    let run = execute_scheduler_due_tasks(&state, None)
+        .await
+        .expect("scheduler run");
+
+    assert_eq!(run.status, "failed");
+    assert_eq!(run.remote_computer_reclaim.status, "attention");
+    assert!(
+        run.task_errors
+            .iter()
+            .any(|error| error.task == "remote_computer_reclaim")
+    );
+    assert!(
+        run.actions
+            .iter()
+            .any(|action| action == "remote_computer_reclaim_processed")
+    );
+}

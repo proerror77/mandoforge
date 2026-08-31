@@ -383,6 +383,219 @@ async fn stale_reclaim_replays_missing_cleanup_evidence_after_lease_transition()
 }
 
 #[tokio::test]
+async fn stale_reclaim_replays_original_cancellation_cleanup_without_releasing_assignment() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let session_id = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "cancellation cleanup retry".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create session")
+        .id;
+    let computer = state
+        .create_remote_computer(CreateRemoteComputer {
+            id: None,
+            name: "cancellation-cleanup-retry".to_string(),
+            profile: Some("workspace-write".to_string()),
+            namespace: None,
+            pod_name: Some("cancellation-cleanup-retry-pod".to_string()),
+            workspace_path: None,
+            state_mount_path: None,
+            metadata: Some(json!({"warm_pool": true})),
+        })
+        .await
+        .expect("create computer");
+    let lease = state
+        .create_remote_computer_lease(
+            computer.id,
+            CreateRemoteComputerLease {
+                session_id: Some(session_id),
+                worker_id: Some("cancellation-cleanup-worker".to_string()),
+                lease_seconds: Some(60),
+                metadata: Some(json!({"on_demand": false})),
+            },
+        )
+        .await
+        .expect("create lease");
+    let assignment = state
+        .create_remote_computer_job_assignment(
+            Uuid::new_v4(),
+            session_id,
+            CreateRemoteComputerJobAssignment {
+                lease_id: lease.id,
+                assigned_by: Some("cancellation-cleanup-worker".to_string()),
+                metadata: None,
+            },
+        )
+        .await
+        .expect("create assignment");
+    let mut retry_metadata = json!({
+        "on_demand": false,
+        "runtime_cleanup_retry_reason": "execution_job_cancel",
+        "runtime_cleanup_retry_assignment_status": "canceled",
+        "runtime_cleanup_assignment_id": null
+    });
+    retry_metadata[REMOTE_COMPUTER_RUNTIME_CLEANUP_RETRY_MARKER] = json!(true);
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test requires memory store");
+    };
+    let mut store = inner.write().await;
+    let persisted_lease = store
+        .remote_computer_leases
+        .get_mut(&lease.id)
+        .expect("persisted lease");
+    persisted_lease.lease_expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+    persisted_lease.metadata = retry_metadata;
+    drop(store);
+
+    let run = execute_remote_computer_stale_reclaim(&state)
+        .await
+        .expect("replay cancellation cleanup");
+
+    assert_eq!(run.status, "completed");
+    assert_eq!(run.reclaimed_lease_count, 1);
+    let persisted_lease = state
+        .list_remote_computer_leases()
+        .await
+        .expect("list leases")
+        .into_iter()
+        .find(|candidate| candidate.id == lease.id)
+        .expect("persisted lease");
+    assert_eq!(persisted_lease.status, "released");
+    assert_eq!(
+        persisted_lease.metadata["runtime_cleanup_reason"],
+        json!("execution_job_cancel")
+    );
+    let persisted_assignment = state
+        .list_remote_computer_job_assignments()
+        .await
+        .expect("list assignments")
+        .into_iter()
+        .find(|candidate| candidate.id == assignment.id)
+        .expect("persisted assignment");
+    assert_eq!(persisted_assignment.status, "assigned");
+    assert!(
+        state
+            .list_audit_logs(None)
+            .await
+            .expect("list audits")
+            .iter()
+            .any(|audit| {
+                audit.action == "remote_computer.runtime_cleanup_completed"
+                    && audit.details["lease_id"] == json!(lease.id)
+                    && audit.details["reason"] == json!("execution_job_cancel")
+            })
+    );
+}
+
+#[tokio::test]
+async fn repeated_terminal_cleanup_keeps_first_converged_metadata() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let session_id = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "stable terminal cleanup".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create session")
+        .id;
+    let computer = state
+        .create_remote_computer(CreateRemoteComputer {
+            id: None,
+            name: "stable-terminal-cleanup".to_string(),
+            profile: Some("workspace-write".to_string()),
+            namespace: None,
+            pod_name: Some("stable-terminal-cleanup-pod".to_string()),
+            workspace_path: None,
+            state_mount_path: None,
+            metadata: Some(json!({"warm_pool": true})),
+        })
+        .await
+        .expect("create computer");
+    let lease = state
+        .create_remote_computer_lease(
+            computer.id,
+            CreateRemoteComputerLease {
+                session_id: Some(session_id),
+                worker_id: Some("stable-terminal-cleanup-worker".to_string()),
+                lease_seconds: Some(60),
+                metadata: Some(json!({"on_demand": false})),
+            },
+        )
+        .await
+        .expect("create lease");
+    let assignment = state
+        .create_remote_computer_job_assignment(
+            Uuid::new_v4(),
+            session_id,
+            CreateRemoteComputerJobAssignment {
+                lease_id: lease.id,
+                assigned_by: Some("stable-terminal-cleanup-worker".to_string()),
+                metadata: None,
+            },
+        )
+        .await
+        .expect("create assignment");
+
+    cleanup_remote_computer_lease_runtime(&state, &lease, None, "execution_job_cancel", "canceled")
+        .await
+        .expect("first cleanup");
+    cleanup_remote_computer_lease_runtime(
+        &state,
+        &lease,
+        Some(&assignment),
+        "expired_lease_reclaim",
+        "released",
+    )
+    .await
+    .expect("repeated cleanup");
+
+    let persisted_lease = state
+        .list_remote_computer_leases()
+        .await
+        .expect("list leases")
+        .into_iter()
+        .find(|candidate| candidate.id == lease.id)
+        .expect("persisted lease");
+    assert_eq!(
+        persisted_lease.metadata["runtime_cleanup_reason"],
+        json!("execution_job_cancel")
+    );
+    assert_eq!(
+        state
+            .list_remote_computer_job_assignments()
+            .await
+            .expect("list assignments")
+            .into_iter()
+            .find(|candidate| candidate.id == assignment.id)
+            .expect("persisted assignment")
+            .status,
+        "assigned"
+    );
+}
+
+#[tokio::test]
 async fn expired_pooled_lease_reclaim_uses_runtime_cleanup_convergence() {
     let _lock = env_lock().lock().expect("env lock");
     let _runner = EnvVarGuard::set("MANDOFORGE_REMOTE_COMPUTER_RUNNER", "reserved");

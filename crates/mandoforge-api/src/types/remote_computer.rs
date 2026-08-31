@@ -9,6 +9,10 @@ use crate::remote_computer_runner::{
 
 pub(crate) const REMOTE_COMPUTER_RUNTIME_CLEANUP_MARKER: &str =
     "_mandoforge_runtime_cleanup_converged";
+pub(crate) const REMOTE_COMPUTER_RUNTIME_CLEANUP_RETRY_MARKER: &str =
+    "_mandoforge_runtime_cleanup_retry_scheduled";
+pub(crate) const REMOTE_COMPUTER_RUNTIME_CLEANUP_CLAIM_UNTIL_MARKER: &str =
+    "_mandoforge_runtime_cleanup_claim_until";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RemoteComputerSidecarSupervisionRun {

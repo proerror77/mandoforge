@@ -786,6 +786,49 @@ pub(crate) fn ontology_catalog_property_type(value_type: &str) -> Option<&'stati
     }
 }
 
+fn validate_action_schema_enums(schema: &Value) -> Result<(), AppError> {
+    let Some(object) = schema.as_object() else {
+        return Ok(());
+    };
+    let is_object_schema = object.get("type").and_then(Value::as_str) == Some("object")
+        || (object.get("type").is_none() && object.get("properties").is_some());
+    if is_object_schema {
+        validate_action_schema_node(schema)?;
+    } else {
+        for declaration in object.values() {
+            validate_action_schema_node(declaration)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_action_schema_node(schema: &Value) -> Result<(), AppError> {
+    let Some(object) = schema.as_object() else {
+        return Ok(());
+    };
+    if object.get("enum").is_some_and(|value| !value.is_array()) {
+        return Err(AppError::forbidden(
+            "ontology release catalog action input schema enum must be an array",
+        ));
+    }
+    if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+        for property in properties.values() {
+            validate_action_schema_node(property)?;
+        }
+    }
+    if let Some(items) = object.get("items") {
+        validate_action_schema_node(items)?;
+    }
+    for keyword in ["allOf", "anyOf", "oneOf"] {
+        if let Some(schemas) = object.get(keyword).and_then(Value::as_array) {
+            for schema in schemas {
+                validate_action_schema_node(schema)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_catalog(catalog: &OntologyReleaseCatalogV1) -> Result<(), AppError> {
     if catalog.schema != ONTOLOGY_RELEASE_CATALOG_SCHEMA {
         return Err(AppError::forbidden(
@@ -895,6 +938,7 @@ fn validate_catalog(catalog: &OntologyReleaseCatalogV1) -> Result<(), AppError> 
                 "ontology release catalog action input schema must be a JSON object",
             ));
         }
+        validate_action_schema_enums(&action.input_schema)?;
     }
     for object in &catalog.objects {
         validate_api_name(object.api_name.clone(), ApiNameKind::Object)?;

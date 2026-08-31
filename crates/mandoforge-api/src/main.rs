@@ -489,7 +489,8 @@ pub(crate) use types::provider::{
 pub(crate) use types::remote_computer::{
     CreateRemoteComputer, CreateRemoteComputerAttachment, CreateRemoteComputerJobAssignment,
     CreateRemoteComputerLease, CreateRemoteComputerSidecarHeartbeat, CreateRemoteComputerStateLock,
-    REMOTE_COMPUTER_RUNTIME_CLEANUP_MARKER, ReleaseRemoteComputerStateLock, RemoteComputer,
+    REMOTE_COMPUTER_RUNTIME_CLEANUP_CLAIM_UNTIL_MARKER, REMOTE_COMPUTER_RUNTIME_CLEANUP_MARKER,
+    REMOTE_COMPUTER_RUNTIME_CLEANUP_RETRY_MARKER, ReleaseRemoteComputerStateLock, RemoteComputer,
     RemoteComputerAgentSandboxLiveEvidenceReadiness, RemoteComputerAgentSandboxReadiness,
     RemoteComputerArtifactDiscoverySidecarConfigReadiness, RemoteComputerAttachment,
     RemoteComputerAttentionItem, RemoteComputerAutoscalingReadiness,

@@ -331,9 +331,7 @@ fn schema_type(schema: &Value) -> String {
 fn schema_value_matches_type(value: &Value, expected: &str) -> bool {
     match expected.trim().to_ascii_lowercase().as_str() {
         "string" | "text" | "uuid" | "date" | "timestamp" | "datetime" => value.is_string(),
-        "integer" | "int" | "int32" | "int64" => {
-            value.as_i64().is_some() || value.as_u64().is_some()
-        }
+        "integer" | "int" | "int32" | "int64" => schema_integer_literal(value),
         "number" | "decimal" | "float" | "double" => value.is_number(),
         "boolean" | "bool" => value.is_boolean(),
         "object" | "json" => value.is_object(),
@@ -341,6 +339,20 @@ fn schema_value_matches_type(value: &Value, expected: &str) -> bool {
         "null" => value.is_null(),
         _ => false,
     }
+}
+
+fn schema_integer_literal(value: &Value) -> bool {
+    if value.as_i64().is_some() || value.as_u64().is_some() {
+        return true;
+    }
+    value.as_f64().is_some_and(|number| {
+        number.is_finite()
+            && number.fract() == 0.0
+            && (((-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&number)
+                && (number as i64) as f64 == number)
+                || ((0.0..18_446_744_073_709_551_616.0).contains(&number)
+                    && (number as u64) as f64 == number))
+    })
 }
 
 fn schema_inline_object(properties: &Value, required: Option<&Value>) -> Option<String> {
@@ -554,6 +566,7 @@ mod tests {
             "required_name": "string",
             "optional_note": {"type": "string", "required": false},
             "priority": {"type": "number", "enum": [1, 2.5], "required": false},
+            "integral_priority": {"type": "integer", "enum": [1.0], "required": false},
             "approved": {"type": "boolean", "enum": [true, false], "required": false},
             "mixed_number": {"type": "number", "enum": [1, "invalid", 2.5], "required": false}
         });
@@ -563,6 +576,7 @@ mod tests {
         assert!(output.contains("readonly \"required_name\": string;"));
         assert!(output.contains("readonly \"optional_note\"?: string;"));
         assert!(output.contains("readonly \"priority\"?: 1 | 2.5;"));
+        assert!(output.contains("readonly \"integral_priority\"?: 1.0;"));
         assert!(output.contains("readonly \"approved\"?: true | false;"));
         assert!(output.contains("readonly \"mixed_number\"?: 1 | 2.5;"));
     }

@@ -127,6 +127,7 @@ fn ontology_action_parameters_accept_object_schema_without_explicit_type() {
             "order_id": {"type": "string"},
             "amount": {"type": "number"},
             "attempt": {"type": "number", "enum": [1]},
+            "integral_attempt": {"type": "integer", "enum": [1.0]},
             "status": {"type": "string", "enum": ["open", "closed"]}
         },
         "required": ["order_id"]
@@ -137,6 +138,11 @@ fn ontology_action_parameters_accept_object_schema_without_explicit_type() {
         .expect("published enum value");
     validate_ontology_action_parameters(&schema, &json!({"order_id": "order-1", "attempt": 1.0}))
         .expect("integer and floating JSON representations of the same enum number");
+    validate_ontology_action_parameters(
+        &schema,
+        &json!({"order_id": "order-1", "integral_attempt": 1}),
+    )
+    .expect("integer schemas must accept equivalent integral floating enum members");
     let error = validate_ontology_action_parameters(
         &schema,
         &json!({"order_id": "order-1", "status": "pending"}),
@@ -172,6 +178,46 @@ fn ontology_sdk_catalog_requires_action_target_in_object_catalog() {
             .message
             .contains("target object is not in the release catalog")
     );
+}
+
+#[test]
+fn ontology_sdk_catalog_rejects_non_array_action_enums() {
+    let order = proposal("object", "Order", json!({"object_type": "Order"}));
+    let mut action = proposal(
+        "action",
+        "refund_order",
+        json!({
+            "action": "refund_order",
+            "target_object": "Order",
+            "inputs": {"status": {"type": "string", "enum": "open"}},
+            "reads": [],
+            "effects": [],
+            "policy": {"approval_required": true, "transaction_profile": "proposal_only"},
+            "transaction_profile": "proposal_only",
+            "executor": "local",
+            "audit_event": "commerce.refund_order"
+        }),
+    );
+
+    let error = build_ontology_release_catalog("commerce", &[order.clone(), action.clone()], None)
+        .expect_err("non-array action enums must fail before publication");
+    assert!(error.message.contains("enum must be an array"));
+
+    action.content["inputs"] = json!({
+        "enum": {"type": "string", "enum": ["open"]}
+    });
+    build_ontology_release_catalog("commerce", &[order.clone(), action.clone()], None)
+        .expect("a flat action parameter may be named enum");
+
+    action.content["inputs"] = json!({
+        "type": "object",
+        "properties": {
+            "enum": {"type": "string"},
+            "selector": {"type": "object", "enum": [{"enum": "literal"}]}
+        }
+    });
+    build_ontology_release_catalog("commerce", &[order, action], None)
+        .expect("schema property names and enum member objects are data, not schema keywords");
 }
 
 #[test]
