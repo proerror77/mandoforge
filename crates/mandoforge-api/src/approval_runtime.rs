@@ -1251,17 +1251,9 @@ where
         request = request.bearer_auth(token);
     }
     let response = request.send().await?;
-    let http_status = response.status();
-    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
-    if !http_status.is_success() {
-        return Err(AppError::bad_request(format!(
-            "approval notification ops controller failed with status {http_status}"
-        )));
-    }
-    let controller_status = body
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("validated");
+    let (http_status, body) =
+        controller_response_json(response, "approval notification ops controller").await?;
+    let controller_status = required_controller_status(&body)?;
     let validated = matches!(controller_status, "validated" | "success" | "ok");
     Ok(json!({
         "attempted": true,
@@ -1323,17 +1315,9 @@ where
         request = request.bearer_auth(token);
     }
     let response = request.send().await?;
-    let http_status = response.status();
-    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
-    if !http_status.is_success() {
-        return Err(AppError::bad_request(format!(
-            "approval notification deployment controller failed with status {http_status}"
-        )));
-    }
-    let controller_status = body
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("validated");
+    let (http_status, body) =
+        controller_response_json(response, "approval notification deployment controller").await?;
+    let controller_status = required_controller_status(&body)?;
     let validated = matches!(
         controller_status,
         "validated" | "deployed" | "healthy" | "success" | "ok"

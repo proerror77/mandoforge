@@ -343,19 +343,11 @@ where
         request = request.bearer_auth(token);
     }
     let response = request.send().await?;
-    let http_status = response.status();
-    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
-    if !http_status.is_success() {
-        return Err(AppError::bad_request(format!(
-            "scheduler deployment controller failed with status {http_status}"
-        )));
-    }
+    let (_http_status, body) =
+        controller_response_json(response, "scheduler deployment controller").await?;
     Ok(json!({
         "attempted": true,
-        "status": body
-            .get("status")
-            .and_then(Value::as_str)
-            .unwrap_or("validated"),
+        "status": required_controller_status(&body)?,
         "controller_response": body,
     }))
 }

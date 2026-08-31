@@ -70,7 +70,7 @@ finance_delivery_receipt_count() {
             system_id: $root_system_id,
             file_name: $root_file_name,
             byte_count: $root_byte_count,
-            status: (.export_state.latest_delivery_status // .export_state.latest_receipt_status // .export_state.latest_status // "delivered"),
+            status: (.export_state.latest_delivery_status // .export_state.latest_receipt_status // .export_state.latest_status // "unknown"),
             record_count: (.export_state.latest_record_count // .export_state.latest_posted_record_count // .export_state.posted_record_count // .export_state.latest_row_count // 0),
             audit_id: (.export_state.latest_delivery_audit_id // .export_state.latest_audit_id // .export_state.audit_id),
             run_id: (.export_state.latest_delivery_run_id // .export_state.latest_run_id // .export_state.run_id),
@@ -344,7 +344,7 @@ write_summary() {
     export_delivery_target_configured="$(jq -r '.response.target_configured // false' "$export_delivery_file")"
   fi
   if [[ -s "$export_delivery_observer_file" ]]; then
-    export_delivery_observer_status="$(jq -r '.status // "ok"' "$export_delivery_observer_file")"
+    export_delivery_observer_status="$(jq -r '.status // "unknown"' "$export_delivery_observer_file")"
     export_delivery_mode="$(jq -r '.export_state.delivery_mode // "unknown"' "$export_delivery_observer_file")"
     export_delivery_count="$(jq -r '.export_state.delivery_count // 0' "$export_delivery_observer_file")"
     export_delivery_receipt_count="$(finance_delivery_receipt_count "$export_delivery_observer_file")"
