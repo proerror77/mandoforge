@@ -116,6 +116,10 @@ async fn postgres_migration_ledger_is_idempotent_and_rejects_checksum_drift() {
         .connect(&database_url)
         .await
         .expect("connect test postgres");
+    run_migrations(&pool).await.expect("apply migrations");
+    verify_migrations_applied(&pool, TenantRuntimeMode::SingleRuntimeTenant)
+        .await
+        .expect("runtime database must verify the exact migration ledger");
     let suffix = Uuid::new_v4().simple().to_string();
     let table_name = format!("mandoforge_migration_ledger_{suffix}");
     let filename = format!("9999_migration_ledger_{suffix}.sql");

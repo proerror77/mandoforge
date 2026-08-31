@@ -38,7 +38,8 @@ pub(crate) async fn run_startup_migrations(
     }
     let result = run_migrations(&migration_pool).await;
     migration_pool.close().await;
-    result
+    result?;
+    verify_migrations_applied(runtime_pool, tenant_runtime_mode).await
 }
 
 pub(crate) async fn verify_migrations_applied(
