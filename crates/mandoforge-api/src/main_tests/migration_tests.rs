@@ -159,6 +159,99 @@ async fn postgres_migration_ledger_is_idempotent_and_rejects_checksum_drift() {
 
 #[tokio::test]
 #[ignore = "requires MANDOFORGE_TEST_POSTGRES_URL"]
+async fn postgres_migration_runner_rejects_tenant_scoped_data_visibility() -> Result<()> {
+    let database_url = std::env::var("MANDOFORGE_TEST_POSTGRES_URL")
+        .expect("MANDOFORGE_TEST_POSTGRES_URL is required");
+    let admin_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await?;
+    run_migrations(&admin_pool).await?;
+
+    let suffix = Uuid::new_v4().simple().to_string();
+    let role_name = format!("mandoforge_scoped_migration_{}", &suffix[..16]);
+    let table_name = format!("mandoforge_scoped_migration_{suffix}");
+    let policy_name = format!("tenant_isolation_{table_name}");
+    let filename = format!("9998_scoped_migration_{suffix}.sql");
+    let directory = std::env::temp_dir().join(format!("mandoforge-migrations-{suffix}"));
+    fs::create_dir_all(&directory)?;
+    let path = directory.join(&filename);
+    fs::write(&path, format!("UPDATE {table_name} SET migrated = TRUE;"))?;
+
+    sqlx::raw_sql(&format!(
+        "CREATE ROLE {role_name} NOLOGIN NOBYPASSRLS;
+         CREATE TABLE {table_name} (tenant_id UUID NOT NULL, migrated BOOLEAN NOT NULL DEFAULT FALSE);
+         ALTER TABLE {table_name} ENABLE ROW LEVEL SECURITY;
+         ALTER TABLE {table_name} FORCE ROW LEVEL SECURITY;
+         CREATE POLICY {policy_name} ON {table_name}
+             USING (tenant_id = mandoforge_current_tenant_id())
+             WITH CHECK (tenant_id = mandoforge_current_tenant_id());
+         GRANT USAGE, CREATE ON SCHEMA public TO {role_name};
+         GRANT SELECT, UPDATE ON {table_name} TO {role_name};
+         GRANT SELECT, INSERT ON schema_migrations TO {role_name};"
+    ))
+    .execute(&admin_pool)
+    .await?;
+    let tenant_a = Uuid::new_v4();
+    let tenant_b = Uuid::new_v4();
+    sqlx::query(&format!(
+        "INSERT INTO {table_name} (tenant_id) VALUES ($1), ($2)"
+    ))
+    .bind(tenant_a)
+    .bind(tenant_b)
+    .execute(&admin_pool)
+    .await?;
+
+    let role_setting = format!("SET ROLE {role_name}");
+    let tenant_setting = format!("SET mandoforge.tenant_id = '{tenant_a}'");
+    let scoped_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .after_connect(move |connection, _| {
+            let role_setting = role_setting.clone();
+            let tenant_setting = tenant_setting.clone();
+            Box::pin(async move {
+                connection.execute(role_setting.as_str()).await?;
+                connection.execute(tenant_setting.as_str()).await?;
+                Ok(())
+            })
+        })
+        .connect(&database_url)
+        .await?;
+    let error = run_migrations_from_paths(&scoped_pool, vec![path])
+        .await
+        .expect_err("global migration must not be recorded through one tenant's RLS view");
+    let error_chain = format!("{error:#}");
+    anyhow::ensure!(
+        error_chain.contains("row-level security"),
+        "unexpected migration failure: {error_chain}"
+    );
+    scoped_pool.close().await;
+
+    let migrated_count: i64 =
+        sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table_name} WHERE migrated"))
+            .fetch_one(&admin_pool)
+            .await?;
+    anyhow::ensure!(migrated_count == 0);
+    let ledger_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM schema_migrations WHERE filename = $1")
+            .bind(&filename)
+            .fetch_one(&admin_pool)
+            .await?;
+    anyhow::ensure!(ledger_count == 0);
+
+    sqlx::raw_sql(&format!(
+        "DROP OWNED BY {role_name};
+         DROP ROLE {role_name};
+         DROP TABLE {table_name};"
+    ))
+    .execute(&admin_pool)
+    .await?;
+    fs::remove_dir_all(directory)?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MANDOFORGE_TEST_POSTGRES_URL"]
 async fn postgres_session_event_trigger_and_explicit_projection_converge() -> Result<()> {
     let database_url = std::env::var("MANDOFORGE_TEST_POSTGRES_URL")
         .expect("MANDOFORGE_TEST_POSTGRES_URL is required");
@@ -212,10 +305,13 @@ async fn postgres_session_event_trigger_and_explicit_projection_converge() -> Re
         .execute(&pool)
         .await?;
 
+        let exporter = Arc::new(RecordingTelemetryExporter::default());
         let mut state = test_state_with_worker(Arc::new(InlineExecutionWorker));
         state.store = StoreBackend::Postgres(pool.clone());
         state.execution_queue = ExecutionQueue::postgres(pool.clone(), tenant_id);
         state.tenant_id = tenant_id;
+        state.observability_config.otlp_endpoint = Some("http://otel.test".to_string());
+        state.telemetry_exporter = exporter.clone();
 
         state
             .append_event(
@@ -393,7 +489,7 @@ async fn postgres_session_event_trigger_and_explicit_projection_converge() -> Re
                 )
                 .await
                 .map_err(|error| anyhow::anyhow!(error.message))?;
-            state
+            let finished = state
                 .execution_queue
                 .finish_finalizing_started(
                     executing.id,
@@ -401,6 +497,9 @@ async fn postgres_session_event_trigger_and_explicit_projection_converge() -> Re
                     finalizing.claim_generation,
                     false,
                 )
+                .await
+                .map_err(|error| anyhow::anyhow!(error.message))?;
+            execution::publish_execution_completion_tail(&state, &finished)
                 .await
                 .map_err(|error| anyhow::anyhow!(error.message))?;
             let interleaved_jobs = state
@@ -434,6 +533,14 @@ async fn postgres_session_event_trigger_and_explicit_projection_converge() -> Re
                 );
             }
         }
+        let completion_telemetry_count = exporter
+            .events
+            .lock()
+            .await
+            .iter()
+            .filter(|event| event.name == "execution.completed")
+            .count();
+        anyhow::ensure!(completion_telemetry_count == 2);
         Ok(())
     }
     .await;

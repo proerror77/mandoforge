@@ -187,8 +187,10 @@ use codex_app_server::{
 pub(crate) use codex_app_server_ops::*;
 pub(crate) use context_packet_runtime::*;
 #[cfg(test)]
-pub(crate) use db_bootstrap::{migration_paths, run_migrations_from_paths};
-pub(crate) use db_bootstrap::{run_migrations, seed_demo_tenant};
+pub(crate) use db_bootstrap::{migration_paths, run_migrations, run_migrations_from_paths};
+pub(crate) use db_bootstrap::{
+    run_startup_migrations, seed_demo_tenant, verify_migrations_applied,
+};
 #[cfg(test)]
 pub(crate) use deployment_version::deployment_version_from_lookup;
 pub(crate) use deployment_version::{
@@ -678,7 +680,11 @@ async fn build_state(process_role: ProcessRole) -> Result<AppState> {
                 .connect(&database_url)
                 .await
                 .context("failed to connect to Postgres")?;
-            run_migrations(&pool).await?;
+            if process_role == ProcessRole::Api {
+                run_startup_migrations(&pool, &database_url, tenant_runtime_mode).await?;
+            } else {
+                verify_migrations_applied(&pool, tenant_runtime_mode).await?;
+            }
             seed_demo_tenant(&pool, tenant_id).await?;
             StoreBackend::Postgres(pool)
         }

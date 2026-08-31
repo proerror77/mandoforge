@@ -2128,6 +2128,42 @@ fn tenant_runtime_mode_defaults_and_parses_env_override() {
 }
 
 #[test]
+fn tenant_routed_migrations_require_a_dedicated_database_url() {
+    assert_eq!(
+        db_bootstrap::migration_database_url_from_lookup(
+            |_| None,
+            "postgres://runtime",
+            TenantRuntimeMode::SingleRuntimeTenant,
+        )
+        .expect("single-tenant development may reuse its database URL"),
+        "postgres://runtime"
+    );
+    let error = db_bootstrap::migration_database_url_from_lookup(
+        |_| None,
+        "postgres://runtime",
+        TenantRuntimeMode::TenantRouted,
+    )
+    .expect_err("tenant-routed migrations need a separate credential");
+    assert!(
+        error
+            .to_string()
+            .contains("MANDOFORGE_MIGRATION_DATABASE_URL is required")
+    );
+    assert_eq!(
+        db_bootstrap::migration_database_url_from_lookup(
+            |key| {
+                (key == "MANDOFORGE_MIGRATION_DATABASE_URL")
+                    .then(|| " postgres://migration ".to_string())
+            },
+            "postgres://runtime",
+            TenantRuntimeMode::TenantRouted,
+        )
+        .expect("dedicated migration URL"),
+        "postgres://migration"
+    );
+}
+
+#[test]
 fn stage2_readiness_parses_open_completion_gaps() {
     let audit = r#"
 # Stage 2 Completion Audit

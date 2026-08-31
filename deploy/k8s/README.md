@@ -66,6 +66,7 @@ Production notes:
 
 - Do not apply `secret.example.yaml` or `worker-secret.example.yaml` to production. The default manifests include only the secret delivery contract; create `mandoforge-secrets` and `mandoforge-worker-secrets` from a reviewed secret-delivery path, and never expose scheduler, admin, controller, KMS, or Postgres-admin credentials to worker Pods.
 - Prefer external Postgres or a mature Postgres Operator for production.
+- The global migration ledger requires a migration role with `BYPASSRLS`. In `tenant_routed` mode set `MANDOFORGE_MIGRATION_DATABASE_URL` to that distinct credential and keep the `DATABASE_URL` runtime role non-superuser without `BYPASSRLS`; startup fails closed otherwise.
 - Review the workspace PVC storage class, backup policy, and retention policy before long-running workers.
 - The default worker NetworkPolicies allow only Postgres, cluster DNS, and the in-cluster OTel collector. Add reviewed destination-aware egress through a CNI FQDN policy or egress proxy before enabling provider, HTTP, or MCP calls in shared clusters.
 - Keep Codex and sandbox execution disabled or tightly constrained before multi-tenant use; the worker drains the durable Postgres queue directly and does not call API `/run` endpoints.

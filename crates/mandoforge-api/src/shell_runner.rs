@@ -150,12 +150,19 @@ impl Drop for ShellCleanup {
                 terminate_process_group(*process_group_id);
             }
             ShellCleanupKind::DockerContainer(name) => {
-                let _ = std::process::Command::new("docker")
+                if let Ok(mut child) = std::process::Command::new("docker")
                     .args(["rm", "-f", name])
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
-                    .spawn();
+                    .spawn()
+                {
+                    let _ = std::thread::Builder::new()
+                        .name("mandoforge-docker-cleanup".to_string())
+                        .spawn(move || {
+                            let _ = child.wait();
+                        });
+                }
             }
         }
     }

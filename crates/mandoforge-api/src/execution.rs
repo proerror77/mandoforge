@@ -1230,6 +1230,7 @@ pub(crate) async fn publish_execution_completion_tail(
             .await?
     };
     if queue_backend == "postgres" {
+        state.emit_telemetry_event(&event).await;
         return Ok(());
     }
     if !crate::session_accepts_worker_execution(state, job.session_id).await? {

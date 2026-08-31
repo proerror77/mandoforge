@@ -101,6 +101,15 @@ BASE_URL=http://127.0.0.1:8787 ./scripts/stage1-demo.sh
 
 Docker Compose uses Postgres through `DATABASE_URL`, so the demo validates migrations and durable runtime tables in addition to the API loop.
 
+Database migrations use a global checksum ledger and therefore must see every
+tenant. Local single-tenant setups may reuse `DATABASE_URL`. A tenant-routed
+deployment must also set `MANDOFORGE_MIGRATION_DATABASE_URL` to a distinct
+Postgres role with `BYPASSRLS`; the runtime role must not be superuser and must
+not have `BYPASSRLS`. Startup fails instead of recording a migration that only
+updated the configured tenant. The Whiskey Compose deployment accepts that
+runtime credential through `MANDOFORGE_DATABASE_URL` and passes the migration
+credential only to the API service.
+
 Run the full live gate after starting the API with Postgres and Docker shell runner mode:
 
 ```bash
@@ -128,7 +137,7 @@ BASE_URL=http://127.0.0.1:8787 ./scripts/stage1-demo.sh
 Before shared-cluster use:
 
 - Do not apply `deploy/k8s/secret.example.yaml` or `deploy/k8s/worker-secret.example.yaml` to production. The default manifests include only `deploy/k8s/secret-delivery-contract.yaml`; create separate `mandoforge-secrets` and worker-only `mandoforge-worker-secrets` through a reviewed delivery path. Worker Pods must receive only `DATABASE_URL`, `MANDOFORGE_WORKER_TOKEN`, and the explicitly allowed optional provider/Vault keys.
-- Add NetworkPolicy before enabling shell, Codex, HTTP, or MCP workers.
+- Keep the checked-in fail-closed worker NetworkPolicies. Add reviewed provider, HTTP, or MCP egress through a destination-aware CNI policy or egress proxy; do not replace it with unrestricted public CIDRs.
 - Review the workspace PVC, backup policy, and retention policy.
 - Split sandbox and Codex execution into separate worker Deployments.
 
