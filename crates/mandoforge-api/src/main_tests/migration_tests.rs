@@ -77,6 +77,7 @@ async fn migration_paths_include_stage2_migrations_in_order() {
     assert!(names.contains(&"0077_session_event_loop_projection.sql"));
     assert!(names.contains(&"0078_execution_completion_projection.sql"));
     assert!(names.contains(&"0079_workflow_step_claim_owner_version.sql"));
+    assert!(names.contains(&"0080_session_status_constraints.sql"));
     assert!(
         names.windows(2).all(|window| window[0] <= window[1]),
         "migrations should run lexicographically: {names:?}"
@@ -93,6 +94,16 @@ fn migration_checksum_is_content_addressed() {
         db_bootstrap::migration_checksum("SELECT 1;"),
         db_bootstrap::migration_checksum("SELECT 2;")
     );
+}
+
+#[test]
+fn session_status_constraint_migration_is_fail_closed() {
+    let migration = include_str!("../../../../db/migrations/0080_session_status_constraints.sql");
+    assert!(migration.contains("ALTER COLUMN status SET DEFAULT 'idle'"));
+    assert!(migration.contains(
+        "CHECK (status IN ('idle', 'running', 'requires_action', 'rescheduling', 'terminated', 'failed'))"
+    ));
+    assert!(migration.contains("CHECK (status IN ('queued', 'running', 'completed', 'failed'))"));
 }
 
 #[test]
@@ -123,6 +134,35 @@ async fn postgres_migration_ledger_is_idempotent_and_rejects_checksum_drift() {
     verify_migrations_applied(&pool, TenantRuntimeMode::SingleRuntimeTenant)
         .await
         .expect("runtime database must verify the exact migration ledger");
+    let constraints: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT conname, convalidated
+         FROM pg_constraint
+         WHERE (conrelid = 'sessions'::regclass AND conname = 'sessions_status_check')
+            OR (conrelid = 'session_loop_jobs'::regclass
+                AND conname = 'session_loop_jobs_status_check')
+         ORDER BY conname",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("read session status constraints");
+    assert_eq!(
+        constraints,
+        vec![
+            ("session_loop_jobs_status_check".to_string(), true),
+            ("sessions_status_check".to_string(), true),
+        ]
+    );
+    let session_status_default: Option<String> = sqlx::query_scalar(
+        "SELECT column_default
+         FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'sessions'
+           AND column_name = 'status'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read session status default");
+    assert_eq!(session_status_default.as_deref(), Some("'idle'::text"));
     let suffix = Uuid::new_v4().simple().to_string();
     let table_name = format!("mandoforge_migration_ledger_{suffix}");
     let filename = format!("9999_migration_ledger_{suffix}.sql");
