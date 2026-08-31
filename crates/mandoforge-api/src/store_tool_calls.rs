@@ -527,7 +527,7 @@ impl AppState {
                 let task_grant = if let Some(grant_id) = tool_call.task_grant_id {
                     let now = Utc::now();
                     let workflow_run_id =
-                        lock_postgres_workflow_run_for_task_grant(&mut *tx, tenant_id, grant_id)
+                        lock_postgres_workflow_run_for_task_grant(&mut tx, tenant_id, grant_id)
                             .await?;
                     let select_sql = format!(
                         "SELECT {TASK_GRANT_COLUMNS}
@@ -572,7 +572,7 @@ impl AppState {
                             return Err(AppError::forbidden(message));
                         }
                         validate_postgres_task_grant_step(
-                            &mut *tx,
+                            &mut tx,
                             tenant_id,
                             workflow_run_id,
                             grant,
@@ -1052,7 +1052,7 @@ impl AppState {
                         .with_known_execution_outcome()
                     })?;
                     let workflow_run_id = lock_postgres_workflow_run_for_task_grant(
-                        &mut *tx,
+                        &mut tx,
                         tenant_id,
                         grant_id,
                     )
@@ -1095,7 +1095,7 @@ impl AppState {
                             );
                         }
                         validate_postgres_task_grant_step(
-                            &mut *tx,
+                            &mut tx,
                             tenant_id,
                             workflow_run_id,
                             &grant,

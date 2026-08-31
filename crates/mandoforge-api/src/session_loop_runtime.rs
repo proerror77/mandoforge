@@ -258,15 +258,14 @@ pub(crate) async fn build_provider_context_packet(
     };
     let mut refresh_blockers = Vec::new();
     if refresh_requested {
-        if let Some((_, grant)) = active_task_grant.as_ref() {
-            if state
+        if let Some((_, grant)) = active_task_grant.as_ref()
+            && state
                 .list_workflow_step_runs(grant.workflow_run_id)
                 .await?
                 .iter()
                 .any(|step| step.session_id == Some(session_id) && step.status == "running")
-            {
-                refresh_blockers.push("workflow_step_running");
-            }
+        {
+            refresh_blockers.push("workflow_step_running");
         }
         if state
             .list_approvals()

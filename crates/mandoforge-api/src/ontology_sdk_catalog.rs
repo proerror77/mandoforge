@@ -928,24 +928,24 @@ fn validate_action_schema_node(
         for property in properties.values() {
             validate_action_schema_node(property, false)?;
         }
-        if let Some(required) = object.get("required") {
-            if !(shorthand_declaration && required.is_boolean()) {
-                let required = required.as_array().ok_or_else(|| {
+        if let Some(required) = object.get("required")
+            && !(shorthand_declaration && required.is_boolean())
+        {
+            let required = required.as_array().ok_or_else(|| {
+                AppError::forbidden(
+                    "ontology release catalog action input schema required must be an array",
+                )
+            })?;
+            for name in required {
+                let name = name.as_str().ok_or_else(|| {
                     AppError::forbidden(
-                        "ontology release catalog action input schema required must be an array",
+                        "ontology release catalog action input schema required names must be strings",
                     )
                 })?;
-                for name in required {
-                    let name = name.as_str().ok_or_else(|| {
-                        AppError::forbidden(
-                            "ontology release catalog action input schema required names must be strings",
-                        )
-                    })?;
-                    if !properties.contains_key(name) {
-                        return Err(AppError::forbidden(format!(
-                            "ontology release catalog action input schema required field {name} is undeclared"
-                        )));
-                    }
+                if !properties.contains_key(name) {
+                    return Err(AppError::forbidden(format!(
+                        "ontology release catalog action input schema required field {name} is undeclared"
+                    )));
                 }
             }
         }
