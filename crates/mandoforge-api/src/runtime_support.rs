@@ -72,13 +72,27 @@ pub(crate) fn env_i64(key: &str) -> Option<i64> {
         .and_then(|value| value.trim().parse::<i64>().ok())
 }
 
+pub(crate) async fn controller_response_json(
+    response: reqwest::Response,
+    failure_context: &str,
+) -> Result<(reqwest::StatusCode, Value), AppError> {
+    let http_status = response.status();
+    if !http_status.is_success() {
+        return Err(AppError::bad_request(format!(
+            "{failure_context} failed with status {http_status}"
+        )));
+    }
+    Ok((http_status, response.json::<Value>().await?))
+}
+
 pub(crate) fn required_controller_status(body: &Value) -> Result<&str, AppError> {
     body.get("status")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|status| !status.is_empty())
-        .ok_or_else(|| {
-            AppError::bad_request("controller response requires a non-empty string status")
+        .ok_or_else(|| AppError {
+            status: axum::http::StatusCode::BAD_GATEWAY,
+            message: "controller response requires a non-empty string status".to_string(),
         })
 }
 
@@ -100,7 +114,8 @@ mod tests {
             json!({"status": 1}),
             json!({"status": " "}),
         ] {
-            assert!(required_controller_status(&invalid).is_err());
+            let error = required_controller_status(&invalid).expect_err("invalid status");
+            assert_eq!(error.status, axum::http::StatusCode::BAD_GATEWAY);
         }
     }
 }

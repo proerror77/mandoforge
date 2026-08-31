@@ -320,13 +320,8 @@ where
         request = request.bearer_auth(token);
     }
     let response = request.send().await?;
-    let http_status = response.status();
-    let body = response.json::<Value>().await?;
-    if !http_status.is_success() {
-        return Err(AppError::bad_request(format!(
-            "agent release controller failed with status {http_status}"
-        )));
-    }
+    let (http_status, body) =
+        controller_response_json(response, "agent release controller").await?;
     let controller_status = required_controller_status(&body)?;
     let promoted = matches!(controller_status, "promoted" | "applied" | "success" | "ok");
     Ok(json!({
@@ -429,13 +424,8 @@ where
         request = request.bearer_auth(token);
     }
     let response = request.send().await?;
-    let http_status = response.status();
-    let body = response.json::<Value>().await?;
-    if !http_status.is_success() {
-        return Err(AppError::bad_request(format!(
-            "agent release deployment controller failed with status {http_status}"
-        )));
-    }
+    let (http_status, body) =
+        controller_response_json(response, "agent release deployment controller").await?;
     let provider_status = required_controller_status(&body)?;
     let validated = matches!(provider_status, "validated" | "success" | "ok" | "healthy");
     Ok(json!({
@@ -525,13 +515,8 @@ where
         request = request.bearer_auth(token);
     }
     let response = request.send().await?;
-    let http_status = response.status();
-    let body = response.json::<Value>().await?;
-    if !http_status.is_success() {
-        return Err(AppError::bad_request(format!(
-            "agent release orchestration controller failed with status {http_status}"
-        )));
-    }
+    let (http_status, body) =
+        controller_response_json(response, "agent release orchestration controller").await?;
     let provider_status = required_controller_status(&body)?;
     let validated = matches!(provider_status, "validated" | "success" | "ok" | "healthy");
     Ok(json!({
@@ -611,13 +596,8 @@ where
         request = request.bearer_auth(token);
     }
     let response = request.send().await?;
-    let http_status = response.status();
-    let body = response.json::<Value>().await?;
-    if !http_status.is_success() {
-        return Err(AppError::bad_request(format!(
-            "agent release rollback controller failed with status {http_status}"
-        )));
-    }
+    let (http_status, body) =
+        controller_response_json(response, "agent release rollback controller").await?;
     let provider_status = required_controller_status(&body)?;
     let rolled_back = matches!(
         provider_status,

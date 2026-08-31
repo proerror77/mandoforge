@@ -693,13 +693,8 @@ where
         request = request.bearer_auth(token);
     }
     let response = request.send().await?;
-    let http_status = response.status();
-    let body = response.json::<Value>().await?;
-    if !http_status.is_success() {
-        return Err(AppError::bad_request(format!(
-            "vault KMS recovery controller failed with status {http_status}"
-        )));
-    }
+    let (http_status, body) =
+        controller_response_json(response, "vault KMS recovery controller").await?;
     let provider_status = required_controller_status(&body)?;
     let validated = matches!(provider_status, "validated" | "success" | "ok" | "healthy");
     Ok(json!({

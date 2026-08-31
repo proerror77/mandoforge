@@ -804,13 +804,7 @@ where
         request = request.bearer_auth(token);
     }
     let response = request.send().await?;
-    let http_status = response.status();
-    let body = response.json::<Value>().await?;
-    if !http_status.is_success() {
-        return Err(AppError::bad_request(format!(
-            "MCP rollout controller failed with status {http_status}"
-        )));
-    }
+    let (http_status, body) = controller_response_json(response, "MCP rollout controller").await?;
     let controller_status = required_controller_status(&body)?;
     let approved = matches!(
         controller_status,
@@ -878,13 +872,8 @@ where
         request = request.bearer_auth(token);
     }
     let response = request.send().await?;
-    let http_status = response.status();
-    let body = response.json::<Value>().await?;
-    if !http_status.is_success() {
-        return Err(AppError::bad_request(format!(
-            "MCP rollout rollback controller failed with status {http_status}"
-        )));
-    }
+    let (http_status, body) =
+        controller_response_json(response, "MCP rollout rollback controller").await?;
     let controller_status = required_controller_status(&body)?;
     let rolled_back = matches!(
         controller_status,
@@ -1399,13 +1388,8 @@ where
         request = request.bearer_auth(token);
     }
     let response = request.send().await?;
-    let http_status = response.status();
-    let body = response.json::<Value>().await?;
-    if !http_status.is_success() {
-        return Err(AppError::bad_request(format!(
-            "MCP connector deployment controller failed with status {http_status}"
-        )));
-    }
+    let (http_status, body) =
+        controller_response_json(response, "MCP connector deployment controller").await?;
     let controller_status = required_controller_status(&body)?;
     let validated = matches!(
         controller_status,

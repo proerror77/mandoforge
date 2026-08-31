@@ -9,8 +9,8 @@ use crate::{
     RemoteComputerRunnerReadiness, RemoteComputerSidecarHeartbeat,
     RemoteComputerSidecarRecoveryReadiness, RemoteComputerSidecarRecoveryRun,
     RemoteComputerSidecarRecoveryTarget, RemoteComputerSidecarSupervisionReadiness,
-    env_bool_lookup, env_i64, new_audit_log, remote_computer_runner_for_config,
-    required_controller_status,
+    controller_response_json, env_bool_lookup, env_i64, new_audit_log,
+    remote_computer_runner_for_config, required_controller_status,
 };
 
 pub(crate) async fn execute_remote_computer_sidecar_recovery(
@@ -257,13 +257,8 @@ where
         request = request.bearer_auth(token);
     }
     let response = request.send().await?;
-    let http_status = response.status();
-    let body = response.json::<Value>().await?;
-    if !http_status.is_success() {
-        return Err(AppError::bad_request(format!(
-            "remote computer sidecar validation controller failed with status {http_status}"
-        )));
-    }
+    let (http_status, body) =
+        controller_response_json(response, "remote computer sidecar validation controller").await?;
     let controller_status = required_controller_status(&body)?;
     let validated = matches!(
         controller_status,

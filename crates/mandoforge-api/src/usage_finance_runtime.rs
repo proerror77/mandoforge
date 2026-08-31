@@ -329,13 +329,8 @@ where
         request = request.bearer_auth(token);
     }
     let response = request.send().await?;
-    let http_status = response.status();
-    let body = response.json::<Value>().await?;
-    if !http_status.is_success() {
-        return Err(AppError::bad_request(format!(
-            "finance close controller failed with status {http_status}"
-        )));
-    }
+    let (http_status, body) =
+        controller_response_json(response, "finance close controller").await?;
     let controller_status = required_controller_status(&body)?;
     let closed = matches!(controller_status, "closed" | "success" | "ok" | "validated");
     Ok(json!({
@@ -397,13 +392,8 @@ where
         request = request.bearer_auth(token);
     }
     let response = request.send().await?;
-    let http_status = response.status();
-    let body = response.json::<Value>().await?;
-    if !http_status.is_success() {
-        return Err(AppError::bad_request(format!(
-            "finance reconciliation controller failed with status {http_status}"
-        )));
-    }
+    let (http_status, body) =
+        controller_response_json(response, "finance reconciliation controller").await?;
     let controller_status = required_controller_status(&body)?;
     let reconciled = matches!(
         controller_status,

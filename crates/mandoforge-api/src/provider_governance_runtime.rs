@@ -453,13 +453,8 @@ where
         request = request.bearer_auth(token);
     }
     let response = request.send().await?;
-    let http_status = response.status();
-    let body = response.json::<Value>().await?;
-    if !http_status.is_success() {
-        return Err(AppError::bad_request(format!(
-            "provider rollout controller failed with status {http_status}"
-        )));
-    }
+    let (http_status, body) =
+        controller_response_json(response, "provider rollout controller").await?;
     let provider_status = required_controller_status(&body)?;
     let applied = matches!(provider_status, "applied" | "success" | "ok" | "validated");
     Ok(json!({
@@ -521,13 +516,8 @@ where
         request = request.bearer_auth(token);
     }
     let response = request.send().await?;
-    let http_status = response.status();
-    let body = response.json::<Value>().await?;
-    if !http_status.is_success() {
-        return Err(AppError::bad_request(format!(
-            "provider rollout rollback controller failed with status {http_status}"
-        )));
-    }
+    let (http_status, body) =
+        controller_response_json(response, "provider rollout rollback controller").await?;
     let provider_status = required_controller_status(&body)?;
     let rolled_back = matches!(
         provider_status,
@@ -909,13 +899,8 @@ where
         request = request.bearer_auth(token);
     }
     let response = request.send().await?;
-    let http_status = response.status();
-    let body = response.json::<Value>().await?;
-    if !http_status.is_success() {
-        return Err(AppError::bad_request(format!(
-            "provider deployment controller failed with status {http_status}"
-        )));
-    }
+    let (http_status, body) =
+        controller_response_json(response, "provider deployment controller").await?;
     let controller_status = required_controller_status(&body)?;
     let validated = matches!(
         controller_status,

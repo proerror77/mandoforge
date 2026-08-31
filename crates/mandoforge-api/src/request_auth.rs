@@ -290,8 +290,13 @@ async fn semantic_source_scope(
             })
         }
         "workflow_pack_installation" => {
-            state.get_workflow_pack_installation(owner_id).await?;
-            Ok(ResourceScope::Tenant)
+            match state.get_workflow_pack_installation(owner_id).await {
+                Ok(_) => Ok(ResourceScope::Tenant),
+                Err(error) if error.status == axum::http::StatusCode::NOT_FOUND => {
+                    Ok(ResourceScope::ScopedUnknown)
+                }
+                Err(error) => Err(error),
+            }
         }
         _ => Ok(ResourceScope::ScopedUnknown),
     }

@@ -1251,13 +1251,8 @@ where
         request = request.bearer_auth(token);
     }
     let response = request.send().await?;
-    let http_status = response.status();
-    let body = response.json::<Value>().await?;
-    if !http_status.is_success() {
-        return Err(AppError::bad_request(format!(
-            "approval notification ops controller failed with status {http_status}"
-        )));
-    }
+    let (http_status, body) =
+        controller_response_json(response, "approval notification ops controller").await?;
     let controller_status = required_controller_status(&body)?;
     let validated = matches!(controller_status, "validated" | "success" | "ok");
     Ok(json!({
@@ -1320,13 +1315,8 @@ where
         request = request.bearer_auth(token);
     }
     let response = request.send().await?;
-    let http_status = response.status();
-    let body = response.json::<Value>().await?;
-    if !http_status.is_success() {
-        return Err(AppError::bad_request(format!(
-            "approval notification deployment controller failed with status {http_status}"
-        )));
-    }
+    let (http_status, body) =
+        controller_response_json(response, "approval notification deployment controller").await?;
     let controller_status = required_controller_status(&body)?;
     let validated = matches!(
         controller_status,
