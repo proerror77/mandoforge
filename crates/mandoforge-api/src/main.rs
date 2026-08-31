@@ -685,7 +685,9 @@ async fn build_state(process_role: ProcessRole) -> Result<AppState> {
             } else {
                 verify_migrations_applied(&pool, tenant_runtime_mode).await?;
             }
-            seed_demo_tenant(&pool, tenant_id).await?;
+            if process_role.seeds_demo_data() {
+                seed_demo_tenant(&pool, tenant_id).await?;
+            }
             StoreBackend::Postgres(pool)
         }
         _ if require_postgres => anyhow::bail!(
@@ -725,10 +727,12 @@ async fn build_state(process_role: ProcessRole) -> Result<AppState> {
         tenant_runtime_mode,
         policy: runtime_policy(policy),
     };
-    state
-        .seed_demo_agent()
-        .await
-        .map_err(|error| anyhow::anyhow!(error.message))?;
+    if process_role.seeds_demo_data() {
+        state
+            .seed_demo_agent()
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+    }
     Ok(state)
 }
 

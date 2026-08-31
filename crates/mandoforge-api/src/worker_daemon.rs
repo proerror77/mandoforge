@@ -36,6 +36,10 @@ impl ProcessRole {
             other => bail!("unsupported MANDOFORGE_PROCESS_ROLE={other}; use api or worker"),
         }
     }
+
+    pub(crate) fn seeds_demo_data(self) -> bool {
+        self == Self::Api
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -484,6 +488,12 @@ mod tests {
     fn process_role_defaults_to_api() {
         let role = ProcessRole::from_lookup(&|_| None).expect("default process role");
         assert_eq!(role, ProcessRole::Api);
+    }
+
+    #[test]
+    fn worker_process_role_does_not_seed_demo_data() {
+        assert!(ProcessRole::Api.seeds_demo_data());
+        assert!(!ProcessRole::Worker.seeds_demo_data());
     }
 
     #[test]
