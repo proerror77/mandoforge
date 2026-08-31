@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -50,9 +50,9 @@ pub(crate) struct CreateSemanticSource {
 pub(crate) struct UpdateSemanticSource {
     #[serde(default)]
     pub(crate) display_name: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_nullable_option")]
     pub(crate) owner_type: Option<Option<String>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_nullable_option")]
     pub(crate) owner_id: Option<Option<Uuid>>,
     #[serde(default)]
     pub(crate) metadata: Option<Value>,
@@ -62,8 +62,16 @@ pub(crate) struct UpdateSemanticSource {
     pub(crate) freshness: Option<Value>,
     #[serde(default)]
     pub(crate) status: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_nullable_option")]
     pub(crate) last_ingested_at: Option<Option<DateTime<Utc>>>,
+}
+
+fn deserialize_nullable_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,7 +128,7 @@ pub(crate) struct UpdateSemanticObject {
     pub(crate) content: Option<Value>,
     #[serde(default)]
     pub(crate) semantic_scopes: Option<Value>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_nullable_option")]
     pub(crate) source_uri: Option<Option<String>>,
     #[serde(default)]
     pub(crate) provenance: Option<Value>,

@@ -9288,7 +9288,7 @@ async fn semantic_collections_filter_project_scoped_resources() {
     assert!(!links.iter().any(|link| link.id == non_object_link.id));
 
     let (status, hidden_error) = request_value(
-        app,
+        app.clone(),
         Request::builder()
             .uri(format!("/api/semantic-objects/{}", hidden_object.id))
             .header("x-mandoforge-subject", "semantic-project-viewer")
@@ -9303,6 +9303,19 @@ async fn semantic_collections_filter_project_scoped_resources() {
             .unwrap_or_default()
             .contains("no membership")
     );
+
+    let repaired_source: SemanticSource = request_json(
+        app,
+        json_request_with_headers(
+            "PATCH",
+            &format!("/api/semantic-sources/{}", visible_source.id),
+            json!({"owner_type": null, "owner_id": null}),
+            &admin_headers,
+        ),
+    )
+    .await;
+    assert!(repaired_source.owner_type.is_none());
+    assert!(repaired_source.owner_id.is_none());
 }
 
 #[tokio::test]
