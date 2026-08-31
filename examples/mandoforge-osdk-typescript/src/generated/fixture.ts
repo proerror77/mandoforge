@@ -93,9 +93,8 @@ export class MandoForgeOntologySdk {
     if (init?.body !== undefined) headers.set("content-type", "application/json");
     if (init?.headers) new Headers(init.headers).forEach((value, key) => headers.set(key, value));
     const response = await fetch(`${this.baseUrl}${path}`, { ...init, headers });
-    const payload: unknown = await response.json();
     if (!response.ok) throw new Error(`MandoForge ontology SDK request failed (${response.status})`);
-    return payload as T;
+    return await response.json() as T;
   }
 
   public readonly objects = {

@@ -1137,6 +1137,8 @@ fn ontology_sdk_applications_migration_is_restart_safe_and_tenant_bound() {
         )
     );
     assert!(migration.contains("release tenant mismatch"));
+    assert!(migration.contains("REFERENCES tenants(id) ON DELETE RESTRICT"));
+    assert!(migration.contains("CHECK (status = 'active')"));
     assert!(migration.contains(
         "CREATE OR REPLACE FUNCTION mandoforge_prevent_ontology_sdk_application_mutation"
     ));

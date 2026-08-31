@@ -35074,7 +35074,9 @@ async fn native_connector_commit_write_enforces_side_effect_scope_and_exact_bind
             .last_error
             .as_deref()
             .unwrap_or_default()
-            .contains("no registered executor")
+            .contains("approval commit token digest does not match"),
+        "unexpected retry error: {:?}",
+        tamper_retry.last_error
     );
 }
 

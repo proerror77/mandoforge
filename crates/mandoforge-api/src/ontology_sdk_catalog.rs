@@ -811,11 +811,29 @@ fn validate_catalog(catalog: &OntologyReleaseCatalogV1) -> Result<(), AppError> 
         .collect::<BTreeSet<_>>();
     for relation in &catalog.relations {
         validate_api_name(relation.api_name.clone(), ApiNameKind::Relation)?;
-        if !object_names.contains(relation.from_object_api_name.as_str())
-            || !object_names.contains(relation.to_object_api_name.as_str())
+        let from_object = catalog
+            .objects
+            .iter()
+            .find(|object| object.api_name == relation.from_object_api_name)
+            .ok_or_else(|| {
+                AppError::forbidden("ontology release catalog relation endpoint is not an object")
+            })?;
+        let to_object = catalog
+            .objects
+            .iter()
+            .find(|object| object.api_name == relation.to_object_api_name)
+            .ok_or_else(|| {
+                AppError::forbidden("ontology release catalog relation endpoint is not an object")
+            })?;
+        if relation.relation_type.trim().is_empty()
+            || relation.stable_key
+                != format!(
+                    "relation:{}:{}:{}",
+                    from_object.object_type, relation.relation_type, to_object.object_type
+                )
         {
             return Err(AppError::forbidden(
-                "ontology release catalog relation endpoint is not an object",
+                "ontology release catalog relation identity is invalid",
             ));
         }
     }
@@ -826,9 +844,16 @@ fn validate_catalog(catalog: &OntologyReleaseCatalogV1) -> Result<(), AppError> 
                 "ontology release catalog action contract metadata is incomplete",
             ));
         }
-        if action.runtime_name.is_empty() {
+        if action.runtime_name.is_empty()
+            || action.stable_key != format!("action:{}", action.runtime_name)
+        {
             return Err(AppError::forbidden(
-                "ontology release catalog action runtime name is missing",
+                "ontology release catalog action identity is invalid",
+            ));
+        }
+        if !object_names.contains(action.target_object_api_name.as_str()) {
+            return Err(AppError::forbidden(
+                "ontology release catalog action target is not an object",
             ));
         }
         if !action.input_schema.is_object() {
@@ -839,6 +864,13 @@ fn validate_catalog(catalog: &OntologyReleaseCatalogV1) -> Result<(), AppError> 
     }
     for object in &catalog.objects {
         validate_api_name(object.api_name.clone(), ApiNameKind::Object)?;
+        if object.object_type.trim().is_empty()
+            || object.stable_key != format!("object:{}", object.object_type)
+        {
+            return Err(AppError::forbidden(
+                "ontology release catalog object identity is invalid",
+            ));
+        }
         let mut property_names = BTreeSet::new();
         let mut property_stable_keys = BTreeSet::new();
         for property in &object.properties {
@@ -882,8 +914,14 @@ fn validate_action_contract_digests(
     let evidence_action_names = evidence_refs
         .iter()
         .filter_map(|entry| entry["tool_spec"]["name"].as_str())
+        .collect::<Vec<_>>();
+    let unique_evidence_action_names = evidence_action_names
+        .iter()
+        .copied()
         .collect::<BTreeSet<_>>();
-    if evidence_action_names.len() != catalog.actions.len() {
+    if evidence_action_names.len() != catalog.actions.len()
+        || unique_evidence_action_names.len() != catalog.actions.len()
+    {
         return Err(AppError::forbidden(
             "ontology release catalog action set does not match its contract snapshots",
         ));
@@ -918,6 +956,21 @@ fn validate_action_contract_digests(
             .map_err(|error| {
                 AppError::forbidden(format!("ontology action contract is invalid: {error}"))
             })?;
+        let target_stable_key = format!("object:{}", tool_spec.target_object);
+        let target_object = catalog
+            .objects
+            .iter()
+            .find(|object| object.stable_key == target_stable_key)
+            .ok_or_else(|| {
+                AppError::forbidden(
+                    "ontology release action target object is missing from the catalog",
+                )
+            })?;
+        if action.target_object_api_name != target_object.api_name {
+            return Err(AppError::forbidden(
+                "ontology release action target does not match the catalog",
+            ));
+        }
         if tool_spec.execution_mode != action.execution_mode {
             return Err(AppError::forbidden(
                 "ontology release action execution mode does not match the catalog",
@@ -935,7 +988,7 @@ fn validate_action_contract_digests(
         action
             .stable_key
             .strip_prefix("action:")
-            .is_none_or(|tool_name| !evidence_action_names.contains(tool_name))
+            .is_none_or(|tool_name| !unique_evidence_action_names.contains(tool_name))
     }) {
         return Err(AppError::forbidden(
             "ontology release catalog action set does not match its contract snapshots",

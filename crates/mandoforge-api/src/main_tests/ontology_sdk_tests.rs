@@ -104,6 +104,118 @@ fn ontology_sdk_catalog_requires_action_target_in_object_catalog() {
 }
 
 #[test]
+fn ontology_sdk_release_catalog_rejects_action_runtime_and_target_rebinding() {
+    let order = proposal("object", "Order", json!({"object_type": "Order"}));
+    let customer = proposal("object", "Customer", json!({"object_type": "Customer"}));
+    let action = proposal(
+        "action",
+        "refund_order",
+        json!({
+            "action": "refund_order",
+            "target_object": "Order",
+            "inputs": {},
+            "reads": [],
+            "effects": [],
+            "policy": {"approval_required": true, "transaction_profile": "proposal_only"},
+            "transaction_profile": "proposal_only",
+            "executor": "local",
+            "audit_event": "commerce.refund_order"
+        }),
+    );
+    let tool_spec =
+        ontology_tool_spec_from_action_proposal(action.run_id, &action).expect("action tool spec");
+    let tool_spec_value = serde_json::to_value(&tool_spec).expect("tool spec value");
+    let contract_digest = normalized_json_sha256(&tool_spec_value);
+    let (catalog, catalog_digest) =
+        build_ontology_release_catalog("commerce", &[order, customer, action.clone()], None)
+            .expect("catalog");
+    let release = OntologyRelease {
+        id: Uuid::new_v4(),
+        version: "commerce-action-binding-v1".to_string(),
+        domain_scope: "commerce".to_string(),
+        source_run_id: Some(action.run_id),
+        parent_release_id: None,
+        rollback_target_release_id: None,
+        status: "active".to_string(),
+        release_class: "repo_controlled".to_string(),
+        object_count: 2,
+        relation_count: 0,
+        action_count: 1,
+        migration_policy: json!({}),
+        gate_result: json!({"status": "passed"}),
+        materialized_object_ids: json!([]),
+        materialized_link_ids: json!([]),
+        evidence_refs: json!([
+            {
+                "proposal_id": action.id,
+                "proposal_type": "action",
+                "review_status": "approved",
+                "tool_spec": tool_spec_value,
+                "contract_digest": contract_digest,
+            },
+            catalog_evidence(&catalog, &catalog_digest),
+        ]),
+        promoted_by: Some("test".to_string()),
+        promoted_at: Some(Utc::now()),
+        rolled_back_by: None,
+        rolled_back_at: None,
+        archived_at: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    release_catalog_from_evidence(&release).expect("untampered catalog");
+
+    let mut runtime_catalog = catalog.clone();
+    runtime_catalog.actions[0].runtime_name = "commerce.other_action".to_string();
+    let runtime_digest = canonical_json_sha256(
+        &serde_json::to_value(&runtime_catalog).expect("runtime catalog value"),
+    );
+    let mut runtime_release = release.clone();
+    runtime_release.evidence_refs[1] = catalog_evidence(&runtime_catalog, &runtime_digest);
+    let runtime_error = release_catalog_from_evidence(&runtime_release)
+        .expect_err("runtime action rebinding must fail");
+    assert!(runtime_error.message.contains("action identity"));
+
+    let mut identity_catalog = catalog.clone();
+    identity_catalog
+        .objects
+        .iter_mut()
+        .find(|object| object.api_name == "Customer")
+        .expect("customer")
+        .stable_key = "object:Other".to_string();
+    let identity_digest = canonical_json_sha256(
+        &serde_json::to_value(&identity_catalog).expect("identity catalog value"),
+    );
+    let mut identity_release = release.clone();
+    identity_release.evidence_refs[1] = catalog_evidence(&identity_catalog, &identity_digest);
+    let identity_error = release_catalog_from_evidence(&identity_release)
+        .expect_err("object identity rebinding must fail");
+    assert!(identity_error.message.contains("object identity"));
+
+    let mut duplicate_release = release.clone();
+    let duplicate_evidence = duplicate_release.evidence_refs[0].clone();
+    duplicate_release
+        .evidence_refs
+        .as_array_mut()
+        .expect("release evidence")
+        .push(duplicate_evidence);
+    let duplicate_error = release_catalog_from_evidence(&duplicate_release)
+        .expect_err("duplicate action evidence must fail");
+    assert!(duplicate_error.message.contains("action set"));
+
+    let mut target_catalog = catalog;
+    target_catalog.actions[0].target_object_api_name = "Customer".to_string();
+    let target_digest = canonical_json_sha256(
+        &serde_json::to_value(&target_catalog).expect("target catalog value"),
+    );
+    let mut target_release = release;
+    target_release.evidence_refs[1] = catalog_evidence(&target_catalog, &target_digest);
+    let target_error = release_catalog_from_evidence(&target_release)
+        .expect_err("target object rebinding must fail");
+    assert!(target_error.message.contains("target"));
+}
+
+#[test]
 fn ontology_sdk_catalog_requires_explicit_name_for_non_ascii_labels() {
     let object = proposal("object", "客户", json!({"object_type": "客户"}));
     let error = build_ontology_release_catalog("commerce", &[object], None)
@@ -314,6 +426,48 @@ async fn ontology_sdk_application_api_persists_release_bound_manifest() {
     assert_eq!(manifest.subset_digest, application.subset_digest);
     assert_eq!(manifest.resolved_catalog.objects.len(), 1);
     assert_eq!(manifest.resolved_catalog.objects[0].api_name, "Order");
+}
+
+#[tokio::test]
+async fn memory_ontology_sdk_applications_are_tenant_isolated() {
+    let state_a = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let mut state_b = state_a.clone();
+    state_b.tenant_id = Uuid::new_v4();
+    let application = OntologySdkApplication {
+        id: Uuid::new_v4(),
+        tenant_id: state_a.current_tenant_id(),
+        subject: "tenant-a-consumer".to_string(),
+        ontology_release_id: Uuid::new_v4(),
+        release_version: "tenant-a-v1".to_string(),
+        domain_scope: "commerce".to_string(),
+        catalog_digest: "sha256:catalog".to_string(),
+        subset_manifest: OntologySdkSubsetManifest {
+            objects: Vec::new(),
+            relations: Vec::new(),
+            actions: Vec::new(),
+        },
+        subset_digest: "sha256:subset".to_string(),
+        status: ONTOLOGY_SDK_APPLICATION_STATUS_ACTIVE.to_string(),
+        created_at: Utc::now(),
+    };
+    state_a
+        .create_ontology_sdk_application(application.clone())
+        .await
+        .expect("create tenant A application");
+
+    assert!(
+        state_b
+            .get_ontology_sdk_application(application.id)
+            .await
+            .is_err()
+    );
+    assert!(
+        state_b
+            .list_ontology_sdk_applications(None)
+            .await
+            .expect("list tenant B applications")
+            .is_empty()
+    );
 }
 
 #[tokio::test]

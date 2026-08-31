@@ -20,7 +20,8 @@ impl AppState {
                     .ontology_sdk_applications
                     .values()
                     .filter(|application| {
-                        subject.is_none_or(|subject| application.subject == subject)
+                        application.tenant_id == self.current_tenant_id()
+                            && subject.is_none_or(|subject| application.subject == subject)
                     })
                     .cloned()
                     .collect::<Vec<_>>();
@@ -56,6 +57,7 @@ impl AppState {
                 .await
                 .ontology_sdk_applications
                 .get(&id)
+                .filter(|application| application.tenant_id == self.current_tenant_id())
                 .cloned()
                 .ok_or_else(|| AppError::not_found("ontology SDK application not found")),
             StoreBackend::Postgres(pool) => {

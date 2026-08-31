@@ -399,15 +399,23 @@ impl ProviderClient for OpenAiCompatibleProviderClient {
             .send()
             .await?;
         let status = response.status();
-        let value: Value = response.json().await?;
-        if !status.is_success() {
-            return Err(AppError::bad_request(format!(
-                "provider request failed with status {status}: {}",
-                redact_provider_error(&value)
-            )));
-        }
-        parse_openai_compatible_provider_response(&value)
+        let body = response.bytes().await?;
+        parse_openai_compatible_http_response(status, &body)
     }
+}
+
+fn parse_openai_compatible_http_response(
+    status: reqwest::StatusCode,
+    body: &[u8],
+) -> Result<ProviderResponse, AppError> {
+    if !status.is_success() {
+        let value = serde_json::from_slice(body).unwrap_or(Value::Null);
+        return Err(AppError::bad_request(format!(
+            "provider request failed with status {status}: {}",
+            redact_provider_error(&value)
+        )));
+    }
+    parse_openai_compatible_provider_response(&serde_json::from_slice(body)?)
 }
 
 const DEFAULT_PROVIDER_TOOL_EXCLUSIONS: &[&str] = &["native.connector.call"];
@@ -798,8 +806,8 @@ fn redact_provider_error(value: &Value) -> String {
 mod tests {
     use super::{
         OpenAiCompatibleProviderClient, default_provider_tool_names,
-        parse_openai_compatible_provider_response, provider_api_key_from_env_value,
-        provider_api_key_secret_ref, provider_tool_schemas,
+        parse_openai_compatible_http_response, parse_openai_compatible_provider_response,
+        provider_api_key_from_env_value, provider_api_key_secret_ref, provider_tool_schemas,
     };
     use crate::secrets::ReservedSecretProvider;
     use serde_json::json;
@@ -866,6 +874,18 @@ mod tests {
         assert_eq!(parsed.tool_calls.len(), 1);
         assert_eq!(parsed.tool_calls[0].tool_name, "file.read");
         assert_eq!(parsed.tool_calls[0].args["paths"][0], "README.md");
+    }
+
+    #[test]
+    fn provider_http_error_preserves_non_json_status_without_echoing_body() {
+        let error = parse_openai_compatible_http_response(
+            reqwest::StatusCode::BAD_GATEWAY,
+            b"<html>upstream secret</html>",
+        )
+        .expect_err("non-JSON provider errors must preserve the HTTP status");
+
+        assert!(error.message.contains("502 Bad Gateway"));
+        assert!(!error.message.contains("upstream secret"));
     }
 
     #[test]

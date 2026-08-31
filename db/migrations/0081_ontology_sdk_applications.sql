@@ -1,6 +1,6 @@
 CREATE TABLE IF NOT EXISTS ontology_sdk_applications (
     id UUID PRIMARY KEY,
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
     subject TEXT NOT NULL CHECK (length(btrim(subject)) > 0),
     ontology_release_id UUID NOT NULL REFERENCES ontology_releases(id) ON DELETE RESTRICT,
     release_version TEXT NOT NULL CHECK (length(btrim(release_version)) > 0),
@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS ontology_sdk_applications (
     subset_manifest JSONB NOT NULL CHECK (jsonb_typeof(subset_manifest) = 'object'),
     subset_digest TEXT NOT NULL CHECK (length(btrim(subset_digest)) > 0),
     status TEXT NOT NULL DEFAULT 'active'
-        CHECK (status IN ('active', 'suspended', 'archived')),
+        CHECK (status = 'active'),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (tenant_id, subject, ontology_release_id, subset_digest)
 );

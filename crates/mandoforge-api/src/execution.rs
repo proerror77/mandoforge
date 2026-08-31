@@ -566,15 +566,7 @@ pub(crate) async fn run_claimed_execution_job(
         ("mcp.call", _, _) => {
             execute_approved_mcp_call(state, &approval, &tool_call, &mut commit).await
         }
-        _ => {
-            execute_approved_native_connector(
-                state,
-                &approval,
-                &tool_call,
-                &mut commit,
-            )
-            .await
-        }
+        _ => execute_approved_native_connector(state, &approval, &tool_call, &mut commit).await,
     };
     match result {
         Ok(()) => {

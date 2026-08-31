@@ -102,7 +102,7 @@ pub(crate) fn generate_typescript_sdk(
     .unwrap();
     writeln!(
         output,
-        "\n  private async request<T>(path: string, init?: RequestInit): Promise<T> {{\n    const headers = new Headers(this.headers);\n    headers.set(\"accept\", \"application/json\");\n    if (init?.body !== undefined) headers.set(\"content-type\", \"application/json\");\n    if (init?.headers) new Headers(init.headers).forEach((value, key) => headers.set(key, value));\n    const response = await fetch(`${{this.baseUrl}}${{path}}`, {{ ...init, headers }});\n    const payload: unknown = await response.json();\n    if (!response.ok) throw new Error(`MandoForge ontology SDK request failed (${{response.status}})`);\n    return payload as T;\n  }}"
+        "\n  private async request<T>(path: string, init?: RequestInit): Promise<T> {{\n    const headers = new Headers(this.headers);\n    headers.set(\"accept\", \"application/json\");\n    if (init?.body !== undefined) headers.set(\"content-type\", \"application/json\");\n    if (init?.headers) new Headers(init.headers).forEach((value, key) => headers.set(key, value));\n    const response = await fetch(`${{this.baseUrl}}${{path}}`, {{ ...init, headers }});\n    if (!response.ok) throw new Error(`MandoForge ontology SDK request failed (${{response.status}})`);\n    return await response.json() as T;\n  }}"
     )
     .unwrap();
 
@@ -197,9 +197,9 @@ fn write_action_types(
     Ok(())
 }
 
-fn schema_properties<'a>(
-    schema: &'a Value,
-) -> Result<(Vec<(&'a str, &'a Value)>, Vec<&'a str>), AppError> {
+type SchemaProperties<'a> = (Vec<(&'a str, &'a Value)>, Vec<&'a str>);
+
+fn schema_properties(schema: &Value) -> Result<SchemaProperties<'_>, AppError> {
     let object = schema.as_object().ok_or_else(|| {
         AppError::forbidden("ontology SDK action input schema must be a JSON object")
     })?;
@@ -508,5 +508,9 @@ mod tests {
         assert!(!first.contains("applicationId: string"));
         assert!(first.contains("status: \"approval_required\""));
         assert!(first.contains("status: \"proposal_created\""));
+        assert!(
+            first.find("if (!response.ok)").expect("status check")
+                < first.find("response.json()").expect("JSON parse")
+        );
     }
 }
