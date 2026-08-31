@@ -935,6 +935,11 @@ fn validate_action_schema(schema: &Value) -> Result<(), AppError> {
         None => object.get("properties").is_some(),
     };
     if is_object_schema {
+        if object.get("properties").is_none() {
+            return Err(AppError::forbidden(
+                "ontology release catalog action top-level object input schema must declare properties",
+            ));
+        }
         validate_action_schema_node(schema, false)?;
     } else {
         for declaration in object.values() {
@@ -1006,6 +1011,19 @@ fn validate_action_schema_node(
                 "ontology release catalog action input schema enum member must be {value_type}"
             )));
         }
+        if value_type.is_some_and(|value_type| {
+            matches!(
+                value_type.trim().to_ascii_lowercase().as_str(),
+                "object" | "array"
+            )
+        }) && values
+            .iter()
+            .any(|value| !ontology_action_schema_value_matches_declaration(value, object))
+        {
+            return Err(AppError::forbidden(
+                "ontology release catalog action input schema enum member does not satisfy its declaration",
+            ));
+        }
     }
     if let Some(properties_value) = object.get("properties") {
         let properties = properties_value.as_object().ok_or_else(|| {
@@ -1047,6 +1065,76 @@ fn validate_action_schema_node(
         ));
     }
     Ok(())
+}
+
+fn ontology_action_schema_value_matches_node(value: &Value, schema: &Value) -> bool {
+    match schema {
+        Value::String(value_type) => ontology_action_schema_value_matches_type(value, value_type),
+        Value::Object(declaration) => {
+            ontology_action_schema_value_matches_declaration(value, declaration)
+        }
+        _ => false,
+    }
+}
+
+fn ontology_action_schema_value_matches_declaration(
+    value: &Value,
+    declaration: &serde_json::Map<String, Value>,
+) -> bool {
+    let value_type = declaration
+        .get("type")
+        .and_then(Value::as_str)
+        .or_else(|| declaration.get("properties").map(|_| "object"));
+    if value_type
+        .is_some_and(|value_type| !ontology_action_schema_value_matches_type(value, value_type))
+    {
+        return false;
+    }
+    if declaration
+        .get("enum")
+        .and_then(Value::as_array)
+        .is_some_and(|values| !crate::json_schema_enum_contains(values, value))
+    {
+        return false;
+    }
+    match value_type.map(|value_type| value_type.trim().to_ascii_lowercase()) {
+        Some(value_type) if value_type == "object" => {
+            let Some(value) = value.as_object() else {
+                return false;
+            };
+            let Some(properties) = declaration.get("properties").and_then(Value::as_object) else {
+                return true;
+            };
+            if value.keys().any(|name| !properties.contains_key(name)) {
+                return false;
+            }
+            if declaration
+                .get("required")
+                .and_then(Value::as_array)
+                .is_some_and(|required| {
+                    required
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .any(|name| !value.contains_key(name))
+                })
+            {
+                return false;
+            }
+            value.iter().all(|(name, value)| {
+                properties
+                    .get(name)
+                    .is_some_and(|schema| ontology_action_schema_value_matches_node(value, schema))
+            })
+        }
+        Some(value_type) if value_type == "array" => declaration.get("items").is_none_or(|items| {
+            value.as_array().is_some_and(|values| {
+                values
+                    .iter()
+                    .all(|value| ontology_action_schema_value_matches_node(value, items))
+            })
+        }),
+        _ => true,
+    }
 }
 
 fn validate_catalog(catalog: &OntologyReleaseCatalogV1) -> Result<(), AppError> {

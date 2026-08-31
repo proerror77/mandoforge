@@ -310,12 +310,12 @@ fn schema_type(schema: &Value) -> String {
                 };
             }
             match object.get("type").and_then(Value::as_str) {
-                Some("array") => object
+                Some(value_type) if value_type.trim().eq_ignore_ascii_case("array") => object
                     .get("items")
                     .map(schema_type)
                     .map(|value| format!("Array<{value}>"))
                     .unwrap_or_else(|| "Array<unknown>".to_string()),
-                Some("object") => object
+                Some(value_type) if value_type.trim().eq_ignore_ascii_case("object") => object
                     .get("properties")
                     .and_then(|value| schema_inline_object(value, object.get("required")))
                     .unwrap_or_else(|| "JsonRecord".to_string()),
@@ -557,7 +557,20 @@ mod tests {
             "priority": {"type": "number", "enum": [1, 2.5], "required": false},
             "integral_priority": {"type": "integer", "enum": [1.0], "required": false},
             "approved": {"type": "boolean", "enum": [true, false], "required": false},
-            "mixed_number": {"type": "number", "enum": [1, "invalid", 2.5], "required": false}
+            "mixed_number": {"type": "number", "enum": [1, "invalid", 2.5], "required": false},
+            "nested": {
+                "type": "OBJECT",
+                "properties": {"id": {"type": "UUID"}},
+                "required": ["id"]
+            },
+            "batches": {
+                "type": "ARRAY",
+                "items": {
+                    "type": "OBJECT",
+                    "properties": {"count": {"type": "INT"}},
+                    "required": ["count"]
+                }
+            }
         });
 
         let output = generate_typescript_sdk(uuid::Uuid::nil(), &catalog).expect("SDK output");
@@ -568,6 +581,8 @@ mod tests {
         assert!(output.contains("readonly \"integral_priority\"?: 1.0;"));
         assert!(output.contains("readonly \"approved\"?: true | false;"));
         assert!(output.contains("readonly \"mixed_number\"?: 1 | 2.5;"));
+        assert!(output.contains("readonly \"nested\": { readonly \"id\": string; };"));
+        assert!(output.contains("readonly \"batches\": Array<{ readonly \"count\": number; }>;"));
     }
 
     #[test]

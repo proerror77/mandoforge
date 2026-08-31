@@ -306,9 +306,37 @@ fn ontology_sdk_catalog_rejects_non_array_action_enums() {
         "type": "array",
         "items": {"type": "string"}
     });
-    let error = build_ontology_release_catalog("commerce", &[order, action], None)
+    let error = build_ontology_release_catalog("commerce", &[order.clone(), action.clone()], None)
         .expect_err("top-level action schemas must describe an object");
     assert!(error.message.contains("top-level type must be object"));
+
+    action.content["inputs"] = json!({"type": "object"});
+    let error = build_ontology_release_catalog("commerce", &[order.clone(), action.clone()], None)
+        .expect_err("top-level object schemas must declare properties");
+    assert!(error.message.contains("must declare properties"));
+
+    action.content["inputs"] = json!({
+        "selector": {
+            "type": "object",
+            "properties": {"x": {"type": "string"}},
+            "required": ["x"],
+            "enum": [{"x": 1}]
+        }
+    });
+    let error = build_ontology_release_catalog("commerce", &[order.clone(), action.clone()], None)
+        .expect_err("object enum members must satisfy nested declarations");
+    assert!(error.message.contains("does not satisfy its declaration"));
+
+    action.content["inputs"] = json!({
+        "items": {
+            "type": "array",
+            "items": {"type": "integer"},
+            "enum": [[1, "two"]]
+        }
+    });
+    let error = build_ontology_release_catalog("commerce", &[order, action], None)
+        .expect_err("array enum members must satisfy item declarations");
+    assert!(error.message.contains("does not satisfy its declaration"));
 }
 
 #[test]
