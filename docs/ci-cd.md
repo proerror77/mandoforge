@@ -30,7 +30,7 @@ path unless the change requires them.
 
 ## Deploy
 
-`.github/workflows/deploy.yml` is manual. Its build job publishes images without creating a production deployment record. Only a run dispatched from `main` can start the optional Whiskey deployment job, which uses the `stage2-production` GitHub Environment.
+`.github/workflows/deploy.yml` is manual and its jobs run only when dispatched from `main`. Its build job publishes images without creating a production deployment record. The optional Whiskey deployment job uses the `stage2-production` GitHub Environment.
 
 To update the Whiskey adoption stack through GitHub Actions, run the workflow with:
 

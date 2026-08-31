@@ -31,9 +31,8 @@ REMOTE_VAULT_KMS_CONTROLLER="$REMOTE_ROOT/vault-kms-controller.mjs"
 REMOTE_FINANCE_CONTROLLER="$REMOTE_ROOT/finance-controller.mjs"
 REMOTE_ENV="$REMOTE_ROOT/whiskey.env"
 REMOTE_ENV_LOADER="$REMOTE_ROOT/load-whiskey-env.sh"
-IMAGE_TAG="${MANDOFORGE_IMAGE_TAG:-latest}"
-GIT_SHA="${MANDOFORGE_GIT_SHA:-$(git rev-parse HEAD 2>/dev/null || printf unknown)}"
-GIT_SHA="${GIT_SHA:-unknown}"
+IMAGE_TAG="${MANDOFORGE_IMAGE_TAG:-}"
+GIT_SHA="${MANDOFORGE_GIT_SHA:-}"
 BUILD_TIME="${MANDOFORGE_BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 PULL_IMAGE="${WHISKEY_PULL_IMAGE:-1}"
 CODEX_WS_PORT="${WHISKEY_CODEX_APP_SERVER_WS_PORT:-18788}"
@@ -83,8 +82,12 @@ FINANCE_EXPORT_DELIVERY_MODE="${WHISKEY_FINANCE_EXPORT_DELIVERY_MODE:-lark_drive
 FINANCE_EXPORT_LARK_AS="${WHISKEY_FINANCE_EXPORT_LARK_AS:-user}"
 FINANCE_EXPORT_LARK_FOLDER_TOKEN="${WHISKEY_FINANCE_EXPORT_LARK_FOLDER_TOKEN:-}"
 
+if [[ ! "$IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+  echo "Whiskey deployment requires an explicit valid image tag via MANDOFORGE_IMAGE_TAG" >&2
+  exit 1
+fi
 if [[ ! "$GIT_SHA" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then
-  echo "Whiskey deployment requires an exact Git SHA via MANDOFORGE_GIT_SHA or the current checkout" >&2
+  echo "Whiskey deployment requires the image's exact Git SHA via MANDOFORGE_GIT_SHA" >&2
   exit 1
 fi
 

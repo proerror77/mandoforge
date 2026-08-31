@@ -25,6 +25,7 @@ runtime_dockerfile="Dockerfile.agent-sandbox"
 runtime_build_script="scripts/build-agent-sandbox-runtime-image.sh"
 runtime_publish_workflow=".github/workflows/deploy.yml"
 whiskey_deploy_script="scripts/whiskey-adoption-deploy.sh"
+whiskey_lark_docs_adopt_script="scripts/whiskey-mcp-lark-docs-adopt.sh"
 agent_sandbox_contract="deploy/k8s/agent-sandbox-controller-contract.yaml"
 
 for manifest in "${dry_run_manifests[@]}"; do
@@ -330,16 +331,24 @@ for publish_contract in \
   fi
 done
 
-if sed -n '/^  build-image:/,/^  deploy-whiskey:/p' "$runtime_publish_workflow" | grep -q 'environment:' \
-  || ! sed -n '/^  deploy-whiskey:/,$p' "$runtime_publish_workflow" | grep -q 'environment: stage2-production'; then
+build_image_job="$(sed -n '/^  build-image:/,/^  deploy-whiskey:/p' "$runtime_publish_workflow")"
+deploy_whiskey_job="$(sed -n '/^  deploy-whiskey:/,$p' "$runtime_publish_workflow")"
+if grep -q 'environment:' <<<"$build_image_job" \
+  || ! grep -q 'environment: stage2-production' <<<"$deploy_whiskey_job"; then
   echo "Only the Whiskey deployment job may use the stage2-production environment" >&2
+  exit 1
+fi
+if ! grep -Fq "if: github.ref == 'refs/heads/main'" <<<"$build_image_job" \
+  || ! grep -Fq "if: github.ref == 'refs/heads/main'" <<<"$deploy_whiskey_job"; then
+  echo "Whiskey image publication and deployment must be restricted to main" >&2
   exit 1
 fi
 
 for deployment_contract in \
   'needs: build-image' \
-  "if: github.ref == 'refs/heads/main'" \
   'scripts/whiskey-adoption-deploy.sh' \
+  'IMAGE_TAG="${MANDOFORGE_IMAGE_TAG:-}"' \
+  'GIT_SHA="${MANDOFORGE_GIT_SHA:-}"' \
   'if [[ ! "$GIT_SHA" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then' \
   'deployment-image.json' \
   'org.opencontainers.image.revision' \
@@ -348,6 +357,16 @@ for deployment_contract in \
   if ! grep -Fq "$deployment_contract" "$runtime_publish_workflow" \
     && ! grep -Fq "$deployment_contract" "$whiskey_deploy_script"; then
     echo "Whiskey deployment is missing identity contract: $deployment_contract" >&2
+    exit 1
+  fi
+done
+
+for adoption_identity_contract in \
+  'org.opencontainers.image.version' \
+  'org.opencontainers.image.revision' \
+  'MANDOFORGE_GIT_SHA="$git_sha"'; do
+  if ! grep -Fq "$adoption_identity_contract" "$whiskey_lark_docs_adopt_script"; then
+    echo "Whiskey Lark docs adoption is missing image identity contract: $adoption_identity_contract" >&2
     exit 1
   fi
 done
