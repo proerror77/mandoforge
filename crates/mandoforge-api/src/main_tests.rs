@@ -7452,7 +7452,7 @@ async fn agent_handoff_events_require_allowlist_approval_and_payload_schema() {
                                 "required": ["assessment_id"],
                                 "properties": {
                                     "assessment_id": {"type": "string"},
-                                    "impact_score": {"type": "number"}
+                                    "impact_score": {"type": "number", "enum": [1]}
                                 }
                             }
                         }]
@@ -7481,7 +7481,7 @@ async fn agent_handoff_events_require_allowlist_approval_and_payload_schema() {
             json!({
                 "target_agent_id": target.id,
                 "intent": "draft_assessment",
-                "payload": {"assessment_id": "a-1", "impact_score": 0.8},
+                "payload": {"assessment_id": "a-1", "impact_score": 1.0},
                 "schema_version": "handoff.v1",
                 "risk_level": "high",
                 "approval_required": false
@@ -7525,7 +7525,7 @@ async fn agent_handoff_events_require_allowlist_approval_and_payload_schema() {
             json!({
                 "target_agent_id": target.id,
                 "intent": "draft_assessment",
-                "payload": {"assessment_id": "a-1", "impact_score": 0.8},
+                "payload": {"assessment_id": "a-1", "impact_score": 1.0},
                 "schema_version": "handoff.v1",
                 "risk_level": "high",
                 "approval_required": true
@@ -11632,7 +11632,9 @@ async fn semantic_synthesis_run_creates_reflection_artifact_and_review_candidate
 
 #[tokio::test]
 async fn semantic_synthesis_run_requires_idle_or_completed_checkpoint() {
-    let app = test_app().await;
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let app = build_router(state.clone());
     let agents: Vec<Agent> = request_json(
         app.clone(),
         Request::builder()
@@ -11676,6 +11678,33 @@ async fn semantic_synthesis_run_requires_idle_or_completed_checkpoint() {
             "semantic synthesis requires a completed session or idle managed-session checkpoint"
         ),
         "unexpected error body: {body}"
+    );
+    state
+        .append_event(
+            "system",
+            None,
+            session.id,
+            "workflow.run.completed",
+            json!({"workflow_run_id": Uuid::new_v4()}),
+        )
+        .await
+        .expect("append partial-session checkpoint");
+    let (status, body) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/sessions/{}/memory-writeback-candidates", session.id),
+            json!({}),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("memory writeback candidates require a completed session")
     );
     let artifacts: Vec<Artifact> = request_json(
         app,
@@ -32714,7 +32743,7 @@ async fn memory_writeback_candidates_require_review_before_durable_memory() {
             .expect("valid request"),
     )
     .await;
-    assert!(matches!(checkpointed.status, SessionStatus::Idle));
+    assert!(matches!(checkpointed.status, SessionStatus::Terminated));
 
     let generated: Vec<MemoryWritebackCandidate> = request_json(
         app.clone(),
@@ -36020,7 +36049,7 @@ async fn generic_runtime_diagnostics_replay_api_flow() {
         completed_resume_loop.status,
         SessionLoopJobStatus::Completed
     );
-    let idle_after_resume: Session = request_json(
+    let completed_after_resume: Session = request_json(
         app.clone(),
         Request::builder()
             .uri(format!("/api/sessions/{}", session.id))
@@ -36028,7 +36057,10 @@ async fn generic_runtime_diagnostics_replay_api_flow() {
             .expect("valid request"),
     )
     .await;
-    assert!(matches!(idle_after_resume.status, SessionStatus::Idle));
+    assert!(matches!(
+        completed_after_resume.status,
+        SessionStatus::Terminated
+    ));
 
     let events_after_approval: Vec<SessionEvent> = request_json(
         app.clone(),
@@ -36044,7 +36076,7 @@ async fn generic_runtime_diagnostics_replay_api_flow() {
         .collect();
     assert!(event_types_after_approval.contains(&"approval.approved"));
     assert!(event_types_after_approval.contains(&"execution.completed"));
-    assert!(event_types_after_approval.contains(&"session.loop.idle"));
+    assert!(event_types_after_approval.contains(&"session.goal.completed"));
     assert!(event_types_after_approval.contains(&"thread.status_changed"));
     assert!(
         event_types_after_approval
@@ -36093,7 +36125,7 @@ async fn generic_runtime_diagnostics_replay_api_flow() {
     )
     .await;
     assert_eq!(completed_threads.len(), 1);
-    assert_eq!(completed_threads[0].status, "idle");
+    assert_eq!(completed_threads[0].status, "terminated");
 }
 
 #[tokio::test]
@@ -40449,14 +40481,14 @@ async fn workflow_step_run_endpoint_claims_and_executes_session_loop() {
             .expect("valid request"),
     )
     .await;
-    let completed_step = resumed_steps
+    let resumed_step = resumed_steps
         .iter()
         .find(|step| step["id"] == json!(step_id))
-        .expect("completed workflow step");
-    assert_eq!(completed_step["status"], json!("completed"));
-    assert!(completed_step["completed_at"].as_str().is_some());
+        .expect("resumed workflow step");
+    assert_eq!(resumed_step["status"], json!("requires_action"));
+    assert!(resumed_step["completed_at"].is_null());
     assert!(
-        completed_step["output_payload"]["worker_execution"]["session_loop_resume"]
+        resumed_step["output_payload"]["worker_execution"]["session_loop_resume"]
             .as_bool()
             .unwrap_or(false)
     );
@@ -44358,10 +44390,11 @@ async fn approving_file_write_resumes_tool_and_creates_artifact() {
         event.event_type == "llm.request"
             && event.payload["context"]["approved_tool_result_count"] == json!(1)
     }));
-    assert!(events_after_resume.iter().any(|event| {
-        event.event_type == "session.loop.idle"
-            && event.payload["reason"] == json!("provider tool loop idled")
-    }));
+    assert!(
+        events_after_resume
+            .iter()
+            .any(|event| event.event_type == "session.goal.completed")
+    );
     assert!(events_after_resume.iter().any(|event| {
         event.event_type == "execution.completed"
             && event.payload["reason"] == json!("approved execution completed")

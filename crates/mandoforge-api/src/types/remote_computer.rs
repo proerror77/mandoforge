@@ -7,6 +7,9 @@ use crate::remote_computer_runner::{
     RemoteComputerRunnerDryRunResponse, RemoteComputerRunnerReadiness,
 };
 
+pub(crate) const REMOTE_COMPUTER_RUNTIME_CLEANUP_MARKER: &str =
+    "_mandoforge_runtime_cleanup_converged";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RemoteComputerSidecarSupervisionRun {
     pub(crate) status: String,
@@ -414,6 +417,8 @@ pub(crate) struct RemoteComputerReclaimRun {
     pub(crate) reclaimed_attachment_count: usize,
     pub(crate) expired_lease_count: usize,
     pub(crate) reclaimed_lease_count: usize,
+    #[serde(default)]
+    pub(crate) replayed_cleanup_evidence_count: usize,
     pub(crate) attachments: Vec<RemoteComputerAttachment>,
     pub(crate) leases: Vec<RemoteComputerLease>,
     pub(crate) execution_enabled: bool,

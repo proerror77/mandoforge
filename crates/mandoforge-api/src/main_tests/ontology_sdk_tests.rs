@@ -125,12 +125,24 @@ fn ontology_action_parameters_accept_object_schema_without_explicit_type() {
     let schema = json!({
         "properties": {
             "order_id": {"type": "string"},
-            "amount": {"type": "number"}
+            "amount": {"type": "number"},
+            "attempt": {"type": "number", "enum": [1]},
+            "status": {"type": "string", "enum": ["open", "closed"]}
         },
         "required": ["order_id"]
     });
     validate_ontology_action_parameters(&schema, &json!({"order_id": "order-1"}))
         .expect("type-omitted object schema should match generated SDK semantics");
+    validate_ontology_action_parameters(&schema, &json!({"order_id": "order-1", "status": "open"}))
+        .expect("published enum value");
+    validate_ontology_action_parameters(&schema, &json!({"order_id": "order-1", "attempt": 1.0}))
+        .expect("integer and floating JSON representations of the same enum number");
+    let error = validate_ontology_action_parameters(
+        &schema,
+        &json!({"order_id": "order-1", "status": "pending"}),
+    )
+    .expect_err("undeclared enum values must fail closed");
+    assert!(error.message.contains("not an allowed enum value"));
     let error = validate_ontology_action_parameters(&schema, &json!({"amount": 12.5}))
         .expect_err("required properties must still be enforced");
     assert!(error.message.contains("missing required field order_id"));
@@ -1020,6 +1032,52 @@ async fn ontology_sdk_consumer_http_enforces_subject_subset_visibility_and_propo
                 properties.contains_key(&from_object.properties[0].api_name)
             })
     }));
+    assert!(!object_values.iter().any(|object| {
+        release
+            .materialized_object_ids
+            .as_array()
+            .is_some_and(|ids| ids.contains(&object["id"]))
+    }));
+
+    state
+        .create_semantic_object(CreateSemanticObject {
+            source_id: None,
+            object_type: "business_object".to_string(),
+            object_key: "sdk-fixture-malformed".to_string(),
+            title: "SDK malformed sibling".to_string(),
+            summary: "must not break a valid object lookup".to_string(),
+            content: json!({
+                "object_type": from_object.object_type,
+                "domain_scope": "commerce",
+                "properties": {}
+            }),
+            semantic_scopes: json!({"domain_scope": "commerce"}),
+            source_uri: Some("mandoforge://sdk-test/malformed".to_string()),
+            provenance: json!({"source": "sdk-test"}),
+            trust_level: "source_attested".to_string(),
+            freshness: "current".to_string(),
+            status: "active".to_string(),
+        })
+        .await
+        .expect("malformed sibling");
+    let (status, object_body) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "GET",
+            &format!(
+                "/api/ontology-sdk/applications/{}/objects/{}/{}",
+                application.id, from_object.api_name, from.id
+            ),
+            Value::Null,
+            &[
+                ("x-mandoforge-subject", "consumer-a"),
+                ("x-mandoforge-roles", "operator"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(object_body["id"], json!(from.id));
 
     let (status, _) = request_value(
         app.clone(),

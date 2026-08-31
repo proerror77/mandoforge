@@ -292,11 +292,19 @@ fn schema_type(schema: &Value) -> String {
             if let Some(values) = object.get("enum").and_then(Value::as_array) {
                 let variants = values
                     .iter()
-                    .filter_map(|value| value.as_str().map(json_string_literal))
+                    .filter(|value| {
+                        object
+                            .get("type")
+                            .and_then(Value::as_str)
+                            .is_none_or(|expected| schema_value_matches_type(value, expected))
+                    })
+                    .map(Value::to_string)
                     .collect::<Vec<_>>();
-                if !variants.is_empty() {
-                    return variants.join(" | ");
-                }
+                return if variants.is_empty() {
+                    "never".to_string()
+                } else {
+                    variants.join(" | ")
+                };
             }
             match object.get("type").and_then(Value::as_str) {
                 Some("array") => object
@@ -317,6 +325,21 @@ fn schema_type(schema: &Value) -> String {
             }
         }
         _ => "unknown".to_string(),
+    }
+}
+
+fn schema_value_matches_type(value: &Value, expected: &str) -> bool {
+    match expected.trim().to_ascii_lowercase().as_str() {
+        "string" | "text" | "uuid" | "date" | "timestamp" | "datetime" => value.is_string(),
+        "integer" | "int" | "int32" | "int64" => {
+            value.as_i64().is_some() || value.as_u64().is_some()
+        }
+        "number" | "decimal" | "float" | "double" => value.is_number(),
+        "boolean" | "bool" => value.is_boolean(),
+        "object" | "json" => value.is_object(),
+        "array" => value.is_array(),
+        "null" => value.is_null(),
+        _ => false,
     }
 }
 
@@ -529,12 +552,18 @@ mod tests {
         let mut catalog = fixture_catalog();
         catalog.actions[0].input_schema = serde_json::json!({
             "required_name": "string",
-            "optional_note": {"type": "string", "required": false}
+            "optional_note": {"type": "string", "required": false},
+            "priority": {"type": "number", "enum": [1, 2.5], "required": false},
+            "approved": {"type": "boolean", "enum": [true, false], "required": false},
+            "mixed_number": {"type": "number", "enum": [1, "invalid", 2.5], "required": false}
         });
 
         let output = generate_typescript_sdk(uuid::Uuid::nil(), &catalog).expect("SDK output");
 
         assert!(output.contains("readonly \"required_name\": string;"));
         assert!(output.contains("readonly \"optional_note\"?: string;"));
+        assert!(output.contains("readonly \"priority\"?: 1 | 2.5;"));
+        assert!(output.contains("readonly \"approved\"?: true | false;"));
+        assert!(output.contains("readonly \"mixed_number\"?: 1 | 2.5;"));
     }
 }

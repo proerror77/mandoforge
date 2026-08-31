@@ -1,5 +1,58 @@
 use super::*;
 
+#[test]
+fn remote_computer_reclaim_run_defaults_new_replay_counter() {
+    let run: RemoteComputerReclaimRun = serde_json::from_value(json!({
+        "generated_at": "2026-09-01T00:00:00Z",
+        "status": "noop",
+        "stale_attachment_count": 0,
+        "reclaimed_attachment_count": 0,
+        "expired_lease_count": 0,
+        "reclaimed_lease_count": 0,
+        "attachments": [],
+        "leases": [],
+        "execution_enabled": false
+    }))
+    .expect("pre-upgrade reclaim run");
+
+    assert_eq!(run.replayed_cleanup_evidence_count, 0);
+}
+
+#[tokio::test]
+#[ignore = "requires MANDOFORGE_TEST_POSTGRES_URL"]
+async fn postgres_existing_audit_log_ids_queries_requested_ids() {
+    let database_url = std::env::var("MANDOFORGE_TEST_POSTGRES_URL")
+        .expect("MANDOFORGE_TEST_POSTGRES_URL is required");
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .expect("connect test postgres");
+    run_migrations(&pool).await.expect("run migrations");
+    let mut state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    seed_demo_tenant(&pool, state.tenant_id)
+        .await
+        .expect("seed tenant");
+    state.store = StoreBackend::Postgres(pool);
+    let audit = new_audit_log(
+        None,
+        "system",
+        None,
+        "remote_computer.cleanup_probe",
+        "remote_computer",
+        None,
+        json!({"status": "completed"}),
+    );
+    let audit_id = audit.id;
+    state.append_audit_log(audit).await.expect("append audit");
+
+    let existing = state
+        .existing_audit_log_ids(&[audit_id, Uuid::new_v4()])
+        .await
+        .expect("query requested audit ids");
+    assert_eq!(existing, std::collections::HashSet::from([audit_id]));
+}
+
 #[tokio::test]
 async fn terminal_session_releases_active_pooled_remote_computer_lease() {
     let app = test_app().await;
@@ -101,7 +154,7 @@ async fn terminal_session_releases_active_pooled_remote_computer_lease() {
 }
 
 #[tokio::test]
-async fn terminal_session_remains_terminal_when_runtime_cleanup_needs_retry() {
+async fn terminal_session_defers_failed_runtime_cleanup_for_stale_reclaim() {
     let _lock = env_lock().lock().expect("env lock");
     let _mode = EnvVarGuard::set("MANDOFORGE_REMOTE_COMPUTER_RUNNER", "reserved");
     let _mutation = EnvVarGuard::set("MANDOFORGE_REMOTE_COMPUTER_MUTATION_ENABLED", "false");
@@ -179,7 +232,7 @@ async fn terminal_session_remains_terminal_when_runtime_cleanup_needs_retry() {
         ))
         .await
         .expect("interrupt response");
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.status(), StatusCode::OK);
 
     let persisted_session: Session = request_json(
         app.clone(),
@@ -190,6 +243,19 @@ async fn terminal_session_remains_terminal_when_runtime_cleanup_needs_retry() {
     )
     .await;
     assert_eq!(persisted_session.status, SessionStatus::Terminated);
+    let events: Vec<SessionEvent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/sessions/{}/events", session.id))
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(
+        events
+            .iter()
+            .any(|event| event.event_type == "remote_computer.runtime_cleanup_failed")
+    );
     let leases: Vec<RemoteComputerLease> = request_json(
         app,
         Request::builder()
@@ -199,18 +265,128 @@ async fn terminal_session_remains_terminal_when_runtime_cleanup_needs_retry() {
             .expect("valid request"),
     )
     .await;
-    assert_eq!(
-        leases
-            .iter()
-            .find(|candidate| candidate.id == lease.id)
-            .expect("retryable lease")
-            .status,
-        "leased"
+    let retryable_lease = leases
+        .iter()
+        .find(|candidate| candidate.id == lease.id)
+        .expect("retryable lease");
+    assert_eq!(retryable_lease.status, "leased");
+    assert!(
+        retryable_lease
+            .lease_expires_at
+            .is_some_and(|expires_at| expires_at <= Utc::now())
     );
 }
 
 #[tokio::test]
+async fn stale_reclaim_replays_missing_cleanup_evidence_after_lease_transition() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "cleanup evidence retry".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create session");
+    let computer = state
+        .create_remote_computer(CreateRemoteComputer {
+            id: None,
+            name: "cleanup-evidence-retry".to_string(),
+            profile: Some("workspace-write".to_string()),
+            namespace: None,
+            pod_name: Some("cleanup-evidence-retry-pod".to_string()),
+            workspace_path: None,
+            state_mount_path: None,
+            metadata: Some(json!({"warm_pool": true})),
+        })
+        .await
+        .expect("create computer");
+    let lease = state
+        .create_remote_computer_lease(
+            computer.id,
+            CreateRemoteComputerLease {
+                session_id: Some(session.id),
+                worker_id: Some("cleanup-evidence-retry-worker".to_string()),
+                lease_seconds: Some(60),
+                metadata: None,
+            },
+        )
+        .await
+        .expect("create lease");
+    let mut cleanup_metadata = json!({
+        "runtime_cleanup_reason": "terminal cleanup",
+        "runtime_cleanup": {
+            "delete_attempted": false,
+            "delete_status": "not_required"
+        }
+    });
+    cleanup_metadata[REMOTE_COMPUTER_RUNTIME_CLEANUP_MARKER] = json!(true);
+    state
+        .update_remote_computer_lease_status(
+            lease.id,
+            "released",
+            UpdateRemoteComputerLease {
+                reason: Some("competing release".to_string()),
+                metadata: None,
+            },
+        )
+        .await
+        .expect("competing status transition");
+    state
+        .transition_remote_computer_lease_after_runtime_cleanup(
+            lease.id,
+            "released",
+            UpdateRemoteComputerLease {
+                reason: Some("terminal cleanup".to_string()),
+                metadata: Some(cleanup_metadata),
+            },
+        )
+        .await
+        .expect("persist lease transition without evidence");
+
+    let replayed = execute_remote_computer_stale_reclaim(&state)
+        .await
+        .expect("replay cleanup evidence");
+    assert_eq!(replayed.status, "completed");
+    assert_eq!(replayed.replayed_cleanup_evidence_count, 1);
+
+    assert!(
+        state
+            .list_events(session.id)
+            .await
+            .expect("list events")
+            .iter()
+            .any(|event| event.event_type == "remote_computer.runtime_cleanup_completed")
+    );
+    assert!(
+        state
+            .list_audit_logs(Some(session.id))
+            .await
+            .expect("list audit logs")
+            .iter()
+            .any(|audit| audit.action == "remote_computer.runtime_cleanup_completed")
+    );
+    let repeated = execute_remote_computer_stale_reclaim(&state)
+        .await
+        .expect("repeat cleanup evidence sweep");
+    assert_eq!(repeated.status, "noop");
+    assert_eq!(repeated.replayed_cleanup_evidence_count, 0);
+}
+
+#[tokio::test]
 async fn expired_pooled_lease_reclaim_uses_runtime_cleanup_convergence() {
+    let _lock = env_lock().lock().expect("env lock");
+    let _runner = EnvVarGuard::set("MANDOFORGE_REMOTE_COMPUTER_RUNNER", "reserved");
+    let _mutation = EnvVarGuard::set("MANDOFORGE_REMOTE_COMPUTER_MUTATION_ENABLED", "false");
     let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
     let computer = state
         .create_remote_computer(CreateRemoteComputer {
@@ -237,23 +413,74 @@ async fn expired_pooled_lease_reclaim_uses_runtime_cleanup_convergence() {
         )
         .await
         .expect("create lease");
+    let failing_identity = RemoteComputerRuntimeIdentity::new(
+        RemoteComputerSubstrate::AgentSandbox,
+        "agent-os-test".to_string(),
+        "expired-on-demand-claim".to_string(),
+        "expired-on-demand-pod".to_string(),
+        Some("expired-on-demand-claim".to_string()),
+        Some("expired-on-demand-sandbox".to_string()),
+        None,
+    );
+    let failing_computer = state
+        .create_remote_computer(CreateRemoteComputer {
+            id: None,
+            name: "expired-on-demand-computer".to_string(),
+            profile: Some("agent-sandbox".to_string()),
+            namespace: Some(failing_identity.namespace.clone()),
+            pod_name: Some(failing_identity.pod_name.clone()),
+            workspace_path: None,
+            state_mount_path: None,
+            metadata: Some(metadata_with_remote_computer_runtime_identity(
+                &json!({"on_demand": true}),
+                &failing_identity,
+            )),
+        })
+        .await
+        .expect("create failing on-demand computer");
+    let failing_lease = state
+        .create_remote_computer_lease(
+            failing_computer.id,
+            CreateRemoteComputerLease {
+                session_id: None,
+                worker_id: Some("expired-on-demand-worker".to_string()),
+                lease_seconds: Some(60),
+                metadata: Some(json!({"on_demand": true})),
+            },
+        )
+        .await
+        .expect("create failing on-demand lease");
     let StoreBackend::Memory(inner) = &state.store else {
         panic!("test requires memory store");
     };
-    inner
-        .write()
-        .await
-        .remote_computer_leases
-        .get_mut(&lease.id)
-        .expect("persisted lease")
-        .lease_expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+    let mut store = inner.write().await;
+    for lease_id in [lease.id, failing_lease.id] {
+        store
+            .remote_computer_leases
+            .get_mut(&lease_id)
+            .expect("persisted lease")
+            .lease_expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+    }
+    drop(store);
 
     let run = execute_remote_computer_stale_reclaim(&state)
         .await
         .expect("reclaim expired lease");
-    assert_eq!(run.expired_lease_count, 1);
+    assert_eq!(run.status, "attention");
+    assert_eq!(run.expired_lease_count, 2);
     assert_eq!(run.reclaimed_lease_count, 1);
     assert_eq!(run.leases[0].status, "released");
+    assert_eq!(
+        state
+            .list_remote_computer_leases()
+            .await
+            .expect("list leases")
+            .into_iter()
+            .find(|candidate| candidate.id == failing_lease.id)
+            .expect("retryable on-demand lease")
+            .status,
+        "leased"
+    );
     assert_eq!(
         state
             .list_remote_computers()

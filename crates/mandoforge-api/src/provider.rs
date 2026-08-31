@@ -85,80 +85,50 @@ impl ProviderClient for MockProviderClient {
     }
 
     async fn complete(&self, context: HarnessContext) -> Result<ProviderResponse, AppError> {
-        if context.approved_tool_result_count > 0 {
-            return Ok(ProviderResponse {
-                plan: vec!["Review approved tool output and produce the final response".to_string()],
-                tool_calls: Vec::new(),
-                final_message: Some(
-                    "Approved execution completed. The session timeline now contains the approved tool result and final provider response."
-                        .to_string(),
-                ),
-                usage: Some(ProviderTokenUsage {
-                    prompt_tokens: 120,
-                    completion_tokens: 45,
-                    total_tokens: 165,
-                }),
-            });
+        if context.execution_failed_count > 0 {
+            return Ok(mock_terminal_response(
+                "Report the terminal worker execution failure",
+                "blocked",
+                "Worker execution failed. The durable failure is recorded in the session timeline.",
+                104,
+                38,
+            ));
         }
         if context.rejected_tool_result_count > 0 {
-            return Ok(ProviderResponse {
-                plan: vec!["Record rejected approval and stop the blocked tool path".to_string()],
-                tool_calls: Vec::new(),
-                final_message: Some(
-                    "Approval rejected. The session timeline records the denied tool result and no blocked tool execution was run."
-                        .to_string(),
-                ),
-                usage: Some(ProviderTokenUsage {
-                    prompt_tokens: 96,
-                    completion_tokens: 32,
-                    total_tokens: 128,
-                }),
-            });
+            return Ok(mock_terminal_response(
+                "Record rejected approval and stop the blocked tool path",
+                "blocked",
+                "Approval rejected. The session timeline records the denied tool result and no blocked tool execution was run.",
+                96,
+                32,
+            ));
+        }
+        if context.approved_tool_result_count > 0 {
+            return Ok(mock_terminal_response(
+                "Review approved tool output and produce the final response",
+                "completed",
+                "Approved execution completed. The session timeline now contains the approved tool result and final provider response.",
+                120,
+                45,
+            ));
         }
         if context.manual_tool_result_count > 0 {
-            return Ok(ProviderResponse {
-                plan: vec!["Review manual tool result and continue the session timeline".to_string()],
-                tool_calls: Vec::new(),
-                final_message: Some(
-                    "Manual tool result processed. The session loop consumed the durable tool result event and recorded a final provider response."
-                        .to_string(),
-                ),
-                usage: Some(ProviderTokenUsage {
-                    prompt_tokens: 88,
-                    completion_tokens: 30,
-                    total_tokens: 118,
-                }),
-            });
-        }
-        if context.execution_failed_count > 0 {
-            return Ok(ProviderResponse {
-                plan: vec!["Report the terminal worker execution failure".to_string()],
-                tool_calls: Vec::new(),
-                final_message: Some(
-                    "Worker execution failed. The durable failure is recorded in the session timeline."
-                        .to_string(),
-                ),
-                usage: Some(ProviderTokenUsage {
-                    prompt_tokens: 104,
-                    completion_tokens: 38,
-                    total_tokens: 142,
-                }),
-            });
+            return Ok(mock_terminal_response(
+                "Review manual tool result and continue the session timeline",
+                "completed",
+                "Manual tool result processed. The session loop consumed the durable tool result event and recorded a final provider response.",
+                88,
+                30,
+            ));
         }
         if context.execution_completed_count > 0 {
-            return Ok(ProviderResponse {
-                plan: vec!["Review completed worker execution and stop dispatching new runtime work".to_string()],
-                tool_calls: Vec::new(),
-                final_message: Some(
-                    "Worker execution completed. The session timeline now contains the Codex App Server run, runtime events, and final tool result."
-                        .to_string(),
-                ),
-                usage: Some(ProviderTokenUsage {
-                    prompt_tokens: 104,
-                    completion_tokens: 38,
-                    total_tokens: 142,
-                }),
-            });
+            return Ok(mock_terminal_response(
+                "Review completed worker execution and stop dispatching new runtime work",
+                "completed",
+                "Worker execution completed. The session timeline now contains the Codex App Server run, runtime events, and final tool result.",
+                104,
+                38,
+            ));
         }
         if context
             .last_user_message
@@ -223,6 +193,28 @@ impl ProviderClient for MockProviderClient {
                 total_tokens: 240,
             }),
         })
+    }
+}
+
+fn mock_terminal_response(
+    plan: &str,
+    status: &str,
+    summary: &str,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+) -> ProviderResponse {
+    ProviderResponse {
+        plan: vec![plan.to_string()],
+        tool_calls: vec![ProviderToolCall {
+            tool_name: "complete_task".to_string(),
+            args: json!({"status": status, "summary": summary}),
+        }],
+        final_message: Some(summary.to_string()),
+        usage: Some(ProviderTokenUsage {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: prompt_tokens + completion_tokens,
+        }),
     }
 }
 
@@ -804,12 +796,87 @@ fn redact_provider_error(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        OpenAiCompatibleProviderClient, default_provider_tool_names,
-        parse_openai_compatible_http_response, parse_openai_compatible_provider_response,
-        provider_api_key_from_env_value, provider_api_key_secret_ref, provider_tool_schemas,
+        HarnessContext, MockProviderClient, OpenAiCompatibleProviderClient, ProviderClient,
+        default_provider_tool_names, parse_openai_compatible_http_response,
+        parse_openai_compatible_provider_response, provider_api_key_from_env_value,
+        provider_api_key_secret_ref, provider_tool_schemas,
     };
     use crate::secrets::ReservedSecretProvider;
     use serde_json::json;
+    use uuid::Uuid;
+
+    fn mock_harness_context() -> HarnessContext {
+        HarnessContext {
+            session_id: Uuid::new_v4(),
+            agent_version_id: Uuid::new_v4(),
+            agent_version: 1,
+            system_prompt: String::new(),
+            task_grant_id: None,
+            context_packet_id: None,
+            rendered_context_packet: None,
+            provider_tool_names: Vec::new(),
+            event_count: 0,
+            pending_event_seq_start: None,
+            pending_event_seq_end: None,
+            pending_event_count: 0,
+            last_user_message: None,
+            latest_goal_event: None,
+            approved_tool_result_count: 0,
+            rejected_tool_result_count: 0,
+            manual_tool_result_count: 0,
+            custom_tool_result_count: 0,
+            execution_completed_count: 0,
+            execution_failed_count: 0,
+            recent_custom_tool_results: Vec::new(),
+            recent_execution_completed: Vec::new(),
+            recent_execution_failed: Vec::new(),
+            recent_goal_events: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_provider_terminal_results_call_complete_task() {
+        let mut approved = mock_harness_context();
+        approved.approved_tool_result_count = 1;
+        let mut rejected = mock_harness_context();
+        rejected.rejected_tool_result_count = 1;
+        let mut manual = mock_harness_context();
+        manual.manual_tool_result_count = 1;
+        let mut execution_completed = mock_harness_context();
+        execution_completed.execution_completed_count = 1;
+        let mut execution_failed = mock_harness_context();
+        execution_failed.execution_failed_count = 1;
+
+        for (context, expected_status) in [
+            (approved, "completed"),
+            (rejected, "blocked"),
+            (manual, "completed"),
+            (execution_completed, "completed"),
+            (execution_failed, "blocked"),
+        ] {
+            let response = MockProviderClient
+                .complete(context)
+                .await
+                .expect("mock response");
+            assert_eq!(response.tool_calls.len(), 1);
+            assert_eq!(response.tool_calls[0].tool_name, "complete_task");
+            assert_eq!(response.tool_calls[0].args["status"], expected_status);
+            assert!(
+                response.tool_calls[0].args["summary"]
+                    .as_str()
+                    .is_some_and(|summary| !summary.is_empty())
+            );
+        }
+
+        let mut mixed = mock_harness_context();
+        mixed.approved_tool_result_count = 1;
+        mixed.execution_failed_count = 1;
+        let response = MockProviderClient
+            .complete(mixed)
+            .await
+            .expect("mixed result response");
+        assert_eq!(response.tool_calls[0].args["status"], "blocked");
+    }
 
     #[test]
     fn default_tools_exclude_approval_only_native_connector_calls() {

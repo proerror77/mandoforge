@@ -167,6 +167,27 @@ pub(crate) async fn consumer_objects(
     api_name: &str,
     grant: Option<&TaskGrant>,
 ) -> Result<Vec<OntologySdkConsumerObject>, AppError> {
+    consumer_objects_filtered(
+        state,
+        principal,
+        application,
+        catalog,
+        api_name,
+        grant,
+        None,
+    )
+    .await
+}
+
+async fn consumer_objects_filtered(
+    state: &AppState,
+    principal: &Principal,
+    application: &OntologySdkApplication,
+    catalog: &OntologyReleaseCatalogV1,
+    api_name: &str,
+    grant: Option<&TaskGrant>,
+    object_id: Option<Uuid>,
+) -> Result<Vec<OntologySdkConsumerObject>, AppError> {
     require_consumer_allowlist(grant, "objects", api_name)?;
     if !application
         .subset_manifest
@@ -186,9 +207,11 @@ pub(crate) async fn consumer_objects(
     let objects = visible_semantic_objects_for_principal(state, principal).await?;
     let mut projected = Vec::new();
     for object in objects {
-        if object.object_type != "business_object"
+        if object_id.is_some_and(|object_id| object.id != object_id)
+            || object.object_type != "business_object"
             || object.status != "active"
             || object.archived_at.is_some()
+            || ontology_sdk_definition_object(&object)
             || object.content.get("domain_scope").and_then(Value::as_str)
                 != Some(application.domain_scope.as_str())
             || object.content.get("object_type").and_then(Value::as_str)
@@ -226,8 +249,16 @@ pub(crate) async fn consumer_object_by_id(
     object_id: Uuid,
     grant: Option<&TaskGrant>,
 ) -> Result<OntologySdkConsumerObject, AppError> {
-    let mut objects =
-        consumer_objects(state, principal, application, catalog, api_name, grant).await?;
+    let mut objects = consumer_objects_filtered(
+        state,
+        principal,
+        application,
+        catalog,
+        api_name,
+        grant,
+        Some(object_id),
+    )
+    .await?;
     objects
         .drain(..)
         .find(|object| object.id == object_id)
@@ -272,6 +303,7 @@ pub(crate) async fn consumer_relations(
             object.object_type == "business_object"
                 && object.status == "active"
                 && object.archived_at.is_none()
+                && !ontology_sdk_definition_object(object)
                 && object.content.get("domain_scope").and_then(Value::as_str)
                     == Some(application.domain_scope.as_str())
         })
@@ -357,6 +389,18 @@ pub(crate) async fn consumer_relations(
         });
     }
     Ok(projected)
+}
+
+fn ontology_sdk_definition_object(object: &SemanticObject) -> bool {
+    object
+        .provenance
+        .get("source")
+        .and_then(Value::as_str)
+        .is_some_and(|source| source.starts_with("ontology_onboarding.materialize"))
+        || object
+            .source_uri
+            .as_deref()
+            .is_some_and(|source_uri| source_uri.starts_with("mandoforge://ontology/onboarding/"))
 }
 
 pub(crate) async fn propose_consumer_action(

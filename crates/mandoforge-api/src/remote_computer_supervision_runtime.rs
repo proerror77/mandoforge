@@ -1,3 +1,6 @@
+use crate::remote_computer_runtime::{
+    remote_computer_runtime_cleanup_converged, remote_computer_runtime_cleanup_evidence_audit_ids,
+};
 use crate::*;
 
 pub(crate) async fn execute_remote_computer_sidecar_supervision(
@@ -60,16 +63,16 @@ pub(crate) async fn execute_remote_computer_stale_reclaim(
     state: &AppState,
 ) -> Result<RemoteComputerReclaimRun, AppError> {
     let stale_attachments = state.list_stale_remote_computer_attachments().await?;
-    let expired_leases: Vec<_> = state
-        .list_remote_computer_leases()
-        .await?
-        .into_iter()
+    let leases = state.list_remote_computer_leases().await?;
+    let expired_leases: Vec<_> = leases
+        .iter()
         .filter(|lease| {
             lease.status == "leased"
                 && lease
                     .lease_expires_at
                     .is_some_and(|lease_expires_at| lease_expires_at <= Utc::now())
         })
+        .cloned()
         .collect();
 
     let mut reclaimed_attachments = Vec::new();
@@ -101,14 +104,22 @@ pub(crate) async fn execute_remote_computer_stale_reclaim(
         let assignment = assignments
             .iter()
             .find(|assignment| assignment.lease_id == lease.id && assignment.status == "assigned");
-        cleanup_remote_computer_lease_runtime(
+        let cleanup = cleanup_remote_computer_lease_runtime(
             state,
             lease,
             assignment,
             "expired_lease_reclaim",
             "released",
         )
-        .await?;
+        .await;
+        if let Err(error) = cleanup {
+            tracing::error!(
+                lease_id = %lease.id,
+                error = %error.message,
+                "Remote Computer stale reclaim deferred a failed runtime cleanup"
+            );
+            continue;
+        }
         let reclaimed = state
             .list_remote_computer_leases()
             .await?
@@ -117,10 +128,52 @@ pub(crate) async fn execute_remote_computer_stale_reclaim(
             .ok_or_else(|| AppError::not_found("Remote computer lease not found"))?;
         reclaimed_leases.push(reclaimed);
     }
+    let evidence_replay_candidates = leases
+        .iter()
+        .filter_map(|lease| {
+            let reason = lease.metadata["runtime_cleanup_reason"].as_str()?;
+            (matches!(lease.status.as_str(), "released" | "failed")
+                && remote_computer_runtime_cleanup_converged(lease)
+                && !reason.trim().is_empty())
+            .then_some((lease, reason))
+        })
+        .collect::<Vec<_>>();
+    let expected_audit_ids = evidence_replay_candidates
+        .iter()
+        .flat_map(|(lease, reason)| {
+            remote_computer_runtime_cleanup_evidence_audit_ids(lease.id, reason)
+        })
+        .collect::<Vec<_>>();
+    let recorded_audit_ids = state.existing_audit_log_ids(&expected_audit_ids).await?;
+    let mut replayed_cleanup_evidence_count = 0;
+    for (lease, reason) in evidence_replay_candidates {
+        if remote_computer_runtime_cleanup_evidence_audit_ids(lease.id, reason)
+            .iter()
+            .all(|audit_id| recorded_audit_ids.contains(audit_id))
+        {
+            continue;
+        }
+        let assignment = lease.metadata["runtime_cleanup_assignment_id"]
+            .as_str()
+            .and_then(|assignment_id| Uuid::parse_str(assignment_id).ok())
+            .and_then(|assignment_id| {
+                assignments
+                    .iter()
+                    .find(|assignment| assignment.id == assignment_id)
+            });
+        replay_remote_computer_lease_runtime_cleanup_evidence(state, lease, assignment, reason)
+            .await?;
+        replayed_cleanup_evidence_count += 1;
+    }
 
     let run = RemoteComputerReclaimRun {
         generated_at: Utc::now(),
-        status: if reclaimed_attachments.is_empty() && reclaimed_leases.is_empty() {
+        status: if reclaimed_leases.len() != expired_leases.len() {
+            "attention"
+        } else if reclaimed_attachments.is_empty()
+            && reclaimed_leases.is_empty()
+            && replayed_cleanup_evidence_count == 0
+        {
             "noop"
         } else {
             "completed"
@@ -130,6 +183,7 @@ pub(crate) async fn execute_remote_computer_stale_reclaim(
         reclaimed_attachment_count: reclaimed_attachments.len(),
         expired_lease_count: expired_leases.len(),
         reclaimed_lease_count: reclaimed_leases.len(),
+        replayed_cleanup_evidence_count,
         attachments: reclaimed_attachments,
         leases: reclaimed_leases,
         execution_enabled: false,

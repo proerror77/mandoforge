@@ -2935,6 +2935,18 @@ pub(crate) fn validate_ontology_action_parameters(
                 "ontology action parameter {name} must be {expected_type}"
             )));
         }
+        if let Some(allowed_values) = declaration.get("enum") {
+            let allowed_values = allowed_values.as_array().ok_or_else(|| {
+                AppError::bad_request(format!(
+                    "ontology action parameter {name} enum must be an array"
+                ))
+            })?;
+            if !json_schema_enum_contains(allowed_values, value) {
+                return Err(AppError::bad_request(format!(
+                    "ontology action parameter {name} is not an allowed enum value"
+                )));
+            }
+        }
     }
     Ok(())
 }

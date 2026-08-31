@@ -1435,6 +1435,7 @@ fn failed_remote_computer_reclaim_run(checked_at: DateTime<Utc>) -> RemoteComput
         reclaimed_attachment_count: 0,
         expired_lease_count: 0,
         reclaimed_lease_count: 0,
+        replayed_cleanup_evidence_count: 0,
         attachments: Vec::new(),
         leases: Vec::new(),
         execution_enabled: false,

@@ -50,6 +50,73 @@ async fn remote_computer_lease_rejects_non_positive_duration() {
 }
 
 #[tokio::test]
+async fn remote_computer_lease_rejects_client_cleanup_markers() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let computer = state
+        .create_remote_computer(CreateRemoteComputer {
+            id: None,
+            name: "cleanup-marker-test".to_string(),
+            profile: None,
+            namespace: None,
+            pod_name: None,
+            workspace_path: None,
+            state_mount_path: None,
+            metadata: None,
+        })
+        .await
+        .expect("create remote computer");
+    let mut cleanup_metadata = json!({});
+    cleanup_metadata[REMOTE_COMPUTER_RUNTIME_CLEANUP_MARKER] = json!(true);
+
+    let error = state
+        .create_remote_computer_lease(
+            computer.id,
+            CreateRemoteComputerLease {
+                session_id: None,
+                worker_id: Some("worker-1".to_string()),
+                lease_seconds: Some(60),
+                metadata: Some(cleanup_metadata.clone()),
+            },
+        )
+        .await
+        .expect_err("client cleanup marker must not be accepted at lease creation");
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+
+    let lease = state
+        .create_remote_computer_lease(
+            computer.id,
+            CreateRemoteComputerLease {
+                session_id: None,
+                worker_id: Some("worker-1".to_string()),
+                lease_seconds: Some(60),
+                metadata: None,
+            },
+        )
+        .await
+        .expect("create clean lease");
+    let error = state
+        .update_remote_computer_lease_status(
+            lease.id,
+            "released",
+            UpdateRemoteComputerLease {
+                reason: Some("spoof cleanup".to_string()),
+                metadata: Some(cleanup_metadata),
+            },
+        )
+        .await
+        .expect_err("client cleanup marker must not be accepted at lease transition");
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        state
+            .list_remote_computer_leases()
+            .await
+            .expect("list leases")[0]
+            .status,
+        "leased"
+    );
+}
+
+#[tokio::test]
 async fn remote_computer_rejects_duplicate_caller_supplied_id() {
     let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
     let id = Uuid::new_v4();
@@ -242,6 +309,11 @@ async fn on_demand_cleanup_failure_keeps_lease_and_record_retryable() {
         .find(|candidate| candidate.id == lease.id)
         .expect("persisted lease");
     assert_eq!(persisted_lease.status, "leased");
+    assert!(
+        persisted_lease
+            .lease_expires_at
+            .is_some_and(|expires_at| expires_at <= Utc::now())
+    );
     let persisted_computer = state
         .list_remote_computers()
         .await

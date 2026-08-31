@@ -10,11 +10,25 @@ use crate::{
     AppError, AppState, CreateRemoteComputer, CreateRemoteComputerAttachment,
     CreateRemoteComputerJobAssignment, CreateRemoteComputerLease,
     CreateRemoteComputerSidecarHeartbeat, CreateRemoteComputerStateLock,
-    ReleaseRemoteComputerStateLock, RemoteComputer, RemoteComputerAttachment,
-    RemoteComputerJobAssignment, RemoteComputerLease, RemoteComputerRuntimeIdentity,
-    RemoteComputerSidecarHeartbeat, RemoteComputerStateLock, RemoteComputerSubstrate,
-    UpdateRemoteComputerAttachment, UpdateRemoteComputerLease,
+    REMOTE_COMPUTER_RUNTIME_CLEANUP_MARKER, ReleaseRemoteComputerStateLock, RemoteComputer,
+    RemoteComputerAttachment, RemoteComputerJobAssignment, RemoteComputerLease,
+    RemoteComputerRuntimeIdentity, RemoteComputerSidecarHeartbeat, RemoteComputerStateLock,
+    RemoteComputerSubstrate, UpdateRemoteComputerAttachment, UpdateRemoteComputerLease,
 };
+
+fn reject_client_runtime_cleanup_marker(
+    metadata: Option<&serde_json::Value>,
+) -> Result<(), AppError> {
+    if metadata
+        .and_then(|metadata| metadata.get(REMOTE_COMPUTER_RUNTIME_CLEANUP_MARKER))
+        .is_some()
+    {
+        return Err(AppError::bad_request(
+            "Remote Computer runtime cleanup metadata is managed internally",
+        ));
+    }
+    Ok(())
+}
 
 impl AppState {
     pub(crate) async fn list_remote_computers(&self) -> Result<Vec<RemoteComputer>, AppError> {
@@ -349,6 +363,7 @@ impl AppState {
         remote_computer_id: Uuid,
         input: CreateRemoteComputerLease,
     ) -> Result<RemoteComputerLease, AppError> {
+        reject_client_runtime_cleanup_marker(input.metadata.as_ref())?;
         let now = Utc::now();
         let lease_seconds = input.lease_seconds.unwrap_or(900);
         if lease_seconds <= 0 {
@@ -455,6 +470,51 @@ impl AppState {
         status: &str,
         input: UpdateRemoteComputerLease,
     ) -> Result<RemoteComputerLease, AppError> {
+        reject_client_runtime_cleanup_marker(input.metadata.as_ref())?;
+        self.update_remote_computer_lease_status_inner(lease_id, status, input, false)
+            .await
+    }
+
+    pub(crate) async fn transition_remote_computer_lease_after_runtime_cleanup(
+        &self,
+        lease_id: Uuid,
+        status: &str,
+        input: UpdateRemoteComputerLease,
+    ) -> Result<RemoteComputerLease, AppError> {
+        if input
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get(REMOTE_COMPUTER_RUNTIME_CLEANUP_MARKER))
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        {
+            return Err(AppError::internal(
+                "Remote Computer runtime cleanup transition is missing its internal marker",
+            ));
+        }
+        let lease = self
+            .update_remote_computer_lease_status_inner(lease_id, status, input, true)
+            .await?;
+        if lease
+            .metadata
+            .get(REMOTE_COMPUTER_RUNTIME_CLEANUP_MARKER)
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        {
+            return Err(AppError::internal(
+                "Remote Computer runtime cleanup transition did not persist its internal marker",
+            ));
+        }
+        Ok(lease)
+    }
+
+    async fn update_remote_computer_lease_status_inner(
+        &self,
+        lease_id: Uuid,
+        status: &str,
+        input: UpdateRemoteComputerLease,
+        persist_same_status_metadata: bool,
+    ) -> Result<RemoteComputerLease, AppError> {
         let now = Utc::now();
         let heartbeat_at = if status == "leased" { Some(now) } else { None };
         match &self.store {
@@ -470,10 +530,15 @@ impl AppState {
                         "Remote computer lease is not active for heartbeat",
                     ));
                 }
-                if (status == "released" || status == "failed") && existing.status == status {
+                let same_terminal_status =
+                    matches!(status, "released" | "failed") && existing.status == status;
+                if same_terminal_status && !persist_same_status_metadata {
                     return Ok(existing);
                 }
-                if (status == "released" || status == "failed") && existing.status != "leased" {
+                if matches!(status, "released" | "failed")
+                    && existing.status != "leased"
+                    && !same_terminal_status
+                {
                     return Err(AppError::bad_request(
                         "Remote computer lease is not active for status transition",
                     ));
@@ -487,7 +552,11 @@ impl AppState {
                     lease.heartbeat_at = Some(heartbeat_at);
                 }
                 if let Some(metadata) = input.metadata {
-                    lease.metadata = metadata;
+                    lease.metadata = if same_terminal_status && persist_same_status_metadata {
+                        merge_remote_computer_metadata(&existing.metadata, metadata)
+                    } else {
+                        metadata
+                    };
                 }
                 if let Some(reason) = input.reason {
                     lease.metadata["reason"] = json!(reason);
@@ -534,15 +603,27 @@ impl AppState {
                         "Remote computer lease is not active for heartbeat",
                     ));
                 }
-                if (status == "released" || status == "failed") && existing.status == status {
+                let same_terminal_status =
+                    matches!(status, "released" | "failed") && existing.status == status;
+                if same_terminal_status && !persist_same_status_metadata {
                     tx.commit().await?;
                     return Ok(existing);
                 }
-                if (status == "released" || status == "failed") && existing.status != "leased" {
+                if matches!(status, "released" | "failed")
+                    && existing.status != "leased"
+                    && !same_terminal_status
+                {
                     return Err(AppError::bad_request(
                         "Remote computer lease is not active for status transition",
                     ));
                 }
+                let metadata = input.metadata.map(|metadata| {
+                    if same_terminal_status && persist_same_status_metadata {
+                        merge_remote_computer_metadata(&existing.metadata, metadata)
+                    } else {
+                        metadata
+                    }
+                });
                 let row = sqlx::query(
                     "UPDATE remote_computer_leases
                      SET status = $1,
@@ -557,7 +638,7 @@ impl AppState {
                 )
                 .bind(status)
                 .bind(heartbeat_at)
-                .bind(input.metadata)
+                .bind(metadata)
                 .bind(input.reason)
                 .bind(now)
                 .bind(self.current_tenant_id())
@@ -602,6 +683,44 @@ impl AppState {
                 }
                 tx.commit().await?;
                 Ok(lease)
+            }
+        }
+    }
+
+    pub(crate) async fn schedule_remote_computer_lease_cleanup_retry(
+        &self,
+        lease_id: Uuid,
+        metadata: serde_json::Value,
+    ) -> Result<RemoteComputerLease, AppError> {
+        let now = Utc::now();
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let lease = store
+                    .remote_computer_leases
+                    .get_mut(&lease_id)
+                    .filter(|lease| lease.status == "leased")
+                    .ok_or_else(|| AppError::not_found("active Remote Computer lease not found"))?;
+                lease.lease_expires_at = Some(now);
+                lease.metadata = metadata;
+                lease.updated_at = now;
+                Ok(lease.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE remote_computer_leases
+                     SET lease_expires_at = $1, metadata = $2, updated_at = $1
+                     WHERE tenant_id = $3 AND id = $4 AND status = 'leased'
+                     RETURNING id, remote_computer_id, session_id, status, worker_id, lease_expires_at, heartbeat_at, metadata, created_at, updated_at",
+                )
+                .bind(now)
+                .bind(metadata)
+                .bind(self.current_tenant_id())
+                .bind(lease_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("active Remote Computer lease not found"))?;
+                remote_computer_lease_from_row(row)
             }
         }
     }
@@ -815,7 +934,7 @@ impl AppState {
                     })?;
                 assignment.status = status.to_string();
                 assignment.metadata =
-                    merge_remote_computer_assignment_metadata(&assignment.metadata, metadata);
+                    merge_remote_computer_metadata(&assignment.metadata, metadata);
                 assignment.updated_at = now;
                 Ok(assignment.clone())
             }
@@ -874,7 +993,7 @@ impl AppState {
                     })?;
                 assignment.status = status.to_string();
                 assignment.metadata =
-                    merge_remote_computer_assignment_metadata(&assignment.metadata, metadata);
+                    merge_remote_computer_metadata(&assignment.metadata, metadata);
                 assignment.updated_at = now;
                 Ok(assignment.clone())
             }
@@ -1600,7 +1719,7 @@ fn normalize_remote_computer_lock_key(lock_key: &str) -> Result<String, AppError
     Ok(lock_key.to_string())
 }
 
-fn merge_remote_computer_assignment_metadata(
+fn merge_remote_computer_metadata(
     existing: &serde_json::Value,
     patch: serde_json::Value,
 ) -> serde_json::Value {
