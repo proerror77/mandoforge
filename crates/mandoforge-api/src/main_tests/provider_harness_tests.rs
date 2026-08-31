@@ -202,11 +202,42 @@ async fn persisted_harness_task_grant(state: &AppState, session: &Session) -> Ta
         .expect("create provider harness workflow run");
     let mut grant = harness_task_grant(session.id, session.agent_id);
     grant.workflow_run_id = run.id;
+    let step_id = Uuid::new_v4();
+    grant.workflow_step_run_id = Some(step_id);
     grant.tool_scope = json!({"write": ["ontology.action.execute"]});
+    let step = WorkflowStepRun {
+        id: step_id,
+        workflow_run_id: run.id,
+        step_key: format!("provider-harness-{}", Uuid::new_v4()),
+        step_type: "agent".to_string(),
+        agent_id: Some(session.agent_id),
+        agent_version_id: None,
+        session_id: Some(session.id),
+        thread_id: None,
+        handoff_id: None,
+        task_grant_id: Some(grant.id),
+        environment_id: None,
+        status: "running".to_string(),
+        input_payload: empty_json_object(),
+        output_payload: empty_json_object(),
+        artifact_ids: Vec::new(),
+        approval_ids: Vec::new(),
+        tool_call_ids: Vec::new(),
+        claimed_by_worker: None,
+        claim_owner_version: 0,
+        lease_expires_at: None,
+        context_packet_id: None,
+        started_at: Some(now),
+        completed_at: None,
+        scheduled_at: None,
+        created_at: now,
+        updated_at: now,
+    };
     state
-        .create_task_grant(grant)
+        .create_workflow_step_run_with_task_grant(step, grant)
         .await
-        .expect("create provider harness TaskGrant")
+        .expect("create provider harness step and TaskGrant")
+        .1
 }
 
 async fn set_harness_task_grant_expiry(
@@ -234,6 +265,59 @@ async fn set_harness_task_grant_expiry(
             .execute(pool)
             .await
             .expect("update provider harness TaskGrant expiry");
+        }
+    }
+}
+
+async fn set_harness_workflow_run_status(state: &AppState, grant: &TaskGrant, status: &str) {
+    match &state.store {
+        StoreBackend::Memory(store) => {
+            let mut store = store.write().await;
+            let run = store
+                .workflow_runs
+                .get_mut(&grant.workflow_run_id)
+                .expect("provider harness workflow run");
+            run.status = status.to_string();
+            run.updated_at = Utc::now();
+        }
+        StoreBackend::Postgres(pool) => {
+            sqlx::query(
+                "UPDATE workflow_runs SET status = $1, updated_at = now() WHERE tenant_id = $2 AND id = $3",
+            )
+            .bind(status)
+            .bind(state.tenant_id)
+            .bind(grant.workflow_run_id)
+            .execute(pool)
+            .await
+            .expect("update provider harness workflow run status");
+        }
+    }
+}
+
+async fn set_harness_workflow_step_status(state: &AppState, grant: &TaskGrant, status: &str) {
+    let step_id = grant
+        .workflow_step_run_id
+        .expect("provider harness workflow step");
+    match &state.store {
+        StoreBackend::Memory(store) => {
+            let mut store = store.write().await;
+            let step = store
+                .workflow_step_runs
+                .get_mut(&step_id)
+                .expect("provider harness workflow step");
+            step.status = status.to_string();
+            step.updated_at = Utc::now();
+        }
+        StoreBackend::Postgres(pool) => {
+            sqlx::query(
+                "UPDATE workflow_step_runs SET status = $1, updated_at = now() WHERE tenant_id = $2 AND id = $3",
+            )
+            .bind(status)
+            .bind(state.tenant_id)
+            .bind(step_id)
+            .execute(pool)
+            .await
+            .expect("update provider harness workflow step status");
         }
     }
 }
@@ -429,6 +513,50 @@ async fn assert_approved_ontology_proposal_commits_as_one_record_set(
     assert!(!error.execution_retry_safe);
     assert!(error.message.contains("revoked"));
     set_harness_ontology_release_status(state, release.id, ONTOLOGY_RELEASE_STATUS_ACTIVE).await;
+    set_harness_workflow_run_status(state, &grant, "canceled").await;
+    let error = state
+        .commit_approved_ontology_action_proposal(
+            &executing,
+            approval.id,
+            artifact.clone(),
+            proposal_details.clone(),
+            result.clone(),
+        )
+        .await
+        .expect_err("terminal workflow run must block proposal commit");
+    assert!(error.execution_outcome_known);
+    assert!(error.message.contains("workflow run is not active"));
+    set_harness_workflow_run_status(state, &grant, "running").await;
+    set_harness_workflow_step_status(state, &grant, "canceled").await;
+    let error = state
+        .commit_approved_ontology_action_proposal(
+            &executing,
+            approval.id,
+            artifact.clone(),
+            proposal_details.clone(),
+            result.clone(),
+        )
+        .await
+        .expect_err("terminal workflow step must block proposal commit");
+    assert!(error.execution_outcome_known);
+    assert!(error.message.contains("workflow step run is terminal"));
+    set_harness_workflow_step_status(state, &grant, "running").await;
+    assert!(
+        state
+            .list_artifacts(session.id)
+            .await
+            .expect("artifacts after terminal workflow denials")
+            .iter()
+            .all(|stored| stored.id != artifact.id)
+    );
+    assert_eq!(
+        state
+            .get_tool_call(tool_call.id)
+            .await
+            .expect("waiting ontology action after terminal workflow denials")
+            .status,
+        "waiting_approval"
+    );
     if let StoreBackend::Postgres(pool) = &state.store {
         let mut invocation_lock = pool.begin().await.expect("begin invocation lock");
         sqlx::query(
@@ -1043,15 +1171,7 @@ async fn completion_and_tool_invocation_start_are_session_atomic() {
         .agent_version_for_session(session.id)
         .await
         .expect("agent version");
-    let grant = harness_task_grant(session.id, session.agent_id);
-    let StoreBackend::Memory(store) = &state.store else {
-        panic!("memory harness");
-    };
-    store
-        .write()
-        .await
-        .task_grants
-        .insert(grant.id, grant.clone());
+    let grant = persisted_harness_task_grant(&state, &session).await;
     let mut running_call = waiting_ontology_action_call(session.id);
     running_call.event_id = Some(Uuid::new_v4());
     running_call.tool_name = "file.read".to_string();
@@ -1112,6 +1232,73 @@ async fn completion_and_tool_invocation_start_are_session_atomic() {
         .iter()
         .any(|call| matches!(call.status.as_str(), "running" | "waiting_approval"));
     assert!(!matches!(session.status, SessionStatus::Terminated) || !unresolved);
+}
+
+async fn assert_terminal_workflow_blocks_tool_invocation_start(
+    state: &AppState,
+    session: &Session,
+) {
+    let agent_version = state
+        .agent_version_for_session(session.id)
+        .await
+        .expect("agent version");
+    let grant = persisted_harness_task_grant(state, session).await;
+    let candidate = || {
+        let mut tool_call = waiting_ontology_action_call(session.id);
+        tool_call.event_id = Some(Uuid::new_v4());
+        tool_call.task_grant_id = Some(grant.id);
+        tool_call.status = "running".to_string();
+        tool_call.policy_decision = json!({"decision": "allowed"});
+        tool_call.started_at = Some(Utc::now());
+        tool_call
+    };
+
+    set_harness_workflow_run_status(state, &grant, "canceled").await;
+    let run_denied = candidate();
+    let error = state
+        .commit_tool_invocation_start(run_denied.clone(), agent_version.id, agent_version.version)
+        .await
+        .expect_err("terminal workflow run must block tool invocation commit");
+    assert!(error.message.contains("workflow run is not active"));
+    set_harness_workflow_run_status(state, &grant, "running").await;
+
+    set_harness_workflow_step_status(state, &grant, "canceled").await;
+    let step_denied = candidate();
+    let error = state
+        .commit_tool_invocation_start(step_denied.clone(), agent_version.id, agent_version.version)
+        .await
+        .expect_err("terminal workflow step must block tool invocation commit");
+    assert!(error.message.contains("workflow step run is terminal"));
+    set_harness_workflow_step_status(state, &grant, "running").await;
+
+    assert_eq!(
+        state
+            .get_task_grant(grant.id)
+            .await
+            .expect("TaskGrant after denied invocation commits")
+            .tool_calls_used,
+        0
+    );
+    assert!(state.get_tool_call(run_denied.id).await.is_err());
+    assert!(state.get_tool_call(step_denied.id).await.is_err());
+    let events = state.list_events(session.id).await.expect("session events");
+    assert!(events.iter().all(|event| {
+        event.id != run_denied.event_id.expect("run denial event id")
+            && event.id != step_denied.event_id.expect("step denial event id")
+    }));
+}
+
+#[tokio::test]
+async fn terminal_workflow_blocks_tool_invocation_start_in_memory() {
+    let (state, session) = harness_test_session().await;
+    assert_terminal_workflow_blocks_tool_invocation_start(&state, &session).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MANDOFORGE_TEST_POSTGRES_URL"]
+async fn terminal_workflow_blocks_tool_invocation_start_in_postgres() {
+    let (state, session) = postgres_harness_test_session().await;
+    assert_terminal_workflow_blocks_tool_invocation_start(&state, &session).await;
 }
 
 async fn assert_tool_result_publishes_after_terminal_status(state: &AppState, session: &Session) {

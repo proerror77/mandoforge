@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 #[cfg(test)]
 use crate::ontology_action_name_from_args;
-use crate::store_backend::StoreBackend;
+use crate::store_backend::{MemoryStore, StoreBackend};
 use crate::store_events::{POSTGRES_SESSION_EVENT_CHANNEL, session_event_notify_payload};
 use crate::store_rows::{task_grant_from_row, tool_call_from_row};
 use crate::store_workflows::{
@@ -15,8 +15,105 @@ use crate::store_workflows::{
 };
 use crate::{
     AppError, AppState, Artifact, AuditLog, SessionEvent, SessionStatus, TaskGrant, ToolCall,
-    new_audit_log, ontology_release_current_status,
+    new_audit_log, ontology_release_current_status, workflow_run_execution_denial,
+    workflow_step_status_terminal,
 };
+
+fn validate_memory_task_grant_workflow(
+    store: &MemoryStore,
+    grant: &TaskGrant,
+) -> Result<(), AppError> {
+    let run = store
+        .workflow_runs
+        .get(&grant.workflow_run_id)
+        .ok_or_else(|| AppError::not_found("workflow run not found"))?;
+    if let Some(message) = workflow_run_execution_denial(&run.status) {
+        return Err(AppError::forbidden(message));
+    }
+    if let Some(step_id) = grant.workflow_step_run_id {
+        let step = store
+            .workflow_step_runs
+            .get(&step_id)
+            .ok_or_else(|| AppError::not_found("workflow step run not found"))?;
+        if step.workflow_run_id != grant.workflow_run_id {
+            return Err(AppError::bad_request(
+                "task grant workflow step does not belong to its workflow run",
+            ));
+        }
+        if workflow_step_status_terminal(&step.status) {
+            return Err(AppError::forbidden("workflow step run is terminal"));
+        }
+    }
+    Ok(())
+}
+
+async fn lock_postgres_workflow_run_for_task_grant(
+    connection: &mut sqlx::PgConnection,
+    tenant_id: Uuid,
+    grant_id: Uuid,
+) -> Result<Uuid, AppError> {
+    let workflow_run_id = sqlx::query_scalar::<_, Uuid>(
+        "SELECT workflow_run_id
+         FROM task_grants
+         WHERE tenant_id = $1 AND id = $2",
+    )
+    .bind(tenant_id)
+    .bind(grant_id)
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or_else(|| AppError::not_found("task grant not found"))?;
+    let status = sqlx::query_scalar::<_, String>(
+        "SELECT status
+         FROM workflow_runs
+         WHERE tenant_id = $1 AND id = $2
+         FOR UPDATE",
+    )
+    .bind(tenant_id)
+    .bind(workflow_run_id)
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or_else(|| AppError::not_found("workflow run not found"))?;
+    if let Some(message) = workflow_run_execution_denial(&status) {
+        return Err(AppError::forbidden(message));
+    }
+    Ok(workflow_run_id)
+}
+
+async fn validate_postgres_task_grant_step(
+    connection: &mut sqlx::PgConnection,
+    tenant_id: Uuid,
+    workflow_run_id: Uuid,
+    grant: &TaskGrant,
+) -> Result<(), AppError> {
+    if grant.workflow_run_id != workflow_run_id {
+        return Err(AppError::bad_request(
+            "task grant lineage crosses workflow runs",
+        ));
+    }
+    let Some(step_id) = grant.workflow_step_run_id else {
+        return Ok(());
+    };
+    let step = sqlx::query_as::<_, (Uuid, String)>(
+        "SELECT workflow_run_id, status
+         FROM workflow_step_runs
+         WHERE tenant_id = $1 AND id = $2
+         FOR UPDATE",
+    )
+    .bind(tenant_id)
+    .bind(step_id)
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or_else(|| AppError::not_found("workflow step run not found"))?;
+    if step.0 != workflow_run_id {
+        return Err(AppError::bad_request(
+            "task grant workflow step does not belong to its workflow run",
+        ));
+    }
+    if workflow_step_status_terminal(&step.1) {
+        return Err(AppError::forbidden("workflow step run is terminal"));
+    }
+    Ok(())
+}
 
 fn invocation_event(
     id: Uuid,
@@ -360,6 +457,7 @@ impl AppState {
                             }
                             return Err(AppError::forbidden(message));
                         }
+                        validate_memory_task_grant_workflow(&store, grant)?;
                         grant.tool_calls_used.checked_add(1).ok_or_else(|| {
                             AppError::bad_request("task grant tool call counter overflow")
                         })?;
@@ -428,6 +526,9 @@ impl AppState {
                 }
                 let task_grant = if let Some(grant_id) = tool_call.task_grant_id {
                     let now = Utc::now();
+                    let workflow_run_id =
+                        lock_postgres_workflow_run_for_task_grant(&mut *tx, tenant_id, grant_id)
+                            .await?;
                     let select_sql = format!(
                         "SELECT {TASK_GRANT_COLUMNS}
                          FROM task_grants
@@ -470,6 +571,13 @@ impl AppState {
                             }
                             return Err(AppError::forbidden(message));
                         }
+                        validate_postgres_task_grant_step(
+                            &mut *tx,
+                            tenant_id,
+                            workflow_run_id,
+                            grant,
+                        )
+                        .await?;
                         grant.tool_calls_used.checked_add(1).ok_or_else(|| {
                             AppError::bad_request("task grant tool call counter overflow")
                         })?;
@@ -805,6 +913,8 @@ impl AppState {
                     if let Some((message, _)) = task_grant_runtime_denial(grant, Utc::now()) {
                         return Err(AppError::forbidden(message).with_known_execution_outcome());
                     }
+                    validate_memory_task_grant_workflow(&store, grant)
+                        .map_err(AppError::with_known_execution_outcome)?;
                     current_id = grant.parent_grant_id;
                 }
                 if !store.sessions.contains_key(&artifact.session_id) {
@@ -941,6 +1051,19 @@ impl AppState {
                         )
                         .with_known_execution_outcome()
                     })?;
+                    let workflow_run_id = lock_postgres_workflow_run_for_task_grant(
+                        &mut *tx,
+                        tenant_id,
+                        grant_id,
+                    )
+                    .await
+                    .map_err(|error| {
+                        if error.status.is_client_error() {
+                            error.with_known_execution_outcome()
+                        } else {
+                            error
+                        }
+                    })?;
                     let select_grant_sql = format!(
                         "SELECT {TASK_GRANT_COLUMNS}
                          FROM task_grants
@@ -971,6 +1094,20 @@ impl AppState {
                                 AppError::forbidden(message).with_known_execution_outcome()
                             );
                         }
+                        validate_postgres_task_grant_step(
+                            &mut *tx,
+                            tenant_id,
+                            workflow_run_id,
+                            &grant,
+                        )
+                        .await
+                        .map_err(|error| {
+                            if error.status.is_client_error() {
+                                error.with_known_execution_outcome()
+                            } else {
+                                error
+                            }
+                        })?;
                         current_id = grant.parent_grant_id;
                     }
                     let (mut events, audits) = approved_ontology_action_proposal_records(
