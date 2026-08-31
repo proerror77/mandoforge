@@ -9,7 +9,8 @@ use crate::{
     RemoteComputerRunnerReadiness, RemoteComputerSidecarHeartbeat,
     RemoteComputerSidecarRecoveryReadiness, RemoteComputerSidecarRecoveryRun,
     RemoteComputerSidecarRecoveryTarget, RemoteComputerSidecarSupervisionReadiness,
-    env_bool_lookup, env_i64, new_audit_log, remote_computer_runner_for_config,
+    controller_response_json, env_bool_lookup, env_i64, new_audit_log,
+    remote_computer_runner_for_config, required_controller_status,
 };
 
 pub(crate) async fn execute_remote_computer_sidecar_recovery(
@@ -153,11 +154,7 @@ where
     if validation_controller_configured && run.attempted_replacement_count > 0 {
         match execute_remote_computer_sidecar_validation_controller(&lookup, &run).await {
             Ok(validation) => {
-                let validation_status = validation
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .unwrap_or("failed")
-                    .to_string();
+                let validation_status = required_controller_status(&validation)?.to_string();
                 run.validation_result = validation;
                 if validation_status != "validated" && run.status == "completed" {
                     run.status = "attention".to_string();
@@ -260,17 +257,9 @@ where
         request = request.bearer_auth(token);
     }
     let response = request.send().await?;
-    let http_status = response.status();
-    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
-    if !http_status.is_success() {
-        return Err(AppError::bad_request(format!(
-            "remote computer sidecar validation controller failed with status {http_status}"
-        )));
-    }
-    let controller_status = body
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("validated");
+    let (http_status, body) =
+        controller_response_json(response, "remote computer sidecar validation controller").await?;
+    let controller_status = required_controller_status(&body)?;
     let validated = matches!(
         controller_status,
         "validated" | "healthy" | "success" | "ok"

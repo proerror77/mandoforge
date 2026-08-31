@@ -3875,6 +3875,15 @@ if grep -R "production_blocked // true" scripts/policy-rollout-evidence-gate.sh 
   exit 1
 fi
 
+if grep -E 'latest_status // "delivered"|\.status // "ok"' \
+  scripts/finance-evidence-gate.sh \
+  scripts/approval-notification-evidence-gate.sh \
+  scripts/stage2-completion-audit-gate.sh \
+  scripts/verify-stage2-evidence-archive.sh >/dev/null; then
+  echo "Stage 2 evidence scripts must not infer successful delivery from a missing status" >&2
+  exit 1
+fi
+
 if ! grep -q "COPY deploy ./deploy" Dockerfile; then
   echo "Runtime image must package deploy metadata for in-cluster completion audits" >&2
   exit 1

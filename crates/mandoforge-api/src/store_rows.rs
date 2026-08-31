@@ -9,11 +9,11 @@ use crate::{
     CostAlertRoute, Environment, EvalCase, EvalDataset, EvalRun, ManagerAgentPlan, McpServerRecord,
     Membership, MemoryWritebackCandidate, OntologyRelease, Organization, PolicyRevision, Project,
     ProviderAccess, ProviderRecord, SecretRecord, SemanticLink, SemanticObject, SemanticSource,
-    Session, SessionEvent, SessionLoopJob, SessionLoopJobStatus, SessionThread, Squad, SquadMember,
-    TaskGrant, Team, TenantInvitation, ToolCall, UsageRollup, WorkItem, WorkItemActivityEntry,
-    WorkItemAssignment, WorkItemReview, WorkflowDefinition, WorkflowPackBinding,
-    WorkflowPackInstallation, WorkflowPackProfileAsset, WorkflowPackRuntimeObject, WorkflowRun,
-    WorkflowStepRun, WorkflowTransition,
+    SessionLoopJobStatus, SessionStatus, SessionThread, Squad, SquadMember, TaskGrant, Team,
+    TenantInvitation, ToolCall, UsageRollup, WorkItem, WorkItemActivityEntry, WorkItemAssignment,
+    WorkItemReview, WorkflowDefinition, WorkflowPackBinding, WorkflowPackInstallation,
+    WorkflowPackProfileAsset, WorkflowPackRuntimeObject, WorkflowRun, WorkflowStepRun,
+    WorkflowTransition,
 };
 
 fn json_array_from_row<T: serde::de::DeserializeOwned>(
@@ -68,7 +68,7 @@ pub(crate) fn session_from_row(row: PgRow) -> Result<Session, AppError> {
         agent_version_id: row.try_get("agent_version_id")?,
         environment_id: row.try_get("environment_id").unwrap_or(None),
         title: row.try_get("title")?,
-        status: status.into(),
+        status: SessionStatus::try_from(status.as_str())?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
@@ -80,7 +80,7 @@ pub(crate) fn session_loop_job_from_row(row: PgRow) -> Result<SessionLoopJob, Ap
         id: row.try_get("id")?,
         session_id: row.try_get("session_id")?,
         environment_id: row.try_get("environment_id")?,
-        status: SessionLoopJobStatus::from(status),
+        status: SessionLoopJobStatus::try_from(status.as_str())?,
         trigger_event_id: row.try_get("trigger_event_id")?,
         pending_event_seq_start: row.try_get("pending_event_seq_start")?,
         pending_event_seq_end: row.try_get("pending_event_seq_end")?,

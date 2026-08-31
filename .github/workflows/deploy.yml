@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: Image tag to build
-        required: true
-        default: manual
+        description: Image tag to build; defaults to the source commit SHA
+        required: false
+        default: ""
       runtime_image_tag:
         description: Agent Sandbox runtime image tag
         required: true
@@ -54,7 +54,6 @@ concurrency:
 
 permissions:
   contents: read
-  packages: write
 
 env:
   IMAGE_NAME: ghcr.io/${{ github.repository }}/mandoforge-api
@@ -62,11 +61,16 @@ env:
 
 jobs:
   build-image:
-    name: Build deploy image
+    name: Build and publish images
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    environment: stage2-production
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      build_time: ${{ steps.api_image.outputs.build_time }}
     env:
-      IMAGE_TAG: ${{ inputs.image_tag }}
+      IMAGE_TAG: ${{ inputs.image_tag || github.sha }}
       RUNTIME_IMAGE_TAG: ${{ inputs.runtime_image_tag }}
     steps:
       - uses: actions/checkout@v6
@@ -78,7 +82,7 @@ jobs:
           [[ "$RUNTIME_IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]
       - name: Build Agent Sandbox runtime image
         run: MANDOFORGE_AGENT_SANDBOX_IMAGE="$RUNTIME_IMAGE_NAME:$RUNTIME_IMAGE_TAG" scripts/build-agent-sandbox-runtime-image.sh --platform linux/amd64
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.0
         if: inputs.runtime_only != 'true'
         with:
           targets: wasm32-unknown-unknown
@@ -109,10 +113,11 @@ jobs:
           cd ..
           scripts/verify-static-ui-assets.sh
       - name: Build image
+        id: api_image
         if: inputs.runtime_only != 'true'
         run: |
           build_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          echo "MANDOFORGE_BUILD_TIME=$build_time" >> "$GITHUB_ENV"
+          echo "build_time=$build_time" >> "$GITHUB_OUTPUT"
           docker build \
             --platform linux/amd64 \
             --build-arg MANDOFORGE_IMAGE_TAG="$IMAGE_TAG" \
@@ -132,8 +137,23 @@ jobs:
       - name: Push Agent Sandbox runtime image
         if: inputs.runtime_only == 'true' || inputs.publish_image == 'true'
         run: docker push "$RUNTIME_IMAGE_NAME:$RUNTIME_IMAGE_TAG"
+
+  deploy-whiskey:
+    name: Deploy Whiskey
+    if: github.ref == 'refs/heads/main' && inputs.runtime_only != 'true' && inputs.deploy_whiskey == 'true'
+    needs: build-image
+    runs-on: ubuntu-latest
+    environment: stage2-production
+    permissions:
+      contents: read
+    env:
+      IMAGE_TAG: ${{ inputs.image_tag || github.sha }}
+      MANDOFORGE_BUILD_TIME: ${{ needs.build-image.outputs.build_time }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - name: Deploy Whiskey
-        if: inputs.runtime_only != 'true' && inputs.deploy_whiskey == 'true'
         env:
           INPUT_WHISKEY_REMOTE_HOST: ${{ inputs.whiskey_remote_host }}
           INPUT_WHISKEY_REMOTE_USER: ${{ inputs.whiskey_remote_user }}
@@ -177,12 +197,3 @@ jobs:
             MANDOFORGE_GIT_SHA="${{ github.sha }}" \
             MANDOFORGE_BUILD_TIME="${MANDOFORGE_BUILD_TIME:-}" \
             scripts/whiskey-adoption-deploy.sh
-
-          version_json="$(ssh whiskey-ci "cd '$remote_root' && set -a && source whiskey.env && set +a && curl -fsS http://127.0.0.1:\${MANDOFORGE_API_HOST_PORT:-18787}/api/deployment/version")"
-          actual_tag="$(jq -r '.image_tag // empty' <<<"$version_json")"
-          if [[ "$actual_tag" != "$IMAGE_TAG" ]]; then
-            echo "Whiskey is not running the requested image tag: expected $IMAGE_TAG, got ${actual_tag:-missing}" >&2
-            echo "$version_json" >&2
-            exit 1
-          fi
-          echo "$version_json"

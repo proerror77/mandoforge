@@ -90,17 +90,9 @@ where
         request = request.bearer_auth(token);
     }
     let response = request.send().await?;
-    let http_status = response.status();
-    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
-    if !http_status.is_success() {
-        return Err(AppError::bad_request(format!(
-            "observability collector deployment controller failed with status {http_status}"
-        )));
-    }
-    let controller_status = body
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("validated");
+    let (http_status, body) =
+        controller_response_json(response, "observability collector deployment controller").await?;
+    let controller_status = required_controller_status(&body)?;
     let validated = matches!(
         controller_status,
         "validated" | "deployed" | "healthy" | "success" | "ok"
@@ -187,17 +179,9 @@ where
         request = request.bearer_auth(token);
     }
     let response = request.send().await?;
-    let http_status = response.status();
-    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
-    if !http_status.is_success() {
-        return Err(AppError::bad_request(format!(
-            "collector cluster rollout controller failed with status {http_status}"
-        )));
-    }
-    let provider_status = body
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("validated");
+    let (http_status, body) =
+        controller_response_json(response, "collector cluster rollout controller").await?;
+    let provider_status = required_controller_status(&body)?;
     let validated = matches!(provider_status, "validated" | "success" | "ok" | "healthy");
     Ok(json!({
         "attempted": true,
@@ -379,11 +363,7 @@ where
         .await
         {
             Ok(execution) => {
-                let execution_status = execution
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .unwrap_or("failed")
-                    .to_string();
+                let execution_status = required_controller_status(&execution)?.to_string();
                 controller_execution = execution;
                 actions.push("observability_remediation_controller_executed".to_string());
                 if execution_status != "remediated" {
@@ -476,17 +456,9 @@ where
         request = request.bearer_auth(token);
     }
     let response = request.send().await?;
-    let http_status = response.status();
-    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
-    if !http_status.is_success() {
-        return Err(AppError::bad_request(format!(
-            "observability remediation controller failed with status {http_status}"
-        )));
-    }
-    let controller_status = body
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("remediated");
+    let (http_status, body) =
+        controller_response_json(response, "observability remediation controller").await?;
+    let controller_status = required_controller_status(&body)?;
     let remediated = matches!(
         controller_status,
         "remediated" | "success" | "ok" | "validated"

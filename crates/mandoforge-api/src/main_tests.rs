@@ -9680,7 +9680,7 @@ async fn semantic_collections_filter_project_scoped_resources() {
         ),
     )
     .await;
-    let partial_owner_source: SemanticSource = request_json(
+    let (partial_owner_status, partial_owner_error) = request_value(
         app.clone(),
         json_request_with_headers(
             "POST",
@@ -9695,6 +9695,36 @@ async fn semantic_collections_filter_project_scoped_resources() {
         ),
     )
     .await;
+    assert_eq!(partial_owner_status, StatusCode::BAD_REQUEST);
+    assert!(
+        partial_owner_error["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("owner_type and owner_id must be provided together")
+    );
+    let (unknown_owner_status, unknown_owner_error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/semantic-sources",
+            json!({
+                "source_type": "repo_doc",
+                "source_uri": "repo://unknown-owner/semantic.md",
+                "display_name": "Unknown Owner Semantic Source",
+                "owner_type": "future_scope",
+                "owner_id": Uuid::new_v4()
+            }),
+            &admin_headers,
+        ),
+    )
+    .await;
+    assert_eq!(unknown_owner_status, StatusCode::BAD_REQUEST);
+    assert!(
+        unknown_owner_error["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("owner_type is not supported")
+    );
     let visible_object: SemanticObject = request_json(
         app.clone(),
         json_request_with_headers(
@@ -9706,24 +9736,6 @@ async fn semantic_collections_filter_project_scoped_resources() {
                 "object_key": "decision:visible-semantic-scope",
                 "title": "Visible semantic scope",
                 "summary": "Visible to the project member.",
-                "trust_level": "human_verified",
-                "freshness": "current"
-            }),
-            &admin_headers,
-        ),
-    )
-    .await;
-    let partial_owner_object: SemanticObject = request_json(
-        app.clone(),
-        json_request_with_headers(
-            "POST",
-            "/api/semantic-objects",
-            json!({
-                "source_id": partial_owner_source.id,
-                "object_type": "decision",
-                "object_key": "decision:partial-owner-semantic-scope",
-                "title": "Partial owner semantic scope",
-                "summary": "Hidden because the source owner is incomplete.",
                 "trust_level": "human_verified",
                 "freshness": "current"
             }),
@@ -9844,11 +9856,6 @@ async fn semantic_collections_filter_project_scoped_resources() {
     .await;
     assert!(sources.iter().any(|source| source.id == visible_source.id));
     assert!(!sources.iter().any(|source| source.id == hidden_source.id));
-    assert!(
-        !sources
-            .iter()
-            .any(|source| source.id == partial_owner_source.id)
-    );
 
     let objects: Vec<SemanticObject> = request_json(
         app.clone(),
@@ -9865,11 +9872,6 @@ async fn semantic_collections_filter_project_scoped_resources() {
     assert!(
         !objects
             .iter()
-            .any(|object| object.id == partial_owner_object.id)
-    );
-    assert!(
-        !objects
-            .iter()
             .any(|object| object.id == unresolved_text_scoped_object.id)
     );
 
@@ -9883,7 +9885,7 @@ async fn semantic_collections_filter_project_scoped_resources() {
     assert!(!links.iter().any(|link| link.id == non_object_link.id));
 
     let (status, hidden_error) = request_value(
-        app,
+        app.clone(),
         Request::builder()
             .uri(format!("/api/semantic-objects/{}", hidden_object.id))
             .header("x-mandoforge-subject", "semantic-project-viewer")
@@ -9898,6 +9900,19 @@ async fn semantic_collections_filter_project_scoped_resources() {
             .unwrap_or_default()
             .contains("no membership")
     );
+
+    let repaired_source: SemanticSource = request_json(
+        app,
+        json_request_with_headers(
+            "PATCH",
+            &format!("/api/semantic-sources/{}", visible_source.id),
+            json!({"owner_type": null, "owner_id": null}),
+            &admin_headers,
+        ),
+    )
+    .await;
+    assert!(repaired_source.owner_type.is_none());
+    assert!(repaired_source.owner_id.is_none());
 }
 
 #[tokio::test]
@@ -13367,6 +13382,55 @@ async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() 
     assert_eq!(old_after_update.status, "rolled_back");
     assert_eq!(old_after_update.released_at, released.released_at);
 
+    let archived_owner_source: SemanticSource = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/semantic-sources",
+            json!({
+                "source_type": "workflow_pack",
+                "source_uri": "pack://ai-governance/0.1.0",
+                "display_name": "Archived workflow pack source",
+                "owner_type": "workflow_pack_installation",
+                "owner_id": installed.id
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let archived_owner_object: SemanticObject = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/semantic-objects",
+            json!({
+                "source_id": archived_owner_source.id,
+                "object_type": "policy",
+                "object_key": "policy:archived-workflow-pack",
+                "title": "Archived workflow pack policy",
+                "summary": "Visible only while its owning installation is active.",
+                "trust_level": "human_verified",
+                "freshness": "current"
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let viewer_headers = [
+        ("x-mandoforge-subject", "archived-pack-viewer"),
+        ("x-mandoforge-roles", "viewer"),
+    ];
+    let active_sources: Vec<SemanticSource> = request_json(
+        app.clone(),
+        json_request_with_headers("GET", "/api/semantic-sources", json!({}), &viewer_headers),
+    )
+    .await;
+    assert!(
+        active_sources
+            .iter()
+            .any(|source| source.id == archived_owner_source.id)
+    );
+
     let archived: WorkflowPackInstallation = request_json(
         app.clone(),
         json_request_with_headers(
@@ -13380,6 +13444,26 @@ async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() 
     assert_eq!(archived.status, "archived");
     assert!(archived.archived_at.is_some());
     assert_eq!(archived.released_at, released.released_at);
+    let visible_sources: Vec<SemanticSource> = request_json(
+        app.clone(),
+        json_request_with_headers("GET", "/api/semantic-sources", json!({}), &viewer_headers),
+    )
+    .await;
+    assert!(
+        !visible_sources
+            .iter()
+            .any(|source| source.id == archived_owner_source.id)
+    );
+    let visible_objects: Vec<SemanticObject> = request_json(
+        app.clone(),
+        json_request_with_headers("GET", "/api/semantic-objects", json!({}), &viewer_headers),
+    )
+    .await;
+    assert!(
+        !visible_objects
+            .iter()
+            .any(|object| object.id == archived_owner_object.id)
+    );
     let (status, definition_after_archive_error) = request_value(
         app.clone(),
         Request::builder()
@@ -20595,17 +20679,19 @@ fn session_statuses_use_managed_agent_lifecycle_names() {
     assert_eq!(SessionStatus::Terminated.as_str(), "terminated");
 
     assert_eq!(
-        SessionStatus::from("created".to_string()),
+        SessionStatus::try_from("created").expect("legacy status remains supported"),
         SessionStatus::Idle
     );
     assert_eq!(
-        SessionStatus::from("waiting_approval".to_string()),
+        SessionStatus::try_from("waiting_approval").expect("legacy status remains supported"),
         SessionStatus::RequiresAction
     );
     assert_eq!(
-        SessionStatus::from("completed".to_string()),
+        SessionStatus::try_from("completed").expect("legacy status remains supported"),
         SessionStatus::Terminated
     );
+    assert!(SessionStatus::try_from("future_status").is_err());
+    assert!(SessionLoopJobStatus::try_from("future_status").is_err());
 }
 
 async fn test_app() -> Router {
@@ -23747,6 +23833,14 @@ async fn agent_release_controller_executes_external_rollout_boundary() {
     let controller_addr = listener.local_addr().expect("release controller addr");
     let controller = Router::new()
         .route("/agent-release", post(mock_agent_release_controller))
+        .route(
+            "/agent-release-unavailable",
+            post(|| async { (StatusCode::SERVICE_UNAVAILABLE, "maintenance") }),
+        )
+        .route(
+            "/agent-release-missing-status",
+            post(|| async { Json(json!({"message": "status omitted"})) }),
+        )
         .with_state(payloads.clone());
     let controller_server = tokio::spawn(async move {
         axum::serve(listener, controller)
@@ -23789,6 +23883,31 @@ async fn agent_release_controller_executes_external_rollout_boundary() {
     assert_eq!(execution["status"], "promoted");
     assert_eq!(execution["deployment_id"], "agent-release-1");
     assert_eq!(execution["steps"].as_array().expect("steps").len(), 3);
+    let unavailable_lookup = |key: &str| match key {
+        "MANDOFORGE_AGENT_RELEASE_CONTROLLER_URL" => Some(format!(
+            "http://{controller_addr}/agent-release-unavailable"
+        )),
+        _ => None,
+    };
+    let unavailable_error =
+        execute_agent_release_controller(&unavailable_lookup, &release, Utc::now())
+            .await
+            .expect_err("non-success controller response must fail before JSON decoding");
+    assert_eq!(unavailable_error.status, StatusCode::BAD_REQUEST);
+    assert!(unavailable_error.message.contains("503"));
+
+    let missing_status_lookup = |key: &str| match key {
+        "MANDOFORGE_AGENT_RELEASE_CONTROLLER_URL" => Some(format!(
+            "http://{controller_addr}/agent-release-missing-status"
+        )),
+        _ => None,
+    };
+    let missing_status_error =
+        execute_agent_release_controller(&missing_status_lookup, &release, Utc::now())
+            .await
+            .expect_err("controller status is required");
+    assert_eq!(missing_status_error.status, StatusCode::BAD_GATEWAY);
+
     let payloads = payloads.lock().await;
     assert_eq!(payloads.len(), 1);
     assert_eq!(payloads[0]["type"], "mandoforge.agent_release_rollout");

@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use anyhow::Result;
 use chrono::Utc;
 use serde_json::{Value, json};
@@ -158,6 +160,31 @@ impl AppState {
                 .ok_or_else(|| AppError::not_found("workflow pack installation not found"))?;
                 workflow_pack_installation_from_row(row)
             }
+        }
+    }
+
+    pub(crate) async fn active_workflow_pack_installation_ids(
+        &self,
+    ) -> Result<HashSet<Uuid>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => Ok(inner
+                .read()
+                .await
+                .workflow_pack_installations
+                .values()
+                .filter(|installation| installation.archived_at.is_none())
+                .map(|installation| installation.id)
+                .collect()),
+            StoreBackend::Postgres(pool) => Ok(sqlx::query_scalar(
+                "SELECT id
+                 FROM workflow_pack_installations
+                 WHERE tenant_id = $1 AND archived_at IS NULL",
+            )
+            .bind(self.current_tenant_id())
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .collect()),
         }
     }
 

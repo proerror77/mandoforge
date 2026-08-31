@@ -267,6 +267,7 @@ async fn semantic_scopes_scope(
 async fn semantic_source_scope(
     state: &AppState,
     source: &SemanticSource,
+    active_workflow_pack_ids: Option<&HashSet<Uuid>>,
 ) -> Result<ResourceScope, AppError> {
     match (source.owner_type.as_deref(), source.owner_id) {
         (None, None) => return Ok(ResourceScope::Tenant),
@@ -293,7 +294,23 @@ async fn semantic_source_scope(
                 project_id: work_item.project_id,
             })
         }
-        _ => Ok(ResourceScope::Tenant),
+        "workflow_pack_installation" => {
+            if let Some(active_workflow_pack_ids) = active_workflow_pack_ids {
+                return Ok(if active_workflow_pack_ids.contains(&owner_id) {
+                    ResourceScope::Tenant
+                } else {
+                    ResourceScope::ScopedUnknown
+                });
+            }
+            match state.get_workflow_pack_installation(owner_id).await {
+                Ok(_) => Ok(ResourceScope::Tenant),
+                Err(error) if error.status == axum::http::StatusCode::NOT_FOUND => {
+                    Ok(ResourceScope::ScopedUnknown)
+                }
+                Err(error) => Err(error),
+            }
+        }
+        _ => Ok(ResourceScope::ScopedUnknown),
     }
 }
 
@@ -303,7 +320,7 @@ async fn semantic_object_scope(
 ) -> Result<ResourceScope, AppError> {
     if let Some(source_id) = object.source_id {
         let source = state.get_semantic_source(source_id).await?;
-        let scope = semantic_source_scope(state, &source).await?;
+        let scope = semantic_source_scope(state, &source, None).await?;
         if !matches!(scope, ResourceScope::Tenant) {
             return Ok(scope);
         }
@@ -321,7 +338,7 @@ async fn semantic_object_scope_with_source_scopes(
             Some(scope) => scope.clone(),
             None => {
                 let source = state.get_semantic_source(source_id).await?;
-                semantic_source_scope(state, &source).await?
+                semantic_source_scope(state, &source, None).await?
             }
         };
         if !matches!(scope, ResourceScope::Tenant) {
@@ -467,9 +484,13 @@ pub(crate) async fn visible_semantic_sources_for_principal(
         return Ok(sources);
     }
     let visible_session_ids = visible_session_ids_for_principal(state, principal).await?;
+    let source_scopes = semantic_source_scope_cache_for_sources(state, &sources).await?;
     let mut visible = Vec::new();
     for source in sources {
-        let scope = semantic_source_scope(state, &source).await?;
+        let scope = source_scopes
+            .get(&source.id)
+            .expect("scope cached for every semantic source")
+            .clone();
         if scope_visible_to_principal_with_sessions(
             state,
             principal,
@@ -581,9 +602,31 @@ pub(crate) async fn visible_semantic_links_for_principal(
 async fn semantic_source_scope_cache(
     state: &AppState,
 ) -> Result<HashMap<Uuid, ResourceScope>, AppError> {
+    let sources = state.list_semantic_sources().await?;
+    semantic_source_scope_cache_for_sources(state, &sources).await
+}
+
+async fn semantic_source_scope_cache_for_sources(
+    state: &AppState,
+    sources: &[SemanticSource],
+) -> Result<HashMap<Uuid, ResourceScope>, AppError> {
+    let active_workflow_pack_ids = if sources.iter().any(|source| {
+        source.owner_type.as_deref().is_some_and(|owner_type| {
+            owner_type
+                .trim()
+                .eq_ignore_ascii_case("workflow_pack_installation")
+        })
+    }) {
+        Some(state.active_workflow_pack_installation_ids().await?)
+    } else {
+        None
+    };
     let mut scopes = HashMap::new();
-    for source in state.list_semantic_sources().await? {
-        scopes.insert(source.id, semantic_source_scope(state, &source).await?);
+    for source in sources {
+        scopes.insert(
+            source.id,
+            semantic_source_scope(state, source, active_workflow_pack_ids.as_ref()).await?,
+        );
     }
     Ok(scopes)
 }
@@ -685,7 +728,7 @@ async fn resource_scope(
         }
         "semantic_source" => {
             let source = state.get_semantic_source(resource_id).await?;
-            semantic_source_scope(state, &source).await
+            semantic_source_scope(state, &source, None).await
         }
         "semantic_object" => {
             let object = state.get_semantic_object(resource_id).await?;
