@@ -24,6 +24,7 @@ pub(crate) async fn run_startup_migrations(
         .connect(&migration_database_url)
         .await
         .context("failed to connect to Postgres with the migration role")?;
+    verify_same_database(runtime_pool, &migration_pool).await?;
     let (migration_role, migration_bypasses_rls) = database_role(&migration_pool).await?;
     if !migration_bypasses_rls {
         bail!(
@@ -40,6 +41,46 @@ pub(crate) async fn run_startup_migrations(
     migration_pool.close().await;
     result?;
     verify_migrations_applied(runtime_pool, tenant_runtime_mode).await
+}
+
+pub(crate) async fn verify_same_database(
+    runtime_pool: &PgPool,
+    migration_pool: &PgPool,
+) -> Result<()> {
+    let identity_lock_id = Uuid::new_v4().as_u128() as i64;
+    let mut migration_transaction = migration_pool
+        .begin()
+        .await
+        .context("failed to begin migration database identity transaction")?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(identity_lock_id)
+        .execute(&mut *migration_transaction)
+        .await
+        .context("failed to mark the migration database identity")?;
+
+    let mut runtime_transaction = runtime_pool
+        .begin()
+        .await
+        .context("failed to begin runtime database identity transaction")?;
+    let runtime_acquired_identity_lock: bool =
+        sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+            .bind(identity_lock_id)
+            .fetch_one(&mut *runtime_transaction)
+            .await
+            .context("failed to compare runtime and migration database identities")?;
+    runtime_transaction
+        .rollback()
+        .await
+        .context("failed to release the runtime database identity transaction")?;
+    migration_transaction
+        .rollback()
+        .await
+        .context("failed to release the migration database identity transaction")?;
+
+    if runtime_acquired_identity_lock {
+        bail!("migration and runtime connections must target the same PostgreSQL database");
+    }
+    Ok(())
 }
 
 pub(crate) async fn verify_migrations_applied(

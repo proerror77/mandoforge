@@ -1,4 +1,7 @@
 use super::*;
+use std::str::FromStr;
+
+use sqlx::postgres::PgConnectOptions;
 
 #[tokio::test]
 async fn migration_paths_include_stage2_migrations_in_order() {
@@ -159,6 +162,49 @@ async fn postgres_migration_ledger_is_idempotent_and_rejects_checksum_drift() {
         .await
         .expect("remove test ledger row");
     fs::remove_dir_all(directory).expect("remove temporary migration directory");
+}
+
+#[tokio::test]
+#[ignore = "requires MANDOFORGE_TEST_POSTGRES_URL"]
+async fn postgres_migration_connection_must_target_runtime_database() -> Result<()> {
+    let database_url = std::env::var("MANDOFORGE_TEST_POSTGRES_URL")
+        .expect("MANDOFORGE_TEST_POSTGRES_URL is required");
+    let runtime_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await?;
+    let migration_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await?;
+
+    db_bootstrap::verify_same_database(&runtime_pool, &migration_pool).await?;
+
+    let runtime_database: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(&runtime_pool)
+        .await?;
+    let other_database = if runtime_database == "postgres" {
+        "template1"
+    } else {
+        "postgres"
+    };
+    let other_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(PgConnectOptions::from_str(&database_url)?.database(other_database))
+        .await?;
+    let error = db_bootstrap::verify_same_database(&runtime_pool, &other_pool)
+        .await
+        .expect_err("a migration connection to another database must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("must target the same PostgreSQL database")
+    );
+
+    other_pool.close().await;
+    migration_pool.close().await;
+    runtime_pool.close().await;
+    Ok(())
 }
 
 #[tokio::test]
