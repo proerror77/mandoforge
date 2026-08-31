@@ -9,11 +9,11 @@ use crate::{
     CostAlertRoute, Environment, EvalCase, EvalDataset, EvalRun, ManagerAgentPlan, McpServerRecord,
     Membership, MemoryWritebackCandidate, OntologyRelease, Organization, PolicyRevision, Project,
     ProviderAccess, ProviderRecord, SecretRecord, SemanticLink, SemanticObject, SemanticSource,
-    SessionLoopJobStatus, SessionStatus, SessionThread, Squad, SquadMember, TaskGrant, Team,
-    TenantInvitation, ToolCall, UsageRollup, WorkItem, WorkItemActivityEntry, WorkItemAssignment,
-    WorkItemReview, WorkflowDefinition, WorkflowPackBinding, WorkflowPackInstallation,
-    WorkflowPackProfileAsset, WorkflowPackRuntimeObject, WorkflowRun, WorkflowStepRun,
-    WorkflowTransition,
+    Session, SessionEvent, SessionLoopJob, SessionLoopJobStatus, SessionStatus, SessionThread,
+    Squad, SquadMember, TaskGrant, Team, TenantInvitation, ToolCall, UsageRollup, WorkItem,
+    WorkItemActivityEntry, WorkItemAssignment, WorkItemReview, WorkflowDefinition,
+    WorkflowPackBinding, WorkflowPackInstallation, WorkflowPackProfileAsset,
+    WorkflowPackRuntimeObject, WorkflowRun, WorkflowStepRun, WorkflowTransition,
 };
 
 fn json_array_from_row<T: serde::de::DeserializeOwned>(
