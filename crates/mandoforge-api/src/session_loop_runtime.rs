@@ -395,25 +395,60 @@ pub(crate) fn provider_completion_request(
 pub(crate) async fn apply_provider_completion(
     state: &AppState,
     session_id: Uuid,
+    task_grant_id: Option<Uuid>,
     status: &str,
     summary: &str,
 ) -> Result<Session, AppError> {
+    let args = json!({"status": status, "summary": summary});
+    let call_event = state
+        .append_event(
+            "tool",
+            None,
+            session_id,
+            "tool.call",
+            json!({"tool": "complete_task", "args": args}),
+        )
+        .await?;
+    let now = Utc::now();
+    let tool_call = state
+        .insert_tool_call(ToolCall {
+            id: Uuid::new_v4(),
+            session_id,
+            event_id: Some(call_event.id),
+            tool_name: "complete_task".to_string(),
+            args: args.clone(),
+            task_grant_id,
+            normalized_args_hash: None,
+            target_binding: empty_json_object(),
+            status: "completed".to_string(),
+            risk_level: "low".to_string(),
+            policy_decision: json!({
+                "decision": "allowed",
+                "reason": "terminal provider control tool",
+            }),
+            result: Some(args.clone()),
+            error: None,
+            started_at: Some(now),
+            completed_at: Some(now),
+            created_at: now,
+        })
+        .await?;
     state
         .append_event(
             "agent",
-            None,
+            Some(call_event.id),
             session_id,
             "agent.tool_use",
-            json!({"tool": "complete_task", "args": {"status": status, "summary": summary}}),
+            json!({"event_id": call_event.id, "tool_call_id": tool_call.id, "tool": "complete_task", "args": args}),
         )
         .await?;
     state
         .append_event(
             "tool",
-            None,
+            Some(tool_call.id),
             session_id,
             "tool.result",
-            json!({"tool": "complete_task", "origin": "session_loop", "content": {"status": status, "summary": summary}}),
+            json!({"tool_call_id": tool_call.id, "tool": "complete_task", "origin": "session_loop", "content": args}),
         )
         .await?;
     let event_type = if status == "completed" {
@@ -1244,7 +1279,8 @@ pub(crate) async fn run_session_loop(
     }
 
     if let Some((status, summary)) = completion {
-        return apply_provider_completion(state, id, &status, &summary).await;
+        return apply_provider_completion(state, id, session_task_grant_id, &status, &summary)
+            .await;
     }
 
     let session = if waiting_for_approval {

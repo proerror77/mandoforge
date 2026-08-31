@@ -78,6 +78,21 @@ fn ontology_sdk_catalog_converts_runtime_names_but_rejects_invalid_explicit_api_
 }
 
 #[test]
+fn ontology_sdk_catalog_rejects_duplicate_object_proposals() {
+    let first = proposal("object", "Order", json!({"object_type": "Order"}));
+    let second = proposal(
+        "object",
+        "Order replacement",
+        json!({"object_type": "Order", "properties": [{"name": "status"}]}),
+    );
+
+    let error = build_ontology_release_catalog("commerce", &[first, second], None)
+        .expect_err("duplicate object identities must fail");
+
+    assert!(error.message.contains("duplicate object identities"));
+}
+
+#[test]
 fn ontology_sdk_catalog_requires_action_target_in_object_catalog() {
     let action = proposal(
         "action",
@@ -450,8 +465,17 @@ async fn memory_ontology_sdk_applications_are_tenant_isolated() {
         status: ONTOLOGY_SDK_APPLICATION_STATUS_ACTIVE.to_string(),
         created_at: Utc::now(),
     };
+    let audit_log = new_audit_log(
+        None,
+        "user",
+        None,
+        "ontology_sdk.application_created",
+        "ontology_sdk_application",
+        Some(application.id),
+        json!({"application_id": application.id}),
+    );
     state_a
-        .create_ontology_sdk_application(application.clone())
+        .create_ontology_sdk_application(application.clone(), audit_log)
         .await
         .expect("create tenant A application");
 
@@ -572,20 +596,30 @@ async fn postgres_ontology_sdk_application_round_trips_without_cross_tenant_read
         },
     )
     .expect("valid subset");
+    let application = OntologySdkApplication {
+        id: Uuid::new_v4(),
+        tenant_id: tenant_a,
+        subject: "postgres-osdk-subject".to_string(),
+        ontology_release_id: release.id,
+        release_version: release.version,
+        domain_scope: release.domain_scope,
+        catalog_digest,
+        subset_manifest,
+        subset_digest,
+        status: ONTOLOGY_SDK_APPLICATION_STATUS_ACTIVE.to_string(),
+        created_at: Utc::now(),
+    };
+    let audit_log = new_audit_log(
+        None,
+        "user",
+        None,
+        "ontology_sdk.application_created",
+        "ontology_sdk_application",
+        Some(application.id),
+        json!({"application_id": application.id}),
+    );
     let application = state_a
-        .create_ontology_sdk_application(OntologySdkApplication {
-            id: Uuid::new_v4(),
-            tenant_id: tenant_a,
-            subject: "postgres-osdk-subject".to_string(),
-            ontology_release_id: release.id,
-            release_version: release.version,
-            domain_scope: release.domain_scope,
-            catalog_digest,
-            subset_manifest,
-            subset_digest,
-            status: ONTOLOGY_SDK_APPLICATION_STATUS_ACTIVE.to_string(),
-            created_at: Utc::now(),
-        })
+        .create_ontology_sdk_application(application, audit_log)
         .await
         .expect("create application");
     assert_eq!(
@@ -595,6 +629,45 @@ async fn postgres_ontology_sdk_application_round_trips_without_cross_tenant_read
             .expect("read application")
             .subject,
         "postgres-osdk-subject"
+    );
+    assert!(
+        state_a
+            .list_audit_logs(None)
+            .await
+            .expect("audits")
+            .iter()
+            .any(|audit| audit.action == "ontology_sdk.application_created"
+                && audit.resource_id == Some(application.id))
+    );
+
+    let rollback_application = OntologySdkApplication {
+        id: Uuid::new_v4(),
+        subject: "postgres-osdk-rollback-subject".to_string(),
+        created_at: Utc::now(),
+        ..application.clone()
+    };
+    let rollback_id = rollback_application.id;
+    let invalid_audit = new_audit_log(
+        Some(Uuid::new_v4()),
+        "user",
+        None,
+        "ontology_sdk.application_created",
+        "ontology_sdk_application",
+        Some(rollback_id),
+        json!({"application_id": rollback_id}),
+    );
+    assert!(
+        state_a
+            .create_ontology_sdk_application(rollback_application, invalid_audit)
+            .await
+            .is_err()
+    );
+    assert!(
+        state_a
+            .get_ontology_sdk_application(rollback_id)
+            .await
+            .is_err(),
+        "application insert must roll back when its audit insert fails"
     );
 
     let pool_b = tenant_pool(tenant_b).await;

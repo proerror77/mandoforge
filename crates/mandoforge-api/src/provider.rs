@@ -641,14 +641,13 @@ fn provider_tool_schema_catalog() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "ontology.action.execute",
-                "description": "Validate and execute one published local-semantic ontology action only after approval. Postgres/customer-grade writeback remains disabled and executable actions require an idempotency_key at runtime.",
+                "description": "Validate one published proposal-only ontology action and create an auditable approval-bound proposal. Direct side effects and customer writeback are disabled.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "context_packet_id": {"type": "string", "description": "The current rendered_context_packet.context_packet_id."},
                         "action": {"type": "string", "description": "Published action name from the pinned ontology release."},
-                        "parameters": {"type": "object", "description": "Parameters matching the published action contract."},
-                        "idempotency_key": {"type": "string", "description": "Optional for read-only or proposal-only actions; required by runtime validation for executable actions."}
+                        "parameters": {"type": "object", "description": "Parameters matching the published proposal-only action contract."}
                     },
                     "required": ["context_packet_id", "action", "parameters"]
                 }
@@ -687,7 +686,7 @@ pub(crate) fn parse_openai_compatible_provider_response(
         .and_then(Value::as_str)
         .unwrap_or_default();
     let tool_calls = match message.get("tool_calls") {
-        None => Vec::new(),
+        None | Some(Value::Null) => Vec::new(),
         Some(value) => {
             let calls = value.as_array().ok_or_else(|| {
                 AppError::bad_request("provider response tool_calls must be an array")
@@ -874,6 +873,31 @@ mod tests {
         assert_eq!(parsed.tool_calls.len(), 1);
         assert_eq!(parsed.tool_calls[0].tool_name, "file.read");
         assert_eq!(parsed.tool_calls[0].args["paths"][0], "README.md");
+    }
+
+    #[test]
+    fn provider_parser_accepts_null_tool_calls_as_no_calls() {
+        let response = json!({
+            "choices": [{"message": {"content": "done", "tool_calls": null}}]
+        });
+
+        let parsed = parse_openai_compatible_provider_response(&response).expect("final response");
+
+        assert!(parsed.tool_calls.is_empty());
+        assert_eq!(parsed.final_message.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn ontology_action_provider_schema_is_proposal_only() {
+        let schemas = provider_tool_schemas(&["ontology.action.execute".to_string()]);
+        let schema = &schemas[0]["function"];
+
+        assert!(
+            schema["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("proposal-only"))
+        );
+        assert!(schema["parameters"]["properties"]["idempotency_key"].is_null());
     }
 
     #[test]

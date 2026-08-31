@@ -593,7 +593,10 @@ fn object_property_values(content: &Value) -> BTreeMap<String, Value> {
 fn property_value_matches(value: &Value, value_type: &str) -> bool {
     match value_type.trim().to_ascii_lowercase().as_str() {
         "unknown" | "" => true,
-        "string" | "text" | "uuid" => value.is_string(),
+        "string" | "text" => value.is_string(),
+        "uuid" => value
+            .as_str()
+            .is_some_and(|value| Uuid::parse_str(value).is_ok()),
         "integer" | "int" | "int32" | "int64" => {
             value.as_i64().is_some() || value.as_u64().is_some()
         }
@@ -663,6 +666,8 @@ mod tests {
         assert!(!property_value_matches(&json!("not-a-date"), "timestamp"));
         assert!(property_value_matches(&json!("2026-08-12"), "date"));
         assert!(!property_value_matches(&json!("not-an-array"), "array"));
+        assert!(property_value_matches(&json!(Uuid::nil()), "uuid"));
+        assert!(!property_value_matches(&json!("not-a-uuid"), "uuid"));
         assert!(property_value_matches(&json!("anything"), "unknown"));
     }
 

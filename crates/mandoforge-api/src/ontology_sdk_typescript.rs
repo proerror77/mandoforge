@@ -225,7 +225,17 @@ fn schema_properties(schema: &Value) -> Result<SchemaProperties<'_>, AppError> {
             .map(|(name, value)| (name.as_str(), value))
             .collect::<Vec<_>>();
         properties.sort_by(|left, right| left.0.cmp(right.0));
-        return Ok((properties, object.keys().map(String::as_str).collect()));
+        let required = properties
+            .iter()
+            .filter(|(_, declaration)| {
+                declaration
+                    .get("required")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true)
+            })
+            .map(|(name, _)| *name)
+            .collect();
+        return Ok((properties, required));
     };
     let mut properties = properties
         .iter()
@@ -512,5 +522,19 @@ mod tests {
             first.find("if (!response.ok)").expect("status check")
                 < first.find("response.json()").expect("JSON parse")
         );
+    }
+
+    #[test]
+    fn generated_sdk_honors_optional_shorthand_action_parameters() {
+        let mut catalog = fixture_catalog();
+        catalog.actions[0].input_schema = serde_json::json!({
+            "required_name": "string",
+            "optional_note": {"type": "string", "required": false}
+        });
+
+        let output = generate_typescript_sdk(uuid::Uuid::nil(), &catalog).expect("SDK output");
+
+        assert!(output.contains("readonly \"required_name\": string;"));
+        assert!(output.contains("readonly \"optional_note\"?: string;"));
     }
 }

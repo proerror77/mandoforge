@@ -1,7 +1,7 @@
 use uuid::Uuid;
 
 use crate::{
-    AppError, AppState, ONTOLOGY_SDK_APPLICATION_STATUS_ACTIVE, OntologySdkApplication,
+    AppError, AppState, AuditLog, ONTOLOGY_SDK_APPLICATION_STATUS_ACTIVE, OntologySdkApplication,
     store_backend::StoreBackend, store_rows::ontology_sdk_application_from_row,
 };
 
@@ -79,6 +79,7 @@ impl AppState {
     pub(crate) async fn create_ontology_sdk_application(
         &self,
         application: OntologySdkApplication,
+        audit_log: AuditLog,
     ) -> Result<OntologySdkApplication, AppError> {
         if application.tenant_id != self.current_tenant_id() {
             return Err(AppError::forbidden(
@@ -88,6 +89,14 @@ impl AppState {
         if application.status != ONTOLOGY_SDK_APPLICATION_STATUS_ACTIVE {
             return Err(AppError::bad_request(
                 "ontology SDK application status must be active",
+            ));
+        }
+        if audit_log.action != "ontology_sdk.application_created"
+            || audit_log.resource_type != "ontology_sdk_application"
+            || audit_log.resource_id != Some(application.id)
+        {
+            return Err(AppError::bad_request(
+                "ontology SDK application audit binding is invalid",
             ));
         }
         match &self.store {
@@ -103,12 +112,19 @@ impl AppState {
                         "ontology SDK application with the same immutable manifest already exists",
                     ));
                 }
+                if store.audit_logs.contains_key(&audit_log.id) {
+                    return Err(AppError::conflict(
+                        "ontology SDK application audit identity already exists",
+                    ));
+                }
                 store
                     .ontology_sdk_applications
                     .insert(application.id, application.clone());
+                store.audit_logs.insert(audit_log.id, audit_log);
                 Ok(application)
             }
             StoreBackend::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
                 let query = format!(
                     "INSERT INTO ontology_sdk_applications
                         ({APPLICATION_COLUMNS})
@@ -128,10 +144,29 @@ impl AppState {
                     .bind(&application.subset_digest)
                     .bind(&application.status)
                     .bind(application.created_at)
-                    .fetch_one(pool)
+                    .fetch_one(&mut *tx)
                     .await
                     .map_err(ontology_sdk_application_write_error)?;
-                ontology_sdk_application_from_row(row)
+                let application = ontology_sdk_application_from_row(row)?;
+                sqlx::query(
+                    "INSERT INTO audit_logs
+                        (id, tenant_id, session_id, actor_type, actor_id, action, resource_type, resource_id, details, created_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                )
+                .bind(audit_log.id)
+                .bind(self.current_tenant_id())
+                .bind(audit_log.session_id)
+                .bind(&audit_log.actor_type)
+                .bind(audit_log.actor_id)
+                .bind(&audit_log.action)
+                .bind(&audit_log.resource_type)
+                .bind(audit_log.resource_id)
+                .bind(&audit_log.details)
+                .bind(audit_log.created_at)
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                Ok(application)
             }
         }
     }

@@ -60,6 +60,7 @@ pub(crate) fn build_ontology_release_catalog(
     for object in objects.values() {
         object_identity_to_api.insert(object.object_type.clone(), object.api_name.clone());
     }
+    let mut proposal_object_identities = BTreeSet::new();
     for proposal in proposals
         .iter()
         .filter(|proposal| proposal.proposal_type == "object")
@@ -72,6 +73,11 @@ pub(crate) fn build_ontology_release_catalog(
             .trim()
             .to_string();
         let stable_key = format!("object:{object_type}");
+        if !proposal_object_identities.insert(stable_key.clone()) {
+            return Err(AppError::bad_request(
+                "ontology release proposals contain duplicate object identities",
+            ));
+        }
         let api_name = choose_api_name(
             proposal,
             explicit_api_name(proposal),

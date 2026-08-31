@@ -260,7 +260,7 @@ async fn complete_task_is_explicit_validated_and_terminal() {
 
     let (state, session) = harness_test_session().await;
     let completed =
-        apply_provider_completion(&state, session.id, "completed", "objective satisfied")
+        apply_provider_completion(&state, session.id, None, "completed", "objective satisfied")
             .await
             .expect("complete session");
     assert!(matches!(completed.status, SessionStatus::Terminated));
@@ -273,4 +273,20 @@ async fn complete_task_is_explicit_validated_and_terminal() {
     assert!(events.iter().any(|event| {
         event.event_type == "tool.result" && event.payload["tool"] == "complete_task"
     }));
+    let tool_calls = state
+        .list_tool_calls(Some(session.id))
+        .await
+        .expect("tool calls");
+    let completion_call = tool_calls
+        .iter()
+        .find(|call| call.tool_name == "complete_task")
+        .expect("durable completion tool call");
+    assert_eq!(completion_call.status, "completed");
+    assert_eq!(
+        completion_call.result.as_ref(),
+        Some(&json!({
+            "status": "completed",
+            "summary": "objective satisfied",
+        }))
+    );
 }

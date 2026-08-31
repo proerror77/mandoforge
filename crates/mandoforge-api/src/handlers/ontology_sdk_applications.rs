@@ -146,23 +146,23 @@ async fn create_application(
         status: ONTOLOGY_SDK_APPLICATION_STATUS_ACTIVE.to_string(),
         created_at: Utc::now(),
     };
-    let application = state.create_ontology_sdk_application(application).await?;
-    state
-        .append_audit_log(new_audit_log(
-            None,
-            "user",
-            None,
-            "ontology_sdk.application_created",
-            "ontology_sdk_application",
-            Some(application.id),
-            serde_json::json!({
-                "subject": principal.subject_id,
-                "application_id": application.id,
-                "ontology_release_id": application.ontology_release_id,
-                "catalog_digest": application.catalog_digest,
-                "subset_digest": application.subset_digest,
-            }),
-        ))
+    let audit_log = new_audit_log(
+        None,
+        "user",
+        None,
+        "ontology_sdk.application_created",
+        "ontology_sdk_application",
+        Some(application.id),
+        serde_json::json!({
+            "subject": principal.subject_id,
+            "application_id": application.id,
+            "ontology_release_id": application.ontology_release_id,
+            "catalog_digest": application.catalog_digest,
+            "subset_digest": application.subset_digest,
+        }),
+    );
+    let application = state
+        .create_ontology_sdk_application(application, audit_log)
         .await?;
     Ok(Json(application))
 }
