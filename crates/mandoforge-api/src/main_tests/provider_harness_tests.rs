@@ -1301,6 +1301,80 @@ async fn terminal_workflow_blocks_tool_invocation_start_in_postgres() {
     assert_terminal_workflow_blocks_tool_invocation_start(&state, &session).await;
 }
 
+#[tokio::test]
+async fn deferred_context_refresh_survives_consumed_user_message() {
+    let (state, session) = harness_test_session().await;
+    let grant = persisted_harness_task_grant(&state, &session).await;
+    state
+        .update_workflow_run_root_task_grant(grant.workflow_run_id, grant.id)
+        .await
+        .expect("bind root TaskGrant");
+    let original = generate_and_persist_context_packet(&state, session.id)
+        .await
+        .expect("original context packet");
+    state
+        .update_task_grant_context_packet(grant.id, original.id)
+        .await
+        .expect("bind original context packet");
+    let message = state
+        .append_event(
+            "user",
+            None,
+            session.id,
+            "user.message",
+            json!({"message": "refresh after current work resolves"}),
+        )
+        .await
+        .expect("user message");
+
+    let blocked = build_harness_context(&state, session.id, Some(message.seq), Some(message.seq))
+        .await
+        .expect("blocked context refresh");
+    assert_eq!(blocked.context_packet_id, Some(original.id));
+    assert!(
+        state
+            .list_events(session.id)
+            .await
+            .expect("events")
+            .iter()
+            .any(|event| {
+                event.event_type == CONTEXT_PACKET_REFRESH_DEFERRED_EVENT
+                    && event.payload["blockers"] == json!(["workflow_step_running"])
+            })
+    );
+
+    set_harness_workflow_step_status(&state, &grant, "queued").await;
+    let refreshed = build_harness_context(&state, session.id, None, None)
+        .await
+        .expect("deferred context refresh");
+    let refreshed_id = refreshed.context_packet_id.expect("refreshed packet id");
+    assert_ne!(refreshed_id, original.id);
+    let reused = build_harness_context(&state, session.id, None, None)
+        .await
+        .expect("reuse completed refresh");
+    assert_eq!(reused.context_packet_id, Some(refreshed_id));
+
+    let events = state.list_events(session.id).await.expect("refresh events");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_type == CONTEXT_PACKET_REFRESH_DEFERRED_EVENT)
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_type == CONTEXT_PACKET_REFRESH_COMPLETED_EVENT)
+            .count(),
+        1
+    );
+    assert!(events.iter().any(|event| {
+        event.event_type == CONTEXT_PACKET_REFRESH_COMPLETED_EVENT
+            && event.payload["context_packet_id"] == json!(refreshed_id)
+    }));
+}
+
 async fn assert_tool_result_publishes_after_terminal_status(state: &AppState, session: &Session) {
     let mut running_call = waiting_ontology_action_call(session.id);
     running_call.status = "running".to_string();

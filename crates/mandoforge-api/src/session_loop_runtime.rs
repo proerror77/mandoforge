@@ -7,6 +7,22 @@ use uuid::Uuid;
 
 use crate::*;
 
+pub(crate) const CONTEXT_PACKET_REFRESH_DEFERRED_EVENT: &str = "context_packet.refresh_deferred";
+pub(crate) const CONTEXT_PACKET_REFRESH_COMPLETED_EVENT: &str = "context_packet.refresh_completed";
+
+fn context_packet_refresh_is_deferred(events: &[SessionEvent]) -> bool {
+    events
+        .iter()
+        .rev()
+        .find(|event| {
+            matches!(
+                event.event_type.as_str(),
+                CONTEXT_PACKET_REFRESH_DEFERRED_EVENT | CONTEXT_PACKET_REFRESH_COMPLETED_EVENT
+            )
+        })
+        .is_some_and(|event| event.event_type == CONTEXT_PACKET_REFRESH_DEFERRED_EVENT)
+}
+
 pub(crate) async fn build_harness_context(
     state: &AppState,
     session_id: Uuid,
@@ -174,7 +190,8 @@ pub(crate) async fn build_harness_context(
     let latest_goal_event = recent_goal_events.first().cloned();
     let refresh_context = pending_events
         .iter()
-        .any(|event| event.event_type == "user.message");
+        .any(|event| event.event_type == "user.message")
+        || context_packet_refresh_is_deferred(&events);
     let (task_grant_id, context_packet_id, rendered_context_packet, provider_tool_names) =
         build_provider_context_packet(state, session_id, refresh_context).await?;
     Ok(HarnessContext {
@@ -234,36 +251,65 @@ pub(crate) async fn build_provider_context_packet(
             .into_iter()
             .max_by_key(|packet| packet.version);
     }
-    let claimed_workflow_step = if refresh_requested {
+    let refresh_events = if refresh_requested {
+        state.list_events(session_id).await?
+    } else {
+        Vec::new()
+    };
+    let mut refresh_blockers = Vec::new();
+    if refresh_requested {
         if let Some((_, grant)) = active_task_grant.as_ref() {
-            state
+            if state
                 .list_workflow_step_runs(grant.workflow_run_id)
                 .await?
                 .iter()
                 .any(|step| step.session_id == Some(session_id) && step.status == "running")
-        } else {
-            false
+            {
+                refresh_blockers.push("workflow_step_running");
+            }
         }
-    } else {
-        false
-    };
-    let refresh_allowed = refresh_requested
-        && active_task_grant.is_some()
-        && !claimed_workflow_step
-        && !state
+        if state
             .list_approvals()
             .await?
             .iter()
             .any(|approval| approval.session_id == session_id && approval.status == "pending")
-        && !state
+        {
+            refresh_blockers.push("approval_pending");
+        }
+        if state
             .list_tool_calls(Some(session_id))
             .await?
             .iter()
-            .any(|call| matches!(call.status.as_str(), "running" | "waiting_approval"));
+            .any(|call| matches!(call.status.as_str(), "running" | "waiting_approval"))
+        {
+            refresh_blockers.push("tool_call_unresolved");
+        }
+    }
+    let refresh_allowed =
+        refresh_requested && active_task_grant.is_some() && refresh_blockers.is_empty();
+    if refresh_requested
+        && active_task_grant.is_some()
+        && !refresh_allowed
+        && !context_packet_refresh_is_deferred(&refresh_events)
+    {
+        state
+            .append_event(
+                "system",
+                task_grant_id,
+                session_id,
+                CONTEXT_PACKET_REFRESH_DEFERRED_EVENT,
+                json!({
+                    "status": "deferred",
+                    "task_grant_id": task_grant_id,
+                    "blockers": refresh_blockers,
+                }),
+            )
+            .await?;
+    }
     if refresh_allowed {
         packet = None;
     }
-    if packet.is_none() && active_task_grant.is_some() {
+    if packet.is_none() && active_task_grant.is_some() && (!refresh_requested || refresh_allowed) {
         let generated_packet = generate_and_persist_context_packet(state, session_id).await?;
         if let Some((_, grant)) = active_task_grant.as_ref() {
             let grant = state
@@ -276,6 +322,21 @@ pub(crate) async fn build_provider_context_packet(
                 context_task_grant.as_ref(),
                 &agent_version,
             );
+        }
+        if refresh_requested {
+            state
+                .append_event(
+                    "system",
+                    task_grant_id,
+                    session_id,
+                    CONTEXT_PACKET_REFRESH_COMPLETED_EVENT,
+                    json!({
+                        "status": "completed",
+                        "task_grant_id": task_grant_id,
+                        "context_packet_id": generated_packet.id,
+                    }),
+                )
+                .await?;
         }
         packet = Some(generated_packet);
     }
