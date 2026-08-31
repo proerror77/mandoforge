@@ -466,6 +466,82 @@ async fn on_demand_cleanup_failure_keeps_lease_and_record_retryable() {
         .collect::<Vec<_>>();
     assert_eq!(failed_audits.len(), 2);
     assert_ne!(failed_audits[0].id, failed_audits[1].id);
+
+    let pending_runtime = json!({
+        "delete_attempted": false,
+        "delete_status": "mutation_blocked",
+        "delete_status_code": null,
+        "namespace": identity.namespace,
+        "resource_name": identity.resource_name,
+        "substrate": identity.substrate,
+    });
+    let mut pending_metadata = second_retry.metadata.clone();
+    pending_metadata[crate::remote_computer_runtime::REMOTE_COMPUTER_RUNTIME_CLEANUP_RETRY_GENERATION_METADATA_KEY] = json!(3);
+    pending_metadata["runtime_cleanup_retry"] = pending_runtime.clone();
+    let pending_lease = state
+        .schedule_remote_computer_lease_cleanup_retry(lease.id, pending_metadata)
+        .await
+        .expect("persist pending cleanup evidence generation");
+    let pending_event_id = deterministic_record_id(
+        lease.id,
+        "remote-computer-runtime-cleanup-event",
+        &["test_cleanup_failure", "failed", "3"],
+    );
+    let pending_audit_id = deterministic_record_id(
+        pending_event_id,
+        "audit",
+        &["remote_computer.runtime_cleanup_failed"],
+    );
+    state
+        .append_event_once(
+            pending_event_id,
+            "system",
+            None,
+            session.id,
+            "remote_computer.runtime_cleanup_failed",
+            json!({
+                "lease_id": lease.id,
+                "remote_computer_id": computer.id,
+                "assignment_id": null,
+                "session_id": session.id,
+                "status": "failed",
+                "reason": "test_cleanup_failure",
+                "runtime": pending_runtime,
+                "retry_generation": 3,
+            }),
+        )
+        .await
+        .expect("persist event before simulated audit interruption");
+    cleanup_remote_computer_lease_runtime(
+        &state,
+        &pending_lease,
+        None,
+        "test_cleanup_failure",
+        "released",
+    )
+    .await
+    .expect_err("cleanup must replay pending evidence before the next failed deletion");
+    let fourth_retry = state
+        .list_remote_computer_leases()
+        .await
+        .expect("list leases after replayed evidence")
+        .into_iter()
+        .find(|candidate| candidate.id == lease.id)
+        .expect("fourth retry lease");
+    assert_eq!(
+        fourth_retry.metadata
+            [crate::remote_computer_runtime::REMOTE_COMPUTER_RUNTIME_CLEANUP_RETRY_GENERATION_METADATA_KEY],
+        json!(4)
+    );
+    assert!(
+        state
+            .list_audit_logs(Some(session.id))
+            .await
+            .expect("cleanup failure audits after replay")
+            .iter()
+            .any(|audit| audit.id == pending_audit_id),
+        "the pending generation audit must be repaired before advancing"
+    );
     let heartbeat_error = state
         .update_remote_computer_lease_status(
             lease.id,

@@ -353,6 +353,37 @@ pub(crate) async fn cleanup_remote_computer_lease_runtime(
         }
     };
 
+    if lease
+        .metadata
+        .get(REMOTE_COMPUTER_RUNTIME_CLEANUP_RETRY_MARKER)
+        .and_then(Value::as_bool)
+        == Some(true)
+        && lease
+            .metadata
+            .get(REMOTE_COMPUTER_RUNTIME_CLEANUP_RETRY_GENERATION_METADATA_KEY)
+            .and_then(Value::as_u64)
+            .is_some()
+    {
+        let retry_reason = lease
+            .metadata
+            .get("runtime_cleanup_retry_reason")
+            .and_then(Value::as_str)
+            .ok_or_else(|| AppError::internal("runtime cleanup retry reason is missing"))?;
+        let retry_runtime = lease
+            .metadata
+            .get("runtime_cleanup_retry")
+            .ok_or_else(|| AppError::internal("runtime cleanup retry evidence is missing"))?;
+        record_remote_computer_runtime_cleanup_evidence(
+            state,
+            &lease,
+            assignment,
+            retry_reason,
+            "failed",
+            retry_runtime,
+        )
+        .await?;
+    }
+
     let remote_computer = state
         .list_remote_computers()
         .await?
