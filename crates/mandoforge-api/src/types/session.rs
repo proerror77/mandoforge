@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::AppError;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Session {
     pub(crate) id: Uuid,
@@ -39,16 +41,20 @@ impl SessionStatus {
     }
 }
 
-impl From<String> for SessionStatus {
-    fn from(value: String) -> Self {
-        match value.as_str() {
-            "idle" | "created" => Self::Idle,
-            "running" => Self::Running,
-            "requires_action" | "waiting_approval" => Self::RequiresAction,
-            "rescheduling" => Self::Rescheduling,
-            "terminated" | "completed" => Self::Terminated,
-            "failed" => Self::Failed,
-            _ => Self::Idle,
+impl TryFrom<&str> for SessionStatus {
+    type Error = AppError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "idle" | "created" => Ok(Self::Idle),
+            "running" => Ok(Self::Running),
+            "requires_action" | "waiting_approval" => Ok(Self::RequiresAction),
+            "rescheduling" => Ok(Self::Rescheduling),
+            "terminated" | "completed" => Ok(Self::Terminated),
+            "failed" => Ok(Self::Failed),
+            _ => Err(AppError::internal(format!(
+                "unsupported session status: {value}"
+            ))),
         }
     }
 }
@@ -120,13 +126,18 @@ impl SessionLoopJobStatus {
     }
 }
 
-impl From<String> for SessionLoopJobStatus {
-    fn from(value: String) -> Self {
-        match value.as_str() {
-            "running" => Self::Running,
-            "completed" => Self::Completed,
-            "failed" => Self::Failed,
-            _ => Self::Queued,
+impl TryFrom<&str> for SessionLoopJobStatus {
+    type Error = AppError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "queued" => Ok(Self::Queued),
+            "running" => Ok(Self::Running),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            _ => Err(AppError::internal(format!(
+                "unsupported session loop job status: {value}"
+            ))),
         }
     }
 }

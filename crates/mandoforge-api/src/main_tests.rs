@@ -21390,17 +21390,19 @@ fn session_statuses_use_managed_agent_lifecycle_names() {
     assert_eq!(SessionStatus::Terminated.as_str(), "terminated");
 
     assert_eq!(
-        SessionStatus::from("created".to_string()),
+        SessionStatus::try_from("created").expect("legacy status remains supported"),
         SessionStatus::Idle
     );
     assert_eq!(
-        SessionStatus::from("waiting_approval".to_string()),
+        SessionStatus::try_from("waiting_approval").expect("legacy status remains supported"),
         SessionStatus::RequiresAction
     );
     assert_eq!(
-        SessionStatus::from("completed".to_string()),
+        SessionStatus::try_from("completed").expect("legacy status remains supported"),
         SessionStatus::Terminated
     );
+    assert!(SessionStatus::try_from("future_status").is_err());
+    assert!(SessionLoopJobStatus::try_from("future_status").is_err());
 }
 
 async fn test_app() -> Router {
