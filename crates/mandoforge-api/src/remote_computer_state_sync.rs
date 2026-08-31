@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use crate::{
     AppError, AuditLog, RemoteComputerProductionStateSyncReadiness,
-    RemoteComputerStateFilesystemReadiness,
+    RemoteComputerStateFilesystemReadiness, required_controller_status,
 };
 
 pub(crate) fn remote_computer_state_sync_base_issues(
@@ -108,16 +108,13 @@ where
     }
     let response = request.send().await?;
     let http_status = response.status();
-    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    let body = response.json::<Value>().await?;
     if !http_status.is_success() {
         return Err(AppError::bad_request(format!(
             "remote computer state sync controller failed with status {http_status}"
         )));
     }
-    let provider_status = body
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("validated");
+    let provider_status = required_controller_status(&body)?;
     let validated = matches!(provider_status, "validated" | "healthy" | "success" | "ok");
     Ok(json!({
         "attempted": true,

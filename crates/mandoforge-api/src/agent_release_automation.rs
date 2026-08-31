@@ -321,16 +321,13 @@ where
     }
     let response = request.send().await?;
     let http_status = response.status();
-    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    let body = response.json::<Value>().await?;
     if !http_status.is_success() {
         return Err(AppError::bad_request(format!(
             "agent release controller failed with status {http_status}"
         )));
     }
-    let controller_status = body
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("promoted");
+    let controller_status = required_controller_status(&body)?;
     let promoted = matches!(controller_status, "promoted" | "applied" | "success" | "ok");
     Ok(json!({
         "attempted": true,
@@ -433,16 +430,13 @@ where
     }
     let response = request.send().await?;
     let http_status = response.status();
-    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    let body = response.json::<Value>().await?;
     if !http_status.is_success() {
         return Err(AppError::bad_request(format!(
             "agent release deployment controller failed with status {http_status}"
         )));
     }
-    let provider_status = body
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("validated");
+    let provider_status = required_controller_status(&body)?;
     let validated = matches!(provider_status, "validated" | "success" | "ok" | "healthy");
     Ok(json!({
         "attempted": true,
@@ -532,16 +526,13 @@ where
     }
     let response = request.send().await?;
     let http_status = response.status();
-    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    let body = response.json::<Value>().await?;
     if !http_status.is_success() {
         return Err(AppError::bad_request(format!(
             "agent release orchestration controller failed with status {http_status}"
         )));
     }
-    let provider_status = body
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("validated");
+    let provider_status = required_controller_status(&body)?;
     let validated = matches!(provider_status, "validated" | "success" | "ok" | "healthy");
     Ok(json!({
         "attempted": true,
@@ -621,16 +612,13 @@ where
     }
     let response = request.send().await?;
     let http_status = response.status();
-    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    let body = response.json::<Value>().await?;
     if !http_status.is_success() {
         return Err(AppError::bad_request(format!(
             "agent release rollback controller failed with status {http_status}"
         )));
     }
-    let provider_status = body
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("rolled_back");
+    let provider_status = required_controller_status(&body)?;
     let rolled_back = matches!(
         provider_status,
         "rolled_back" | "recovered" | "success" | "ok" | "applied"

@@ -805,16 +805,13 @@ where
     }
     let response = request.send().await?;
     let http_status = response.status();
-    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    let body = response.json::<Value>().await?;
     if !http_status.is_success() {
         return Err(AppError::bad_request(format!(
             "MCP rollout controller failed with status {http_status}"
         )));
     }
-    let controller_status = body
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("approved");
+    let controller_status = required_controller_status(&body)?;
     let approved = matches!(
         controller_status,
         "approved" | "applied" | "validated" | "success" | "ok"
@@ -882,16 +879,13 @@ where
     }
     let response = request.send().await?;
     let http_status = response.status();
-    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    let body = response.json::<Value>().await?;
     if !http_status.is_success() {
         return Err(AppError::bad_request(format!(
             "MCP rollout rollback controller failed with status {http_status}"
         )));
     }
-    let controller_status = body
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("rolled_back");
+    let controller_status = required_controller_status(&body)?;
     let rolled_back = matches!(
         controller_status,
         "rolled_back" | "recovered" | "success" | "ok" | "applied"
@@ -1406,16 +1400,13 @@ where
     }
     let response = request.send().await?;
     let http_status = response.status();
-    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    let body = response.json::<Value>().await?;
     if !http_status.is_success() {
         return Err(AppError::bad_request(format!(
             "MCP connector deployment controller failed with status {http_status}"
         )));
     }
-    let controller_status = body
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("validated");
+    let controller_status = required_controller_status(&body)?;
     let validated = matches!(
         controller_status,
         "validated" | "deployed" | "healthy" | "success" | "ok"

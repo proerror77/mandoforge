@@ -146,10 +146,7 @@ where
         {
             Ok(execution) => {
                 controller_execution = execution.clone();
-                let controller_status = execution
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .unwrap_or("blocked");
+                let controller_status = required_controller_status(&execution)?;
                 if controller_status == "applied" {
                     message =
                         "provider production rollout applied through external rollout controller"
@@ -310,10 +307,7 @@ where
         {
             Ok(execution) => {
                 controller_execution = execution.clone();
-                let controller_status = execution
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .unwrap_or("blocked");
+                let controller_status = required_controller_status(&execution)?;
                 if controller_status == "rolled_back" {
                     message =
                         "provider production rollout rollback confirmed by external controller"
@@ -460,16 +454,13 @@ where
     }
     let response = request.send().await?;
     let http_status = response.status();
-    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    let body = response.json::<Value>().await?;
     if !http_status.is_success() {
         return Err(AppError::bad_request(format!(
             "provider rollout controller failed with status {http_status}"
         )));
     }
-    let provider_status = body
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("applied");
+    let provider_status = required_controller_status(&body)?;
     let applied = matches!(provider_status, "applied" | "success" | "ok" | "validated");
     Ok(json!({
         "attempted": true,
@@ -531,16 +522,13 @@ where
     }
     let response = request.send().await?;
     let http_status = response.status();
-    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    let body = response.json::<Value>().await?;
     if !http_status.is_success() {
         return Err(AppError::bad_request(format!(
             "provider rollout rollback controller failed with status {http_status}"
         )));
     }
-    let provider_status = body
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("rolled_back");
+    let provider_status = required_controller_status(&body)?;
     let rolled_back = matches!(
         provider_status,
         "rolled_back" | "recovered" | "success" | "ok" | "applied"
@@ -922,16 +910,13 @@ where
     }
     let response = request.send().await?;
     let http_status = response.status();
-    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    let body = response.json::<Value>().await?;
     if !http_status.is_success() {
         return Err(AppError::bad_request(format!(
             "provider deployment controller failed with status {http_status}"
         )));
     }
-    let controller_status = body
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("validated");
+    let controller_status = required_controller_status(&body)?;
     let validated = matches!(
         controller_status,
         "validated" | "deployed" | "healthy" | "success" | "ok"

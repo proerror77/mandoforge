@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
+use crate::AppError;
+
 pub(crate) fn env_bool(name: &str) -> bool {
     env_bool_lookup(name, &|key| std::env::var(key).ok())
 }
@@ -68,4 +70,37 @@ pub(crate) fn env_i64(key: &str) -> Option<i64> {
     std::env::var(key)
         .ok()
         .and_then(|value| value.trim().parse::<i64>().ok())
+}
+
+pub(crate) fn required_controller_status(body: &Value) -> Result<&str, AppError> {
+    body.get("status")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|status| !status.is_empty())
+        .ok_or_else(|| {
+            AppError::bad_request("controller response requires a non-empty string status")
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::required_controller_status;
+
+    #[test]
+    fn controller_status_is_required_and_non_empty() {
+        assert_eq!(
+            required_controller_status(&json!({"status": " validated "})).expect("valid status"),
+            "validated"
+        );
+        for invalid in [
+            json!({}),
+            json!({"status": null}),
+            json!({"status": 1}),
+            json!({"status": " "}),
+        ] {
+            assert!(required_controller_status(&invalid).is_err());
+        }
+    }
 }

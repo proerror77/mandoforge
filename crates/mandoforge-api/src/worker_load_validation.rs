@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use crate::{
     AppError, AppState, AuditLog, WorkerAutoscalingReadiness, WorkerK8sReadiness,
     WorkerLoadValidationEvidence, WorkerLoadValidationRun, WorkerQueueBackendReadiness, env_bool,
-    new_audit_log, worker_autoscaling_readiness_from_manifests,
+    new_audit_log, required_controller_status, worker_autoscaling_readiness_from_manifests,
     worker_isolated_pool_configured_from_manifests, worker_k8s_readiness_from_manifests,
     worker_queue_backend_readiness,
 };
@@ -249,16 +249,13 @@ where
     }
     let response = request.send().await?;
     let http_status = response.status();
-    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    let body = response.json::<Value>().await?;
     if !http_status.is_success() {
         return Err(AppError::bad_request(format!(
             "worker load validation controller failed with status {http_status}"
         )));
     }
-    let controller_status = body
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("validated");
+    let controller_status = required_controller_status(&body)?;
     let validated = matches!(controller_status, "validated" | "success" | "ok");
     Ok(json!({
         "attempted": true,
