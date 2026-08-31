@@ -1007,7 +1007,14 @@ pub(crate) fn ontology_action_tool_spec_for_release(
                 "ontology release action contract is invalid: {error}"
             ))
         })?;
-    if release.source_run_id != Some(tool_spec.run_id) {
+    let inherited_from_parent = release.parent_release_id.is_some_and(|parent_release_id| {
+        evidence
+            .get("inherited_from_release_id")
+            .and_then(Value::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok())
+            == Some(parent_release_id)
+    });
+    if release.source_run_id != Some(tool_spec.run_id) && !inherited_from_parent {
         return Err(AppError::forbidden(
             "ontology action contract does not belong to the pinned release source run",
         ));
@@ -3901,7 +3908,7 @@ pub(crate) async fn create_ontology_release_candidate_with_actor(
             &entropy[..8]
         )
     });
-    let evidence_refs = proposals
+    let mut evidence_refs = proposals
         .iter()
         .map(|proposal| {
             let mut evidence = json!({
@@ -3929,7 +3936,7 @@ pub(crate) async fn create_ontology_release_candidate_with_actor(
         .collect::<Result<Vec<_>, AppError>>()?;
     let (catalog, catalog_digest) =
         build_ontology_release_catalog(&domain_scope, &proposals, active_release.as_ref())?;
-    let mut evidence_refs = evidence_refs;
+    inherit_parent_action_contract_evidence(active_release.as_ref(), &catalog, &mut evidence_refs)?;
     evidence_refs.push(catalog_evidence(&catalog, &catalog_digest));
     let release = OntologyRelease {
         id: Uuid::new_v4(),

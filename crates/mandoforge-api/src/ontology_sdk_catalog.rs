@@ -106,7 +106,18 @@ pub(crate) fn build_ontology_release_catalog(
         );
     }
 
-    let mut relations = Vec::new();
+    let mut relations = parent_catalog
+        .as_ref()
+        .map(|catalog| {
+            catalog
+                .relations
+                .iter()
+                .cloned()
+                .map(|relation| (relation.stable_key.clone(), relation))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let mut proposal_relation_identities = BTreeSet::new();
     for proposal in proposals
         .iter()
         .filter(|proposal| proposal.proposal_type == "relation")
@@ -130,6 +141,11 @@ pub(crate) fn build_ontology_release_catalog(
             },
         )?;
         let stable_key = format!("relation:{from_object}:{relation_type}:{to_object}");
+        if !proposal_relation_identities.insert(stable_key.clone()) {
+            return Err(AppError::bad_request(
+                "ontology release proposals contain duplicate relation identities",
+            ));
+        }
         let fallback = proposal
             .content
             .get("link_type")
@@ -142,16 +158,30 @@ pub(crate) fn build_ontology_release_catalog(
             fallback,
             ApiNameKind::Relation,
         )?;
-        relations.push(OntologySdkCatalogRelation {
-            stable_key,
-            api_name,
-            from_object_api_name,
-            relation_type,
-            to_object_api_name,
-        });
+        relations.insert(
+            stable_key.clone(),
+            OntologySdkCatalogRelation {
+                stable_key,
+                api_name,
+                from_object_api_name,
+                relation_type,
+                to_object_api_name,
+            },
+        );
     }
 
-    let mut actions = Vec::new();
+    let mut actions = parent_catalog
+        .as_ref()
+        .map(|catalog| {
+            catalog
+                .actions
+                .iter()
+                .cloned()
+                .map(|action| (action.stable_key.clone(), action))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let mut proposal_action_identities = BTreeSet::new();
     for proposal in proposals
         .iter()
         .filter(|proposal| proposal.proposal_type == "action")
@@ -164,6 +194,11 @@ pub(crate) fn build_ontology_release_catalog(
         })?;
         let contract_digest = normalized_json_sha256(&tool_spec_value);
         let stable_key = format!("action:{}", tool_spec.name);
+        if !proposal_action_identities.insert(stable_key.clone()) {
+            return Err(AppError::bad_request(
+                "ontology release proposals contain duplicate action identities",
+            ));
+        }
         let api_name = choose_api_name(
             proposal,
             explicit_api_name(proposal),
@@ -180,19 +215,24 @@ pub(crate) fn build_ontology_release_catalog(
                     tool_spec.target_object
                 ))
             })?;
-        actions.push(OntologySdkCatalogAction {
-            stable_key,
-            api_name,
-            runtime_name: tool_spec.name,
-            contract_digest,
-            execution_mode: tool_spec.execution_mode,
-            target_object_api_name,
-            input_schema: tool_spec.input_schema,
-            approval_required: tool_spec.approval_required,
-        });
+        actions.insert(
+            stable_key.clone(),
+            OntologySdkCatalogAction {
+                stable_key,
+                api_name,
+                runtime_name: tool_spec.name,
+                contract_digest,
+                execution_mode: tool_spec.execution_mode,
+                target_object_api_name,
+                input_schema: tool_spec.input_schema,
+                approval_required: tool_spec.approval_required,
+            },
+        );
     }
 
     let mut objects = objects.into_values().collect::<Vec<_>>();
+    let mut relations = relations.into_values().collect::<Vec<_>>();
+    let mut actions = actions.into_values().collect::<Vec<_>>();
     objects.sort_by(|left, right| left.api_name.cmp(&right.api_name));
     relations.sort_by(|left, right| left.api_name.cmp(&right.api_name));
     actions.sort_by(|left, right| left.api_name.cmp(&right.api_name));
@@ -218,6 +258,38 @@ pub(crate) fn catalog_evidence(catalog: &OntologyReleaseCatalogV1, digest: &str)
         "snapshot": catalog,
         "digest": digest,
     })
+}
+
+pub(crate) fn inherit_parent_action_contract_evidence(
+    parent_release: Option<&OntologyRelease>,
+    catalog: &OntologyReleaseCatalogV1,
+    evidence_refs: &mut Vec<Value>,
+) -> Result<(), AppError> {
+    let Some(parent_release) = parent_release else {
+        return Ok(());
+    };
+    let parent_evidence = parent_release.evidence_refs.as_array().ok_or_else(|| {
+        AppError::forbidden("parent ontology release action contract evidence is missing")
+    })?;
+    for action in &catalog.actions {
+        if evidence_refs.iter().any(|evidence| {
+            evidence["tool_spec"]["name"].as_str() == Some(action.runtime_name.as_str())
+        }) {
+            continue;
+        }
+        let mut inherited = parent_evidence
+            .iter()
+            .find(|evidence| {
+                evidence["tool_spec"]["name"].as_str() == Some(action.runtime_name.as_str())
+            })
+            .cloned()
+            .ok_or_else(|| {
+                AppError::forbidden("parent ontology release action contract is missing")
+            })?;
+        inherited["inherited_from_release_id"] = json!(parent_release.id);
+        evidence_refs.push(inherited);
+    }
+    Ok(())
 }
 
 pub(crate) fn release_catalog_from_evidence(
@@ -814,7 +886,16 @@ pub(crate) fn ontology_action_schema_type_supported(value_type: &str) -> bool {
 
 pub(crate) fn ontology_action_schema_value_matches_type(value: &Value, expected: &str) -> bool {
     match expected.trim().to_ascii_lowercase().as_str() {
-        "string" | "text" | "uuid" | "date" | "timestamp" | "datetime" => value.is_string(),
+        "string" | "text" => value.is_string(),
+        "uuid" => value
+            .as_str()
+            .is_some_and(|value| uuid::Uuid::parse_str(value).is_ok()),
+        "date" => value
+            .as_str()
+            .is_some_and(|value| chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").is_ok()),
+        "timestamp" | "datetime" => value
+            .as_str()
+            .is_some_and(|value| chrono::DateTime::parse_from_rfc3339(value).is_ok()),
         "integer" | "int" | "int32" | "int64" => ontology_action_schema_integer(value),
         "number" | "decimal" | "float" | "double" => value.is_number(),
         "boolean" | "bool" => value.is_boolean(),
@@ -844,8 +925,15 @@ fn validate_action_schema(schema: &Value) -> Result<(), AppError> {
     let Some(object) = schema.as_object() else {
         return Ok(());
     };
-    let is_object_schema = object.get("type").and_then(Value::as_str) == Some("object")
-        || (object.get("type").is_none() && object.get("properties").is_some());
+    let is_object_schema = match object.get("type").and_then(Value::as_str) {
+        Some(value_type) if value_type.eq_ignore_ascii_case("object") => true,
+        Some(_) => {
+            return Err(AppError::forbidden(
+                "ontology release catalog action input schema top-level type must be object",
+            ));
+        }
+        None => object.get("properties").is_some(),
+    };
     if is_object_schema {
         validate_action_schema_node(schema, false)?;
     } else {

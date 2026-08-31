@@ -130,6 +130,9 @@ fn ontology_action_parameters_accept_object_schema_without_explicit_type() {
             "integral_attempt": {"type": "integer", "enum": [1.0]},
             "status": {"type": "string", "enum": ["open", "closed"]},
             "request_id": {"type": "uuid"},
+            "requested_on": {"type": "date"},
+            "created_at": {"type": "timestamp"},
+            "reviewed_at": {"type": "datetime"},
             "metadata": {"type": "json"},
             "lines": {
                 "type": "array",
@@ -162,6 +165,9 @@ fn ontology_action_parameters_accept_object_schema_without_explicit_type() {
         &json!({
             "order_id": "order-1",
             "request_id": "8b783dbc-d482-46df-8fc6-1812fe94b8a7",
+            "requested_on": "2026-08-12",
+            "created_at": "2026-08-12T00:00:00Z",
+            "reviewed_at": "2026-08-12T08:00:00+08:00",
             "metadata": ["arbitrary", 1],
             "lines": [{"sku": "sku-1", "quantity": 2.0, "active": true}]
         }),
@@ -173,6 +179,18 @@ fn ontology_action_parameters_accept_object_schema_without_explicit_type() {
     )
     .expect_err("undeclared enum values must fail closed");
     assert!(error.message.contains("not an allowed enum value"));
+    for (field, value, expected_type) in [
+        ("request_id", "not-a-uuid", "uuid"),
+        ("requested_on", "yesterday", "date"),
+        ("created_at", "noon", "timestamp"),
+        ("reviewed_at", "tomorrow", "datetime"),
+    ] {
+        let mut parameters = json!({"order_id": "order-1"});
+        parameters[field] = json!(value);
+        let error = validate_ontology_action_parameters(&schema, &parameters)
+            .expect_err("formatted scalar aliases must fail closed");
+        assert!(error.message.contains(&format!("must be {expected_type}")));
+    }
     let error = validate_ontology_action_parameters(&schema, &json!({"amount": 12.5}))
         .expect_err("required properties must still be enforced");
     assert!(error.message.contains("missing required field order_id"));
@@ -273,9 +291,24 @@ fn ontology_sdk_catalog_rejects_non_array_action_enums() {
     action.content["inputs"] = json!({
         "status": {"type": "string", "enum": ["open", 1]}
     });
-    let error = build_ontology_release_catalog("commerce", &[order, action], None)
+    let error = build_ontology_release_catalog("commerce", &[order.clone(), action.clone()], None)
         .expect_err("type-mismatched action enum members must fail before publication");
     assert!(error.message.contains("enum member must be string"));
+
+    action.content["inputs"] = json!({
+        "request_id": {"type": "uuid", "enum": ["not-a-uuid"]}
+    });
+    let error = build_ontology_release_catalog("commerce", &[order.clone(), action.clone()], None)
+        .expect_err("malformed formatted enum values must fail before publication");
+    assert!(error.message.contains("enum member must be uuid"));
+
+    action.content["inputs"] = json!({
+        "type": "array",
+        "items": {"type": "string"}
+    });
+    let error = build_ontology_release_catalog("commerce", &[order, action], None)
+        .expect_err("top-level action schemas must describe an object");
+    assert!(error.message.contains("top-level type must be object"));
 }
 
 #[test]
@@ -410,25 +443,70 @@ fn ontology_sdk_catalog_inherits_parent_api_names() {
             "properties": [{"name": "display_name", "api_name": "displayName", "type": "string"}]
         }),
     );
-    let (parent_catalog, parent_digest) =
-        build_ontology_release_catalog("commerce", &[parent_object], None).expect("parent");
+    let parent_order = proposal("object", "Order", json!({"object_type": "Order"}));
+    let parent_relation = proposal(
+        "relation",
+        "Customer places Order",
+        json!({
+            "from_object": "Customer",
+            "relation": "places",
+            "to_object": "Order"
+        }),
+    );
+    let parent_action = proposal(
+        "action",
+        "refund_order",
+        json!({
+            "action": "refund_order",
+            "target_object": "Order",
+            "inputs": {"reason": {"type": "text"}},
+            "reads": [],
+            "effects": [],
+            "policy": {"approval_required": true, "transaction_profile": "proposal_only"},
+            "transaction_profile": "proposal_only",
+            "executor": "local",
+            "audit_event": "commerce.refund_order"
+        }),
+    );
+    let parent_action_id = parent_action.id;
+    let parent_action_run_id = parent_action.run_id;
+    let parent_action_spec =
+        ontology_tool_spec_from_action_proposal(parent_action.run_id, &parent_action)
+            .expect("parent action tool spec");
+    let parent_action_spec = serde_json::to_value(parent_action_spec).expect("parent action JSON");
+    let parent_action_digest = normalized_json_sha256(&parent_action_spec);
+    let (parent_catalog, parent_digest) = build_ontology_release_catalog(
+        "commerce",
+        &[parent_object, parent_order, parent_relation, parent_action],
+        None,
+    )
+    .expect("parent");
     let parent = OntologyRelease {
         id: Uuid::new_v4(),
         version: "v1".to_string(),
         domain_scope: "commerce".to_string(),
-        source_run_id: None,
+        source_run_id: Some(parent_action_run_id),
         parent_release_id: None,
         rollback_target_release_id: None,
         status: "active".to_string(),
         release_class: "repo_controlled".to_string(),
-        object_count: 1,
-        relation_count: 0,
-        action_count: 0,
+        object_count: 2,
+        relation_count: 1,
+        action_count: 1,
         migration_policy: json!({}),
         gate_result: json!({"status": "passed"}),
         materialized_object_ids: json!([]),
         materialized_link_ids: json!([]),
-        evidence_refs: json!([catalog_evidence(&parent_catalog, &parent_digest)]),
+        evidence_refs: json!([
+            {
+                "proposal_id": parent_action_id,
+                "proposal_type": "action",
+                "review_status": "approved",
+                "tool_spec": parent_action_spec.clone(),
+                "contract_digest": parent_action_digest.clone(),
+            },
+            catalog_evidence(&parent_catalog, &parent_digest)
+        ]),
         promoted_by: Some("test".to_string()),
         promoted_at: Some(Utc::now()),
         rolled_back_by: None,
@@ -438,21 +516,70 @@ fn ontology_sdk_catalog_inherits_parent_api_names() {
         updated_at: Utc::now(),
     };
     let child_object = proposal("object", "Customer", json!({"object_type": "Customer"}));
-    let (child_catalog, _) =
+    let child_run_id = child_object.run_id;
+    let (child_catalog, child_digest) =
         build_ontology_release_catalog("commerce", &[child_object], Some(&parent)).expect("child");
-    assert_eq!(child_catalog.objects[0].api_name, "Customer");
+    let child_customer = child_catalog
+        .objects
+        .iter()
+        .find(|object| object.object_type == "Customer")
+        .expect("inherited customer");
+    assert_eq!(child_customer.api_name, "Customer");
+    assert_eq!(child_customer.properties[0].api_name, "displayName");
     assert_eq!(
-        child_catalog.objects[0].properties[0].api_name,
-        "displayName"
-    );
-    assert_eq!(
-        child_catalog.objects[0].properties[0].stable_key,
+        child_customer.properties[0].stable_key,
         "object:Customer:property:display_name"
     );
     assert_eq!(
-        child_catalog.objects[0].primary_key_api_name.as_deref(),
+        child_customer.primary_key_api_name.as_deref(),
         Some("displayName")
     );
+    assert_eq!(child_catalog.relations.len(), 1);
+    assert_eq!(
+        child_catalog.relations[0].stable_key,
+        parent_catalog.relations[0].stable_key
+    );
+    assert_eq!(child_catalog.actions.len(), 1);
+    assert_eq!(
+        child_catalog.actions[0].stable_key,
+        parent_catalog.actions[0].stable_key
+    );
+    let mut child_evidence = Vec::new();
+    inherit_parent_action_contract_evidence(Some(&parent), &child_catalog, &mut child_evidence)
+        .expect("inherit parent action evidence");
+    assert_eq!(
+        child_evidence[0]["inherited_from_release_id"],
+        json!(parent.id)
+    );
+    child_evidence.push(catalog_evidence(&child_catalog, &child_digest));
+    let child_release = OntologyRelease {
+        id: Uuid::new_v4(),
+        version: "v2".to_string(),
+        domain_scope: "commerce".to_string(),
+        source_run_id: Some(child_run_id),
+        parent_release_id: Some(parent.id),
+        rollback_target_release_id: Some(parent.id),
+        status: "candidate".to_string(),
+        release_class: "repo_controlled".to_string(),
+        object_count: child_catalog.objects.len() as i32,
+        relation_count: child_catalog.relations.len() as i32,
+        action_count: child_catalog.actions.len() as i32,
+        migration_policy: json!({}),
+        gate_result: json!({}),
+        materialized_object_ids: json!([]),
+        materialized_link_ids: json!([]),
+        evidence_refs: json!(child_evidence),
+        promoted_by: None,
+        promoted_at: None,
+        rolled_back_by: None,
+        rolled_back_at: None,
+        archived_at: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    validate_release_catalog(&child_release).expect("child release catalog");
+    ontology_action_tool_spec_for_release(&child_release, &child_catalog.actions[0].runtime_name)
+        .expect("inherited action contract belongs to the child release lineage");
 
     let invalid_primary_key = proposal(
         "object",

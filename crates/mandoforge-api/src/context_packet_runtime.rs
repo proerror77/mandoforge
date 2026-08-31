@@ -2857,7 +2857,10 @@ pub(crate) fn validate_ontology_action_parameters(
     let parameters = parameters
         .as_object()
         .ok_or_else(|| AppError::bad_request("ontology action parameters must be a JSON object"))?;
-    if input_schema.get("type").and_then(Value::as_str) == Some("object")
+    if input_schema
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|value_type| value_type.eq_ignore_ascii_case("object"))
         || (input_schema.get("type").is_none() && input_schema.get("properties").is_some())
     {
         let properties = input_schema
