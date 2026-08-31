@@ -133,10 +133,10 @@ pub(crate) fn OntologyGraphIsland(props: &OntologyGraphIslandProps) -> Html {
         use_effect_with(
             (selected_node_id, selected_node_ids),
             move |(selected_node_id, selected_node_ids)| {
-            if let Some(instance) = graph_instance.borrow().as_ref() {
-                if let Ok(ids) =
-                    selected_node_ids.serialize(&serde_wasm_bindgen::Serializer::json_compatible())
-                {
+                if let Some(instance) = graph_instance.borrow().as_ref() {
+                    if let Ok(ids) = selected_node_ids
+                        .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+                    {
                         js_select_ontology_nodes(instance, selected_node_id, ids);
                     }
                 }

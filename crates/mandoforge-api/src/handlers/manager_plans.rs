@@ -10,10 +10,29 @@ use uuid::Uuid;
 use crate::{
     AppError, AppState, CreateManagerAgentPlan, ManagerAgentPlan, Permission,
     ReviewManagerAgentPlan, authorize_collection_request, authorize_request,
-    normalize_manager_plan_risk, normalize_manager_plan_status,
     record_manager_agent_plan_audit_and_event, record_manager_agent_plan_work_item_activity,
     visible_session_ids_for_principal,
 };
+
+fn normalize_manager_plan_risk(value: &str) -> Result<String, AppError> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "low" | "medium" | "high" => Ok(normalized),
+        _ => Err(AppError::bad_request(
+            "risk_classification must be one of low, medium, or high",
+        )),
+    }
+}
+
+fn normalize_manager_plan_status(value: &str) -> Result<String, AppError> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "planned" | "reviewed" | "approved" | "needs_changes" | "blocked" => Ok(normalized),
+        _ => Err(AppError::bad_request(
+            "manager agent plan status must be planned, reviewed, approved, needs_changes, or blocked",
+        )),
+    }
+}
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()

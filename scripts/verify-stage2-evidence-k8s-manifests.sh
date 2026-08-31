@@ -63,6 +63,7 @@ managed_workflow_runtime_script="scripts/managed-workflow-runtime-evidence-gate.
 mcp_gateway_script="scripts/mcp-gateway-evidence-gate.sh"
 eval_release_script="scripts/eval-release-evidence-gate.sh"
 finance_script="scripts/finance-evidence-gate.sh"
+remote_computer_manifest_script="scripts/verify-remote-computer-k8s-manifests.sh"
 completion_audit_script="scripts/stage2-completion-audit-gate.sh"
 runtime_production_script="scripts/runtime-production-readiness-gate.sh"
 production_deployment_safety_script="scripts/production-deployment-safety-gate.sh"
@@ -248,6 +249,11 @@ if [[ ! -x "$whiskey_evidence_script" ]]; then
   exit 1
 fi
 
+if [[ ! -x "$remote_computer_manifest_script" ]]; then
+  echo "missing executable Remote Computer manifest verifier: $remote_computer_manifest_script" >&2
+  exit 1
+fi
+
 if ! grep -q "stop_remote_listener_by_port()" "$whiskey_deploy_script"; then
   echo "Whiskey deploy script must clean stale controller listeners by port before restarting controllers" >&2
   exit 1
@@ -283,6 +289,7 @@ deploy_root_render_file="$(mktemp -t mandoforge-deploy-root-kustomize.XXXXXX)"
 remote_computer_pilot_render_file="$(mktemp -t mandoforge-remote-computer-pilot-kustomize.XXXXXX)"
 trap 'rm -f "$stage2_render_file" "$stage2_production_render_file" "$deploy_render_file" "$deploy_root_render_file" "$remote_computer_pilot_render_file"' EXIT
 
+"$remote_computer_manifest_script"
 kubectl kustomize deploy/stage2-evidence >"$stage2_render_file"
 kubectl kustomize deploy/stage2-production-evidence --load-restrictor LoadRestrictionsNone \
   >"$stage2_production_render_file"
@@ -315,10 +322,33 @@ if [[ ! -s "$remote_computer_pilot_render_file" ]]; then
   exit 1
 fi
 
+stage2_production_job_count="$(grep -c '^kind: Job$' "$stage2_production_render_file")"
+stage2_production_admin_env_count="$(grep -c '^[[:space:]]*- name: MANDOFORGE_DEV_ADMIN_TOKEN$' "$stage2_production_render_file")"
+stage2_production_admin_key_count="$(grep -c '^[[:space:]]*key: MANDOFORGE_DEV_ADMIN_TOKEN$' "$stage2_production_render_file")"
+if [[ "$stage2_production_job_count" == "0" \
+  || "$stage2_production_admin_env_count" != "$stage2_production_job_count" \
+  || "$stage2_production_admin_key_count" != "$stage2_production_job_count" ]]; then
+  echo "every Stage 2 production evidence Job must receive the API admin token from mandoforge-secrets" >&2
+  exit 1
+fi
+
+if ! grep -q 'name: MANDOFORGE_DEV_ADMIN_TOKEN' "$stage2_render_file" \
+  || ! grep -q 'key: MANDOFORGE_DEV_ADMIN_TOKEN' "$stage2_render_file"; then
+  echo "Stage 2 evidence gate must receive the API admin token from mandoforge-secrets" >&2
+  exit 1
+fi
+
 if grep -Eq '(^|[[:space:]-])secret\.example\.yaml([[:space:]]|$)' deploy/k8s/kustomization.yaml; then
   echo "deploy/k8s default kustomization must not apply the example Secret" >&2
   exit 1
 fi
+
+for secret_example in deploy/k8s/secret.example.yaml deploy/k8s/worker-secret.example.yaml; do
+  if [[ ! -f "$secret_example" ]]; then
+    echo "missing Kubernetes Secret example: $secret_example" >&2
+    exit 1
+  fi
+done
 
 if ! grep -q "secret-delivery-contract.yaml" deploy/k8s/kustomization.yaml; then
   echo "deploy/k8s default kustomization must include the secret delivery contract" >&2
@@ -327,8 +357,17 @@ fi
 
 if ! grep -q 'MANDOFORGE_SECRET_DELIVERY_REQUIRED: "true"' deploy/k8s/secret-delivery-contract.yaml \
   || ! grep -q 'MANDOFORGE_SECRET_NAME: "mandoforge-secrets"' deploy/k8s/secret-delivery-contract.yaml \
+  || ! grep -q 'MANDOFORGE_DEV_ADMIN_TOKEN' deploy/k8s/secret-delivery-contract.yaml \
+  || ! grep -q 'MANDOFORGE_WORKER_SECRET_NAME: "mandoforge-worker-secrets"' deploy/k8s/secret-delivery-contract.yaml \
+  || ! grep -q 'MANDOFORGE_WORKER_SECRET_REQUIRED_KEYS: "DATABASE_URL,MANDOFORGE_WORKER_TOKEN"' deploy/k8s/secret-delivery-contract.yaml \
   || ! grep -q 'MANDOFORGE_SECRET_MUST_NOT_BE_EXAMPLE: "true"' deploy/k8s/secret-delivery-contract.yaml; then
-  echo "secret delivery contract must require external mandoforge-secrets delivery" >&2
+  echo "secret delivery contract must require separate external control-plane and worker secret delivery" >&2
+  exit 1
+fi
+
+if ! grep -q 'MANDOFORGE_DEV_ADMIN_TOKEN:' deploy/k8s/secret.example.yaml \
+  || ! grep -A6 'secretRef:' deploy/k8s/api.yaml | grep -q 'name: mandoforge-secrets'; then
+  echo "API admin auth must be delivered from the same mandoforge-secrets contract used by evidence Jobs" >&2
   exit 1
 fi
 
@@ -555,6 +594,11 @@ fi
 
 if ! grep -q "name: mandoforge-stage2-controller-env" deploy/stage2-evidence/stage2-controller-env-secret.example.yaml; then
   echo "Stage 2 controller env Secret example has the wrong name" >&2
+  exit 1
+fi
+
+if ! grep -q 'MANDOFORGE_DEV_ADMIN_TOKEN:' deploy/stage2-evidence/stage2-controller-env-secret.example.yaml; then
+  echo "Stage 2 controller env example must carry the API admin token for standalone evidence Job examples" >&2
   exit 1
 fi
 

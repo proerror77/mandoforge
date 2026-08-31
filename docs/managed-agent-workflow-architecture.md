@@ -236,11 +236,10 @@ It should include:
 - `default_agent_id`, `default_environment_id`
 - `step_graph`
 - `handoff_rules`
-- `execution_strategy`: `native_steps`, `delegated_runtime`, or reserved
-  `native_dynamic`
+- `execution_strategy`: `native_steps` or `delegated_runtime`
 - `runtime_adapter`: optional `codex_app_server`, `codex_cli`,
   `claude_code`, or another released runtime profile family
-- `runtime_mode`: optional `normal`, `ultracode`, or `dynamic_workflow`
+- `runtime_mode`: optional `normal` or `ultracode`
 - `runtime_capability_contract`
 - `event_ingestion_policy`
 - `approval_policy_ref`
@@ -278,73 +277,6 @@ subagent execution. The worker may call Claude Code, Codex App Server, Codex
 CLI, or another released adapter, but all output must be ingested according to
 the run's event policy and projected back into sessions, artifacts, approvals,
 and audit logs.
-
-### DynamicWorkflowPlan
-
-`DynamicWorkflowPlan` is the pre-run object for dynamic multi-agent work. It
-bridges natural-language or pack-defined intake to the existing
-`WorkflowDefinition` and `WorkflowRun` runtime objects without making
-MandoForge own an inner JavaScript workflow runtime.
-
-The object stores:
-
-- source `WorkItem` or session.
-- objective.
-- phases with prompts/objectives, agent counts, max parallelism, and
-  dependencies.
-- `agent_fleet_policy` with `max_total_agents` capped at 1000 and
-  `max_parallel_agents` capped at 16.
-- governance scope for memory, tools, connectors, approval, and external
-  effects.
-- validation strategy such as cross-check requirements and voting threshold.
-- materialization target, runtime adapter, runtime mode, capability contract,
-  and event ingestion policy.
-- analysis, review, materialized workflow ids, and audit trace id.
-
-The API lifecycle is proposal -> review -> materialize:
-
-- `POST /api/dynamic-workflow-plans/compile` turns a natural-language
-  objective plus fleet limits into a reviewable `CreateDynamicWorkflowPlan`
-  request. The current compiler is deterministic and conservative: by default
-  it creates a native dynamic implement/evaluate/repair/gate feedback-loop
-  request rather than letting generated code execute directly. Callers can
-  explicitly request `delegated_runtime` for externally owned inner planning.
-- `POST /api/dynamic-workflow-plans` validates the phase graph and fleet
-  limits, stores the proposal, and records audit evidence.
-- `POST /api/dynamic-workflow-plans/:id/review` records the review decision.
-  Only `approved` plans may be materialized.
-- `POST /api/dynamic-workflow-plans/:id/materialize` creates the
-  `WorkflowDefinition`, `WorkflowRun`, primary session, root `TaskGrant`, and
-  start steps. `delegated_runtime` plans become one governed delegated runtime
-  step; `native_steps` plans expand phases into concrete agent steps;
-  `native_dynamic` plans create a MandoForge-owned evaluator feedback graph:
-  `implement`, `implementation-evaluator`, `developer`, `troubleshooter`,
-  `integration-tester`, `integration-gate-keeper`, and `unexpected-error`.
-- `POST /api/dynamic-workflow-plans/:id/adjudicate` performs the first
-  workflow-level cross-check/voting adjudication by reading materialized step
-  outputs and recording session/audit evidence. Only explicit `vote: true`
-  step evidence counts as positive; missing votes keep the workflow in
-  `insufficient_evidence`.
-- `POST /api/dynamic-workflow-plans/:id/pressure-test` records a control-plane
-  pressure simulation for large agent counts and max parallelism. This proves
-  planning/backpressure math and review evidence, not provider capacity or live
-  LLM execution at that scale. The API status is `control_plane_passed`, not a
-  live provider-scale claim.
-
-This is the current MandoForge equivalent of Claude Code Dynamic Workflows:
-MandoForge governs the envelope, approval, memory/connector/tool scope, audit,
-and observability while Claude Code, Codex App Server, or another adapter may
-own the inner fleet execution.
-
-Delegated runtime adapter status:
-
-- `codex_app_server`: calls thread -> turn -> poll and records normalized run
-  evidence plus a delegated runtime artifact.
-- `claude_code` and `codex_cli`: route through the governed `agent_cli`
-  execution profile path. They require a matching Environment/agent/handoff
-  runtime profile or an explicit local/demo allowlist, and they ingest adapter
-  events through the existing runtime event parser.
-- Unsupported adapters remain fail-closed as `requires_action`.
 
 ### WorkflowStepRun
 

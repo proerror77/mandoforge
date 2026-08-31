@@ -2058,15 +2058,12 @@ impl ToolExecutor for ShellExecTool {
             ));
         }
         let runner = shell_runner();
-        let mut process = shell_command(&runner, &workspace, command).map_err(|error| {
-            AppError::bad_request(format!("failed to prepare shell.exec runner: {error}"))
-        })?;
-        let output = tokio::time::timeout(Duration::from_secs(30), process.output())
+        let output = run_shell_command(&runner, &workspace, command, Duration::from_secs(30))
             .await
-            .map_err(|_| AppError::bad_request("shell.exec timed out"))?
             .map_err(|error| {
                 AppError::bad_request(format!("failed to execute shell.exec: {error}"))
-            })?;
+            })?
+            .ok_or_else(|| AppError::bad_request("shell.exec timed out"))?;
         let stdout = truncate_output(&String::from_utf8_lossy(&output.stdout), 64 * 1024);
         let stderr = truncate_output(&String::from_utf8_lossy(&output.stderr), 64 * 1024);
         let result = json!({
@@ -3004,11 +3001,7 @@ pub(crate) async fn principal_from_request(
     if worker_token_authenticated(headers) {
         return Ok(Principal {
             tenant_id,
-            subject_id: header_value(headers, "x-mandoforge-subject")
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or("mandoforge-worker")
-                .to_string(),
+            subject_id: configured_worker_subject(),
             roles: vec![Role::Worker],
         });
     }
@@ -3189,14 +3182,20 @@ pub(crate) fn resolve_request_tenant_id(
 
     match (state.tenant_runtime_mode, requested_tenant_id) {
         (TenantRuntimeMode::TenantRouted, Some(tenant_id))
-            if insecure_dev_auth_enabled() || trusted_tenant_header_enabled() =>
+            if insecure_dev_auth_enabled()
+                || trusted_tenant_header_enabled()
+                || (worker_token_authenticated(headers)
+                    && state.process_role == ProcessRole::Worker
+                    && tenant_id == state.configured_tenant_id()) =>
         {
             Ok(tenant_id)
         }
         (TenantRuntimeMode::TenantRouted, Some(_)) => Err(AppError::forbidden(
             "x-mandoforge-tenant-id is only accepted from trusted tenant-routing ingress",
         )),
-        (TenantRuntimeMode::TenantRouted, None) => Ok(state.configured_tenant_id()),
+        (TenantRuntimeMode::TenantRouted, None) => Err(AppError::forbidden(
+            "tenant-routed runtime requires x-mandoforge-tenant-id from trusted ingress",
+        )),
         (TenantRuntimeMode::SingleRuntimeTenant, Some(tenant_id)) => {
             if tenant_id != state.configured_tenant_id() {
                 return Err(AppError::forbidden(
@@ -3207,6 +3206,20 @@ pub(crate) fn resolve_request_tenant_id(
         }
         (TenantRuntimeMode::SingleRuntimeTenant, None) => Ok(state.configured_tenant_id()),
     }
+}
+
+fn configured_worker_subject() -> String {
+    std::env::var("MANDOFORGE_WORKER_SUBJECT")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            std::env::var("WORKER_SUBJECT")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or_else(|| "mandoforge-worker".to_string())
 }
 
 pub(crate) fn subject_from_headers(headers: &HeaderMap) -> Result<String, AppError> {

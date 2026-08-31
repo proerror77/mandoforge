@@ -29,10 +29,26 @@ use tokio::sync::RwLock;
 use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing::info;
 use uuid::Uuid;
+use worker_daemon::ProcessRole;
 
 const DEFAULT_TENANT_ID: &str = "00000000-0000-4000-8000-000000000001";
-const CONSOLE_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-w1lKnuwwmhE0Xrkx/vuamFpvJ0MhJzm3MkSKnpQOQFQ='; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
-const CONSOLE_DEV_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-w1lKnuwwmhE0Xrkx/vuamFpvJ0MhJzm3MkSKnpQOQFQ='; connect-src 'self' http://127.0.0.1:* http://localhost:*; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+
+pub(crate) fn deterministic_record_id(namespace_id: Uuid, kind: &str, parts: &[&str]) -> Uuid {
+    let mut hasher = Sha256::new();
+    hasher.update(b"mandoforge-durable-record-v1");
+    hasher.update(namespace_id.as_bytes());
+    hasher.update(kind.as_bytes());
+    for part in parts {
+        hasher.update([0]);
+        hasher.update(part.as_bytes());
+    }
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
 
 mod agent_release_automation;
 mod agent_runtime_profile_release;
@@ -44,7 +60,6 @@ mod codex_app_server_ops;
 mod context_packet_runtime;
 mod db_bootstrap;
 mod deployment_version;
-mod dynamic_workflow_runtime;
 mod enterprise_product_readiness;
 mod enterprise_security_readiness;
 mod error;
@@ -52,7 +67,6 @@ mod eval_judge;
 mod eval_runtime;
 mod execution;
 mod execution_queue;
-mod execution_queue_broker;
 mod handlers;
 mod http_shell;
 mod mcp_gateway;
@@ -70,6 +84,7 @@ mod ontology_source_adapters;
 mod policy;
 mod policy_rollout_runtime;
 mod policy_runtime;
+mod process_control;
 mod provider;
 mod provider_governance_runtime;
 mod provider_mcp_runtime;
@@ -106,7 +121,6 @@ mod store_backend;
 mod store_codex_app_server;
 mod store_context_packets;
 mod store_cost_alert_routes;
-mod store_dynamic_workflow_plans;
 mod store_entities;
 mod store_environments;
 mod store_eval;
@@ -140,6 +154,7 @@ mod usage_finance_runtime;
 mod usage_summary_runtime;
 mod vault_kms_runtime;
 mod vault_readiness_runtime;
+mod worker_daemon;
 mod worker_execution_runtime;
 mod worker_load_validation;
 mod worker_readiness;
@@ -170,14 +185,15 @@ use codex_app_server::{
 pub(crate) use codex_app_server_ops::*;
 pub(crate) use context_packet_runtime::*;
 #[cfg(test)]
-pub(crate) use db_bootstrap::migration_paths;
-pub(crate) use db_bootstrap::{run_migrations, seed_demo_tenant};
+pub(crate) use db_bootstrap::{migration_paths, run_migrations, run_migrations_from_paths};
+pub(crate) use db_bootstrap::{
+    run_startup_migrations, seed_demo_tenant, verify_migrations_applied,
+};
 #[cfg(test)]
 pub(crate) use deployment_version::deployment_version_from_lookup;
 pub(crate) use deployment_version::{
     deployment_expected_value_matches, deployment_version_from_env,
 };
-pub(crate) use dynamic_workflow_runtime::*;
 pub(crate) use enterprise_product_readiness::build_enterprise_product_completion_readiness;
 pub(crate) use enterprise_security_readiness::build_enterprise_security_admin_readiness;
 pub(crate) use error::AppError;
@@ -187,14 +203,14 @@ use eval_judge::{EvalJudgeRequest, EvalJudgeResponse, ReservedEvalJudgeClient};
 pub(crate) use eval_runtime::*;
 use execution::{
     AgentCliRequest, ExecutionWorker, ExecutionWorkerOutcome, InlineExecutionWorker,
-    QueueBackedExecutionWorker, run_agent_cli, run_execution_job, truncate_output,
+    QueueBackedExecutionWorker, claim_execution_job, run_agent_cli, run_claimed_execution_job,
+    truncate_output,
 };
 #[cfg(test)]
-use execution::{codex_jsonl_event_type, parse_codex_jsonl};
+use execution::{codex_jsonl_event_type, parse_codex_jsonl, run_execution_job};
 #[cfg(test)]
-use execution_queue::{ExecutionJobRequest, ExecutionQueueBackend};
+use execution_queue::ExecutionJobRequest;
 use execution_queue::{ExecutionJobStatus, ExecutionQueue};
-use execution_queue_broker::{BrokerExecutionQueue, BrokerQueueConfig, BrokerQueueKind};
 pub(crate) use http_shell::{api_cors_layer, security_headers_middleware};
 use mcp_gateway::{
     HttpMcpGatewayClient, McpCallRequest, McpGatewayClient, McpGatewayConfig,
@@ -238,6 +254,7 @@ pub(crate) use provider_governance_runtime::*;
 pub(crate) use provider_mcp_runtime::*;
 pub(crate) use remote_computer_events::{
     record_remote_computer_attachment_event, record_remote_computer_job_assignment_event,
+    record_remote_computer_job_assignment_event_for_execution_claim,
     record_remote_computer_lease_event, record_remote_computer_sidecar_heartbeat_event,
     record_remote_computer_state_lock_event,
 };
@@ -256,7 +273,8 @@ pub(crate) use remote_computer_runtime::{
     cleanup_remote_computer_lease_runtime, cleanup_remote_computer_session_runtimes,
     delete_remote_computer_runtime_resource, metadata_with_remote_computer_runtime_identity,
     remote_computer_runner_request_is_exec, remote_computer_runner_response_for_audit,
-    remote_computer_runtime_identity, required_remote_computer_runtime_identity,
+    remote_computer_runtime_identity, replay_remote_computer_lease_runtime_cleanup_evidence,
+    required_remote_computer_runtime_identity,
 };
 pub(crate) use remote_computer_sidecars::{
     build_remote_computer_sidecar_recovery_readiness, build_remote_computer_sidecar_supervision,
@@ -277,17 +295,18 @@ pub(crate) use remote_computer_supervision_runtime::*;
 pub(crate) use request_auth::*;
 #[cfg(test)]
 pub(crate) use runtime_config::{
-    ExecutionQueueBackendSelection, runtime_tenant_id_from_lookup, select_execution_queue_backend,
-    tenant_runtime_mode_from_lookup,
+    ExecutionQueueBackendSelection, allow_in_memory_store_from_lookup,
+    runtime_tenant_id_from_lookup, select_execution_queue_backend, tenant_runtime_mode_from_lookup,
 };
 pub(crate) use runtime_config::{
-    approval_email_relay_url_from_env, approval_slack_webhook_url_from_env,
-    approval_webhook_url_from_env, codex_app_server_client_from_env,
-    codex_app_server_config_from_env, cost_alert_email_relay_url_from_env,
-    cost_alert_smtp_config_from_env, cost_alert_webhook_url_from_env, eval_judge_client_from_env,
-    eval_judge_config_from_env, execution_queue_from_env, execution_worker_from_env,
-    mcp_gateway_client_from_env, mcp_gateway_config_from_env, runtime_tenant_id_from_env,
-    telemetry_exporter_from_env, tenant_runtime_mode_from_env,
+    allow_in_memory_store_from_env, approval_email_relay_url_from_env,
+    approval_slack_webhook_url_from_env, approval_webhook_url_from_env,
+    codex_app_server_client_from_env, codex_app_server_config_from_env,
+    cost_alert_email_relay_url_from_env, cost_alert_smtp_config_from_env,
+    cost_alert_webhook_url_from_env, eval_judge_client_from_env, eval_judge_config_from_env,
+    execution_queue_from_env, execution_worker_from_env, mcp_gateway_client_from_env,
+    mcp_gateway_config_from_env, runtime_tenant_id_from_env, telemetry_exporter_from_env,
+    tenant_runtime_mode_from_env,
 };
 pub(crate) use runtime_support::*;
 pub(crate) use sandbox_runtime_protocol::{
@@ -305,8 +324,8 @@ pub(crate) use semantic_synthesis_schedules::*;
 pub(crate) use session_handoff_runtime::*;
 pub(crate) use session_loop_runtime::*;
 #[cfg(test)]
-use shell_runner::docker_shell_args;
-use shell_runner::{shell_command, shell_runner};
+use shell_runner::{docker_shell_args, shell_command};
+use shell_runner::{run_shell_command, shell_runner};
 pub(crate) use stage2_readiness::build_stage2_completion_readiness;
 #[cfg(test)]
 pub(crate) use stage2_readiness::parse_stage2_open_gaps;
@@ -533,14 +552,9 @@ pub(crate) use types::worker::{
 };
 pub(crate) use types::workflow::{
     AgentInboxEntry, AgentInboxSnapshot, ClaimWorkflowStepRun, ClaimWorkflowStepRunResponse,
-    CompileDynamicWorkflowPlan, CreateDynamicWorkflowPlan, CreateTaskGrant,
-    CreateWorkflowDefinition, CreateWorkflowRun, CreateWorkflowStepRun,
-    DynamicWorkflowAdjudicationRequest, DynamicWorkflowAdjudicationResponse, DynamicWorkflowPlan,
-    DynamicWorkflowPlanCompilationResponse, DynamicWorkflowPlanMaterializationResponse,
-    DynamicWorkflowPressureTestRequest, DynamicWorkflowPressureTestResponse,
-    MaterializeDynamicWorkflowPlan, ReviewDynamicWorkflowPlan, RunDueWorkflowSteps,
-    RunWorkflowStepRun, RunWorkflowStepRunResponse, SessionRuntimeRefs, TaskBoardItem,
-    TaskBoardSnapshot, TaskGrant, UpdateWorkflowDefinition, UpdateWorkflowStepRun,
+    CreateTaskGrant, CreateWorkflowDefinition, CreateWorkflowRun, CreateWorkflowStepRun,
+    RunDueWorkflowSteps, RunWorkflowStepRun, RunWorkflowStepRunResponse, SessionRuntimeRefs,
+    TaskBoardItem, TaskBoardSnapshot, TaskGrant, UpdateWorkflowDefinition, UpdateWorkflowStepRun,
     WorkflowDefinition, WorkflowGraphConditionEvaluation, WorkflowGraphConsoleEdge,
     WorkflowGraphConsoleNode, WorkflowGraphFanInReadiness, WorkflowGraphNumericComparator,
     WorkflowGraphReadyStep, WorkflowGraphRetryPolicy, WorkflowGraphTimeComparator, WorkflowRun,
@@ -604,6 +618,27 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
+    let process_role = ProcessRole::from_env()?;
+    let state = build_state(process_role).await?;
+    if process_role == ProcessRole::Worker {
+        return worker_daemon::run_worker_daemon(state).await;
+    }
+
+    let app = build_router(state);
+
+    let addr: SocketAddr = std::env::var("MANDOFORGE_ADDR")
+        .unwrap_or_else(|_| "127.0.0.1:8787".to_string())
+        .parse()
+        .context("invalid MANDOFORGE_ADDR")?;
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    info!(%addr, "mandoforge api listening");
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+async fn build_state(process_role: ProcessRole) -> Result<AppState> {
+    let require_postgres = process_role == ProcessRole::Worker;
+
     let workspace_root = std::env::var("MANDOFORGE_WORKSPACE_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(".mandoforge/workspaces"));
@@ -641,16 +676,31 @@ async fn main() -> Result<()> {
                 .connect(&database_url)
                 .await
                 .context("failed to connect to Postgres")?;
-            run_migrations(&pool).await?;
-            seed_demo_tenant(&pool, tenant_id).await?;
+            if process_role == ProcessRole::Api {
+                run_startup_migrations(&pool, &database_url, tenant_runtime_mode).await?;
+            } else {
+                verify_migrations_applied(&pool, tenant_runtime_mode).await?;
+            }
+            if process_role.seeds_demo_data() {
+                seed_demo_tenant(&pool, tenant_id).await?;
+            }
             StoreBackend::Postgres(pool)
         }
-        _ => StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
+        _ if require_postgres => anyhow::bail!(
+            "MANDOFORGE_PROCESS_ROLE=worker requires DATABASE_URL-backed Postgres state"
+        ),
+        _ if allow_in_memory_store_from_env() => {
+            StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default())))
+        }
+        _ => anyhow::bail!(
+            "DATABASE_URL is required; set MANDOFORGE_ALLOW_IN_MEMORY_STORE=1 only for local development"
+        ),
     };
 
     let execution_queue = execution_queue_from_env(&store, tenant_id)?;
 
     let state = AppState {
+        process_role,
         store,
         execution_queue,
         execution_worker: execution_worker_from_env(),
@@ -673,21 +723,13 @@ async fn main() -> Result<()> {
         tenant_runtime_mode,
         policy: runtime_policy(policy),
     };
-    state
-        .seed_demo_agent()
-        .await
-        .map_err(|error| anyhow::anyhow!(error.message))?;
-
-    let app = build_router(state);
-
-    let addr: SocketAddr = std::env::var("MANDOFORGE_ADDR")
-        .unwrap_or_else(|_| "127.0.0.1:8787".to_string())
-        .parse()
-        .context("invalid MANDOFORGE_ADDR")?;
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    info!(%addr, "mandoforge api listening");
-    axum::serve(listener, app).await?;
-    Ok(())
+    if process_role.seeds_demo_data() {
+        state
+            .seed_demo_agent()
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+    }
+    Ok(state)
 }
 
 fn build_router(state: AppState) -> Router {
@@ -705,7 +747,6 @@ fn build_router(state: AppState) -> Router {
         .merge(handlers::memory_governance::router())
         .merge(handlers::sessions::router())
         .merge(handlers::manager_plans::router())
-        .merge(handlers::dynamic_workflow_plans::router())
         .merge(handlers::workflows::router())
         .merge(handlers::tools::router())
         .merge(handlers::tenant::router())

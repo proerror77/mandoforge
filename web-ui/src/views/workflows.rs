@@ -1,5 +1,5 @@
-use crate::api::{DynamicWorkflowPlan, WorkflowDefinition, WorkflowRun};
-use crate::components::{FlowMeter, JsonPreview, KeyMetrics, Panel, Rows};
+use crate::api::{WorkflowDefinition, WorkflowRun};
+use crate::components::{ApprovalRows, FlowMeter, JsonPreview, KeyMetrics, Panel, Rows};
 use crate::state::{ConsoleData, UiLang};
 use crate::{board_column, is_active_status, label_or, short_id, status_tone};
 use yew::prelude::*;
@@ -9,7 +9,6 @@ enum RunsTasksTab {
     Runs,
     Board,
     Templates,
-    DynamicPlans,
     Approvals,
 }
 
@@ -17,17 +16,15 @@ enum RunsTasksTab {
 pub(crate) struct WorkflowsProps {
     pub(crate) data: ConsoleData,
     pub(crate) lang: UiLang,
-    pub(crate) objective: String,
-    pub(crate) on_objective: Callback<InputEvent>,
-    pub(crate) on_compile: Callback<MouseEvent>,
+    pub(crate) on_approve_approval: Callback<String>,
+    pub(crate) on_reject_approval: Callback<String>,
 }
 
 impl RunsTasksTab {
-    const ALL: [RunsTasksTab; 5] = [
+    const ALL: [RunsTasksTab; 4] = [
         RunsTasksTab::Runs,
         RunsTasksTab::Board,
         RunsTasksTab::Templates,
-        RunsTasksTab::DynamicPlans,
         RunsTasksTab::Approvals,
     ];
 
@@ -37,14 +34,12 @@ impl RunsTasksTab {
                 RunsTasksTab::Runs => "Runs",
                 RunsTasksTab::Board => "Task Board",
                 RunsTasksTab::Templates => "Templates",
-                RunsTasksTab::DynamicPlans => "Dynamic Plans",
                 RunsTasksTab::Approvals => "Approvals",
             },
             UiLang::Zh => match self {
                 RunsTasksTab::Runs => "运行记录",
                 RunsTasksTab::Board => "任务板",
                 RunsTasksTab::Templates => "流程模板",
-                RunsTasksTab::DynamicPlans => "动态计划",
                 RunsTasksTab::Approvals => "审批",
             },
         }
@@ -83,16 +78,19 @@ pub(crate) fn WorkflowsView(props: &WorkflowsProps) -> Html {
             <section class="page-purpose">
                 <p class="eyebrow">{ lang.text("Runs & Tasks / 运行与任务", "运行与任务 / Runs & Tasks") }</p>
                 <h2>{ lang.text(
-                    "One place for runs, task board state, workflow templates, dynamic plans, and approvals.",
-                    "统一查看托管智能体的运行记录、任务板、流程模板、动态计划和审批。"
+                    "One place for runs, task board state, workflow templates, and approvals.",
+                    "统一查看托管智能体的运行记录、任务板、流程模板和审批。"
                 ) }</h2>
                 <p>{ lang.text(
-                    "This page absorbs the old Workflow, Dynamic Workflow, and Board concepts. Templates are reusable plans; dynamic plans are one-off compiled runs; the board is the execution-state view.",
-                    "这里吸收原来的 Workflow、Dynamic Workflow 和 Board。固定流程是模板；动态流程是一次性计划；任务板是执行状态视图。"
+                    "Templates define reusable execution plans; the board shows execution state; approvals keep high-risk actions governed.",
+                    "流程模板定义可复用执行计划；任务板展示执行状态；审批负责治理高风险动作。"
                 ) }</p>
             </section>
 
-            <RunsTasksSummary data={props.data.clone()} lang={lang} />
+            <RunsTasksSummary
+                data={props.data.clone()}
+                lang={lang}
+            />
 
             <nav class="subnav-tabs" aria-label="Runs and tasks sections">
                 { for RunsTasksTab::ALL.into_iter().map(|tab| {
@@ -111,19 +109,32 @@ pub(crate) fn WorkflowsView(props: &WorkflowsProps) -> Html {
 
             {
                 match *active_tab {
-                    RunsTasksTab::Runs => html! { <RunsPanel data={props.data.clone()} lang={lang} /> },
-                    RunsTasksTab::Board => html! { <TaskBoardPanel data={props.data.clone()} lang={lang} /> },
-                    RunsTasksTab::Templates => html! { <WorkflowTemplatesPanel data={props.data.clone()} lang={lang} /> },
-                    RunsTasksTab::DynamicPlans => html! {
-                        <DynamicPlansPanel
+                    RunsTasksTab::Runs => html! {
+                        <RunsPanel
                             data={props.data.clone()}
                             lang={lang}
-                            objective={props.objective.clone()}
-                            on_objective={props.on_objective.clone()}
-                            on_compile={props.on_compile.clone()}
                         />
                     },
-                    RunsTasksTab::Approvals => html! { <ApprovalsPanel data={props.data.clone()} lang={lang} /> },
+                    RunsTasksTab::Board => html! {
+                        <TaskBoardPanel
+                            data={props.data.clone()}
+                            lang={lang}
+                        />
+                    },
+                    RunsTasksTab::Templates => html! {
+                        <WorkflowTemplatesPanel
+                            data={props.data.clone()}
+                            lang={lang}
+                        />
+                    },
+                    RunsTasksTab::Approvals => html! {
+                        <ApprovalsPanel
+                            data={props.data.clone()}
+                            lang={lang}
+                            on_approve_approval={props.on_approve_approval.clone()}
+                            on_reject_approval={props.on_reject_approval.clone()}
+                        />
+                    },
                 }
             }
         </div>
@@ -266,57 +277,18 @@ fn WorkflowTemplatesPanel(props: &RunsTasksDataProps) -> Html {
     }
 }
 
-#[derive(Properties, Clone, PartialEq)]
-struct DynamicPlansPanelProps {
-    data: ConsoleData,
-    lang: UiLang,
-    objective: String,
-    on_objective: Callback<InputEvent>,
-    on_compile: Callback<MouseEvent>,
-}
-
 #[component]
-fn DynamicPlansPanel(props: &DynamicPlansPanelProps) -> Html {
-    html! {
-        <div class="page-grid">
-            <Panel title={props.lang.text("Dynamic Plan Compiler", "动态计划编译器")}>
-                <div class="form-stack">
-                    <textarea
-                        id="dynamic-plan-objective"
-                        name="dynamic-plan-objective"
-                        value={props.objective.clone()}
-                        oninput={props.on_objective.clone()}
-                    />
-                    <button onclick={props.on_compile.clone()}>{ props.lang.text("Compile dynamic plan", "编译动态计划") }</button>
-                </div>
-            </Panel>
-            <Panel title={props.lang.text("Plan Shape", "计划形态")}>
-                <FleetShape plans={props.data.dynamic_workflow_plans.data.clone()} lang={props.lang} />
-            </Panel>
-            <Panel title={props.lang.text("Dynamic Plans", "动态计划")}>
-                <Rows empty={props.lang.text("No dynamic plans.", "没有动态计划。")} rows={props.data.dynamic_workflow_plans.data.iter().take(12).map(|plan| {
-                    (plan.status.clone(), label_or(&plan.objective, "dynamic plan").to_string(), label_or(&plan.runtime_adapter, "runtime").to_string())
-                }).collect::<Vec<_>>()} />
-            </Panel>
-            <Panel title={props.lang.text("Policy Boundaries", "策略边界")}>
-                <KeyMetrics values={vec![
-                    (props.lang.text("Max agents", "最大智能体数").to_string(), "1000 policy cap".to_string()),
-                    (props.lang.text("Max parallel", "最大并行数").to_string(), "16 policy cap".to_string()),
-                    (props.lang.text("Cross-check", "交叉复核").to_string(), "review and adjudication metadata".to_string()),
-                ]} />
-            </Panel>
-        </div>
-    }
-}
-
-#[component]
-fn ApprovalsPanel(props: &RunsTasksDataProps) -> Html {
+fn ApprovalsPanel(props: &WorkflowsProps) -> Html {
     html! {
         <div class="page-grid">
             <Panel title={props.lang.text("Approval Queue", "审批队列")}>
-                <Rows empty={props.lang.text("No pending approvals.", "没有待处理审批。")} rows={props.data.approvals.data.iter().take(12).map(|approval| {
-                    (approval.status.clone(), label_or(&approval.kind, "approval").to_string(), label_or(&approval.reason, "reason").to_string())
-                }).collect::<Vec<_>>()} />
+                <ApprovalRows
+                    approvals={props.data.approvals.data.clone()}
+                    lang={props.lang}
+                    limit={12}
+                    on_approve={props.on_approve_approval.clone()}
+                    on_reject={props.on_reject_approval.clone()}
+                />
             </Panel>
             <Panel title={props.lang.text("Human Review Rules", "人工确认原则")}>
                 <KeyMetrics values={vec![
@@ -367,47 +339,6 @@ fn WorkflowGraph(props: &WorkflowGraphProps) -> Html {
                 <FlowMeter label={props.lang.text("Runs", "运行")} value={props.runs.len()} max={props.runs.len().max(1)} tone="neutral" />
                 <FlowMeter label={props.lang.text("Active", "运行中")} value={active_runs} max={props.runs.len().max(1)} tone="info" />
                 <FlowMeter label={props.lang.text("Failed", "失败")} value={failed_runs} max={props.runs.len().max(1)} tone={if failed_runs > 0 { "bad" } else { "good" }} />
-            </div>
-        </div>
-    }
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct FleetShapeProps {
-    plans: Vec<DynamicWorkflowPlan>,
-    lang: UiLang,
-}
-
-#[component]
-fn FleetShape(props: &FleetShapeProps) -> Html {
-    let total = props.plans.len().max(1);
-    html! {
-        <div class="fleet-shape">
-            { for props.plans.iter().take(18).enumerate().map(|(index, plan)| {
-                let size = 26 + ((index % 5) * 8);
-                html! {
-                    <article
-                        class={classes!("fleet-cell", status_tone(&plan.status))}
-                        key={plan.id.clone()}
-                        style={format!("--cell-size: {}px;", size)}
-                    >
-                        <strong>{ index + 1 }</strong>
-                        <span>{ label_or(&plan.runtime_adapter, "runtime") }</span>
-                    </article>
-                }
-            }) }
-            { if props.plans.is_empty() {
-                html! {
-                    <div class="fleet-empty">
-                        { for (0..9).map(|index| html! { <i style={format!("--delay: {}ms;", index * 80)}></i> }) }
-                    </div>
-                }
-            } else {
-                html! {}
-            }}
-            <div class="fleet-summary">
-                <FlowMeter label={props.lang.text("Compiled plans", "已编译计划")} value={props.plans.len()} max={total} tone="info" />
-                <FlowMeter label={props.lang.text("Ready plans", "就绪计划")} value={props.plans.iter().filter(|plan| status_tone(&plan.status) == "good").count()} max={total} tone="good" />
             </div>
         </div>
     }

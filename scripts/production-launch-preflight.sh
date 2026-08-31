@@ -75,20 +75,24 @@ require_file deploy/k8s/worker-isolated-pool-networkpolicy.yaml
 require_file deploy/k8s/workspace-pvc.yaml
 require_file deploy/k8s/stage2-production-evidence-pvc.yaml
 require_file deploy/k8s/secret.example.yaml
+require_file deploy/k8s/worker-secret.example.yaml
 require_file deploy/k8s/secret-delivery-contract.yaml
 
 if grep -Eq '(^|[[:space:]-])secret\.example\.yaml([[:space:]]|$)' deploy/k8s/kustomization.yaml; then
   fail "deploy/k8s/kustomization.yaml must not apply secret.example.yaml"
 fi
 
-if grep -Eq 'POSTGRES_PASSWORD:[[:space:]]*"mandoforge"|postgres://mandoforge:mandoforge@' deploy/k8s/secret.example.yaml; then
-  fail "deploy/k8s/secret.example.yaml must not contain default Postgres credentials"
+if grep -Eq 'POSTGRES_PASSWORD:[[:space:]]*"mandoforge"|postgres://mandoforge:mandoforge@' \
+  deploy/k8s/secret.example.yaml deploy/k8s/worker-secret.example.yaml; then
+  fail "Kubernetes example Secrets must not contain default Postgres credentials"
 fi
 
 if ! grep -q 'MANDOFORGE_SECRET_DELIVERY_REQUIRED: "true"' deploy/k8s/secret-delivery-contract.yaml \
   || ! grep -q 'MANDOFORGE_SECRET_NAME: "mandoforge-secrets"' deploy/k8s/secret-delivery-contract.yaml \
+  || ! grep -q 'MANDOFORGE_WORKER_SECRET_NAME: "mandoforge-worker-secrets"' deploy/k8s/secret-delivery-contract.yaml \
+  || ! grep -q 'MANDOFORGE_WORKER_SECRET_REQUIRED_KEYS: "DATABASE_URL,MANDOFORGE_WORKER_TOKEN"' deploy/k8s/secret-delivery-contract.yaml \
   || ! grep -q 'MANDOFORGE_SECRET_MUST_NOT_BE_EXAMPLE: "true"' deploy/k8s/secret-delivery-contract.yaml; then
-  fail "deploy/k8s/secret-delivery-contract.yaml must declare external mandoforge-secrets delivery"
+  fail "deploy/k8s/secret-delivery-contract.yaml must declare separate external control-plane and worker secret delivery"
 fi
 
 if grep -Eq 'MANDOFORGE_INSECURE_DEV_AUTH:[[:space:]]*"?(true|1)"?' deploy/k8s/configmap.yaml; then
@@ -192,11 +196,6 @@ fi
 if grep -q 'mountPath: /var/run/secrets/kubernetes.io/serviceaccount' deploy/k8s/worker.yaml \
   || grep -q 'mountPath: /var/run/secrets/kubernetes.io/serviceaccount' deploy/k8s/worker-isolated-pool.yaml; then
   fail "queue workers must not receive Kubernetes API credentials"
-fi
-
-if grep -q 'app: agent-remote-computer' deploy/k8s/worker-isolated-pool-networkpolicy.yaml \
-  || grep -q 'port: 8080' deploy/k8s/worker-isolated-pool-networkpolicy.yaml; then
-  fail "queue workers must not retain a direct runtime network path"
 fi
 
 if ! grep -q 'claimName: mandoforge-workspaces' deploy/k8s/api.yaml; then

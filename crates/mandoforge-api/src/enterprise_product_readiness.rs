@@ -93,7 +93,7 @@ fn build_enterprise_product_completion_lanes(
         ]
     } else {
         vec![
-            "production launch preflight, default Secret exclusion, secret delivery contract, production runtime config, API workspace PVC, or deployment safety verifier evidence is missing",
+            "production launch preflight, default Secret exclusion, secret delivery contract, production runtime config, shared RWX workspace PVC, or deployment safety verifier evidence is missing",
         ]
     };
     let production_deployment_safety_next_actions = if production_deployment_safety_static_ready {
@@ -105,7 +105,7 @@ fn build_enterprise_product_completion_lanes(
         vec![
             "remove example Secrets from default deployment paths",
             "restore deploy/k8s/secret-delivery-contract.yaml",
-            "replace API workspace emptyDir with a PVC or object-storage-backed workspace",
+            "restore the mandoforge-workspaces ReadWriteMany PVC and shared storage class contract",
             "restore ./scripts/production-launch-preflight.sh",
         ]
     };
@@ -135,7 +135,7 @@ fn build_enterprise_product_completion_lanes(
                 "incomplete"
             },
             current_boundary: if production_deployment_safety_static_ready {
-                "Default K8s deployment excludes example Secrets, includes a no-secret delivery contract, avoids API workspace emptyDir, and has a launch preflight gate; customer-grade secret delivery evidence is still external"
+                "Default K8s deployment excludes example Secrets, separates worker credentials from control-plane credentials, avoids API workspace emptyDir, and has a launch preflight gate; customer-grade secret delivery evidence is still external"
             } else {
                 "Default deployment safety evidence is incomplete"
             },
@@ -147,8 +147,9 @@ fn build_enterprise_product_completion_lanes(
             ],
             required_evidence: vec![
                 "deploy/k8s/kustomization.yaml does not apply secret.example.yaml",
-                "deploy/k8s/secret.example.yaml does not contain default database credentials",
-                "deploy/k8s/secret-delivery-contract.yaml declares mandoforge-secrets as externally delivered production state",
+                "Kubernetes control-plane and worker Secret examples contain no default database credentials",
+                "deploy/k8s/secret-delivery-contract.yaml declares separate externally delivered control-plane and worker Secrets",
+                "worker Deployments reference only the worker-specific secret key whitelist",
                 "deploy/k8s/configmap.yaml forces provider runtime production mode and Kubernetes Remote Computer transport",
                 "deploy/k8s/configmap.yaml does not enable insecure dev auth, trusted caller headers, trusted tenant spoofing, host shell, or inline shell execution",
                 "API workspace storage is backed by mandoforge-workspaces PVC instead of emptyDir",
@@ -984,6 +985,7 @@ fn json_string_present(value: &Value, key: &str) -> bool {
 fn production_deployment_safety_static_ready() -> bool {
     let kustomization = project_file_content("deploy/k8s/kustomization.yaml");
     let secret_example = project_file_content("deploy/k8s/secret.example.yaml");
+    let worker_secret_example = project_file_content("deploy/k8s/worker-secret.example.yaml");
     let secret_delivery_contract = project_file_content("deploy/k8s/secret-delivery-contract.yaml");
     let agent_sandbox_controller_contract =
         project_file_content("deploy/k8s/agent-sandbox-controller-contract.yaml");
@@ -1011,10 +1013,26 @@ fn production_deployment_safety_static_ready() -> bool {
         && secret_example.as_deref().is_some_and(|content| {
             !content.contains("POSTGRES_PASSWORD: \"mandoforge\"")
                 && !content.contains("postgres://mandoforge:mandoforge@")
+                && content.contains("MANDOFORGE_DEV_ADMIN_TOKEN:")
+        })
+        && worker_secret_example.as_deref().is_some_and(|content| {
+            content.contains("name: mandoforge-worker-secrets")
+                && content.contains("MANDOFORGE_WORKER_TOKEN:")
+                && !content.contains("MANDOFORGE_SCHEDULER_TOKEN:")
+                && !content.contains("MANDOFORGE_DEV_ADMIN_TOKEN:")
+                && !content.contains("POSTGRES_PASSWORD:")
+                && !content.contains("postgres://mandoforge:mandoforge@")
         })
         && secret_delivery_contract.as_deref().is_some_and(|content| {
             content.contains("MANDOFORGE_SECRET_DELIVERY_REQUIRED: \"true\"")
                 && content.contains("MANDOFORGE_SECRET_NAME: \"mandoforge-secrets\"")
+                && content.contains("MANDOFORGE_DEV_ADMIN_TOKEN")
+                && content.contains(
+                    "MANDOFORGE_WORKER_SECRET_NAME: \"mandoforge-worker-secrets\"",
+                )
+                && content.contains(
+                    "MANDOFORGE_WORKER_SECRET_REQUIRED_KEYS: \"DATABASE_URL,MANDOFORGE_WORKER_TOKEN\"",
+                )
                 && content.contains("MANDOFORGE_SECRET_MUST_NOT_BE_EXAMPLE: \"true\"")
         })
         && kustomization.as_deref().is_some_and(|content| {
@@ -1086,13 +1104,18 @@ fn production_deployment_safety_static_ready() -> bool {
                 && content.contains("mountPath: /var/run/secrets/kubernetes.io/serviceaccount")
                 && !content.contains("emptyDir: {}")
         })
+        && project_file_content("deploy/k8s/workspace-pvc.yaml")
+            .as_deref()
+            .is_some_and(workspace_pvc_uses_shared_rwx_contract)
         && worker_manifest.as_deref().is_some_and(|content| {
             workload_disables_service_account_token(content)
                 && !content.contains("mountPath: /var/run/secrets/kubernetes.io/serviceaccount")
+                && worker_uses_scoped_secret_refs(content)
         })
         && isolated_worker_manifest.as_deref().is_some_and(|content| {
             workload_disables_service_account_token(content)
                 && !content.contains("mountPath: /var/run/secrets/kubernetes.io/serviceaccount")
+                && worker_uses_scoped_secret_refs(content)
         })
         && isolated_worker_network_policy
             .as_deref()
@@ -1316,8 +1339,91 @@ fn workload_disables_service_account_token(content: &str) -> bool {
     })
 }
 
+fn worker_uses_scoped_secret_refs(content: &str) -> bool {
+    let Some(documents) = yaml_documents(content) else {
+        return false;
+    };
+    let Some(worker) = documents
+        .iter()
+        .find(|document| document.get("kind").and_then(Value::as_str) == Some("Deployment"))
+        .and_then(|deployment| deployment.get("spec"))
+        .and_then(|spec| spec.get("template"))
+        .and_then(|template| template.get("spec"))
+        .and_then(|spec| spec.get("containers"))
+        .and_then(Value::as_array)
+        .and_then(|containers| {
+            containers
+                .iter()
+                .find(|container| container.get("name").and_then(Value::as_str) == Some("worker"))
+        })
+    else {
+        return false;
+    };
+    if worker
+        .get("envFrom")
+        .and_then(Value::as_array)
+        .is_some_and(|entries| entries.iter().any(|entry| entry.get("secretRef").is_some()))
+    {
+        return false;
+    }
+    let Some(env) = worker.get("env").and_then(Value::as_array) else {
+        return false;
+    };
+    let allowed = [
+        "DATABASE_URL",
+        "MANDOFORGE_WORKER_TOKEN",
+        "MANDOFORGE_PROVIDER_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "MANDOFORGE_VAULT_TOKEN",
+    ];
+    let secret_refs = env
+        .iter()
+        .filter(|entry| {
+            entry
+                .get("valueFrom")
+                .and_then(|value_from| value_from.get("secretKeyRef"))
+                .is_some()
+        })
+        .collect::<Vec<_>>();
+    secret_refs.len() == allowed.len()
+        && allowed.iter().all(|expected| {
+            secret_refs.iter().any(|entry| {
+                entry.get("name").and_then(Value::as_str) == Some(*expected)
+                    && entry
+                        .get("valueFrom")
+                        .and_then(|value_from| value_from.get("secretKeyRef"))
+                        .is_some_and(|secret_ref| {
+                            secret_ref.get("name").and_then(Value::as_str)
+                                == Some("mandoforge-worker-secrets")
+                                && secret_ref.get("key").and_then(Value::as_str) == Some(*expected)
+                        })
+            })
+        })
+        && env.iter().all(|entry| {
+            entry
+                .get("name")
+                .and_then(Value::as_str)
+                .is_none_or(|name| {
+                    ![
+                        "ADMIN",
+                        "SCHEDULER",
+                        "CONTROLLER",
+                        "KMS",
+                        "POSTGRES_PASSWORD",
+                    ]
+                    .iter()
+                    .any(|forbidden| name.contains(forbidden))
+                })
+        })
+}
+
 fn project_file_content(path: &str) -> Option<String> {
     project_file_path(path).and_then(|path| std::fs::read_to_string(path).ok())
+}
+
+fn workspace_pvc_uses_shared_rwx_contract(content: &str) -> bool {
+    content.contains("ReadWriteMany")
+        && content.contains("storageClassName: mandoforge-shared-workspaces-rwx")
 }
 
 #[cfg(unix)]
@@ -1374,5 +1480,20 @@ mod tests {
         );
         assert_ne!(token_enabled, worker, "fixture mutation must enable token");
         assert!(!workload_disables_service_account_token(&token_enabled));
+    }
+
+    #[test]
+    fn workspace_pvc_requires_shared_rwx_contract() {
+        let workspace_pvc = include_str!("../../../deploy/k8s/workspace-pvc.yaml");
+        assert!(workspace_pvc_uses_shared_rwx_contract(workspace_pvc));
+        assert!(!workspace_pvc_uses_shared_rwx_contract(
+            &workspace_pvc.replace("ReadWriteMany", "ReadWriteOnce")
+        ));
+        assert!(!workspace_pvc_uses_shared_rwx_contract(
+            &workspace_pvc.replace(
+                "mandoforge-shared-workspaces-rwx",
+                "single-node-block-storage",
+            )
+        ));
     }
 }

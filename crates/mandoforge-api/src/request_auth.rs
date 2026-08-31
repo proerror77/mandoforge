@@ -88,26 +88,30 @@ pub(crate) async fn visible_session_ids_for_principal(
         .collect())
 }
 
-async fn work_item_visible_to_principal(
+pub(crate) async fn visible_work_items_for_principal(
     state: &AppState,
     principal: &Principal,
-    work_item_id: Uuid,
-) -> Result<bool, AppError> {
+) -> Result<Vec<WorkItem>, AppError> {
+    let work_items = state.list_work_items().await?;
     if principal.roles.contains(&Role::Admin) {
-        return Ok(true);
+        return Ok(work_items);
     }
-    let work_item = state.get_work_item(work_item_id).await?;
-    if let Some(project_id) = work_item.project_id {
-        return state
-            .subject_can_access_project(&principal.subject_id, project_id)
-            .await;
+    let mut visible = Vec::new();
+    for work_item in work_items {
+        if scope_visible_to_principal(
+            state,
+            principal,
+            ResourceScope::TeamProject {
+                team_id: work_item.team_id,
+                project_id: work_item.project_id,
+            },
+        )
+        .await?
+        {
+            visible.push(work_item);
+        }
     }
-    if let Some(team_id) = work_item.team_id {
-        return state
-            .subject_can_access_team(&principal.subject_id, team_id)
-            .await;
-    }
-    Ok(true)
+    Ok(visible)
 }
 
 async fn session_scope(state: &AppState, session_id: Uuid) -> Result<ResourceScope, AppError> {
@@ -757,25 +761,6 @@ async fn resource_scope(
                 }),
             }
         }
-        "dynamic_workflow_plan" => {
-            let plan = state.get_dynamic_workflow_plan(resource_id).await?;
-            if let Some(session_id) = plan.source_session_id {
-                Ok(ResourceScope::Session(session_id))
-            } else if let Some(workflow_run_id) = plan.workflow_run_id {
-                let run = state.get_workflow_run(workflow_run_id).await?;
-                Ok(ResourceScope::Session(run.primary_session_id))
-            } else if let Some(work_item_id) = plan.source_work_item_id {
-                let work_item = state.get_work_item(work_item_id).await?;
-                Ok(ResourceScope::TeamProject {
-                    team_id: work_item.team_id,
-                    project_id: work_item.project_id,
-                })
-            } else {
-                Err(AppError::forbidden(
-                    "unscoped dynamic workflow plan requires admin access",
-                ))
-            }
-        }
         "agent_release" => {
             let release = state
                 .list_all_agent_releases()
@@ -823,28 +808,6 @@ async fn resource_scope(
             resource_type
         ))),
     }
-}
-
-pub(crate) async fn dynamic_workflow_plan_visible_to_principal(
-    state: &AppState,
-    principal: &Principal,
-    visible_session_ids: &HashSet<Uuid>,
-    plan: &DynamicWorkflowPlan,
-) -> Result<bool, AppError> {
-    if principal.roles.contains(&Role::Admin) {
-        return Ok(true);
-    }
-    if let Some(session_id) = plan.source_session_id {
-        return Ok(visible_session_ids.contains(&session_id));
-    }
-    if let Some(workflow_run_id) = plan.workflow_run_id {
-        let run = state.get_workflow_run(workflow_run_id).await?;
-        return Ok(visible_session_ids.contains(&run.primary_session_id));
-    }
-    if let Some(work_item_id) = plan.source_work_item_id {
-        return work_item_visible_to_principal(state, principal, work_item_id).await;
-    }
-    Ok(false)
 }
 
 pub(crate) async fn enforce_resource_scope(

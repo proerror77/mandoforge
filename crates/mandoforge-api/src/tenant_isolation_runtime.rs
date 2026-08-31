@@ -447,7 +447,6 @@ pub(crate) fn tenant_isolation_tracked_tables() -> Vec<&'static str> {
         "agent_handoff_events",
         "agent_handoff_assignments",
         "manager_agent_plans",
-        "dynamic_workflow_plans",
         "workflow_pack_installations",
         "workflow_pack_profile_assets",
         "workflow_pack_bindings",

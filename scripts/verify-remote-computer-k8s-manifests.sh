@@ -121,6 +121,148 @@ render_manifest_json() {
   kubectl patch --local=true --type=merge --patch '{}' -f "$1" -o json
 }
 
+render_named_resource_json() {
+  local manifest="$1"
+  local expected_kind="$2"
+  local expected_name="$3"
+
+  render_manifest_json "$manifest" \
+    | jq -ces --arg expected_kind "$expected_kind" --arg expected_name "$expected_name" '
+        [
+          .[]
+          | if .kind == "List" then .items[] else . end
+          | select(.kind == $expected_kind and .metadata.name == $expected_name)
+        ] as $matches
+        | if ($matches | length) == 1 then
+            $matches[0]
+          else
+            error("expected exactly one matching Kubernetes resource")
+          end
+      '
+}
+
+verify_worker_runtime_contracts() {
+  local api_json config_json pvc_json worker_json policy_json
+  local worker_contract worker_manifest worker_name worker_service_name
+  local policy_contract policy_manifest policy_name policy_app
+
+  config_json="$(render_named_resource_json deploy/k8s/configmap.yaml ConfigMap mandoforge-config)"
+  jq -e '.data.MANDOFORGE_WORKER_SUBJECT == "mandoforge-worker"' <<<"$config_json" >/dev/null \
+    || { echo "worker authorization subject must be a stable configured service identity" >&2; exit 1; }
+
+  api_json="$(render_named_resource_json deploy/k8s/api.yaml Deployment mandoforge-api)"
+  jq -e '
+    .spec.template.spec as $pod
+    | [$pod.containers[]? | select(.name == "api")] as $containers
+    | ($containers | length) == 1
+      and $containers[0].command == ["mandoforge-api"]
+      and ([
+        $containers[0].env[]?
+        | select(.name == "MANDOFORGE_PROCESS_ROLE")
+      ] == [{"name":"MANDOFORGE_PROCESS_ROLE","value":"api"}])
+      and any($containers[0].volumeMounts[]?;
+        .name == "workspaces" and .mountPath == "/var/lib/mandoforge/workspaces")
+      and any($pod.volumes[]?;
+        .name == "workspaces"
+        and .persistentVolumeClaim.claimName == "mandoforge-workspaces")
+  ' <<<"$api_json" >/dev/null \
+    || { echo "API Deployment must bind the api role and shared workspace PVC to its api container" >&2; exit 1; }
+
+  for worker_contract in \
+    'deploy/k8s/worker.yaml|mandoforge-worker|mandoforge-worker' \
+    'deploy/k8s/worker-isolated-pool.yaml|mandoforge-worker-isolated|mandoforge-worker-isolated'; do
+    IFS='|' read -r worker_manifest worker_name worker_service_name <<<"$worker_contract"
+    worker_json="$(render_named_resource_json "$worker_manifest" Deployment "$worker_name")"
+    if ! jq -e --arg worker_service_name "$worker_service_name" '
+      .spec.template.spec as $pod
+      | [$pod.containers[]? | select(.name == "worker")] as $containers
+      | ($pod.containers | length) == 1
+        and ($containers | length) == 1
+        and $pod.serviceAccountName == "mandoforge-worker"
+        and $pod.automountServiceAccountToken == false
+        and $containers[0].command == ["mandoforge-api"]
+        and ([
+          $containers[0].env[]?
+          | select(.name == "MANDOFORGE_PROCESS_ROLE")
+        ] == [{"name":"MANDOFORGE_PROCESS_ROLE","value":"worker"}])
+        and ([
+          $containers[0].env[]?
+          | select(.name == "MANDOFORGE_SERVICE_NAME")
+        ] == [{"name":"MANDOFORGE_SERVICE_NAME","value":$worker_service_name}])
+        and ([$containers[0].envFrom[]? | select(has("secretRef"))] | length) == 0
+        and ([$containers[0].env[]? | select(.valueFrom.secretKeyRef != null) | .name] | sort)
+          == ([
+            "DATABASE_URL",
+            "DEEPSEEK_API_KEY",
+            "MANDOFORGE_PROVIDER_API_KEY",
+            "MANDOFORGE_VAULT_TOKEN",
+            "MANDOFORGE_WORKER_TOKEN"
+          ] | sort)
+        and all($containers[0].env[]? | select(.valueFrom.secretKeyRef != null);
+          .valueFrom.secretKeyRef.name == "mandoforge-worker-secrets"
+          and .valueFrom.secretKeyRef.key == .name)
+        and all($containers[0].env[]?;
+          (.name | test("(ADMIN|SCHEDULER|CONTROLLER|KMS|POSTGRES_PASSWORD)")) | not)
+        and any($containers[0].volumeMounts[]?;
+          .name == "workspaces" and .mountPath == "/var/lib/mandoforge/workspaces")
+        and any($pod.volumes[]?;
+          .name == "workspaces"
+          and .persistentVolumeClaim.claimName == "mandoforge-workspaces")
+        and ([
+          $pod.containers[]?.volumeMounts[]?.mountPath,
+          $pod.initContainers[]?.volumeMounts[]?.mountPath
+        ] | index("/var/run/secrets/kubernetes.io/serviceaccount") | not)
+        and ([
+          $pod.volumes[]?.projected.sources[]?
+          | select(has("serviceAccountToken"))
+        ] | length == 0)
+    ' <<<"$worker_json" >/dev/null; then
+      echo "$worker_manifest must bind the worker role, telemetry identity, worker-only secret whitelist, and shared workspace PVC to one mandoforge-api container" >&2
+      exit 1
+    fi
+  done
+
+  pvc_json="$(render_named_resource_json deploy/k8s/workspace-pvc.yaml PersistentVolumeClaim mandoforge-workspaces)"
+  jq -e '
+    .spec.accessModes == ["ReadWriteMany"]
+    and .spec.storageClassName == "mandoforge-shared-workspaces-rwx"
+  ' <<<"$pvc_json" >/dev/null \
+    || { echo "workspace PVC must use the shared RWX storage contract" >&2; exit 1; }
+
+  for policy_contract in \
+    'deploy/k8s/worker-networkpolicy.yaml|mandoforge-worker-restricted|mandoforge-worker' \
+    'deploy/k8s/worker-isolated-pool-networkpolicy.yaml|mandoforge-worker-isolated|mandoforge-worker-isolated'; do
+    IFS='|' read -r policy_manifest policy_name policy_app <<<"$policy_contract"
+    policy_json="$(render_named_resource_json "$policy_manifest" NetworkPolicy "$policy_name")"
+    if ! jq -e --arg policy_app "$policy_app" '
+      def ports_exact($expected):
+        ([.ports[]? | {protocol: (.protocol // "TCP"), port: .port}]
+          | sort_by([.protocol, (.port | tostring)]))
+        == ($expected | sort_by([.protocol, (.port | tostring)]));
+      .spec as $spec
+      | $spec.podSelector == {"matchLabels":{"app":$policy_app}}
+        and (($spec.policyTypes // []) | sort) == (["Ingress", "Egress"] | sort)
+        and (($spec.ingress // []) | length) == 0
+        and ($spec.egress | length) == 3
+        and any($spec.egress[];
+          (.to // []) == [{"podSelector":{"matchLabels":{"app":"mandoforge-postgres"}}}]
+          and ports_exact([{"protocol":"TCP","port":5432}]))
+        and any($spec.egress[];
+          (.to // []) == [{"podSelector":{"matchLabels":{"app":"mandoforge-otel-collector"}}}]
+          and ports_exact([{"protocol":"TCP","port":4318},{"protocol":"TCP","port":13133}]))
+        and any($spec.egress[];
+          (.to // []) == [{
+            "namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"kube-system"}},
+            "podSelector":{"matchLabels":{"k8s-app":"kube-dns"}}
+          }]
+          and ports_exact([{"protocol":"UDP","port":53},{"protocol":"TCP","port":53}]))
+    ' <<<"$policy_json" >/dev/null; then
+      echo "$policy_manifest must deny ingress and allow only Postgres, DNS, and in-cluster OTel egress" >&2
+      exit 1
+    fi
+  done
+}
+
 kubectl kustomize deploy/k8s >"$k8s_render"
 kubectl kustomize deploy >"$default_render"
 kubectl kustomize deploy/remote-computer-pilot --load-restrictor LoadRestrictionsNone >"$pilot_render"
@@ -169,25 +311,7 @@ if ! jq -e '
   exit 1
 fi
 
-for worker_manifest in deploy/k8s/worker.yaml deploy/k8s/worker-isolated-pool.yaml; do
-  if ! render_manifest_json "$worker_manifest" \
-    | jq -e '.spec.template.spec.automountServiceAccountToken == false' >/dev/null; then
-    echo "$worker_manifest must set automountServiceAccountToken: false" >&2
-    exit 1
-  fi
-done
-
-if grep -q "mountPath: /var/run/secrets/kubernetes.io/serviceaccount" deploy/k8s/worker.yaml \
-  || grep -q "mountPath: /var/run/secrets/kubernetes.io/serviceaccount" deploy/k8s/worker-isolated-pool.yaml; then
-  echo "queue workers must not mount Kubernetes API credentials" >&2
-  exit 1
-fi
-
-if grep -q "app: agent-remote-computer" deploy/k8s/worker-isolated-pool-networkpolicy.yaml \
-  || grep -q "port: 8080" deploy/k8s/worker-isolated-pool-networkpolicy.yaml; then
-  echo "queue workers must reach remote runtimes only through the MandoForge API" >&2
-  exit 1
-fi
+verify_worker_runtime_contracts
 
 if ! grep -q 'MANDOFORGE_AGENT_SANDBOX_CONTROLLER_VERSION: "v0.5.1"' "$agent_sandbox_contract" \
   || ! grep -q 'MANDOFORGE_AGENT_SANDBOX_EXTENSIONS_API: "extensions.agents.x-k8s.io/v1beta1"' "$agent_sandbox_contract" \

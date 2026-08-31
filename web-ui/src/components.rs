@@ -2,7 +2,7 @@ use crate::api::{
     Approval, DeploymentVersion, EnterpriseProductReadiness, Session, ToolCall, WorkerJob,
     WorkflowPackInstallation, WorkflowPackMarketplace,
 };
-use crate::state::View;
+use crate::state::{UiLang, View};
 use crate::{active_job_count, label_or, pretty_json, semantic_scope_summary, status_tone};
 use serde_json::Value;
 use yew::prelude::*;
@@ -103,6 +103,61 @@ pub(crate) fn Rows(props: &RowsProps) -> Html {
                     </div>
                     <small>{ status }</small>
                 </article>
+            }) }
+        </div>
+    }
+}
+
+#[derive(Properties, Clone, PartialEq)]
+pub(crate) struct ApprovalRowsProps {
+    pub(crate) approvals: Vec<Approval>,
+    pub(crate) lang: UiLang,
+    pub(crate) limit: usize,
+    pub(crate) on_approve: Callback<String>,
+    pub(crate) on_reject: Callback<String>,
+}
+
+#[component]
+pub(crate) fn ApprovalRows(props: &ApprovalRowsProps) -> Html {
+    if props.approvals.is_empty() {
+        return html! { <p class="empty">{ props.lang.text("No pending approvals.", "没有待处理审批。") }</p> };
+    }
+    html! {
+        <div class="rows">
+            { for props.approvals.iter().take(props.limit).map(|approval| {
+                let is_pending = approval.status == "pending" || approval.status == "requires_action";
+                let on_approve = {
+                    let callback = props.on_approve.clone();
+                    let id = approval.id.clone();
+                    Callback::from(move |_| callback.emit(id.clone()))
+                };
+                let on_reject = {
+                    let callback = props.on_reject.clone();
+                    let id = approval.id.clone();
+                    Callback::from(move |_| callback.emit(id.clone()))
+                };
+                html! {
+                    <article class="row" key={approval.id.clone()}>
+                        <StatusLogo status={approval.status.clone()} />
+                        <div>
+                            <strong>{ label_or(&approval.kind, "approval") }</strong>
+                            <span>{ label_or(&approval.reason, &approval.id) }</span>
+                        </div>
+                        <small>{ approval.status.clone() }</small>
+                        {
+                            if is_pending {
+                                html! {
+                                    <div class="row-actions">
+                                        <button class="action-success" onclick={on_approve}>{ props.lang.text("Approve", "批准") }</button>
+                                        <button class="action-danger" onclick={on_reject}>{ props.lang.text("Reject", "拒绝") }</button>
+                                    </div>
+                                }
+                            } else {
+                                html! { <span class="row-action-note">{ props.lang.text("No action needed", "无需处理") }</span> }
+                            }
+                        }
+                    </article>
+                }
             }) }
         </div>
     }

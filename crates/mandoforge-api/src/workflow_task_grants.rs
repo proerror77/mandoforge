@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use chrono::Utc;
 use serde_json::{Value, json};
@@ -914,6 +914,8 @@ pub(crate) fn normalize_optional_filter(value: Option<String>) -> Option<String>
 
 pub(crate) async fn build_task_board_snapshot(
     state: &AppState,
+    visible_session_ids: Option<&HashSet<Uuid>>,
+    visible_work_item_ids: Option<&HashSet<Uuid>>,
 ) -> Result<TaskBoardSnapshot, AppError> {
     let generated_at = Utc::now();
     let work_items = state
@@ -927,11 +929,24 @@ pub(crate) async fn build_task_board_snapshot(
     let mut status_counts = BTreeMap::new();
     let mut workflow_step_count = 0usize;
     let mut claimable_count = 0usize;
+    let mut counted_work_item_ids = HashSet::new();
+    let mut visible_workflow_run_ids = HashSet::new();
     for run in &runs {
-        let work_item = run
-            .source_work_item_id
-            .and_then(|work_item_id| work_items.get(&work_item_id));
+        let work_item = run.source_work_item_id.and_then(|work_item_id| {
+            visible_work_item_ids
+                .is_none_or(|visible| visible.contains(&work_item_id))
+                .then(|| work_items.get(&work_item_id))
+                .flatten()
+        });
         for step in state.list_workflow_step_runs(run.id).await? {
+            let session_id = step.session_id.unwrap_or(run.primary_session_id);
+            if visible_session_ids.is_some_and(|visible| !visible.contains(&session_id)) {
+                continue;
+            }
+            visible_workflow_run_ids.insert(run.id);
+            if let Some(work_item_id) = work_item.map(|item| item.id) {
+                counted_work_item_ids.insert(work_item_id);
+            }
             workflow_step_count += 1;
             *status_counts.entry(step.status.clone()).or_insert(0) += 1;
             let blockers = workflow_step_claim_blockers(&step, step.agent_id, generated_at);
@@ -940,7 +955,7 @@ pub(crate) async fn build_task_board_snapshot(
                 claimable_count += 1;
             }
             items.push(TaskBoardItem {
-                work_item_id: run.source_work_item_id,
+                work_item_id: work_item.map(|item| item.id),
                 work_item_title: work_item.map(|item| item.title.clone()),
                 work_item_priority: work_item.map(|item| item.priority.clone()),
                 workflow_run_id: run.id,
@@ -964,8 +979,10 @@ pub(crate) async fn build_task_board_snapshot(
     items.reverse();
     Ok(TaskBoardSnapshot {
         generated_at,
-        work_item_count: work_items.len(),
-        workflow_run_count: runs.len(),
+        work_item_count: visible_session_ids
+            .map_or(work_items.len(), |_| counted_work_item_ids.len()),
+        workflow_run_count: visible_session_ids
+            .map_or(runs.len(), |_| visible_workflow_run_ids.len()),
         workflow_step_count,
         claimable_count,
         status_counts,
@@ -976,6 +993,7 @@ pub(crate) async fn build_task_board_snapshot(
 pub(crate) async fn build_agent_inbox_snapshot(
     state: &AppState,
     agent_id: Uuid,
+    visible_work_item_ids: Option<&HashSet<Uuid>>,
 ) -> Result<AgentInboxSnapshot, AppError> {
     let generated_at = Utc::now();
     let work_items = state
@@ -986,10 +1004,12 @@ pub(crate) async fn build_agent_inbox_snapshot(
         .collect::<HashMap<_, _>>();
     let mut entries = Vec::new();
     for run in state.list_workflow_runs().await? {
-        let work_item = run
-            .source_work_item_id
-            .and_then(|work_item_id| work_items.get(&work_item_id))
-            .cloned();
+        let work_item = run.source_work_item_id.and_then(|work_item_id| {
+            visible_work_item_ids
+                .is_none_or(|visible| visible.contains(&work_item_id))
+                .then(|| work_items.get(&work_item_id).cloned())
+                .flatten()
+        });
         for step in state.list_workflow_step_runs(run.id).await? {
             if step.agent_id != Some(agent_id) || workflow_step_status_terminal(&step.status) {
                 continue;
@@ -1068,16 +1088,91 @@ pub(crate) fn workflow_step_claim_blockers(
     blockers
 }
 
+pub(crate) fn workflow_graph_step_keys_visible_to_agents(
+    definition: &WorkflowDefinition,
+    visible_agent_ids: &HashSet<Uuid>,
+) -> Result<(HashSet<String>, HashSet<String>), AppError> {
+    let mut defined_step_keys = HashSet::new();
+    let mut visible_step_keys = HashSet::new();
+    for graph_step in definition
+        .step_graph
+        .get("steps")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let step_key = workflow_graph_step_key(graph_step)?;
+        defined_step_keys.insert(step_key.clone());
+        if workflow_graph_step_agent_id(definition, graph_step)?
+            .is_none_or(|agent_id| visible_agent_ids.contains(&agent_id))
+        {
+            visible_step_keys.insert(step_key);
+        }
+    }
+    Ok((defined_step_keys, visible_step_keys))
+}
+
 pub(crate) async fn build_workflow_run_graph_console(
     state: &AppState,
     run: &WorkflowRun,
+    visible_session_ids: &HashSet<Uuid>,
+    visible_agent_ids: &HashSet<Uuid>,
 ) -> Result<WorkflowRunGraphConsole, AppError> {
     let generated_at = Utc::now();
     let definition = state
         .get_workflow_definition(run.workflow_definition_id)
         .await?;
-    let steps = state.list_workflow_step_runs(run.id).await?;
-    let transitions = state.list_workflow_transitions(run.id).await?;
+    let all_steps = state.list_workflow_step_runs(run.id).await?;
+    let steps = all_steps
+        .iter()
+        .filter(|step| {
+            visible_session_ids.contains(&step.session_id.unwrap_or(run.primary_session_id))
+        })
+        .collect::<Vec<_>>();
+    let visible_step_ids = steps.iter().map(|step| step.id).collect::<HashSet<_>>();
+    let visible_step_keys = steps
+        .iter()
+        .map(|step| step.step_key.clone())
+        .collect::<HashSet<_>>();
+    let materialized_step_keys = all_steps
+        .iter()
+        .map(|step| step.step_key.clone())
+        .collect::<BTreeSet<_>>();
+    let graph_steps = definition
+        .step_graph
+        .get("steps")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let (_, agent_visible_step_keys) =
+        workflow_graph_step_keys_visible_to_agents(&definition, visible_agent_ids)?;
+    let visible_declared_step_keys = agent_visible_step_keys
+        .into_iter()
+        .filter(|step_key| !materialized_step_keys.contains(step_key))
+        .collect::<HashSet<_>>();
+    let mut visible_node_keys = visible_step_keys.clone();
+    visible_node_keys.extend(visible_declared_step_keys.iter().cloned());
+    let transitions = state
+        .list_workflow_transitions(run.id)
+        .await?
+        .into_iter()
+        .filter(|transition| {
+            transition
+                .from_step_run_id
+                .is_none_or(|step_id| visible_step_ids.contains(&step_id))
+                && transition
+                    .to_step_run_id
+                    .is_none_or(|step_id| visible_step_ids.contains(&step_id))
+                && transition
+                    .from_step_key
+                    .as_ref()
+                    .is_none_or(|step_key| visible_node_keys.contains(step_key))
+                && transition
+                    .to_step_key
+                    .as_ref()
+                    .is_none_or(|step_key| visible_node_keys.contains(step_key))
+        })
+        .collect::<Vec<_>>();
     let mut status_counts = BTreeMap::new();
     let due_scheduled_count = steps
         .iter()
@@ -1088,10 +1183,6 @@ pub(crate) async fn build_workflow_run_graph_console(
                     .is_some_and(|scheduled_at| scheduled_at <= generated_at)
         })
         .count();
-    let materialized_step_keys = steps
-        .iter()
-        .map(|step| step.step_key.clone())
-        .collect::<BTreeSet<_>>();
     let mut nodes = steps
         .iter()
         .map(|step| -> Result<WorkflowGraphConsoleNode, AppError> {
@@ -1100,7 +1191,10 @@ pub(crate) async fn build_workflow_run_graph_console(
             let dependencies = graph_step
                 .map(workflow_graph_step_dependencies)
                 .transpose()?
-                .unwrap_or_default();
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|step_key| visible_node_keys.contains(step_key))
+                .collect();
             let definition_summary = graph_step
                 .map(workflow_graph_console_summary)
                 .unwrap_or_else(empty_json_object);
@@ -1130,39 +1224,40 @@ pub(crate) async fn build_workflow_run_graph_console(
             })
         })
         .collect::<Result<Vec<_>, AppError>>()?;
-    if let Some(graph_steps) = definition.step_graph.get("steps").and_then(Value::as_array) {
-        for graph_step in graph_steps {
-            let step_key = workflow_graph_step_key(graph_step)?;
-            if materialized_step_keys.contains(&step_key) {
-                continue;
-            }
-            let status = "declared".to_string();
-            *status_counts.entry(status.clone()).or_insert(0) += 1;
-            nodes.push(WorkflowGraphConsoleNode {
-                id: workflow_graph_declared_node_id(run.id, &step_key),
-                step_run_id: None,
-                step_key: step_key.clone(),
-                step_type: workflow_graph_step_type(graph_step),
-                status,
-                declared: true,
-                dependencies: workflow_graph_step_dependencies(graph_step)?,
-                agent_id: workflow_graph_step_agent_id(&definition, graph_step)?,
-                task_grant_id: None,
-                context_packet_id: None,
-                claimed_by_worker: None,
-                lease_expires_at: None,
-                scheduled_at: None,
-                due: false,
-                started_at: None,
-                completed_at: None,
-                definition_summary: workflow_graph_console_summary(graph_step),
-                input_summary: json!({
-                    "source": "workflow_definition",
-                    "graph_step": workflow_graph_console_summary(graph_step)
-                }),
-                output_summary: empty_json_object(),
-            });
+    for graph_step in graph_steps {
+        let step_key = workflow_graph_step_key(graph_step)?;
+        if !visible_declared_step_keys.contains(&step_key) {
+            continue;
         }
+        let status = "declared".to_string();
+        *status_counts.entry(status.clone()).or_insert(0) += 1;
+        nodes.push(WorkflowGraphConsoleNode {
+            id: workflow_graph_declared_node_id(run.id, &step_key),
+            step_run_id: None,
+            step_key: step_key.clone(),
+            step_type: workflow_graph_step_type(graph_step),
+            status,
+            declared: true,
+            dependencies: workflow_graph_step_dependencies(graph_step)?
+                .into_iter()
+                .filter(|step_key| visible_node_keys.contains(step_key))
+                .collect(),
+            agent_id: workflow_graph_step_agent_id(&definition, graph_step)?,
+            task_grant_id: None,
+            context_packet_id: None,
+            claimed_by_worker: None,
+            lease_expires_at: None,
+            scheduled_at: None,
+            due: false,
+            started_at: None,
+            completed_at: None,
+            definition_summary: workflow_graph_console_summary(graph_step),
+            input_summary: json!({
+                "source": "workflow_definition",
+                "graph_step": workflow_graph_console_summary(graph_step)
+            }),
+            output_summary: empty_json_object(),
+        });
     }
     let mut edges = transitions
         .iter()
@@ -1178,25 +1273,26 @@ pub(crate) async fn build_workflow_run_graph_console(
             created_at: transition.created_at,
         })
         .collect::<Vec<_>>();
-    if let Some(graph_steps) = definition.step_graph.get("steps").and_then(Value::as_array) {
-        for graph_step in graph_steps {
-            let to_step_key = workflow_graph_step_key(graph_step)?;
-            if materialized_step_keys.contains(&to_step_key) {
+    for graph_step in graph_steps {
+        let to_step_key = workflow_graph_step_key(graph_step)?;
+        if !visible_declared_step_keys.contains(&to_step_key) {
+            continue;
+        }
+        for from_step_key in workflow_graph_step_dependencies(graph_step)? {
+            if !visible_node_keys.contains(&from_step_key) {
                 continue;
             }
-            for from_step_key in workflow_graph_step_dependencies(graph_step)? {
-                edges.push(WorkflowGraphConsoleEdge {
-                    id: workflow_graph_declared_edge_id(run.id, &from_step_key, &to_step_key),
-                    from_step_key: Some(from_step_key),
-                    to_step_key: Some(to_step_key.clone()),
-                    transition_type: "declared_dependency".to_string(),
-                    status: "declared".to_string(),
-                    declared: true,
-                    condition_summary: workflow_graph_console_summary(graph_step),
-                    result_summary: empty_json_object(),
-                    created_at: generated_at,
-                });
-            }
+            edges.push(WorkflowGraphConsoleEdge {
+                id: workflow_graph_declared_edge_id(run.id, &from_step_key, &to_step_key),
+                from_step_key: Some(from_step_key),
+                to_step_key: Some(to_step_key.clone()),
+                transition_type: "declared_dependency".to_string(),
+                status: "declared".to_string(),
+                declared: true,
+                condition_summary: workflow_graph_console_summary(graph_step),
+                result_summary: empty_json_object(),
+                created_at: generated_at,
+            });
         }
     }
     Ok(WorkflowRunGraphConsole {

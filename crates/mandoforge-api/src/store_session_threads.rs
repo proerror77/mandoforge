@@ -3,10 +3,126 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use crate::store_backend::StoreBackend;
-use crate::store_rows::session_thread_from_row;
-use crate::{AppError, AppState, SessionThread};
+use crate::store_rows::{session_from_row, session_thread_from_row};
+use crate::{AppError, AppState, Session, SessionStatus, SessionThread};
 
 impl AppState {
+    pub(crate) async fn set_session_and_primary_thread_status(
+        &self,
+        session_id: Uuid,
+        thread_id: Uuid,
+        session_status: SessionStatus,
+        thread_status: &str,
+    ) -> Result<(Session, Option<SessionThread>), AppError> {
+        let updated_at = Utc::now();
+        let next_is_terminal = matches!(
+            session_status,
+            SessionStatus::Terminated | SessionStatus::Failed
+        );
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let session = store
+                    .sessions
+                    .get(&session_id)
+                    .ok_or_else(|| AppError::not_found("session not found"))?;
+                if matches!(
+                    session.status,
+                    SessionStatus::Terminated | SessionStatus::Failed
+                ) && !next_is_terminal
+                {
+                    return Err(AppError::bad_request(
+                        "session is terminal and cannot run session loop work",
+                    ));
+                }
+                let session = store
+                    .sessions
+                    .get_mut(&session_id)
+                    .ok_or_else(|| AppError::not_found("session not found"))?;
+                session.status = session_status;
+                session.updated_at = updated_at;
+                let session = session.clone();
+                let thread = store
+                    .session_threads
+                    .get_mut(&thread_id)
+                    .filter(|thread| thread.session_id == session_id)
+                    .ok_or_else(|| AppError::not_found("session thread not found"))?;
+                let updated_thread = if thread.status == thread_status {
+                    None
+                } else {
+                    thread.status = thread_status.to_string();
+                    thread.updated_at = updated_at;
+                    Some(thread.clone())
+                };
+                Ok((session, updated_thread))
+            }
+            StoreBackend::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let current_status = sqlx::query_scalar::<_, String>(
+                    "SELECT status
+                     FROM sessions
+                     WHERE tenant_id = $1 AND id = $2
+                     FOR UPDATE",
+                )
+                .bind(self.current_tenant_id())
+                .bind(session_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or_else(|| AppError::not_found("session not found"))?;
+                if matches!(current_status.as_str(), "terminated" | "failed") && !next_is_terminal {
+                    return Err(AppError::bad_request(
+                        "session is terminal and cannot run session loop work",
+                    ));
+                }
+                let session_row = sqlx::query(
+                    "UPDATE sessions
+                     SET status = $1, updated_at = $2
+                     WHERE tenant_id = $3 AND id = $4
+                     RETURNING id, agent_id, agent_version_id, environment_id, title, status, created_at, updated_at",
+                )
+                .bind(session_status.as_str())
+                .bind(updated_at)
+                .bind(self.current_tenant_id())
+                .bind(session_id)
+                .fetch_one(&mut *tx)
+                .await?;
+                let thread_row = sqlx::query(
+                    "UPDATE session_threads
+                     SET status = $1, updated_at = $2
+                     WHERE tenant_id = $3 AND id = $4 AND session_id = $5 AND status IS DISTINCT FROM $1
+                     RETURNING id, session_id, parent_thread_id, thread_kind, agent_id,
+                               agent_version_id, environment_id, source_handoff_id,
+                               specialist_session_id, status, title, context, created_at, updated_at",
+                )
+                .bind(thread_status)
+                .bind(updated_at)
+                .bind(self.current_tenant_id())
+                .bind(thread_id)
+                .bind(session_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let thread_exists = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM session_threads
+                         WHERE tenant_id = $1 AND id = $2 AND session_id = $3
+                     )",
+                )
+                .bind(self.current_tenant_id())
+                .bind(thread_id)
+                .bind(session_id)
+                .fetch_one(&mut *tx)
+                .await?;
+                if !thread_exists {
+                    return Err(AppError::not_found("session thread not found"));
+                }
+                let session = session_from_row(session_row)?;
+                let updated_thread = thread_row.map(session_thread_from_row).transpose()?;
+                tx.commit().await?;
+                Ok((session, updated_thread))
+            }
+        }
+    }
+
     pub(crate) async fn list_session_threads(
         &self,
         session_id: Option<Uuid>,

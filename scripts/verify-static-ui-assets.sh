@@ -3,6 +3,17 @@ set -euo pipefail
 
 INDEX_FILE="${INDEX_FILE:-web/index.html}"
 ASSET_ROOT="${ASSET_ROOT:-web}"
+BASE_URL="${BASE_URL:-}"
+TEMP_ASSET_ROOT=""
+LIVE_CSP=""
+
+cleanup() {
+  if [[ -n "$TEMP_ASSET_ROOT" ]]; then
+    rm -rf -- "$TEMP_ASSET_ROOT"
+  fi
+}
+
+trap cleanup EXIT
 
 require_file() {
   if [[ ! -s "$1" ]]; then
@@ -20,12 +31,29 @@ require_text() {
   fi
 }
 
-for command in find grep sed; do
+for command in find grep node sed; do
   if ! command -v "$command" >/dev/null 2>&1; then
     echo "missing required command: $command" >&2
     exit 1
   fi
 done
+
+if [[ -n "$BASE_URL" ]]; then
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "missing required command: curl" >&2
+    exit 1
+  fi
+  TEMP_ASSET_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/mandoforge-static-ui.XXXXXX")"
+  INDEX_FILE="$TEMP_ASSET_ROOT/index.html"
+  ASSET_ROOT="$TEMP_ASSET_ROOT"
+  headers_file="$TEMP_ASSET_ROOT/headers"
+  curl -fsS -D "$headers_file" -o "$INDEX_FILE" "${BASE_URL%/}/"
+  LIVE_CSP="$(sed -n 's/^[Cc]ontent-[Ss]ecurity-[Pp]olicy:[[:space:]]*//p' "$headers_file" | tr -d '\r' | tail -n 1)"
+  if [[ -z "$LIVE_CSP" ]]; then
+    echo "live static UI response is missing Content-Security-Policy" >&2
+    exit 1
+  fi
+fi
 
 require_file "$INDEX_FILE"
 
@@ -39,7 +67,16 @@ if [[ "${#asset_refs[@]}" -eq 0 ]]; then
 fi
 
 for asset_ref in "${asset_refs[@]}"; do
-  require_file "web${asset_ref}"
+  if [[ "$asset_ref" != /* || "/${asset_ref#/}/" == *"/../"* ]]; then
+    echo "unsafe static UI asset path: $asset_ref" >&2
+    exit 1
+  fi
+  asset_file="${ASSET_ROOT%/}${asset_ref}"
+  if [[ -n "$BASE_URL" ]]; then
+    mkdir -p "$(dirname "$asset_file")"
+    curl -fsS -o "$asset_file" "${BASE_URL%/}$asset_ref"
+  fi
+  require_file "$asset_file"
 done
 
 require_text "$INDEX_FILE" "MandoForge Agent OS Console"
@@ -96,6 +133,12 @@ done
 if grep -R -q "window.prompt" "$ASSET_ROOT"; then
   echo "static UI must not use window.prompt" >&2
   exit 1
+fi
+
+if [[ -n "$BASE_URL" ]]; then
+  CSP_VALUE="$LIVE_CSP" INDEX_FILE="$INDEX_FILE" node scripts/verify-static-ui-csp-hash.mjs
+else
+  INDEX_FILE="$INDEX_FILE" node scripts/verify-static-ui-csp-hash.mjs
 fi
 
 echo "static UI asset verification ok"

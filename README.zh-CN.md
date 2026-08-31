@@ -129,7 +129,8 @@ Agent -> Environment -> Session -> Events -> Threads
 Stage 1 已经实现了通用运行时内核：
 
 - Rust + Axum API server。
-- Postgres 持久化存储，缺少 `DATABASE_URL` 时可以回退到内存模式。
+- Postgres 持久化存储；本地内存模式必须显式设置
+  `MANDOFORGE_ALLOW_IN_MEMORY_STORE=1`。
 - Agent、Agent Version、Session、Event、Tool Call、Approval、Artifact、Audit Log。
 - Tool Router：统一管理工具调用。
 - Policy Engine：决定工具调用是允许、拒绝还是需要审批。
@@ -211,6 +212,7 @@ audit evidence；下一步主线应该继续往 UI workflow surfaces、Semantic 
 
 ```bash
 MANDOFORGE_INSECURE_DEV_AUTH=1 \
+MANDOFORGE_ALLOW_IN_MEMORY_STORE=1 \
 MANDOFORGE_ALLOW_HOST_SHELL_EXEC=1 \
 cargo run -p mandoforge-api
 ```
@@ -262,11 +264,14 @@ START_POSTGRES=1 ./scripts/managed-session-restart-resume-core-gate.sh
 tool call、audit log、restart/resume、cursor、thread lineage 和 runtime turn
 证据写到 `.mandoforge/managed-session-restart-resume-core-evidence/`。
 
-常驻 worker / runtime session loop：
+仅本地使用的 HTTP worker 兼容路径：
 
 ```bash
+MANDOFORGE_INSECURE_DEV_AUTH=true \
+MANDOFORGE_ALLOW_IN_MEMORY_STORE=1 \
 MANDOFORGE_EXECUTION_WORKER=queue \
-MANDOFORGE_DEV_ADMIN_TOKEN=local-worker-token \
+MANDOFORGE_DEV_ADMIN_TOKEN=local-admin-token \
+MANDOFORGE_WORKER_TOKEN=local-worker-token \
 cargo run -p mandoforge-api
 
 BASE_URL=http://127.0.0.1:8787 \
@@ -275,9 +280,27 @@ WORKER_POOL=managed-agent \
 cargo run -p mandoforge-api --bin mandoforge-worker
 ```
 
+HTTP worker 只用于本地兼容，API 进程必须启用
+`MANDOFORGE_INSECURE_DEV_AUTH=true`。生产 worker 使用同一个 API binary 和
+Postgres durable queue，不调用 HTTP `/run`：
+
+```bash
+DATABASE_URL=postgres://mandoforge:mandoforge@127.0.0.1:5432/mandoforge \
+MANDOFORGE_PROCESS_ROLE=worker \
+MANDOFORGE_TENANT_ID=00000000-0000-4000-8000-000000000001 \
+MANDOFORGE_WORKER_TOKEN=... \
+MANDOFORGE_WORKER_SUBJECT=mandoforge-worker \
+WORKER_ID=worker-1 \
+cargo run -p mandoforge-api
+```
+
 这个 worker 会消费 session-loop jobs 和已批准的 execution jobs。用户从 UI
 或 `/api/sessions/:id/events` 写入任务后，session-loop job 由 worker claim，
-再进入 provider / tool / approval / execution queue 路径。`WORKER_ENVIRONMENT_ID`
+再进入 provider / tool / approval / execution queue 路径。每个 worker 进程只处理
+`MANDOFORGE_TENANT_ID` 指定的租户，worker token 固定映射到稳定的
+`MANDOFORGE_WORKER_SUBJECT`；该主体必须被加入允许执行的 team/project。
+`WORKER_ID` 只表示临时 lease owner（例如 Pod 名），不参与授权。
+`WORKER_ENVIRONMENT_ID`
 会把 worker 绑定到单个 Environment id；`WORKER_POOL` 或 `WORKER_QUEUE`
 会绑定到 `worker_queue_binding` 里同名 pool 的 Environments。
 

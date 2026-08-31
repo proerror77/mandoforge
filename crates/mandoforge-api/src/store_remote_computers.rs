@@ -841,6 +841,88 @@ impl AppState {
         }
     }
 
+    pub(crate) async fn finalize_remote_computer_job_assignment_for_attempt(
+        &self,
+        assignment_id: Uuid,
+        execution_job_id: Uuid,
+        attempt_count: i32,
+        claim_generation: i64,
+        worker_id: &str,
+        owner_status: crate::ExecutionJobStatus,
+        status: &str,
+        metadata: serde_json::Value,
+    ) -> Result<RemoteComputerJobAssignment, AppError> {
+        let now = Utc::now();
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let _claim_guard = self
+                    .execution_queue
+                    .lock_owned_claim(execution_job_id, worker_id, claim_generation, owner_status)
+                    .await?;
+                let mut store = inner.write().await;
+                let assignment = store
+                    .remote_computer_job_assignments
+                    .get_mut(&assignment_id)
+                    .filter(|assignment| {
+                        assignment.execution_job_id == execution_job_id
+                            && assignment.metadata["execution_attempt_count"].as_i64()
+                                == Some(i64::from(attempt_count))
+                            && (assignment.status == "assigned" || assignment.status == status)
+                    })
+                    .ok_or_else(|| {
+                        AppError::not_found("Remote computer job assignment not found")
+                    })?;
+                assignment.status = status.to_string();
+                assignment.metadata =
+                    merge_remote_computer_assignment_metadata(&assignment.metadata, metadata);
+                assignment.updated_at = now;
+                Ok(assignment.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "WITH owner_claim AS (
+                         SELECT 1
+                         FROM execution_jobs
+                         WHERE tenant_id = $4
+                           AND id = $6
+                           AND status = $9
+                           AND worker_id = $10
+                           AND claim_generation = $8
+                           AND lease_expires_at > now()
+                         FOR UPDATE
+                     )
+                     UPDATE remote_computer_job_assignments
+                     SET status = $1,
+                         metadata = metadata || $2::jsonb,
+                         updated_at = $3
+                     WHERE tenant_id = $4
+                       AND id = $5
+                       AND execution_job_id = $6
+                       AND metadata -> 'execution_attempt_count' = to_jsonb($7::int)
+                       AND EXISTS (SELECT 1 FROM owner_claim)
+                       AND status IN ('assigned', $1)
+                     RETURNING id, execution_job_id, remote_computer_id, lease_id, session_id, status, assigned_by, metadata, created_at, updated_at",
+                )
+                .bind(status)
+                .bind(metadata)
+                .bind(now)
+                .bind(self.current_tenant_id())
+                .bind(assignment_id)
+                .bind(execution_job_id)
+                .bind(attempt_count)
+                .bind(claim_generation)
+                .bind(owner_status.as_str())
+                .bind(worker_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| {
+                    AppError::not_found("Remote computer job assignment not found")
+                })?;
+                remote_computer_job_assignment_from_row(row)
+            }
+        }
+    }
+
     pub(crate) async fn list_remote_computer_state_locks(
         &self,
     ) -> Result<Vec<RemoteComputerStateLock>, AppError> {

@@ -74,6 +74,7 @@ fn postgres_workflow_step(
         approval_ids: Vec::new(),
         tool_call_ids: Vec::new(),
         claimed_by_worker: None,
+        claim_owner_version: 0,
         lease_expires_at: None,
         context_packet_id: None,
         started_at: None,
@@ -82,150 +83,6 @@ fn postgres_workflow_step(
         created_at: now,
         updated_at: now,
     }
-}
-
-#[tokio::test]
-#[ignore = "requires MANDOFORGE_TEST_POSTGRES_URL"]
-async fn postgres_dynamic_workflow_review_compare_and_set_blocks_stale_status() {
-    let state = postgres_workflow_store_state().await;
-    let now = Utc::now();
-    let plan = state
-        .create_dynamic_workflow_plan(DynamicWorkflowPlan {
-            id: Uuid::new_v4(),
-            source_work_item_id: None,
-            source_session_id: None,
-            objective: "Verify PostgreSQL review compare-and-set".to_string(),
-            status: "proposed".to_string(),
-            phases: json!([]),
-            agent_fleet_policy: json!({}),
-            governance: json!({}),
-            validation: json!({}),
-            materialization: json!({}),
-            analysis: json!({}),
-            review: json!({}),
-            workflow_definition_id: None,
-            workflow_run_id: None,
-            audit_trace_id: None,
-            created_at: now,
-            updated_at: now,
-            reviewed_at: None,
-            materialized_at: None,
-        })
-        .await
-        .expect("create postgres dynamic workflow plan");
-
-    let approved = state
-        .update_dynamic_workflow_plan_review(
-            plan.id,
-            "proposed",
-            "approved".to_string(),
-            json!({"approved_by": "postgres-reviewer"}),
-            None,
-            now,
-        )
-        .await
-        .expect("approve postgres dynamic workflow plan");
-    assert_eq!(approved.status, "approved");
-
-    let error = state
-        .update_dynamic_workflow_plan_review(
-            plan.id,
-            "proposed",
-            "reviewed".to_string(),
-            json!({"note": "stale operator review"}),
-            None,
-            Utc::now(),
-        )
-        .await
-        .expect_err("stale review status must conflict");
-    assert_eq!(error.status, StatusCode::CONFLICT);
-    assert_eq!(
-        state
-            .get_dynamic_workflow_plan(plan.id)
-            .await
-            .expect("read persisted postgres plan")
-            .status,
-        "approved"
-    );
-
-    let first_claim_audit = state
-        .append_audit_log(new_audit_log(
-            None,
-            "system",
-            None,
-            "dynamic_workflow_plan.materialization_claim_requested",
-            "dynamic_workflow_plan",
-            Some(plan.id),
-            json!({"attempt": 1}),
-        ))
-        .await
-        .expect("create postgres materialization claim audit");
-    state
-        .claim_dynamic_workflow_plan_materialization(plan.id, first_claim_audit.id, Utc::now())
-        .await
-        .expect("claim postgres materialization");
-    state
-        .fail_dynamic_workflow_plan_materialization(plan.id, first_claim_audit.id, None, Utc::now())
-        .await
-        .expect("fail postgres materialization");
-    let reapproved = state
-        .update_dynamic_workflow_plan_review(
-            plan.id,
-            "materialization_failed",
-            "approved".to_string(),
-            json!({"approved_by": "postgres-retry-reviewer"}),
-            None,
-            Utc::now(),
-        )
-        .await
-        .expect("reapprove failed postgres materialization");
-    assert_eq!(reapproved.status, "approved");
-    let retry_claim_audit = state
-        .append_audit_log(new_audit_log(
-            None,
-            "system",
-            None,
-            "dynamic_workflow_plan.materialization_claim_requested",
-            "dynamic_workflow_plan",
-            Some(plan.id),
-            json!({"attempt": 2}),
-        ))
-        .await
-        .expect("create postgres retry claim audit");
-    let reclaimed = state
-        .claim_dynamic_workflow_plan_materialization(plan.id, retry_claim_audit.id, Utc::now())
-        .await
-        .expect("reclaim reapproved postgres materialization");
-    assert_eq!(reclaimed.status, "materializing");
-    let late_review_audit = state
-        .append_audit_log(new_audit_log(
-            None,
-            "postgres-retry-reviewer",
-            None,
-            "dynamic_workflow_plan.reviewed",
-            "dynamic_workflow_plan",
-            Some(plan.id),
-            json!({"status": "approved"}),
-        ))
-        .await
-        .expect("create late postgres review audit");
-    let still_claimed = state
-        .update_dynamic_workflow_plan_audit_trace_if_unchanged(
-            plan.id,
-            &reapproved.status,
-            reapproved.updated_at,
-            Some(late_review_audit.id),
-            late_review_audit.created_at,
-        )
-        .await
-        .expect("late postgres review audit attachment converges");
-    assert_eq!(still_claimed.status, "materializing");
-    assert_eq!(still_claimed.audit_trace_id, Some(retry_claim_audit.id));
-    let retry_failed = state
-        .fail_dynamic_workflow_plan_materialization(plan.id, retry_claim_audit.id, None, Utc::now())
-        .await
-        .expect("postgres retry claim remains valid after late review audit");
-    assert_eq!(retry_failed.status, "materialization_failed");
 }
 
 #[tokio::test]
@@ -326,4 +183,188 @@ async fn postgres_terminal_workflow_run_rejects_new_step_reservations() {
             .len(),
         1
     );
+}
+
+#[tokio::test]
+#[ignore = "requires MANDOFORGE_TEST_POSTGRES_URL"]
+async fn postgres_claim_owner_migration_blocks_legacy_claim_replay() {
+    let state = postgres_workflow_store_state().await;
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list postgres agents")
+        .into_iter()
+        .next()
+        .expect("seeded postgres agent");
+    let now = Utc::now();
+    let definition = state
+        .create_workflow_definition(WorkflowDefinition {
+            id: Uuid::new_v4(),
+            pack_installation_id: None,
+            pack_id: None,
+            pack_version: None,
+            name: "Postgres legacy claim migration".to_string(),
+            entrypoint: format!("postgres-legacy-claim-{}", Uuid::new_v4()),
+            trigger_type: "manual".to_string(),
+            default_agent_id: agent.id,
+            default_environment_id: None,
+            input_schema_ref: None,
+            output_schema_ref: None,
+            step_graph: json!({}),
+            handoff_rules: json!({}),
+            execution_strategy: "managed_graph".to_string(),
+            runtime_adapter: None,
+            runtime_mode: None,
+            runtime_capability_contract: json!({}),
+            event_ingestion_policy: default_event_ingestion_policy(),
+            approval_policy_ref: None,
+            eval_gate_refs: Vec::new(),
+            release_state: "released".to_string(),
+            created_at: now,
+            updated_at: now,
+            archived_at: None,
+        })
+        .await
+        .expect("create postgres workflow definition");
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "Postgres legacy claim migration".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create postgres workflow session");
+    let run = state
+        .create_workflow_run(postgres_workflow_run(
+            definition.id,
+            session.id,
+            "running",
+            now,
+        ))
+        .await
+        .expect("create postgres workflow run");
+    let root_grant = issue_root_task_grant_for_workflow_run(&state, &run, &definition, &session)
+        .await
+        .expect("create postgres root task grant");
+    let run = state
+        .update_workflow_run_root_task_grant(run.id, root_grant.id)
+        .await
+        .expect("bind postgres root task grant");
+    let mut step_input = postgres_workflow_step(run.id, "legacy-running-step", now);
+    step_input.agent_id = Some(agent.id);
+    step_input.session_id = Some(session.id);
+    step_input.task_grant_id = Some(root_grant.id);
+    let step = state
+        .create_workflow_step_run_if_key_absent(step_input)
+        .await
+        .expect("create postgres workflow step")
+        .expect("postgres workflow step created");
+    let mut child_grant = root_grant.clone();
+    child_grant.id = Uuid::new_v4();
+    child_grant.parent_grant_id = Some(root_grant.id);
+    let child_grant = state
+        .create_task_grant(child_grant)
+        .await
+        .expect("create postgres child task grant");
+    let StoreBackend::Postgres(pool) = &state.store else {
+        panic!("test state must use postgres store");
+    };
+    let mut transaction = pool
+        .begin()
+        .await
+        .expect("begin migration test transaction");
+    sqlx::query(
+        "ALTER TABLE workflow_step_runs DROP CONSTRAINT workflow_step_runs_claim_owner_version_check",
+    )
+    .execute(&mut *transaction)
+    .await
+    .expect("simulate pre-migration claim schema");
+    sqlx::query(
+        "UPDATE workflow_step_runs
+         SET status = 'running', claimed_by_worker = 'subject:alice', claim_owner_version = 0,
+             lease_expires_at = now() + interval '5 minutes'
+         WHERE tenant_id = $1 AND id = $2",
+    )
+    .bind(state.current_tenant_id())
+    .bind(step.id)
+    .execute(&mut *transaction)
+    .await
+    .expect("insert legacy active claim");
+    sqlx::raw_sql(include_str!(
+        "../../../../db/migrations/0079_workflow_step_claim_owner_version.sql"
+    ))
+    .execute(&mut *transaction)
+    .await
+    .expect("apply claim owner migration");
+
+    let migrated = sqlx::query_as::<_, (String, Option<String>, i16, Value)>(
+        "SELECT status, claimed_by_worker, claim_owner_version, output_payload
+         FROM workflow_step_runs WHERE tenant_id = $1 AND id = $2",
+    )
+    .bind(state.current_tenant_id())
+    .bind(step.id)
+    .fetch_one(&mut *transaction)
+    .await
+    .expect("read migrated claim");
+    assert_eq!(migrated.0, "failed");
+    assert_eq!(migrated.1, None);
+    assert_eq!(migrated.2, 0);
+    assert_eq!(migrated.3["claim_migration"]["status"], "outcome_unknown");
+
+    let replayed = sqlx::query_scalar::<_, Uuid>(
+        "UPDATE workflow_step_runs
+         SET status = 'running', claimed_by_worker = 'subject:alice', claim_owner_version = 1
+         WHERE tenant_id = $1 AND id = $2
+           AND ((status = 'queued' AND claimed_by_worker IS NULL AND claim_owner_version = 0)
+             OR (status = 'running' AND claim_owner_version = 1 AND lease_expires_at <= now()))
+         RETURNING id",
+    )
+    .bind(state.current_tenant_id())
+    .bind(step.id)
+    .fetch_optional(&mut *transaction)
+    .await
+    .expect("attempt replay claim");
+    assert_eq!(replayed, None);
+
+    let run_status = sqlx::query_scalar::<_, String>(
+        "SELECT status FROM workflow_runs WHERE tenant_id = $1 AND id = $2",
+    )
+    .bind(state.current_tenant_id())
+    .bind(run.id)
+    .fetch_one(&mut *transaction)
+    .await
+    .expect("read migrated workflow run");
+    assert_eq!(run_status, "requires_action");
+
+    for grant_id in [root_grant.id, child_grant.id] {
+        let grant_status = sqlx::query_scalar::<_, String>(
+            "SELECT status FROM task_grants WHERE tenant_id = $1 AND id = $2",
+        )
+        .bind(state.current_tenant_id())
+        .bind(grant_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .expect("read migrated task grant");
+        assert_eq!(grant_status, "cancelled");
+    }
+    transaction
+        .commit()
+        .await
+        .expect("commit migration test transaction");
+
+    let error = enforce_task_grant_for_tool_invocation(
+        &state,
+        "file.write",
+        &ExecuteTool {
+            session_id: session.id,
+            task_grant_id: Some(root_grant.id),
+            args: json!({"path": "should-not-run"}),
+        },
+    )
+    .await
+    .expect_err("migrated root task grant must not authorize tool execution");
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+    assert_eq!(error.message, "task grant is not active");
 }

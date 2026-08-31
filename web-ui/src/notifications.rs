@@ -147,7 +147,10 @@ pub(crate) fn console_notifications(data: &ConsoleData, lang: UiLang) -> Vec<Con
                 key: format!("approval:{}", approval.id),
                 severity: "warning",
                 title: if lang == UiLang::En {
-                    format!("Approval required: {}", label_or(&approval.kind, "runtime action"))
+                    format!(
+                        "Approval required: {}",
+                        label_or(&approval.kind, "runtime action")
+                    )
                 } else {
                     format!("需要审批：{}", label_or(&approval.kind, "运行时动作"))
                 },
@@ -207,7 +210,10 @@ pub(crate) fn console_notifications(data: &ConsoleData, lang: UiLang) -> Vec<Con
 
     if let Some(notification) = json_gate_notification(
         "connector:production-readiness",
-        lang.text("Connector production readiness is blocked", "连接器生产就绪被阻塞"),
+        lang.text(
+            "Connector production readiness is blocked",
+            "连接器生产就绪被阻塞",
+        ),
         &data.native_connector_production_readiness.data,
         View::Deploy,
         lang.text("Open System Ops", "查看上线"),
@@ -288,7 +294,9 @@ pub(crate) fn console_notifications(data: &ConsoleData, lang: UiLang) -> Vec<Con
         notifications.push(ConsoleNotification {
             key: "enterprise:completion-blocked".to_string(),
             severity: "critical",
-            title: lang.text("Enterprise completion is blocked", "企业级完成状态被阻塞").to_string(),
+            title: lang
+                .text("Enterprise completion is blocked", "企业级完成状态被阻塞")
+                .to_string(),
             detail: data
                 .enterprise_product_readiness
                 .data
@@ -301,7 +309,7 @@ pub(crate) fn console_notifications(data: &ConsoleData, lang: UiLang) -> Vec<Con
                         "Enterprise readiness endpoint reports completion blocked.",
                     )
                     .to_string()
-            }),
+                }),
             target: View::Deploy,
             target_label: lang.text("Open readiness", "查看就绪"),
         });

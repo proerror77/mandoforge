@@ -14,23 +14,24 @@ use tokio::process::Command;
 use uuid::Uuid;
 
 use crate::codex_app_server::{CodexThreadRequest, CodexTurnRequest, CodexTurnResponse};
-use crate::execution_queue::{ExecutionJob, ExecutionJobRequest, ExecutionJobStatus};
+use crate::execution_queue::{ExecutionJob, ExecutionJobRequest};
 use crate::mcp_gateway::McpCallRequest;
 use crate::remote_computer_runner::{
     RemoteComputerRunnerConfig, RemoteComputerRunnerDryRunRequest, poll_agent_sandbox_binding,
     poll_kubernetes_pod_running_in_namespace, remote_computer_runner_for_config,
 };
-use crate::shell_runner::{shell_command, shell_runner};
+use crate::shell_runner::{run_shell_command, shell_runner};
 use crate::{
     AppError, AppState, Approval, Artifact, CreateRemoteComputer,
     CreateRemoteComputerJobAssignment, CreateRemoteComputerLease, Environment, ExecuteTool,
     RemoteComputer, RemoteComputerJobAssignment, RemoteComputerLease,
     RemoteComputerRuntimeIdentity, RemoteComputerSubstrate, SandboxRuntimeOperation,
     SandboxRuntimeRequest, ToolCall, delete_remote_computer_runtime_resource,
-    metadata_with_remote_computer_runtime_identity, new_audit_log, normalize_agent_cli_executable,
-    record_remote_computer_job_assignment_event, remote_computer_runtime_identity,
-    required_remote_computer_runtime_identity, resolve_mcp_runtime_secret_refs,
-    revalidate_task_grant_for_tool_invocation,
+    deterministic_record_id, metadata_with_remote_computer_runtime_identity, new_audit_log,
+    normalize_agent_cli_executable, record_remote_computer_job_assignment_event,
+    record_remote_computer_job_assignment_event_for_execution_claim,
+    remote_computer_runtime_identity, required_remote_computer_runtime_identity,
+    resolve_mcp_runtime_secret_refs, revalidate_task_grant_for_tool_invocation,
 };
 
 const DEFAULT_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
@@ -171,11 +172,49 @@ pub(crate) async fn run_execution_job(
     job_id: Uuid,
     worker_id: &str,
 ) -> Result<ExecutionJob, AppError> {
-    let job = state.execution_queue.start(job_id, worker_id).await?;
+    let job = claim_execution_job(state, job_id, worker_id).await?;
+    run_claimed_execution_job(state, &job, worker_id).await
+}
+
+pub(crate) async fn claim_execution_job(
+    state: &AppState,
+    job_id: Uuid,
+    worker_id: &str,
+) -> Result<ExecutionJob, AppError> {
+    let current = state.execution_queue.get(job_id).await?;
+    if current.status == crate::ExecutionJobStatus::Finalizing {
+        state
+            .execution_queue
+            .resume_finalizing(job_id, worker_id)
+            .await
+    } else {
+        state.execution_queue.start(job_id, worker_id).await
+    }
+}
+
+pub(crate) async fn run_claimed_execution_job(
+    state: &AppState,
+    job: &ExecutionJob,
+    worker_id: &str,
+) -> Result<ExecutionJob, AppError> {
+    if job.status == crate::ExecutionJobStatus::Finalizing {
+        if job.finalization_details["stage"] == "outcome_reconciliation" {
+            return finish_outcome_reconciliation(state, job, worker_id).await;
+        }
+        let assignment = remote_computer_assignment_for_job(state, job).await?;
+        return finish_finalizing_execution_job(
+            state,
+            job,
+            assignment.as_ref(),
+            worker_id,
+            json!({"stage": "finalization_recovery"}),
+        )
+        .await;
+    }
     if !crate::session_accepts_worker_execution(state, job.session_id).await? {
         return retry_or_fail_started_execution_job(
             state,
-            &job,
+            job,
             None,
             AppError::bad_request("execution job session is no longer active"),
             json!({"stage": "session_status"}),
@@ -183,7 +222,7 @@ pub(crate) async fn run_execution_job(
         .await;
     }
     let remote_environment_contract =
-        match remote_computer_environment_contract_for_job(state, &job).await {
+        match remote_computer_environment_contract_for_job(state, job).await {
             Ok(contract) => contract,
             Err(error) => {
                 let error_message = error.message.clone();
@@ -204,7 +243,7 @@ pub(crate) async fn run_execution_job(
                     .await?;
                 return retry_or_fail_started_execution_job(
                     state,
-                    &job,
+                    job,
                     None,
                     error,
                     json!({"stage": "environment_contract"}),
@@ -217,7 +256,7 @@ pub(crate) async fn run_execution_job(
         Err(error) => {
             return retry_or_fail_started_execution_job(
                 state,
-                &job,
+                job,
                 None,
                 error,
                 json!({"stage": "approval_load"}),
@@ -228,7 +267,7 @@ pub(crate) async fn run_execution_job(
     if approval.status != "approved" {
         return retry_or_fail_started_execution_job(
             state,
-            &job,
+            job,
             None,
             AppError::bad_request("execution job approval is not approved"),
             json!({"stage": "approval_status", "approval_status": approval.status}),
@@ -240,7 +279,7 @@ pub(crate) async fn run_execution_job(
         Err(error) => {
             return retry_or_fail_started_execution_job(
                 state,
-                &job,
+                job,
                 None,
                 error,
                 json!({"stage": "tool_call_load"}),
@@ -251,7 +290,7 @@ pub(crate) async fn run_execution_job(
     if let Err(error) = state.ensure_session_runnable(job.session_id).await {
         return retry_or_fail_started_execution_job(
             state,
-            &job,
+            job,
             None,
             error,
             json!({"stage": "session_governance_revalidation"}),
@@ -271,19 +310,64 @@ pub(crate) async fn run_execution_job(
     {
         return retry_or_fail_started_execution_job(
             state,
-            &job,
+            job,
             None,
             error,
             json!({"stage": "task_grant_revalidation"}),
         )
         .await;
     }
-    let active_assignment = match active_remote_computer_assignment_for_job(state, &job).await {
+    if tool_call.normalized_args_hash.is_some() {
+        let commit_token = match state.approval_commit_token_for_approval(approval.id).await {
+            Ok(token) => token,
+            Err(error) => {
+                return retry_or_fail_started_execution_job(
+                    state,
+                    job,
+                    None,
+                    error,
+                    json!({"stage": "approval_commit_token_lookup"}),
+                )
+                .await;
+            }
+        };
+        if commit_token
+            .as_ref()
+            .is_some_and(|token| token.status == "consumed")
+        {
+            let executing = state
+                .execution_queue
+                .begin_executing_started(job.id, worker_id, job.claim_generation)
+                .await?;
+            return record_execution_outcome_unknown_started(
+                state,
+                &executing,
+                worker_id,
+                AppError::forbidden(
+                    "approval commit token was already consumed; execution outcome requires reconciliation",
+                ),
+            )
+            .await;
+        }
+        if let Err(error) =
+            crate::validate_approval_commit_token_for_tool_call(state, &approval, &tool_call).await
+        {
+            return retry_or_fail_started_execution_job(
+                state,
+                job,
+                None,
+                error,
+                json!({"stage": "approval_commit_token_revalidation"}),
+            )
+            .await;
+        }
+    }
+    let active_assignment = match active_remote_computer_assignment_for_job(state, job).await {
         Ok(assignment) => assignment,
         Err(error) => {
             return retry_or_fail_started_execution_job(
                 state,
-                &job,
+                job,
                 None,
                 error,
                 json!({"stage": "remote_computer_assignment_load"}),
@@ -295,7 +379,7 @@ pub(crate) async fn run_execution_job(
         Some(assignment) => {
             if let Err(error) = validate_active_remote_computer_assignment_for_job(
                 state,
-                &job,
+                job,
                 &assignment,
                 remote_environment_contract.as_ref(),
             )
@@ -303,7 +387,7 @@ pub(crate) async fn run_execution_job(
             {
                 return retry_or_fail_started_execution_job(
                     state,
-                    &job,
+                    job,
                     Some(&assignment),
                     error,
                     json!({
@@ -323,7 +407,7 @@ pub(crate) async fn run_execution_job(
         None => {
             match auto_assign_remote_computer_for_job(
                 state,
-                &job,
+                job,
                 worker_id,
                 remote_environment_contract.as_ref(),
             )
@@ -333,7 +417,7 @@ pub(crate) async fn run_execution_job(
                 Err(error) => {
                     return retry_or_fail_started_execution_job(
                         state,
-                        &job,
+                        job,
                         None,
                         error,
                         json!({
@@ -357,7 +441,7 @@ pub(crate) async fn run_execution_job(
         );
         return retry_or_fail_started_execution_job(
             state,
-            &job,
+            job,
             None,
             error,
             json!({
@@ -373,14 +457,13 @@ pub(crate) async fn run_execution_job(
         .await;
     }
     if let Some(assignment) = remote_computer_assignment.as_ref() {
-        if let Err(error) = record_remote_computer_execution_handoff_acknowledged(
-            state, &job, worker_id, assignment,
-        )
-        .await
+        if let Err(error) =
+            record_remote_computer_execution_handoff_acknowledged(state, job, worker_id, assignment)
+                .await
         {
             return retry_or_fail_started_execution_job(
                 state,
-                &job,
+                job,
                 Some(assignment),
                 error,
                 json!({"stage": "remote_computer_handoff_acknowledge"}),
@@ -388,12 +471,11 @@ pub(crate) async fn run_execution_job(
             .await;
         }
         if let Err(error) =
-            append_remote_computer_execution_transport_plan(state, &job, worker_id, assignment)
-                .await
+            append_remote_computer_execution_transport_plan(state, job, worker_id, assignment).await
         {
             return retry_or_fail_started_execution_job(
                 state,
-                &job,
+                job,
                 Some(assignment),
                 error,
                 json!({"stage": "remote_computer_execution_transport_plan"}),
@@ -408,7 +490,7 @@ pub(crate) async fn run_execution_job(
         );
         return retry_or_fail_started_execution_job(
             state,
-            &job,
+            job,
             remote_computer_assignment.as_ref(),
             error,
             json!({
@@ -423,65 +505,442 @@ pub(crate) async fn run_execution_job(
         )
         .await;
     }
+    let mut commit = ExecutionCommit::new(state, job.id, worker_id, job.claim_generation);
     let result = match (
         tool_call.tool_name.as_str(),
         remote_computer_assignment.as_ref(),
         remote_pod_execution_enabled,
     ) {
         ("file.write", Some(assignment), true) => {
-            execute_approved_remote_computer_file_write(state, &approval, &tool_call, assignment)
-                .await
+            execute_approved_remote_computer_file_write(
+                state,
+                &approval,
+                &tool_call,
+                assignment,
+                &mut commit,
+            )
+            .await
         }
-        ("file.write", _, _) => execute_approved_file_write(state, &approval, &tool_call).await,
+        ("file.write", _, _) => {
+            execute_approved_file_write(state, &approval, &tool_call, &mut commit).await
+        }
         ("shell.exec", Some(assignment), true) => {
-            execute_approved_remote_computer_shell(state, &approval, &tool_call, assignment).await
+            execute_approved_remote_computer_shell(
+                state,
+                &approval,
+                &tool_call,
+                assignment,
+                &mut commit,
+            )
+            .await
         }
-        ("shell.exec", _, _) => execute_approved_shell(state, &approval, &tool_call).await,
+        ("shell.exec", _, _) => {
+            execute_approved_shell(state, &approval, &tool_call, &mut commit).await
+        }
         ("codex.exec", Some(assignment), true) => {
-            execute_approved_remote_computer_codex(state, &approval, &tool_call, assignment).await
+            execute_approved_remote_computer_codex(
+                state,
+                &approval,
+                &tool_call,
+                assignment,
+                &mut commit,
+            )
+            .await
         }
-        ("codex.exec", _, _) => execute_approved_codex(state, &approval, &tool_call).await,
+        ("codex.exec", _, _) => {
+            execute_approved_codex(state, &approval, &tool_call, &mut commit).await
+        }
         ("agent_cli.exec", Some(assignment), true) => {
-            execute_approved_remote_computer_agent_cli(state, &approval, &tool_call, assignment)
-                .await
+            execute_approved_remote_computer_agent_cli(
+                state,
+                &approval,
+                &tool_call,
+                assignment,
+                &mut commit,
+            )
+            .await
         }
-        ("agent_cli.exec", _, _) => execute_approved_agent_cli(state, &approval, &tool_call).await,
-        ("mcp.call", _, _) => execute_approved_mcp_call(state, &approval, &tool_call).await,
-        _ => execute_approved_native_connector_or_generic_tool(state, &approval, &tool_call).await,
+        ("agent_cli.exec", _, _) => {
+            execute_approved_agent_cli(state, &approval, &tool_call, &mut commit).await
+        }
+        ("mcp.call", _, _) => {
+            execute_approved_mcp_call(state, &approval, &tool_call, &mut commit).await
+        }
+        _ => {
+            execute_approved_native_connector_or_generic_tool(
+                state,
+                &approval,
+                &tool_call,
+                &mut commit,
+            )
+            .await
+        }
     };
-    if result.is_ok() {
-        let completed = state
-            .execution_queue
-            .complete_started(job.id, worker_id)
-            .await?;
-        finalize_remote_computer_assignment_for_job(
-            state,
-            &job,
-            remote_computer_assignment.as_ref(),
-            "completed",
-            "remote_computer.execution_handoff_completed",
-            json!({"execution_job_status": "completed"}),
+    match result {
+        Ok(()) => {
+            let executing = commit.started().ok_or_else(|| {
+                AppError::internal("tool execution completed without a durable commit point")
+            })?;
+            complete_started_execution_job(
+                state,
+                executing,
+                remote_computer_assignment.as_ref(),
+                worker_id,
+            )
+            .await
+        }
+        Err(error) => {
+            if let Some(executing) = commit.started() {
+                let durable_outcome = if error.execution_outcome_known {
+                    record_known_tool_failure_if_missing(state, executing, &error).await?
+                } else {
+                    reconcile_durable_tool_outcome(state, executing).await?
+                };
+                match durable_outcome {
+                    DurableToolOutcome::Success => {
+                        complete_started_execution_job(
+                            state,
+                            executing,
+                            remote_computer_assignment.as_ref(),
+                            worker_id,
+                        )
+                        .await
+                    }
+                    DurableToolOutcome::Failure if error.execution_outcome_known => {
+                        retry_or_fail_started_execution_job(
+                            state,
+                            executing,
+                            remote_computer_assignment.as_ref(),
+                            error,
+                            json!({"stage": "tool_known_failure"}),
+                        )
+                        .await
+                    }
+                    DurableToolOutcome::Failure | DurableToolOutcome::Unknown => {
+                        record_execution_outcome_unknown_started(state, executing, worker_id, error)
+                            .await
+                    }
+                }
+            } else {
+                retry_or_fail_started_execution_job(
+                    state,
+                    job,
+                    remote_computer_assignment.as_ref(),
+                    error,
+                    json!({"stage": "tool_precommit_validation"}),
+                )
+                .await
+            }
+        }
+    }
+}
+
+pub(crate) async fn recover_expired_execution_with_durable_outcome(
+    state: &AppState,
+    job: &ExecutionJob,
+    worker_id: &str,
+) -> Result<ExecutionJob, AppError> {
+    let finalizing = state
+        .execution_queue
+        .recover_expired_executing(
+            job.id,
+            worker_id,
+            None,
+            json!({"stage": "outcome_reconciliation"}),
         )
         .await?;
-        record_execution_completed_event(state, &completed).await?;
-        Ok(completed)
-    } else {
-        let error = result.expect_err("checked error");
-        retry_or_fail_started_execution_job(
+    finish_outcome_reconciliation(state, &finalizing, worker_id).await
+}
+
+async fn finish_outcome_reconciliation(
+    state: &AppState,
+    job: &ExecutionJob,
+    worker_id: &str,
+) -> Result<ExecutionJob, AppError> {
+    let Some(event) = latest_durable_tool_outcome_event(state, job).await? else {
+        return record_execution_outcome_unknown_finalizing(state, job, worker_id).await;
+    };
+    let outcome = reconcile_durable_tool_outcome(state, job).await?;
+    let finalizing = match (outcome, event.event_type.as_str()) {
+        (DurableToolOutcome::Success, "tool.result") => job.clone(),
+        (DurableToolOutcome::Failure, "tool.error") => {
+            let error = event.payload["content"]["error"]
+                .as_str()
+                .or_else(|| event.payload["content"].as_str())
+                .unwrap_or("tool execution failed after durable commit");
+            state
+                .execution_queue
+                .set_finalizing_failure(
+                    job.id,
+                    worker_id,
+                    job.claim_generation,
+                    error,
+                    json!({"stage": "tool_known_failure", "recovery": "durable_tool_error"}),
+                )
+                .await?
+        }
+        _ => {
+            return Err(AppError::internal(
+                "durable tool outcome conflicts with its terminal event",
+            ));
+        }
+    };
+    let assignment = remote_computer_assignment_for_job(state, &finalizing).await?;
+    let details = finalizing.finalization_details.clone();
+    finish_finalizing_execution_job(state, &finalizing, assignment.as_ref(), worker_id, details)
+        .await
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DurableToolOutcome {
+    Success,
+    Failure,
+    Unknown,
+}
+
+const EXECUTION_OUTCOME_UNKNOWN_REASON: &str =
+    "execution outcome after side-effect commit requires reconciliation";
+
+async fn reconcile_durable_tool_outcome(
+    state: &AppState,
+    job: &ExecutionJob,
+) -> Result<DurableToolOutcome, AppError> {
+    let tool_call = state.get_tool_call(job.tool_call_id).await?;
+    let status_outcome = match tool_call.status.as_str() {
+        "completed" => Some(DurableToolOutcome::Success),
+        "failed" => Some(DurableToolOutcome::Failure),
+        _ => None,
+    };
+    let event = latest_durable_tool_outcome_event(state, job).await?;
+    let event_outcome = event.as_ref().map(|event| {
+        if event.event_type == "tool.result" {
+            DurableToolOutcome::Success
+        } else {
+            DurableToolOutcome::Failure
+        }
+    });
+    if status_outcome
+        .zip(event_outcome)
+        .is_some_and(|(status, event)| status != event)
+    {
+        return Err(AppError::internal(
+            "tool status conflicts with its durable terminal event",
+        ));
+    }
+    match event {
+        Some(event) if event.event_type == "tool.result" => {
+            let result = event.payload.get("content").cloned().unwrap_or(Value::Null);
+            if status_outcome != Some(DurableToolOutcome::Success) {
+                state
+                    .update_tool_call_status(job.tool_call_id, "completed", Some(result), None)
+                    .await?;
+            }
+            Ok(DurableToolOutcome::Success)
+        }
+        Some(event) => {
+            let error = event.payload.get("content").cloned().unwrap_or(Value::Null);
+            if status_outcome != Some(DurableToolOutcome::Failure) {
+                state
+                    .update_tool_call_status(job.tool_call_id, "failed", None, Some(error))
+                    .await?;
+            }
+            Ok(DurableToolOutcome::Failure)
+        }
+        None => Ok(DurableToolOutcome::Unknown),
+    }
+}
+
+async fn latest_durable_tool_outcome_event(
+    state: &AppState,
+    job: &ExecutionJob,
+) -> Result<Option<crate::SessionEvent>, AppError> {
+    Ok(state
+        .list_events(job.session_id)
+        .await?
+        .into_iter()
+        .rev()
+        .find(|event| {
+            event.actor_type == "tool"
+                && event.actor_id == Some(job.tool_call_id)
+                && event.payload["execution_job_id"] == json!(job.id)
+                && event.payload["tool_call_id"] == json!(job.tool_call_id)
+                && event.payload["attempt_count"] == json!(job.attempt_count)
+                && event.payload["claim_generation"]
+                    .as_i64()
+                    .is_some_and(|generation| generation <= job.claim_generation)
+                && matches!(event.event_type.as_str(), "tool.result" | "tool.error")
+                && (event.event_type == "tool.result"
+                    || event.payload["execution_outcome_known"].as_bool() == Some(true))
+        }))
+}
+
+async fn record_known_tool_failure_if_missing(
+    state: &AppState,
+    job: &ExecutionJob,
+    error: &AppError,
+) -> Result<DurableToolOutcome, AppError> {
+    let current = reconcile_durable_tool_outcome(state, job).await?;
+    if current != DurableToolOutcome::Unknown {
+        return Ok(current);
+    }
+    let event_type = "tool.error";
+    let event_id = execution_attempt_event_id(job, event_type);
+    let error_payload = json!({
+        "error": error.message,
+        "execution_outcome_known": true,
+    });
+    state
+        .append_event_once_for_execution_claim(
+            job,
+            crate::ExecutionJobStatus::Executing,
+            event_id,
+            "tool",
+            Some(job.tool_call_id),
+            job.session_id,
+            event_type,
+            json!({
+                "execution_job_id": job.id,
+                "tool_call_id": job.tool_call_id,
+                "tool": job.tool_name,
+                "content": error_payload,
+                "execution_outcome_known": true,
+                "attempt_count": job.attempt_count,
+                "claim_generation": job.claim_generation,
+            }),
+        )
+        .await?;
+    state
+        .update_tool_call_status(
+            job.tool_call_id,
+            "failed",
+            None,
+            Some(error_payload.clone()),
+        )
+        .await?;
+    let mut audit = new_audit_log(
+        Some(job.session_id),
+        "worker",
+        Some(job.id),
+        "tool.failed",
+        "tool_call",
+        Some(job.tool_call_id),
+        json!({
+            "tool": job.tool_name,
+            "error": error_payload,
+            "execution_job_id": job.id,
+            "attempt_count": job.attempt_count,
+        }),
+    );
+    audit.id = deterministic_record_id(event_id, "audit", &["tool.failed"]);
+    state
+        .append_audit_log_for_execution_claim(job, crate::ExecutionJobStatus::Executing, audit)
+        .await?;
+    Ok(DurableToolOutcome::Failure)
+}
+
+struct ExecutionCommit<'a> {
+    state: &'a AppState,
+    job_id: Uuid,
+    worker_id: &'a str,
+    claim_generation: i64,
+    started: Option<ExecutionJob>,
+}
+
+impl<'a> ExecutionCommit<'a> {
+    fn new(state: &'a AppState, job_id: Uuid, worker_id: &'a str, claim_generation: i64) -> Self {
+        Self {
             state,
-            &job,
-            remote_computer_assignment.as_ref(),
-            error,
+            job_id,
+            worker_id,
+            claim_generation,
+            started: None,
+        }
+    }
+
+    async fn begin(&mut self) -> Result<(), AppError> {
+        if self.started.is_none() {
+            self.started = Some(
+                self.state
+                    .execution_queue
+                    .begin_executing_started(self.job_id, self.worker_id, self.claim_generation)
+                    .await?,
+            );
+        }
+        Ok(())
+    }
+
+    fn started(&self) -> Option<&ExecutionJob> {
+        self.started.as_ref()
+    }
+
+    fn is_started(&self) -> bool {
+        self.started.is_some()
+    }
+
+    async fn append_tool_outcome(
+        &self,
+        tool_call: &ToolCall,
+        event_type: &str,
+        content: Value,
+        execution_outcome_known: bool,
+    ) -> Result<crate::SessionEvent, AppError> {
+        let job = self.started().ok_or_else(|| {
+            AppError::internal("tool outcome was recorded before the durable commit point")
+        })?;
+        self.state
+            .append_event_once_for_execution_claim(
+                job,
+                crate::ExecutionJobStatus::Executing,
+                execution_attempt_event_id(job, event_type),
+                "tool",
+                Some(tool_call.id),
+                job.session_id,
+                event_type,
+                json!({
+                    "execution_job_id": job.id,
+                    "tool_call_id": tool_call.id,
+                    "tool": tool_call.tool_name,
+                    "content": content,
+                    "execution_outcome_known": execution_outcome_known,
+                    "attempt_count": job.attempt_count,
+                    "claim_generation": job.claim_generation,
+                }),
+            )
+            .await
+    }
+}
+
+async fn complete_started_execution_job(
+    state: &AppState,
+    job: &ExecutionJob,
+    assignment: Option<&RemoteComputerJobAssignment>,
+    worker_id: &str,
+) -> Result<ExecutionJob, AppError> {
+    let finalizing = state
+        .execution_queue
+        .begin_finalizing_started(
+            job.id,
+            worker_id,
+            job.claim_generation,
+            None,
             json!({"stage": "tool_execution"}),
         )
-        .await
-    }
+        .await?;
+    finish_finalizing_execution_job(
+        state,
+        &finalizing,
+        assignment,
+        worker_id,
+        json!({"stage": "tool_execution"}),
+    )
+    .await
 }
 
 async fn execute_approved_native_connector_or_generic_tool(
     state: &AppState,
     approval: &Approval,
     tool_call: &ToolCall,
+    commit: &mut ExecutionCommit<'_>,
 ) -> Result<(), AppError> {
     if tool_call.tool_name == "native.connector.call" {
         let connector_id = tool_call
@@ -490,14 +949,17 @@ async fn execute_approved_native_connector_or_generic_tool(
             .and_then(Value::as_str)
             .unwrap_or_default();
         if crate::native_connectors::is_supported_ecommerce_connector(connector_id) {
-            return execute_approved_ecommerce_native_connector(state, approval, tool_call).await;
+            return execute_approved_ecommerce_native_connector(state, approval, tool_call, commit)
+                .await;
         }
         if crate::native_connectors::is_supported_github_connector(connector_id) {
-            return execute_approved_github_native_connector(state, approval, tool_call).await;
+            return execute_approved_github_native_connector(state, approval, tool_call, commit)
+                .await;
         }
     }
 
     let result = if tool_call.normalized_args_hash.is_some() {
+        commit.begin().await?;
         let token =
             crate::consume_valid_approval_commit_token_for_tool_call(state, approval, tool_call)
                 .await?;
@@ -509,8 +971,12 @@ async fn execute_approved_native_connector_or_generic_tool(
             "target_binding": token.target_binding,
         })
     } else {
+        commit.begin().await?;
         json!({"approval": "approved"})
     };
+    commit
+        .append_tool_outcome(tool_call, "tool.result", result.clone(), true)
+        .await?;
     state
         .update_tool_call_status(tool_call.id, "completed", Some(result), None)
         .await?;
@@ -521,7 +987,9 @@ async fn execute_approved_ecommerce_native_connector(
     state: &AppState,
     approval: &Approval,
     tool_call: &ToolCall,
+    commit: &mut ExecutionCommit<'_>,
 ) -> Result<(), AppError> {
+    commit.begin().await?;
     let token =
         crate::consume_valid_approval_commit_token_for_tool_call(state, approval, tool_call)
             .await?;
@@ -535,14 +1003,8 @@ async fn execute_approved_ecommerce_native_connector(
         "target_binding": token.target_binding,
         "adapter_result": adapter_result,
     });
-    state
-        .append_event(
-            "tool",
-            Some(tool_call.id),
-            approval.session_id,
-            "tool.result",
-            json!({"tool_call_id": tool_call.id, "tool": tool_call.tool_name, "content": result}),
-        )
+    commit
+        .append_tool_outcome(tool_call, "tool.result", result.clone(), true)
         .await?;
     state
         .update_tool_call_status(tool_call.id, "completed", Some(result.clone()), None)
@@ -574,7 +1036,9 @@ async fn execute_approved_github_native_connector(
     state: &AppState,
     approval: &Approval,
     tool_call: &ToolCall,
+    commit: &mut ExecutionCommit<'_>,
 ) -> Result<(), AppError> {
+    commit.begin().await?;
     let token =
         crate::consume_valid_approval_commit_token_for_tool_call(state, approval, tool_call)
             .await?;
@@ -588,14 +1052,8 @@ async fn execute_approved_github_native_connector(
         "target_binding": token.target_binding,
         "adapter_result": adapter_result,
     });
-    state
-        .append_event(
-            "tool",
-            Some(tool_call.id),
-            approval.session_id,
-            "tool.result",
-            json!({"tool_call_id": tool_call.id, "tool": tool_call.tool_name, "content": result}),
-        )
+    commit
+        .append_tool_outcome(tool_call, "tool.result", result.clone(), true)
         .await?;
     state
         .update_tool_call_status(tool_call.id, "completed", Some(result.clone()), None)
@@ -627,6 +1085,7 @@ async fn execute_approved_mcp_call(
     state: &AppState,
     approval: &Approval,
     tool_call: &ToolCall,
+    commit: &mut ExecutionCommit<'_>,
 ) -> Result<(), AppError> {
     let config = state
         .mcp_gateway_config
@@ -641,6 +1100,7 @@ async fn execute_approved_mcp_call(
     } else {
         0
     };
+    commit.begin().await?;
     let token =
         crate::consume_valid_approval_commit_token_for_tool_call(state, approval, tool_call)
             .await?;
@@ -654,14 +1114,8 @@ async fn execute_approved_mcp_call(
         "secret_refs_resolved_count": secret_refs_resolved,
         "result": response.result,
     });
-    state
-        .append_event(
-            "tool",
-            Some(tool_call.id),
-            approval.session_id,
-            "tool.result",
-            json!({"tool_call_id": tool_call.id, "tool": tool_call.tool_name, "content": result}),
-        )
+    commit
+        .append_tool_outcome(tool_call, "tool.result", result.clone(), true)
         .await?;
     state
         .update_tool_call_status(tool_call.id, "completed", Some(result.clone()), None)
@@ -686,48 +1140,293 @@ async fn execute_approved_mcp_call(
     Ok(())
 }
 
-async fn record_execution_completed_event(
+async fn finish_finalizing_execution_job(
+    state: &AppState,
+    job: &ExecutionJob,
+    assignment: Option<&RemoteComputerJobAssignment>,
+    worker_id: &str,
+    _details: Value,
+) -> Result<ExecutionJob, AppError> {
+    let details = job.finalization_details.clone();
+    let failed = job.last_error.is_some();
+    let committed_known_failure = details["stage"] == "tool_known_failure"
+        && reconcile_durable_tool_outcome(state, job).await? == DurableToolOutcome::Failure;
+    let retryable_failure = failed && !committed_known_failure;
+    let terminal_failure = failed && (!retryable_failure || job.attempt_count >= job.max_attempts);
+    let queue_backend = state.execution_queue.backend_kind();
+    let mut finalizing = job.clone();
+    if failed {
+        record_execution_failure_tail(state, job, assignment, retryable_failure, details).await?;
+    } else {
+        finalize_remote_computer_assignment_for_job(
+            state,
+            job,
+            assignment,
+            "completed",
+            "remote_computer.execution_handoff_completed",
+            json!({"execution_job_status": "completed"}),
+        )
+        .await?;
+    }
+    if queue_backend != "postgres" && (!failed || terminal_failure) {
+        finalizing = state
+            .execution_queue
+            .prepare_outcome_tail(job.id, worker_id, job.claim_generation)
+            .await?;
+    }
+    let finished = state
+        .execution_queue
+        .finish_finalizing_started(
+            finalizing.id,
+            worker_id,
+            finalizing.claim_generation,
+            retryable_failure,
+        )
+        .await?;
+    match finished.status {
+        crate::ExecutionJobStatus::Completed => {
+            publish_execution_completion_tail(state, &finished).await?
+        }
+        crate::ExecutionJobStatus::Failed => {
+            publish_execution_failure_tail(state, &finished).await?
+        }
+        _ => {}
+    }
+    Ok(finished)
+}
+
+pub(crate) async fn publish_execution_completion_tail(
     state: &AppState,
     job: &ExecutionJob,
 ) -> Result<(), AppError> {
+    let queue_backend = state.execution_queue.backend_kind();
+    let event = if queue_backend == "postgres" {
+        state
+            .list_events(job.session_id)
+            .await?
+            .into_iter()
+            .rev()
+            .find(|event| crate::execution_completion_event_matches_job(event, job))
+            .ok_or_else(|| AppError::internal("execution completion event was not committed"))?
+    } else {
+        if job.status != crate::ExecutionJobStatus::Completed
+            || !matches!(
+                job.finalization_details["stage"].as_str(),
+                Some("completion_pending" | "completion_published")
+            )
+        {
+            return Err(AppError::not_found(
+                "execution completion is not pending publication",
+            ));
+        }
+        state
+            .append_event_once(
+                execution_completion_event_id(job),
+                "worker",
+                Some(job.id),
+                job.session_id,
+                "execution.completed",
+                execution_completed_payload(job),
+            )
+            .await?
+    };
+    publish_execution_outcome_event(state, job, event).await
+}
+
+pub(crate) async fn publish_execution_failure_tail(
+    state: &AppState,
+    job: &ExecutionJob,
+) -> Result<(), AppError> {
+    if job.status != crate::ExecutionJobStatus::Failed
+        || (state.execution_queue.backend_kind() != "postgres"
+            && !matches!(
+                job.finalization_details["stage"].as_str(),
+                Some("failure_pending" | "failure_published")
+            ))
+    {
+        return Err(AppError::not_found(
+            "execution failure is not pending publication",
+        ));
+    }
     let event = state
-        .append_event(
-            "worker",
-            Some(job.id),
-            job.session_id,
-            "execution.completed",
-            json!({
-                "execution_job_id": job.id,
-                "approval_id": job.approval_id,
-                "tool_call_id": job.tool_call_id,
-                "tool": job.tool_name,
-                "status": job.status,
-                "worker_id": job.worker_id,
-                "reason": "approved execution completed"
-            }),
-        )
-        .await?;
-    project_latest_tool_result_for_execution_job(state, job).await?;
-    crate::project_session_event_to_loop(state, &event).await?;
+        .list_events(job.session_id)
+        .await?
+        .into_iter()
+        .rev()
+        .find(|event| crate::execution_failure_event_matches_job(event, job))
+        .ok_or_else(|| AppError::internal("execution failure event was not committed"))?;
+    publish_execution_outcome_event(state, job, event).await
+}
+
+async fn publish_execution_outcome_event(
+    state: &AppState,
+    job: &ExecutionJob,
+    event: crate::SessionEvent,
+) -> Result<(), AppError> {
+    let queue_backend = state.execution_queue.backend_kind();
+    if queue_backend == "postgres" {
+        state.emit_telemetry_event(&event).await;
+        return Ok(());
+    }
+    if !crate::session_accepts_worker_execution(state, job.session_id).await? {
+        state.execution_queue.mark_outcome_published(job.id).await?;
+        return Ok(());
+    }
+
+    let pending_start = earliest_uncovered_pending_tool_result_seq(state, job.session_id)
+        .await?
+        .unwrap_or(event.seq);
+    let projected =
+        crate::project_session_event_to_loop_from(state, &event, Some(pending_start)).await?;
+    if projected.is_none()
+        && !state
+            .session_loop_projection_covers_range(job.session_id, pending_start, event.seq)
+            .await?
+    {
+        return Ok(());
+    }
+    state.execution_queue.mark_outcome_published(job.id).await?;
     Ok(())
 }
 
-async fn project_latest_tool_result_for_execution_job(
+fn execution_completion_event_id(job: &ExecutionJob) -> Uuid {
+    let attempt_count = job.attempt_count.to_string();
+    let claim_generation = job.claim_generation.to_string();
+    deterministic_record_id(
+        job.id,
+        "execution-completion-event",
+        &[attempt_count.as_str(), claim_generation.as_str()],
+    )
+}
+
+fn execution_completed_payload(job: &ExecutionJob) -> Value {
+    json!({
+        "execution_job_id": job.id,
+        "approval_id": job.approval_id,
+        "tool_call_id": job.tool_call_id,
+        "tool": job.tool_name,
+        "status": "completed",
+        "worker_id": job.worker_id,
+        "attempt_count": job.attempt_count,
+        "claim_generation": job.claim_generation,
+        "reason": "approved execution completed"
+    })
+}
+
+async fn latest_tool_result_for_execution_job(
     state: &AppState,
     job: &ExecutionJob,
-) -> Result<(), AppError> {
-    let events = state.list_events(job.session_id).await?;
-    if let Some(tool_result_event) = events.iter().rev().find(|event| {
-        event.event_type == "tool.result"
-            && event
-                .payload
-                .get("tool_call_id")
-                .and_then(Value::as_str)
-                .and_then(|value| Uuid::parse_str(value).ok())
-                == Some(job.tool_call_id)
-    }) {
-        crate::project_session_event_to_loop(state, tool_result_event).await?;
+) -> Result<Option<crate::SessionEvent>, AppError> {
+    Ok(latest_durable_tool_outcome_event(state, job)
+        .await?
+        .filter(|event| event.event_type == "tool.result"))
+}
+
+pub(crate) async fn earliest_uncovered_pending_tool_result_seq(
+    state: &AppState,
+    session_id: Uuid,
+) -> Result<Option<i64>, AppError> {
+    // ponytail: pending completions are normally tiny; index by session if this becomes hot.
+    let mut earliest = None;
+    for pending_job in state
+        .execution_queue
+        .list()
+        .await?
+        .into_iter()
+        .filter(|job| {
+            job.session_id == session_id
+                && job.status == crate::ExecutionJobStatus::Completed
+                && job.finalization_details["stage"] == "completion_pending"
+        })
+    {
+        let result = latest_tool_result_for_execution_job(state, &pending_job)
+            .await?
+            .ok_or_else(|| {
+                AppError::internal("completed execution is missing its durable tool result")
+            })?;
+        if !state
+            .session_loop_projection_covers_range(session_id, result.seq, result.seq)
+            .await?
+        {
+            earliest = Some(earliest.map_or(result.seq, |seq: i64| seq.min(result.seq)));
+        }
     }
+    Ok(earliest)
+}
+
+async fn record_execution_outcome_unknown_started(
+    state: &AppState,
+    job: &ExecutionJob,
+    worker_id: &str,
+    error: AppError,
+) -> Result<ExecutionJob, AppError> {
+    append_execution_outcome_unknown_evidence(state, job, crate::ExecutionJobStatus::Executing)
+        .await?;
+    state
+        .execution_queue
+        .mark_outcome_unknown_started(job.id, worker_id, job.claim_generation, &error.message)
+        .await
+}
+
+async fn record_execution_outcome_unknown_finalizing(
+    state: &AppState,
+    job: &ExecutionJob,
+    worker_id: &str,
+) -> Result<ExecutionJob, AppError> {
+    append_execution_outcome_unknown_evidence(state, job, crate::ExecutionJobStatus::Finalizing)
+        .await?;
+    state
+        .execution_queue
+        .mark_outcome_unknown_finalizing(
+            job.id,
+            worker_id,
+            job.claim_generation,
+            EXECUTION_OUTCOME_UNKNOWN_REASON,
+        )
+        .await
+}
+
+async fn append_execution_outcome_unknown_evidence(
+    state: &AppState,
+    job: &ExecutionJob,
+    status: crate::ExecutionJobStatus,
+) -> Result<(), AppError> {
+    let event_type = "execution.outcome_unknown";
+    let event_id = execution_attempt_event_id(job, event_type);
+    let payload = json!({
+        "execution_job_id": job.id,
+        "approval_id": job.approval_id,
+        "tool_call_id": job.tool_call_id,
+        "tool": job.tool_name,
+        "attempt_count": job.attempt_count,
+        "reason": EXECUTION_OUTCOME_UNKNOWN_REASON,
+        "requires_reconciliation": true,
+    });
+    state
+        .append_event_once_for_execution_claim(
+            job,
+            status.clone(),
+            event_id,
+            "worker",
+            Some(job.id),
+            job.session_id,
+            event_type,
+            payload.clone(),
+        )
+        .await?;
+    let mut audit = new_audit_log(
+        Some(job.session_id),
+        "worker",
+        Some(job.id),
+        event_type,
+        "execution_job",
+        Some(job.id),
+        payload,
+    );
+    audit.id = deterministic_record_id(event_id, "audit", &[event_type]);
+    state
+        .append_audit_log_for_execution_claim(job, status, audit)
+        .await?;
     Ok(())
 }
 
@@ -739,15 +1438,40 @@ async fn retry_or_fail_started_execution_job(
     details: Value,
 ) -> Result<ExecutionJob, AppError> {
     let error_message = error.message.clone();
-    let updated = state
+    let finalizing = state
         .execution_queue
-        .retry_or_fail_started(
+        .begin_finalizing_started(
             job.id,
             job.worker_id.as_deref().unwrap_or(""),
-            &error_message,
+            job.claim_generation,
+            Some(&error_message),
+            details.clone(),
         )
         .await?;
-    let queued = updated.status == ExecutionJobStatus::Queued;
+    let updated = finish_finalizing_execution_job(
+        state,
+        &finalizing,
+        assignment,
+        finalizing.worker_id.as_deref().unwrap_or(""),
+        details,
+    )
+    .await?;
+    if updated.status == crate::ExecutionJobStatus::Queued {
+        Ok(updated)
+    } else {
+        Err(error)
+    }
+}
+
+async fn record_execution_failure_tail(
+    state: &AppState,
+    job: &ExecutionJob,
+    assignment: Option<&RemoteComputerJobAssignment>,
+    retryable_failure: bool,
+    details: Value,
+) -> Result<(), AppError> {
+    let error_message = job.last_error.clone().unwrap_or_default();
+    let queued = retryable_failure && job.attempt_count < job.max_attempts;
     let assignment_status = if queued { "released" } else { "failed" };
     let assignment_event = if queued {
         "remote_computer.execution_handoff_released"
@@ -762,27 +1486,38 @@ async fn retry_or_fail_started_execution_job(
         assignment_event,
         merge_json_object(
             json!({
-                "execution_job_status": updated.status.clone(),
-                "attempt_count": updated.attempt_count,
-                "max_attempts": updated.max_attempts,
-                "last_error": updated.last_error.clone(),
+                "execution_job_status": if queued { "queued" } else { "failed" },
+                "attempt_count": job.attempt_count,
+                "max_attempts": job.max_attempts,
+                "last_error": error_message.clone(),
             }),
             details.clone(),
         ),
     )
     .await?;
-    state
-        .append_event(
-            "worker",
-            Some(job.id),
-            job.session_id,
-            if queued {
-                "execution.retry_queued"
-            } else {
-                "execution.failed"
-            },
-            merge_json_object(
-                json!({
+    let event_type = if queued {
+        "execution.retry_queued"
+    } else {
+        "execution.failed"
+    };
+    if queued || state.execution_queue.backend_kind() != "postgres" {
+        let event_id = if queued {
+            execution_attempt_event_id(job, event_type)
+        } else {
+            execution_failure_event_id(job)
+        };
+        state
+            .append_event_once_for_execution_claim(
+                job,
+                crate::ExecutionJobStatus::Finalizing,
+                event_id,
+                "worker",
+                Some(job.id),
+                job.session_id,
+                event_type,
+                merge_json_object(
+                    details,
+                    json!({
                     "execution_job_id": job.id,
                     "approval_id": job.approval_id,
                     "tool_call_id": job.tool_call_id,
@@ -790,15 +1525,48 @@ async fn retry_or_fail_started_execution_job(
                     "assignment_id": assignment.map(|assignment| assignment.id),
                     "remote_computer_id": assignment.map(|assignment| assignment.remote_computer_id),
                     "lease_id": assignment.map(|assignment| assignment.lease_id),
-                    "attempt_count": updated.attempt_count,
-                    "max_attempts": updated.max_attempts,
-                    "last_error": updated.last_error.clone(),
+                    "status": if queued { "queued" } else { "failed" },
+                    "worker_id": job.worker_id,
+                    "attempt_count": job.attempt_count,
+                    "claim_generation": job.claim_generation,
+                    "max_attempts": job.max_attempts,
+                    "last_error": error_message.clone(),
+                    "reason": if queued { "execution retry queued" } else { "approved execution failed" },
                 }),
-                details,
-            ),
-        )
-        .await?;
-    if queued { Ok(updated) } else { Err(error) }
+                ),
+            )
+            .await?;
+    }
+    if !queued && state.get_tool_call(job.tool_call_id).await?.status != "failed" {
+        state
+            .update_tool_call_status(
+                job.tool_call_id,
+                "failed",
+                None,
+                Some(json!({"error": error_message})),
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+fn execution_attempt_event_id(job: &ExecutionJob, event_type: &str) -> Uuid {
+    let attempt_count = job.attempt_count.to_string();
+    deterministic_record_id(
+        job.id,
+        "execution-attempt-event",
+        &[attempt_count.as_str(), event_type],
+    )
+}
+
+fn execution_failure_event_id(job: &ExecutionJob) -> Uuid {
+    let attempt_count = job.attempt_count.to_string();
+    let claim_generation = job.claim_generation.to_string();
+    deterministic_record_id(
+        job.id,
+        "execution-failure-event",
+        &[attempt_count.as_str(), claim_generation.as_str()],
+    )
 }
 
 fn merge_json_object(mut base: Value, extra: Value) -> Value {
@@ -858,11 +1626,21 @@ async fn record_remote_computer_execution_handoff_acknowledged(
 }
 
 fn remote_computer_pod_execution_requested() -> bool {
-    let transport_mode = std::env::var("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT")
-        .ok()
+    remote_computer_pod_execution_requested_from_lookup(&|key| std::env::var(key).ok())
+}
+
+pub(crate) fn remote_computer_pod_execution_requested_from_lookup<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let transport_mode = lookup("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT")
         .map(|value| value.trim().to_ascii_lowercase())
         .unwrap_or_default();
-    let execution_enabled = env_flag("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_ENABLED");
+    let execution_enabled =
+        lookup("MANDOFORGE_REMOTE_COMPUTER_EXECUTION_ENABLED").is_some_and(|value| {
+            let value = value.trim();
+            value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
+        });
     execution_enabled && matches!(transport_mode.as_str(), "kubernetes" | "k8s")
 }
 
@@ -954,8 +1732,32 @@ async fn active_remote_computer_assignment_for_job(
         .await?
         .into_iter()
         .find(|assignment| {
-            assignment.execution_job_id == job.id && assignment.status == "assigned"
+            assignment.execution_job_id == job.id
+                && assignment.status == "assigned"
+                && remote_computer_assignment_matches_attempt(assignment, job)
         }))
+}
+
+async fn remote_computer_assignment_for_job(
+    state: &AppState,
+    job: &ExecutionJob,
+) -> Result<Option<RemoteComputerJobAssignment>, AppError> {
+    Ok(state
+        .list_remote_computer_job_assignments()
+        .await?
+        .into_iter()
+        .filter(|assignment| {
+            assignment.execution_job_id == job.id
+                && remote_computer_assignment_matches_attempt(assignment, job)
+        })
+        .max_by_key(|assignment| assignment.updated_at))
+}
+
+fn remote_computer_assignment_matches_attempt(
+    assignment: &RemoteComputerJobAssignment,
+    job: &ExecutionJob,
+) -> bool {
+    assignment.metadata["execution_attempt_count"].as_i64() == Some(i64::from(job.attempt_count))
 }
 
 async fn validate_active_remote_computer_assignment_for_job(
@@ -1106,6 +1908,8 @@ async fn auto_assign_remote_computer_for_job(
                 metadata: Some(json!({
                     "handoff_mode": "environment-worker-lease",
                     "source": "run_execution_job",
+                    "execution_attempt_count": job.attempt_count,
+                    "execution_claim_generation": job.claim_generation,
                     "session_workspace_path": remote_session_workspace_path_for_computer_id(
                         state,
                         lease.remote_computer_id,
@@ -1780,9 +2584,25 @@ async fn finalize_remote_computer_assignment_for_job(
         return Ok(());
     };
     let updated = state
-        .update_remote_computer_job_assignment_status(assignment.id, status, metadata)
+        .finalize_remote_computer_job_assignment_for_attempt(
+            assignment.id,
+            job.id,
+            job.attempt_count,
+            job.claim_generation,
+            job.worker_id.as_deref().unwrap_or(""),
+            crate::ExecutionJobStatus::Finalizing,
+            status,
+            metadata,
+        )
         .await?;
-    record_remote_computer_job_assignment_event(state, &updated, job, event_type).await
+    record_remote_computer_job_assignment_event_for_execution_claim(
+        state,
+        &updated,
+        job,
+        event_type,
+        crate::ExecutionJobStatus::Finalizing,
+    )
+    .await
 }
 
 #[derive(Debug, Clone)]
@@ -2080,6 +2900,7 @@ async fn execute_approved_file_write(
     state: &AppState,
     approval: &Approval,
     tool_call: &ToolCall,
+    commit: &mut ExecutionCommit<'_>,
 ) -> Result<(), AppError> {
     let relative_path = tool_call
         .args
@@ -2094,6 +2915,7 @@ async fn execute_approved_file_write(
         .unwrap_or_default();
     let workspace = session_workspace(state, approval.session_id).await?;
     let output_path = safe_workspace_path(&workspace, relative_path)?;
+    commit.begin().await?;
     if let Some(parent) = output_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -2104,14 +2926,8 @@ async fn execute_approved_file_write(
         "path": relative_path,
         "bytes": content.len(),
     });
-    state
-        .append_event(
-            "tool",
-            Some(tool_call.id),
-            approval.session_id,
-            "tool.result",
-            json!({"tool_call_id": tool_call.id, "tool": tool_call.tool_name, "content": result}),
-        )
+    commit
+        .append_tool_outcome(tool_call, "tool.result", result.clone(), true)
         .await?;
     state
         .update_tool_call_status(tool_call.id, "completed", Some(result.clone()), None)
@@ -2144,6 +2960,23 @@ async fn execute_approved_file_write(
             Some(approval.session_id),
             "tool",
             Some(tool_call.id),
+            "artifact.created",
+            "artifact",
+            Some(artifact.id),
+            json!({
+                "name": artifact.name,
+                "path": artifact.path,
+                "artifact_type": artifact.artifact_type,
+                "tool": tool_call.tool_name,
+                "resumed_after_approval": true
+            }),
+        ))
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(approval.session_id),
+            "tool",
+            Some(tool_call.id),
             "tool.completed",
             "tool_call",
             Some(tool_call.id),
@@ -2158,6 +2991,7 @@ async fn execute_approved_remote_computer_file_write(
     approval: &Approval,
     tool_call: &ToolCall,
     assignment: &crate::RemoteComputerJobAssignment,
+    commit: &mut ExecutionCommit<'_>,
 ) -> Result<(), AppError> {
     let relative_path = tool_call
         .args
@@ -2180,6 +3014,8 @@ async fn execute_approved_remote_computer_file_write(
             content: content.to_string(),
         },
     );
+    runtime_request.validate().map_err(AppError::bad_request)?;
+    commit.begin().await?;
     let exec_result = run_remote_computer_pod_exec(
         &target,
         approval.session_id,
@@ -2195,7 +3031,8 @@ async fn execute_approved_remote_computer_file_write(
     if !kubernetes_exec_status_succeeded(&status) {
         return Err(AppError::bad_request(format!(
             "Remote Computer file.write failed with status {status}"
-        )));
+        ))
+        .with_known_execution_outcome());
     }
     let limit = execution_output_limit_bytes();
     let stdout = truncate_output(
@@ -2276,29 +3113,27 @@ async fn execute_approved_remote_computer_file_write(
             }),
         )
         .await?;
-    state
-        .append_event(
-            "tool",
-            Some(tool_call.id),
-            approval.session_id,
+    commit
+        .append_tool_outcome(
+            tool_call,
             "tool.result",
             json!({
-                "tool_call_id": tool_call.id,
-                "tool": tool_call.tool_name,
-                "content": {
-                    "approval": "approved",
-                    "path": relative_path,
-                    "content_bytes": content.len(),
-                    "runner": "remote_computer_pod_exec",
-                    "remote_computer_id": remote_computer.id,
-                    "assignment_id": assignment.id,
-                    "status": status,
-                    "stdout_bytes": stdout.original_bytes,
-                    "stderr_bytes": stderr.original_bytes,
-                    "redacted": true
-                }
+                "approval": "approved",
+                "path": relative_path,
+                "content_bytes": content.len(),
+                "runner": "remote_computer_pod_exec",
+                "remote_computer_id": remote_computer.id,
+                "assignment_id": assignment.id,
+                "status": status,
+                "stdout_bytes": stdout.original_bytes,
+                "stderr_bytes": stderr.original_bytes,
+                "redacted": true
             }),
+            true,
         )
+        .await?;
+    state
+        .update_tool_call_status(tool_call.id, "completed", Some(result.clone()), None)
         .await?;
     state
         .append_event(
@@ -2308,6 +3143,26 @@ async fn execute_approved_remote_computer_file_write(
             "artifact.created",
             json!({"artifact_id": artifact.id, "name": artifact.name, "path": artifact.path, "artifact_type": artifact.artifact_type, "runner": "remote_computer_pod_exec"}),
         )
+        .await?;
+    state
+        .append_audit_log(new_audit_log(
+            Some(approval.session_id),
+            "tool",
+            Some(tool_call.id),
+            "artifact.created",
+            "artifact",
+            Some(artifact.id),
+            json!({
+                "name": artifact.name,
+                "path": artifact.path,
+                "artifact_type": artifact.artifact_type,
+                "tool": tool_call.tool_name,
+                "runner": "remote_computer_pod_exec",
+                "remote_computer_id": remote_computer.id,
+                "assignment_id": assignment.id,
+                "resumed_after_approval": true
+            }),
+        ))
         .await?;
     state
         .append_audit_log(new_audit_log(
@@ -2337,6 +3192,7 @@ async fn execute_approved_shell(
     state: &AppState,
     approval: &Approval,
     tool_call: &ToolCall,
+    commit: &mut ExecutionCommit<'_>,
 ) -> Result<(), AppError> {
     if !host_shell_execution_allowed() {
         return Err(AppError::bad_request(
@@ -2350,12 +3206,11 @@ async fn execute_approved_shell(
         .ok_or_else(|| AppError::bad_request("shell.exec requires command"))?;
     let workspace = session_workspace(state, approval.session_id).await?;
     let runner = shell_runner();
-    let mut process = shell_command(&runner, &workspace, command).map_err(|error| {
-        AppError::bad_request(format!("failed to prepare shell.exec runner: {error}"))
-    })?;
-    let output = tokio::time::timeout(Duration::from_secs(30), process.output())
+    commit.begin().await?;
+    let output = run_shell_command(&runner, &workspace, command, Duration::from_secs(30))
         .await
-        .map_err(|_| AppError::bad_request("shell.exec timed out"))??;
+        .map_err(|error| AppError::bad_request(format!("failed to execute shell.exec: {error}")))?
+        .ok_or_else(|| AppError::bad_request("shell.exec timed out"))?;
     let limit = execution_output_limit_bytes();
     let stdout = truncate_output(&String::from_utf8_lossy(&output.stdout), limit);
     let stderr = truncate_output(&String::from_utf8_lossy(&output.stderr), limit);
@@ -2378,14 +3233,8 @@ async fn execute_approved_shell(
             "error": "shell.exec exited unsuccessfully",
             "content": result
         });
-        state
-            .append_event(
-                "tool",
-                Some(tool_call.id),
-                approval.session_id,
-                "tool.error",
-                json!({"tool_call_id": tool_call.id, "tool": tool_call.tool_name, "content": error_payload}),
-            )
+        commit
+            .append_tool_outcome(tool_call, "tool.error", error_payload.clone(), true)
             .await?;
         state
             .update_tool_call_status(tool_call.id, "failed", None, Some(error_payload.clone()))
@@ -2404,16 +3253,11 @@ async fn execute_approved_shell(
         return Err(AppError::bad_request(format!(
             "shell.exec exited unsuccessfully: {:?}",
             output.status.code()
-        )));
+        ))
+        .with_known_execution_outcome());
     }
-    state
-        .append_event(
-            "tool",
-            Some(tool_call.id),
-            approval.session_id,
-            "tool.result",
-            json!({"tool_call_id": tool_call.id, "tool": tool_call.tool_name, "content": result}),
-        )
+    commit
+        .append_tool_outcome(tool_call, "tool.result", result.clone(), true)
         .await?;
     state
         .update_tool_call_status(tool_call.id, "completed", Some(result.clone()), None)
@@ -2437,6 +3281,7 @@ async fn execute_approved_remote_computer_shell(
     approval: &Approval,
     tool_call: &ToolCall,
     assignment: &crate::RemoteComputerJobAssignment,
+    commit: &mut ExecutionCommit<'_>,
 ) -> Result<(), AppError> {
     let command = tool_call
         .args
@@ -2452,6 +3297,8 @@ async fn execute_approved_remote_computer_shell(
             command: command.to_string(),
         },
     );
+    runtime_request.validate().map_err(AppError::bad_request)?;
+    commit.begin().await?;
     let exec_result = run_remote_computer_pod_exec(
         &target,
         approval.session_id,
@@ -2479,7 +3326,8 @@ async fn execute_approved_remote_computer_shell(
     if !kubernetes_exec_status_succeeded(&status) {
         return Err(AppError::bad_request(format!(
             "Remote Computer shell.exec failed with status {status}"
-        )));
+        ))
+        .with_known_execution_outcome());
     }
     let result = json!({
         "approval": "approved",
@@ -2524,28 +3372,23 @@ async fn execute_approved_remote_computer_shell(
             }),
         )
         .await?;
-    state
-        .append_event(
-            "tool",
-            Some(tool_call.id),
-            approval.session_id,
+    commit
+        .append_tool_outcome(
+            tool_call,
             "tool.result",
             json!({
-                "tool_call_id": tool_call.id,
-                "tool": tool_call.tool_name,
-                "content": {
-                    "approval": "approved",
-                    "runner": "remote_computer_pod_exec",
-                    "remote_computer_id": target.remote_computer.id,
-                    "assignment_id": assignment.id,
-                    "lease_id": assignment.lease_id,
-                    "status": status,
-                    "command_chars": command.chars().count(),
-                    "stdout_bytes": stdout.original_bytes,
-                    "stderr_bytes": stderr.original_bytes,
-                    "redacted": true
-                }
+                "approval": "approved",
+                "runner": "remote_computer_pod_exec",
+                "remote_computer_id": target.remote_computer.id,
+                "assignment_id": assignment.id,
+                "lease_id": assignment.lease_id,
+                "status": status,
+                "command_chars": command.chars().count(),
+                "stdout_bytes": stdout.original_bytes,
+                "stderr_bytes": stderr.original_bytes,
+                "redacted": true
             }),
+            true,
         )
         .await?;
     state
@@ -2582,6 +3425,7 @@ async fn execute_approved_remote_computer_codex(
     approval: &Approval,
     tool_call: &ToolCall,
     assignment: &crate::RemoteComputerJobAssignment,
+    commit: &mut ExecutionCommit<'_>,
 ) -> Result<(), AppError> {
     let request: CodexRequest = serde_json::from_value(tool_call.args.clone())?;
     if request.sandbox_mode != "read-only" && request.sandbox_mode != "workspace-write" {
@@ -2619,6 +3463,7 @@ async fn execute_approved_remote_computer_codex(
             }),
         )
         .await?;
+    commit.begin().await?;
     let exec_result = run_remote_computer_pod_exec(
         &target,
         approval.session_id,
@@ -2775,24 +3620,19 @@ async fn execute_approved_remote_computer_codex(
             "error": "Remote Computer Codex exec failed",
             "content": result
         });
-        state
-            .append_event(
-                "tool",
-                Some(tool_call.id),
-                approval.session_id,
+        commit
+            .append_tool_outcome(
+                tool_call,
                 "tool.error",
                 json!({
-                    "tool_call_id": tool_call.id,
-                    "tool": tool_call.tool_name,
-                    "content": {
-                        "error": "Remote Computer Codex exec failed",
-                        "status": status,
-                        "stdout_bytes": stdout.original_bytes,
-                        "stderr_bytes": stderr.original_bytes,
-                        "final_message_bytes": final_output.original_bytes,
-                        "redacted": true
-                    }
+                    "error": "Remote Computer Codex exec failed",
+                    "status": status,
+                    "stdout_bytes": stdout.original_bytes,
+                    "stderr_bytes": stderr.original_bytes,
+                    "final_message_bytes": final_output.original_bytes,
+                    "redacted": true
                 }),
+                true,
             )
             .await?;
         state
@@ -2821,29 +3661,25 @@ async fn execute_approved_remote_computer_codex(
                 }),
             ))
             .await?;
-        return Err(AppError::bad_request("Remote Computer Codex exec failed"));
+        return Err(AppError::bad_request("Remote Computer Codex exec failed")
+            .with_known_execution_outcome());
     }
-    state
-        .append_event(
-            "tool",
-            Some(tool_call.id),
-            approval.session_id,
+    commit
+        .append_tool_outcome(
+            tool_call,
             "tool.result",
             json!({
-                "tool_call_id": tool_call.id,
-                "tool": tool_call.tool_name,
-                "content": {
-                    "runner": "remote_computer_pod_exec",
-                    "remote_computer_id": target.remote_computer.id,
-                    "assignment_id": assignment.id,
-                    "lease_id": assignment.lease_id,
-                    "status": status,
-                    "stdout_bytes": stdout.original_bytes,
-                    "stderr_bytes": stderr.original_bytes,
-                    "final_message_bytes": final_output.original_bytes,
-                    "redacted": true
-                }
+                "runner": "remote_computer_pod_exec",
+                "remote_computer_id": target.remote_computer.id,
+                "assignment_id": assignment.id,
+                "lease_id": assignment.lease_id,
+                "status": status,
+                "stdout_bytes": stdout.original_bytes,
+                "stderr_bytes": stderr.original_bytes,
+                "final_message_bytes": final_output.original_bytes,
+                "redacted": true
             }),
+            true,
         )
         .await?;
     state
@@ -2880,6 +3716,7 @@ async fn execute_approved_remote_computer_agent_cli(
     approval: &Approval,
     tool_call: &ToolCall,
     assignment: &crate::RemoteComputerJobAssignment,
+    commit: &mut ExecutionCommit<'_>,
 ) -> Result<(), AppError> {
     let request: AgentCliRequest = serde_json::from_value(tool_call.args.clone())?;
     let profile = normalize_agent_cli_profile(&request.profile)?;
@@ -2933,6 +3770,7 @@ async fn execute_approved_remote_computer_agent_cli(
             }),
         )
         .await?;
+    commit.begin().await?;
     let exec_result = run_remote_computer_pod_exec(
         &target,
         approval.session_id,
@@ -3082,25 +3920,20 @@ async fn execute_approved_remote_computer_agent_cli(
             "error": "Remote Computer agent CLI exec failed",
             "content": result
         });
-        state
-            .append_event(
-                "tool",
-                Some(tool_call.id),
-                approval.session_id,
+        commit
+            .append_tool_outcome(
+                tool_call,
                 "tool.error",
                 json!({
-                    "tool_call_id": tool_call.id,
-                    "tool": tool_call.tool_name,
-                    "content": {
-                        "error": "Remote Computer agent CLI exec failed",
-                        "profile": profile,
-                        "runtime_type": runtime_type,
-                        "status": status,
-                        "stdout_bytes": stdout.original_bytes,
-                        "stderr_bytes": stderr.original_bytes,
-                        "redacted": true
-                    }
+                    "error": "Remote Computer agent CLI exec failed",
+                    "profile": profile,
+                    "runtime_type": runtime_type,
+                    "status": status,
+                    "stdout_bytes": stdout.original_bytes,
+                    "stderr_bytes": stderr.original_bytes,
+                    "redacted": true
                 }),
+                true,
             )
             .await?;
         state
@@ -3134,32 +3967,28 @@ async fn execute_approved_remote_computer_agent_cli(
                 }),
             ))
             .await?;
-        return Err(AppError::bad_request(
-            "Remote Computer agent CLI exec failed",
-        ));
+        return Err(
+            AppError::bad_request("Remote Computer agent CLI exec failed")
+                .with_known_execution_outcome(),
+        );
     }
-    state
-        .append_event(
-            "tool",
-            Some(tool_call.id),
-            approval.session_id,
+    commit
+        .append_tool_outcome(
+            tool_call,
             "tool.result",
             json!({
-                "tool_call_id": tool_call.id,
-                "tool": tool_call.tool_name,
-                "content": {
-                    "runner": "remote_computer_pod_exec",
-                    "profile": profile,
-                    "runtime_type": runtime_type,
-                    "remote_computer_id": target.remote_computer.id,
-                    "assignment_id": assignment.id,
-                    "lease_id": assignment.lease_id,
-                    "status": status,
-                    "stdout_bytes": stdout.original_bytes,
-                    "stderr_bytes": stderr.original_bytes,
-                    "redacted": true
-                }
+                "runner": "remote_computer_pod_exec",
+                "profile": profile,
+                "runtime_type": runtime_type,
+                "remote_computer_id": target.remote_computer.id,
+                "assignment_id": assignment.id,
+                "lease_id": assignment.lease_id,
+                "status": status,
+                "stdout_bytes": stdout.original_bytes,
+                "stderr_bytes": stderr.original_bytes,
+                "redacted": true
             }),
+            true,
         )
         .await?;
     state
@@ -3200,18 +4029,13 @@ async fn execute_approved_codex(
     state: &AppState,
     approval: &Approval,
     tool_call: &ToolCall,
+    commit: &mut ExecutionCommit<'_>,
 ) -> Result<(), AppError> {
     let request: CodexRequest = serde_json::from_value(tool_call.args.clone())?;
-    match run_codex(state, approval.session_id, request).await {
+    match run_codex(state, approval.session_id, request, commit).await {
         Ok(result) => {
-            state
-                .append_event(
-                    "tool",
-                    Some(tool_call.id),
-                    approval.session_id,
-                    "tool.result",
-                    json!({"tool_call_id": tool_call.id, "tool": tool_call.tool_name, "content": result}),
-                )
+            commit
+                .append_tool_outcome(tool_call, "tool.result", result.clone(), true)
                 .await?;
             state
                 .update_tool_call_status(tool_call.id, "completed", Some(result.clone()), None)
@@ -3230,15 +4054,12 @@ async fn execute_approved_codex(
             Ok(())
         }
         Err(error) => {
+            if !error.execution_outcome_known {
+                return Err(error);
+            }
             let error_payload = json!({"error": error.message.clone()});
-            state
-                .append_event(
-                    "tool",
-                    Some(tool_call.id),
-                    approval.session_id,
-                    "tool.error",
-                    json!({"tool_call_id": tool_call.id, "tool": tool_call.tool_name, "content": error_payload}),
-                )
+            commit
+                .append_tool_outcome(tool_call, "tool.error", error_payload.clone(), true)
                 .await?;
             state
                 .update_tool_call_status(tool_call.id, "failed", None, Some(error_payload.clone()))
@@ -3263,18 +4084,13 @@ async fn execute_approved_agent_cli(
     state: &AppState,
     approval: &Approval,
     tool_call: &ToolCall,
+    commit: &mut ExecutionCommit<'_>,
 ) -> Result<(), AppError> {
     let request: AgentCliRequest = serde_json::from_value(tool_call.args.clone())?;
-    match run_agent_cli(state, approval.session_id, request).await {
+    match run_agent_cli_with_commit(state, approval.session_id, request, commit).await {
         Ok(result) => {
-            state
-                .append_event(
-                    "tool",
-                    Some(tool_call.id),
-                    approval.session_id,
-                    "tool.result",
-                    json!({"tool_call_id": tool_call.id, "tool": tool_call.tool_name, "content": result}),
-                )
+            commit
+                .append_tool_outcome(tool_call, "tool.result", result.clone(), true)
                 .await?;
             state
                 .update_tool_call_status(tool_call.id, "completed", Some(result.clone()), None)
@@ -3303,15 +4119,12 @@ async fn execute_approved_agent_cli(
             Ok(())
         }
         Err(error) => {
+            if !error.execution_outcome_known {
+                return Err(error);
+            }
             let error_payload = json!({"error": error.message.clone()});
-            state
-                .append_event(
-                    "tool",
-                    Some(tool_call.id),
-                    approval.session_id,
-                    "tool.error",
-                    json!({"tool_call_id": tool_call.id, "tool": tool_call.tool_name, "content": error_payload}),
-                )
+            commit
+                .append_tool_outcome(tool_call, "tool.error", error_payload.clone(), true)
                 .await?;
             state
                 .update_tool_call_status(tool_call.id, "failed", None, Some(error_payload.clone()))
@@ -3401,6 +4214,7 @@ async fn run_codex(
     state: &AppState,
     session_id: Uuid,
     request: CodexRequest,
+    commit: &mut ExecutionCommit<'_>,
 ) -> Result<Value, AppError> {
     if request.sandbox_mode != "read-only" && request.sandbox_mode != "workspace-write" {
         return Err(AppError::bad_request(
@@ -3408,16 +4222,18 @@ async fn run_codex(
         ));
     }
     match codex_execution_strategy(&request)? {
-        CodexExecutionStrategy::Cli => run_codex_cli(state, session_id, request).await,
-        CodexExecutionStrategy::AppServer => run_codex_app_server(state, session_id, request).await,
+        CodexExecutionStrategy::Cli => run_codex_cli(state, session_id, request, commit).await,
+        CodexExecutionStrategy::AppServer => {
+            run_codex_app_server(state, session_id, request, commit).await
+        }
         CodexExecutionStrategy::Auto => {
             if state.codex_app_server_config.is_none() {
-                return run_codex_cli(state, session_id, request).await;
+                return run_codex_cli(state, session_id, request, commit).await;
             }
             let fallback_request = request.clone();
-            match run_codex_app_server(state, session_id, request).await {
+            match run_codex_app_server(state, session_id, request, commit).await {
                 Ok(result) => Ok(result),
-                Err(error) => {
+                Err(error) if !commit.is_started() => {
                     state
                         .append_event(
                             "tool",
@@ -3431,8 +4247,9 @@ async fn run_codex(
                             }),
                         )
                         .await?;
-                    run_codex_cli(state, session_id, fallback_request).await
+                    run_codex_cli(state, session_id, fallback_request, commit).await
                 }
+                Err(error) => Err(error),
             }
         }
     }
@@ -3501,6 +4318,7 @@ async fn run_codex_app_server(
     state: &AppState,
     session_id: Uuid,
     request: CodexRequest,
+    commit: &mut ExecutionCommit<'_>,
 ) -> Result<Value, AppError> {
     let config = state
         .codex_app_server_config
@@ -3531,6 +4349,7 @@ async fn run_codex_app_server(
             "source": "approved_codex_exec",
         }),
     };
+    commit.begin().await?;
     let thread = state
         .codex_app_server_client
         .create_thread(config, thread_request.clone())
@@ -3633,9 +4452,14 @@ async fn run_codex_app_server(
     }
 
     if event_type == "codex.task.failed" {
-        return Err(AppError::bad_request(format!(
+        let error = AppError::bad_request(format!(
             "Codex App Server turn ended with status {final_status}"
-        )));
+        ));
+        return Err(if poll_result.terminal {
+            error.with_known_execution_outcome()
+        } else {
+            error
+        });
     }
 
     Ok(json!({
@@ -4074,6 +4898,24 @@ pub(crate) async fn run_agent_cli(
     session_id: Uuid,
     request: AgentCliRequest,
 ) -> Result<Value, AppError> {
+    run_agent_cli_inner(state, session_id, request, None).await
+}
+
+async fn run_agent_cli_with_commit(
+    state: &AppState,
+    session_id: Uuid,
+    request: AgentCliRequest,
+    commit: &mut ExecutionCommit<'_>,
+) -> Result<Value, AppError> {
+    run_agent_cli_inner(state, session_id, request, Some(commit)).await
+}
+
+async fn run_agent_cli_inner(
+    state: &AppState,
+    session_id: Uuid,
+    request: AgentCliRequest,
+    commit: Option<&mut ExecutionCommit<'_>>,
+) -> Result<Value, AppError> {
     let profile = normalize_agent_cli_profile(&request.profile)?;
     let config = agent_cli_profile_config_for_session(state, session_id, &profile).await?;
     let runtime_type = config.runtime_type.clone();
@@ -4102,6 +4944,7 @@ pub(crate) async fn run_agent_cli(
         .await?;
 
     let mut command = Command::new(&config.command);
+    command.kill_on_drop(true);
     command.current_dir(&workspace);
     for arg in &config.args {
         command.arg(arg);
@@ -4122,6 +4965,9 @@ pub(crate) async fn run_agent_cli(
         .or(config.timeout_seconds)
         .unwrap_or(180)
         .clamp(1, 900);
+    if let Some(commit) = commit {
+        commit.begin().await?;
+    }
     let output = tokio::time::timeout(Duration::from_secs(timeout_seconds), command.output())
         .await
         .map_err(|_| AppError::bad_request("agent CLI execution timed out"))??;
@@ -4181,7 +5027,8 @@ pub(crate) async fn run_agent_cli(
         return Err(AppError::bad_request(format!(
             "agent CLI execution failed with exit code {:?}",
             output.status.code()
-        )));
+        ))
+        .with_known_execution_outcome());
     }
 
     Ok(json!({
@@ -5349,6 +6196,7 @@ async fn run_codex_cli(
     state: &AppState,
     session_id: Uuid,
     request: CodexRequest,
+    commit: &mut ExecutionCommit<'_>,
 ) -> Result<Value, AppError> {
     let workspace = state.workspace_root.join(session_id.to_string());
     tokio::fs::create_dir_all(&workspace).await?;
@@ -5364,9 +6212,11 @@ async fn run_codex_cli(
         )
         .await?;
 
+    commit.begin().await?;
     let output = tokio::time::timeout(
         Duration::from_secs(180),
         Command::new("codex")
+            .kill_on_drop(true)
             .arg("exec")
             .arg("--sandbox")
             .arg(&request.sandbox_mode)
@@ -5456,7 +6306,8 @@ async fn run_codex_cli(
         return Err(AppError::bad_request(format!(
             "codex exec failed with exit code {:?}",
             output.status.code()
-        )));
+        ))
+        .with_known_execution_outcome());
     }
     Ok(json!({
         "runner": "cli",

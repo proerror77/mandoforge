@@ -15,18 +15,57 @@ pub(crate) async fn build_harness_context(
 ) -> Result<HarnessContext, AppError> {
     let agent_version = state.agent_version_for_session(session_id).await?;
     let events = state.list_events(session_id).await?;
+    let execution_jobs = state.execution_queue.list().await?;
+    let hidden_execution_tool_calls: HashSet<_> = execution_jobs
+        .iter()
+        .filter(|job| {
+            job.session_id == session_id
+                && !events
+                    .iter()
+                    .any(|event| execution_completion_event_matches_job(event, job))
+        })
+        .map(|job| job.tool_call_id)
+        .collect();
     let pending_events = events
         .iter()
         .filter(|event| {
             pending_event_seq_start.is_some_and(|start| event.seq >= start)
                 && pending_event_seq_end.is_some_and(|end| event.seq <= end)
+                && !(event.event_type == "tool.result"
+                    && event
+                        .actor_id
+                        .is_some_and(|actor_id| hidden_execution_tool_calls.contains(&actor_id)))
+                && (event.event_type != "execution.completed"
+                    || execution_jobs
+                        .iter()
+                        .any(|job| execution_completion_event_matches_job(event, job)))
+                && (event.event_type != "execution.failed"
+                    || execution_jobs
+                        .iter()
+                        .any(|job| execution_failure_event_matches_job(event, job)))
         })
         .collect::<Vec<_>>();
     let context_events: Vec<&SessionEvent> =
         if pending_event_seq_start.is_some() && pending_event_seq_end.is_some() {
             pending_events.clone()
         } else {
-            events.iter().collect()
+            events
+                .iter()
+                .filter(|event| {
+                    !(event.event_type == "tool.result"
+                        && event.actor_id.is_some_and(|actor_id| {
+                            hidden_execution_tool_calls.contains(&actor_id)
+                        }))
+                        && (event.event_type != "execution.completed"
+                            || execution_jobs
+                                .iter()
+                                .any(|job| execution_completion_event_matches_job(event, job)))
+                        && (event.event_type != "execution.failed"
+                            || execution_jobs
+                                .iter()
+                                .any(|job| execution_failure_event_matches_job(event, job)))
+                })
+                .collect()
         };
     let last_user_message = if context_events
         .iter()
@@ -92,6 +131,19 @@ pub(crate) async fn build_harness_context(
             })
         })
         .collect::<Vec<_>>();
+    let execution_failed_events = context_events
+        .iter()
+        .filter(|event| event.event_type == "execution.failed")
+        .rev()
+        .take(10)
+        .map(|event| {
+            json!({
+                "event_id": event.id,
+                "created_at": event.created_at,
+                "payload": event.payload,
+            })
+        })
+        .collect::<Vec<_>>();
     let recent_custom_tool_results = context_events
         .iter()
         .filter(|event| event.event_type == "user.custom_tool_result")
@@ -141,9 +193,11 @@ pub(crate) async fn build_harness_context(
         rejected_tool_result_count: rejected_event_result_count,
         manual_tool_result_count,
         execution_completed_count: execution_completed_events.len(),
+        execution_failed_count: execution_failed_events.len(),
         custom_tool_result_count: recent_custom_tool_results.len(),
         recent_custom_tool_results,
         recent_execution_completed: execution_completed_events,
+        recent_execution_failed: execution_failed_events,
         recent_goal_events,
     })
 }
@@ -613,14 +667,33 @@ pub(crate) async fn enqueue_session_loop(
     trigger_event_id: Option<Uuid>,
     reason: &str,
 ) -> Result<SessionLoopJob, AppError> {
+    enqueue_session_loop_from(state, id, trigger_event_id, reason, None).await
+}
+
+async fn enqueue_session_loop_from(
+    state: &AppState,
+    id: Uuid,
+    trigger_event_id: Option<Uuid>,
+    reason: &str,
+    pending_event_seq_start_floor: Option<i64>,
+) -> Result<SessionLoopJob, AppError> {
     if !session_accepts_worker_execution(state, id).await? {
         return Err(AppError::bad_request(
             "session is terminal and cannot enqueue session loop work",
         ));
     }
-    let job = state
-        .enqueue_session_loop_job(id, trigger_event_id, reason)
-        .await?;
+    let job = match pending_event_seq_start_floor {
+        Some(seq_start) => {
+            state
+                .enqueue_session_loop_job_from(id, trigger_event_id, reason, Some(seq_start))
+                .await?
+        }
+        None => {
+            state
+                .enqueue_session_loop_job(id, trigger_event_id, reason)
+                .await?
+        }
+    };
     state
         .append_event(
             "system",
@@ -642,13 +715,34 @@ pub(crate) async fn project_session_event_to_loop(
     state: &AppState,
     event: &SessionEvent,
 ) -> Result<Option<SessionLoopJob>, AppError> {
+    project_session_event_to_loop_from(state, event, None).await
+}
+
+pub(crate) async fn project_session_event_to_loop_from(
+    state: &AppState,
+    event: &SessionEvent,
+    pending_event_seq_start_floor: Option<i64>,
+) -> Result<Option<SessionLoopJob>, AppError> {
     let Some(reason) = session_loop_reason_for_event(&event.event_type) else {
         return Ok(None);
     };
+    if event.event_type == "execution.completed"
+        && !trusted_execution_completion_event(state, event).await?
+    {
+        return Ok(None);
+    }
+    if event.event_type == "execution.failed"
+        && !trusted_execution_failure_event(state, event).await?
+    {
+        return Ok(None);
+    }
     if matches!(
         event.event_type.as_str(),
-        "approval.approved" | "approval.rejected" | "execution.completed"
+        "approval.approved" | "approval.rejected" | "execution.completed" | "execution.failed"
     ) {
+        if !session_accepts_worker_execution(state, event.session_id).await? {
+            return Ok(None);
+        }
         set_managed_session_status(
             state,
             event.session_id,
@@ -657,9 +751,107 @@ pub(crate) async fn project_session_event_to_loop(
         )
         .await?;
     }
-    enqueue_session_loop(state, event.session_id, Some(event.id), reason)
-        .await
-        .map(Some)
+    if state
+        .has_unresolved_execution_result_at_or_before(event.session_id, event.seq)
+        .await?
+    {
+        return Ok(None);
+    }
+    let pending_event_seq_start_floor = match (
+        pending_event_seq_start_floor,
+        crate::execution::earliest_uncovered_pending_tool_result_seq(state, event.session_id)
+            .await?,
+    ) {
+        (Some(requested), Some(pending)) => Some(requested.min(pending)),
+        (Some(seq), None) | (None, Some(seq)) => Some(seq),
+        (None, None) => None,
+    };
+    let projection_covers_event = match pending_event_seq_start_floor {
+        Some(seq_start) => {
+            state
+                .session_loop_projection_covers_range(event.session_id, seq_start, event.seq)
+                .await?
+        }
+        None => {
+            state
+                .session_loop_projection_covers(event.session_id, event.seq)
+                .await?
+        }
+    };
+    if projection_covers_event {
+        return Ok(None);
+    }
+    enqueue_session_loop_from(
+        state,
+        event.session_id,
+        Some(event.id),
+        reason,
+        pending_event_seq_start_floor,
+    )
+    .await
+    .map(Some)
+}
+
+async fn trusted_execution_completion_event(
+    state: &AppState,
+    event: &SessionEvent,
+) -> Result<bool, AppError> {
+    let Some(job_id) = event.actor_id else {
+        return Ok(false);
+    };
+    Ok(state
+        .execution_queue
+        .list()
+        .await?
+        .into_iter()
+        .any(|job| job.id == job_id && execution_completion_event_matches_job(event, &job)))
+}
+
+async fn trusted_execution_failure_event(
+    state: &AppState,
+    event: &SessionEvent,
+) -> Result<bool, AppError> {
+    let Some(job_id) = event.actor_id else {
+        return Ok(false);
+    };
+    Ok(state
+        .execution_queue
+        .list()
+        .await?
+        .into_iter()
+        .any(|job| job.id == job_id && execution_failure_event_matches_job(event, &job)))
+}
+
+pub(crate) fn execution_completion_event_matches_job(
+    event: &SessionEvent,
+    job: &crate::execution_queue::ExecutionJob,
+) -> bool {
+    event.actor_type == "worker"
+        && event.actor_id == Some(job.id)
+        && event.session_id == job.session_id
+        && event.event_type == "execution.completed"
+        && event.payload["status"] == "completed"
+        && job.status == ExecutionJobStatus::Completed
+        && event.payload["execution_job_id"] == json!(job.id)
+        && event.payload["tool_call_id"] == json!(job.tool_call_id)
+        && event.payload["attempt_count"] == json!(job.attempt_count)
+        && event.payload["claim_generation"] == json!(job.claim_generation)
+}
+
+pub(crate) fn execution_failure_event_matches_job(
+    event: &SessionEvent,
+    job: &crate::execution_queue::ExecutionJob,
+) -> bool {
+    event.actor_type == "worker"
+        && event.actor_id == Some(job.id)
+        && event.session_id == job.session_id
+        && event.event_type == "execution.failed"
+        && event.payload["status"] == "failed"
+        && job.status == ExecutionJobStatus::Failed
+        && event.payload["execution_job_id"] == json!(job.id)
+        && event.payload["tool_call_id"] == json!(job.tool_call_id)
+        && event.payload["attempt_count"] == json!(job.attempt_count)
+        && event.payload["claim_generation"] == json!(job.claim_generation)
 }
 
 pub(crate) async fn run_session_loop(
@@ -802,14 +994,14 @@ pub(crate) async fn run_session_loop(
 
     let session_task_grant_id = active_task_grant.as_ref().map(|(_, grant)| grant.id);
     let mut waiting_for_approval = false;
-    for tool_call in provider_response.tool_calls {
+    for tool_call in &provider_response.tool_calls {
         let result = execute_tool_invocation(
             state,
             &tool_call.tool_name,
             ExecuteTool {
                 session_id: id,
                 task_grant_id: session_task_grant_id,
-                args: tool_call.args,
+                args: tool_call.args.clone(),
             },
             ToolInvocationOrigin::SessionLoop,
         )
@@ -820,61 +1012,27 @@ pub(crate) async fn run_session_loop(
         }
     }
 
-    let artifact = Artifact {
-        id: Uuid::new_v4(),
-        session_id: id,
-        artifact_type: "markdown".to_string(),
-        name: "diagnostics.md".to_string(),
-        path: None,
-        content: json!({
-            "markdown": "# Runtime Diagnostics\n\nThe generic runtime processed recent platform events, confirmed approval gating for shell execution, and produced a replayable diagnostics artifact."
-        }),
-        created_at: Utc::now(),
-    };
-    let artifact = state.insert_artifact(artifact).await?;
+    let tool_calls = provider_response.tool_calls.clone();
+    let final_report = provider_response
+        .final_message
+        .as_ref()
+        .map(|final_message| json!({"summary": final_message}));
     state
         .append_event(
-        "system",
-        Some(artifact.id),
-        id,
-        "artifact.created",
-        json!({"artifact_id": artifact.id, "name": artifact.name, "artifact_type": artifact.artifact_type}),
-    )
-    .await?;
-    state
-        .append_audit_log(new_audit_log(
-            Some(id),
-            "system",
+            "agent",
             None,
-            "artifact.created",
-            "artifact",
-            Some(artifact.id),
-            json!({"name": artifact.name, "artifact_type": artifact.artifact_type}),
-        ))
+            id,
+            "session_loop.turn_summary",
+            serde_json::json!({
+                "provider": provider_label,
+                "client": provider.name(),
+                "plan": provider_response.plan,
+                "tool_calls": tool_calls,
+                "final_message": provider_response.final_message,
+                "final_report": final_report,
+            }),
+        )
         .await?;
-
-    state
-        .append_event(
-        "agent",
-        None,
-        id,
-            "llm.response",
-            json!({
-                "final_report": {
-                "summary": "Generic Runtime Diagnostics Demo reached the approval gate and produced a replayable artifact.",
-                "files_read": ["README.md", "config/policy.stage1.yaml"],
-                "sql_tables": ["generic_demo.platform_events", "generic_demo.sample_documents", "generic_demo.sample_metrics"],
-                "policy_events": ["policy.requires_approval for shell.exec"],
-                "artifacts": ["diagnostics.md"],
-                "next_steps": [
-                    "Add live external provider transport behind the ProviderClient trait",
-                    "Add Docker-backed sandbox execution for shell workers",
-                    "Run Postgres-backed sql.query integration verification"
-                ]
-            }
-        }),
-    )
-    .await?;
 
     if let Some(final_message) = provider_response.final_message {
         state

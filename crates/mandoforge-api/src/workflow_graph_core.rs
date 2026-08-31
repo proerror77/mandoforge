@@ -59,25 +59,25 @@ pub(crate) fn normalize_workflow_release_state(value: &str) -> Result<String, Ap
     }
 }
 
-pub(crate) fn workflow_handoff_rules_is_dynamic_materialization(handoff_rules: &Value) -> bool {
+pub(crate) fn workflow_handoff_rules_has_retired_materialization(handoff_rules: &Value) -> bool {
     handoff_rules
         .get("source")
         .and_then(Value::as_str)
         .is_some_and(|source| source == "dynamic_workflow_plan")
 }
 
-pub(crate) fn validate_dynamic_materialization_provenance_update(
+pub(crate) fn validate_retired_materialization_provenance_update(
     current: &Value,
     proposed: &Value,
 ) -> Result<(), AppError> {
-    let current_is_dynamic = workflow_handoff_rules_is_dynamic_materialization(current);
-    let proposed_is_dynamic = workflow_handoff_rules_is_dynamic_materialization(proposed);
-    if current_is_dynamic != proposed_is_dynamic {
+    let current_is_retired = workflow_handoff_rules_has_retired_materialization(current);
+    let proposed_is_retired = workflow_handoff_rules_has_retired_materialization(proposed);
+    if current_is_retired != proposed_is_retired {
         return Err(AppError::bad_request(
-            "dynamic workflow materialization provenance is immutable",
+            "retired workflow materialization provenance is immutable",
         ));
     }
-    if current_is_dynamic {
+    if current_is_retired {
         for field in [
             "source",
             "dynamic_workflow_plan_id",
@@ -85,7 +85,7 @@ pub(crate) fn validate_dynamic_materialization_provenance_update(
         ] {
             if current.get(field) != proposed.get(field) {
                 return Err(AppError::bad_request(format!(
-                    "dynamic workflow materialization provenance field {field} is immutable"
+                    "retired workflow materialization provenance field {field} is immutable"
                 )));
             }
         }
@@ -96,9 +96,9 @@ pub(crate) fn validate_dynamic_materialization_provenance_update(
 pub(crate) fn normalize_workflow_execution_strategy(value: &str) -> Result<String, AppError> {
     let normalized = value.trim().to_ascii_lowercase();
     match normalized.as_str() {
-        "native_steps" | "delegated_runtime" | "native_dynamic" => Ok(normalized),
+        "native_steps" | "delegated_runtime" => Ok(normalized),
         _ => Err(AppError::bad_request(
-            "workflow execution_strategy must be native_steps, delegated_runtime, or native_dynamic",
+            "workflow execution_strategy must be native_steps or delegated_runtime",
         )),
     }
 }
@@ -126,9 +126,9 @@ pub(crate) fn normalize_optional_runtime_adapter(
 pub(crate) fn normalize_runtime_mode(value: &str) -> Result<String, AppError> {
     let normalized = value.trim().to_ascii_lowercase();
     match normalized.as_str() {
-        "normal" | "ultracode" | "dynamic_workflow" => Ok(normalized),
+        "normal" | "ultracode" => Ok(normalized),
         _ => Err(AppError::bad_request(
-            "runtime_mode must be normal, ultracode, or dynamic_workflow",
+            "runtime_mode must be normal or ultracode",
         )),
     }
 }
@@ -1073,6 +1073,7 @@ pub(crate) async fn materialize_workflow_graph_step_with_policy_context(
                 approval_ids: Vec::new(),
                 tool_call_ids: Vec::new(),
                 claimed_by_worker: None,
+                claim_owner_version: 0,
                 lease_expires_at: None,
                 context_packet_id: None,
                 started_at: Some(now),
@@ -1195,6 +1196,7 @@ pub(crate) async fn materialize_workflow_graph_step_with_policy_context(
             approval_ids: Vec::new(),
             tool_call_ids: Vec::new(),
             claimed_by_worker: None,
+            claim_owner_version: 0,
             lease_expires_at: None,
             context_packet_id: None,
             started_at: terminal.then_some(now),
@@ -1250,6 +1252,7 @@ pub(crate) async fn materialize_workflow_graph_step_with_policy_context(
             approval_ids: Vec::new(),
             tool_call_ids: Vec::new(),
             claimed_by_worker: None,
+            claim_owner_version: 0,
             lease_expires_at: None,
             context_packet_id: None,
             started_at: terminal.then_some(now),

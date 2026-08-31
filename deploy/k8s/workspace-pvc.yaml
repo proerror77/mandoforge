@@ -4,13 +4,11 @@ metadata:
   name: mandoforge-workspaces
 spec:
   accessModes:
-    - ReadWriteOnce
-  # storageClassName must be explicitly set for production to avoid relying on the
-  # cluster default (which may be HDD or non-replicated local storage).
-  # Set to a suitable class for your cloud provider, e.g. "gp3" for AWS EKS.
-  # If multiple API replicas are required, switch accessModes to ReadWriteMany
-  # and use a storageClassName that supports it (e.g. EFS/NFS/JuiceFS).
-  storageClassName: gp3
+    - ReadWriteMany
+  # The API and dedicated worker role both mount this claim, so production must
+  # use an RWX-capable shared filesystem instead of a single-node block volume.
+  # Use a storage class backed by shared storage such as EFS/NFS/JuiceFS/CephFS.
+  storageClassName: mandoforge-shared-workspaces-rwx
   resources:
     requests:
       storage: 50Gi

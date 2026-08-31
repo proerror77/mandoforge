@@ -3320,6 +3320,7 @@ fn membership_role_from_str(role: &str) -> Result<Role, AppError> {
     match role.trim() {
         "admin" => Ok(Role::Admin),
         "operator" => Ok(Role::Operator),
+        "worker" => Ok(Role::Worker),
         "approver" => Ok(Role::Approver),
         "viewer" => Ok(Role::Viewer),
         other => Err(AppError::bad_request(format!(

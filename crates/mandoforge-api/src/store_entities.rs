@@ -1124,38 +1124,4 @@ impl AppState {
             }
         }
     }
-
-    pub(crate) async fn set_session_status(
-        &self,
-        session_id: Uuid,
-        status: SessionStatus,
-    ) -> Result<Session, AppError> {
-        match &self.store {
-            StoreBackend::Memory(inner) => {
-                let mut store = inner.write().await;
-                let session = store
-                    .sessions
-                    .get_mut(&session_id)
-                    .ok_or_else(|| AppError::not_found("session not found"))?;
-                session.status = status;
-                session.updated_at = Utc::now();
-                Ok(session.clone())
-            }
-            StoreBackend::Postgres(pool) => {
-                let row = sqlx::query(
-                    "UPDATE sessions
-                     SET status = $1, updated_at = now()
-                     WHERE tenant_id = $2 AND id = $3
-                     RETURNING id, agent_id, agent_version_id, environment_id, title, status, created_at, updated_at",
-                )
-                .bind(status.as_str())
-                .bind(self.current_tenant_id())
-                .bind(session_id)
-                .fetch_optional(pool)
-                .await?
-                .ok_or_else(|| AppError::not_found("session not found"))?;
-                session_from_row(row)
-            }
-        }
-    }
 }

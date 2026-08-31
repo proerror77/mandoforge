@@ -60,7 +60,7 @@ resolve_running_image_identity() {
 
 resolve_env_image_tag() {
   local remote_env="$REMOTE_ROOT/whiskey.env"
-  ssh "$REMOTE_HOST" "if [[ -f '$remote_env' ]]; then sed -n 's/^MANDOFORGE_IMAGE_TAG=//p' '$remote_env' | tail -n 1; fi" 2>/dev/null | tr -d '\r'
+  ssh "$REMOTE_HOST" "set -euo pipefail; [[ -f '$remote_env' && ! -L '$remote_env' ]]; [[ \"\$(stat -c '%u' '$remote_env')\" == \"\$(id -u)\" ]]; chmod 0600 '$remote_env'; [[ \"\$(stat -c '%a' '$remote_env')\" == 600 ]]; sed -n 's/^MANDOFORGE_IMAGE_TAG=//p' '$remote_env' | tail -n 1" 2>/dev/null | tr -d '\r'
 }
 
 resolve_status_doc_image_tag() {

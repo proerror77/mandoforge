@@ -10,7 +10,10 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use uuid::Uuid;
 
-use crate::{AppError, AppState, ProjectGitHubBinding, UpsertProjectGitHubBinding};
+use crate::{
+    AppError, AppState, Permission, ProjectGitHubBinding, UpsertProjectGitHubBinding,
+    authorize_request,
+};
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
@@ -52,15 +55,18 @@ async fn github_webhook(
         .get_project_github_binding_by_repo(repo_full_name)
         .await?;
 
-    // Verify HMAC-SHA256 signature when a secret env var is configured.
-    if !binding.webhook_secret_ref.is_empty() {
-        let secret = std::env::var(&binding.webhook_secret_ref)
-            .ok()
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty())
-            .ok_or_else(|| AppError::unauthorized("webhook secret not configured"))?;
-        verify_github_signature(&headers, &body, &secret)?;
+    let secret_ref = binding.webhook_secret_ref.trim();
+    if secret_ref.is_empty() {
+        return Err(AppError::unauthorized(
+            "github webhook secret reference is not configured",
+        ));
     }
+    let secret = std::env::var(secret_ref)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| AppError::unauthorized("webhook secret not configured"))?;
+    verify_github_signature(&headers, &body, &secret)?;
 
     let workflow_name = match event_type.as_str() {
         "issues" => "swe_issue_triage",
@@ -111,7 +117,9 @@ fn verify_github_signature(headers: &HeaderMap, body: &[u8], secret: &str) -> Re
 
 async fn list_bindings(
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<ProjectGitHubBinding>>, AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "github_bindings", None).await?;
     let bindings = state.list_project_github_bindings().await?;
     Ok(Json(bindings))
 }
@@ -119,7 +127,16 @@ async fn list_bindings(
 async fn get_binding(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
 ) -> Result<Json<ProjectGitHubBinding>, AppError> {
+    authorize_request(
+        &state,
+        &headers,
+        Permission::Admin,
+        "github_binding",
+        Some(id),
+    )
+    .await?;
     let bindings = state.list_project_github_bindings().await?;
     bindings
         .into_iter()
@@ -130,15 +147,18 @@ async fn get_binding(
 
 async fn upsert_binding(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<UpsertProjectGitHubBinding>,
 ) -> Result<(StatusCode, Json<ProjectGitHubBinding>), AppError> {
+    authorize_request(&state, &headers, Permission::Admin, "github_bindings", None).await?;
     validate_repo_full_name(&req.repo_full_name)?;
+    let webhook_secret_ref = require_webhook_secret_ref(req.webhook_secret_ref.as_deref())?;
     let now = Utc::now();
     let binding = ProjectGitHubBinding {
         id: Uuid::new_v4(),
         repo_full_name: req.repo_full_name,
         pack_installation_id: req.pack_installation_id,
-        webhook_secret_ref: req.webhook_secret_ref.unwrap_or_default(),
+        webhook_secret_ref,
         active: req.active.unwrap_or(true),
         created_at: now,
         updated_at: now,
@@ -154,4 +174,42 @@ fn validate_repo_full_name(name: &str) -> Result<(), AppError> {
         ));
     }
     Ok(())
+}
+
+fn require_webhook_secret_ref(value: Option<&str>) -> Result<String, AppError> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .ok_or_else(|| AppError::bad_request("webhook_secret_ref is required"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn github_webhook_secret_ref_is_required() {
+        assert!(require_webhook_secret_ref(None).is_err());
+        assert!(require_webhook_secret_ref(Some("  ")).is_err());
+        assert_eq!(
+            require_webhook_secret_ref(Some("  GITHUB_WEBHOOK_SECRET  ")).unwrap(),
+            "GITHUB_WEBHOOK_SECRET"
+        );
+    }
+
+    #[test]
+    fn github_signature_verification_fails_closed() {
+        let body = br#"{"repository":{"full_name":"org/repo"}}"#;
+        let secret = "test-secret";
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        let signature = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Hub-Signature-256", signature.parse().unwrap());
+
+        verify_github_signature(&headers, body, secret).unwrap();
+        assert!(verify_github_signature(&HeaderMap::new(), body, secret).is_err());
+        assert!(verify_github_signature(&headers, b"tampered", secret).is_err());
+    }
 }

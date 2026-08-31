@@ -34,8 +34,10 @@ pub(crate) struct HarnessContext {
     pub(crate) manual_tool_result_count: usize,
     pub(crate) custom_tool_result_count: usize,
     pub(crate) execution_completed_count: usize,
+    pub(crate) execution_failed_count: usize,
     pub(crate) recent_custom_tool_results: Vec<Value>,
     pub(crate) recent_execution_completed: Vec<Value>,
+    pub(crate) recent_execution_failed: Vec<Value>,
     pub(crate) recent_goal_events: Vec<Value>,
 }
 
@@ -125,6 +127,21 @@ impl ProviderClient for MockProviderClient {
                     prompt_tokens: 88,
                     completion_tokens: 30,
                     total_tokens: 118,
+                }),
+            });
+        }
+        if context.execution_failed_count > 0 {
+            return Ok(ProviderResponse {
+                plan: vec!["Report the terminal worker execution failure".to_string()],
+                tool_calls: Vec::new(),
+                final_message: Some(
+                    "Worker execution failed. The durable failure is recorded in the session timeline."
+                        .to_string(),
+                ),
+                usage: Some(ProviderTokenUsage {
+                    prompt_tokens: 104,
+                    completion_tokens: 38,
+                    total_tokens: 142,
                 }),
             });
         }

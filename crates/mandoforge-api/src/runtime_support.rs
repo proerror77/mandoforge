@@ -93,6 +93,7 @@ pub(crate) fn required_controller_status(body: &Value) -> Result<&str, AppError>
         .ok_or_else(|| AppError {
             status: axum::http::StatusCode::BAD_GATEWAY,
             message: "controller response requires a non-empty string status".to_string(),
+            execution_outcome_known: false,
         })
 }
 

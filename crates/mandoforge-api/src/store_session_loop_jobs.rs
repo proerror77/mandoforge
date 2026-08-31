@@ -13,20 +13,40 @@ impl AppState {
         trigger_event_id: Option<Uuid>,
         reason: &str,
     ) -> Result<SessionLoopJob, AppError> {
+        self.enqueue_session_loop_job_from(session_id, trigger_event_id, reason, None)
+            .await
+    }
+
+    pub(crate) async fn enqueue_session_loop_job_from(
+        &self,
+        session_id: Uuid,
+        trigger_event_id: Option<Uuid>,
+        reason: &str,
+        pending_event_seq_start_floor: Option<i64>,
+    ) -> Result<SessionLoopJob, AppError> {
         let session = self.get_session(session_id).await?;
         let pending_event_seq_end = self
             .session_loop_trigger_event_seq(session_id, trigger_event_id)
             .await?;
-        let cursor_high_watermark =
-            match self.session_loop_cursor_high_watermark(session_id).await? {
-                Some(seq) => Some(seq),
-                None => match pending_event_seq_end {
-                    Some(seq_end) => self.session_event_seq_before(session_id, seq_end).await?,
-                    None => None,
-                },
-            };
+        let mut cursor_high_watermark = match self
+            .session_loop_cursor_high_watermark(session_id)
+            .await?
+        {
+            Some(seq) => Some(seq),
+            None => match (pending_event_seq_start_floor, pending_event_seq_end) {
+                (Some(seq_start), _) => Some(seq_start.saturating_sub(1)),
+                (None, Some(seq_end)) => self.session_event_seq_before(session_id, seq_end).await?,
+                (None, None) => None,
+            },
+        };
+        if let Some(seq_start) = pending_event_seq_start_floor
+            && cursor_high_watermark.is_some_and(|high_watermark| high_watermark >= seq_start)
+        {
+            cursor_high_watermark = Some(seq_start.saturating_sub(1));
+        }
         let pending_event_seq_start = pending_event_seq_end.and_then(|seq_end| {
-            let seq_start = cursor_high_watermark.unwrap_or(0) + 1;
+            let seq_start = pending_event_seq_start_floor
+                .unwrap_or_else(|| cursor_high_watermark.unwrap_or(0) + 1);
             (seq_start <= seq_end).then_some(seq_start)
         });
         let now = Utc::now();
@@ -57,8 +77,13 @@ impl AppState {
                         && existing.status == SessionLoopJobStatus::Queued
                 }) {
                     existing.trigger_event_id = trigger_event_id;
-                    if existing.pending_event_seq_start.is_none() {
-                        existing.pending_event_seq_start = pending_event_seq_start;
+                    if let Some(seq_start) = pending_event_seq_start
+                        && existing
+                            .pending_event_seq_start
+                            .is_none_or(|existing_start| seq_start < existing_start)
+                    {
+                        existing.pending_event_seq_start = Some(seq_start);
+                        existing.processed_event_seq = Some(seq_start.saturating_sub(1));
                     }
                     existing.pending_event_seq_end =
                         max_optional_i64(existing.pending_event_seq_end, pending_event_seq_end);
@@ -79,8 +104,19 @@ impl AppState {
                      ON CONFLICT (tenant_id, session_id)
                      WHERE status = 'queued'
                      DO UPDATE SET trigger_event_id = EXCLUDED.trigger_event_id,
-                                   pending_event_seq_start = COALESCE(session_loop_jobs.pending_event_seq_start, EXCLUDED.pending_event_seq_start),
+                                   pending_event_seq_start = CASE
+                                       WHEN session_loop_jobs.pending_event_seq_start IS NULL THEN EXCLUDED.pending_event_seq_start
+                                       WHEN EXCLUDED.pending_event_seq_start IS NULL THEN session_loop_jobs.pending_event_seq_start
+                                       ELSE LEAST(session_loop_jobs.pending_event_seq_start, EXCLUDED.pending_event_seq_start)
+                                   END,
                                    pending_event_seq_end = NULLIF(GREATEST(COALESCE(session_loop_jobs.pending_event_seq_end, 0), COALESCE(EXCLUDED.pending_event_seq_end, 0)), 0),
+                                   processed_event_seq = CASE
+                                       WHEN EXCLUDED.pending_event_seq_start IS NOT NULL
+                                        AND (session_loop_jobs.pending_event_seq_start IS NULL
+                                             OR EXCLUDED.pending_event_seq_start < session_loop_jobs.pending_event_seq_start)
+                                           THEN EXCLUDED.processed_event_seq
+                                       ELSE session_loop_jobs.processed_event_seq
+                                   END,
                                    reason = EXCLUDED.reason
                      RETURNING id, session_id, environment_id, status, trigger_event_id,
                                pending_event_seq_start, pending_event_seq_end, processed_event_seq, reason,
@@ -194,6 +230,53 @@ impl AppState {
         .await
     }
 
+    pub(crate) async fn renew_session_loop_job_lease(
+        &self,
+        id: Uuid,
+        worker_id: &str,
+        lease_seconds: i64,
+    ) -> Result<SessionLoopJob, AppError> {
+        if !(1..=86_400).contains(&lease_seconds) {
+            return Err(AppError::bad_request(
+                "session loop lease_seconds must be between 1 and 86400",
+            ));
+        }
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let job = store
+                    .session_loop_jobs
+                    .get_mut(&id)
+                    .filter(|job| {
+                        job.status == SessionLoopJobStatus::Running
+                            && job.worker_id.as_deref() == Some(worker_id)
+                    })
+                    .ok_or_else(|| AppError::not_found("session loop job not found"))?;
+                job.lease_expires_at = Some(Utc::now() + chrono::Duration::seconds(lease_seconds));
+                Ok(job.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE session_loop_jobs
+                     SET lease_expires_at = now() + $1 * interval '1 second'
+                     WHERE tenant_id = $2 AND id = $3 AND status = 'running' AND worker_id = $4
+                     RETURNING id, session_id, environment_id, status, trigger_event_id,
+                               pending_event_seq_start, pending_event_seq_end, processed_event_seq, reason,
+                               enqueued_at, started_at, completed_at, worker_id, lease_expires_at,
+                               attempt_count, max_attempts, last_error",
+                )
+                .bind(lease_seconds)
+                .bind(self.current_tenant_id())
+                .bind(id)
+                .bind(worker_id)
+                .fetch_optional(pool)
+                .await?
+                .ok_or_else(|| AppError::not_found("session loop job not found"))?;
+                session_loop_job_from_row(row)
+            }
+        }
+    }
+
     pub(crate) async fn fail_session_loop_job(
         &self,
         id: Uuid,
@@ -278,8 +361,7 @@ impl AppState {
                     let lease_expired = matches!(job.status, SessionLoopJobStatus::Running)
                         && job
                             .lease_expires_at
-                            .as_ref()
-                            .is_some_and(|expires_at| *expires_at < Utc::now());
+                            .is_none_or(|expires_at| expires_at <= Utc::now());
                     let other_running_job = store.session_loop_jobs.values().any(|existing| {
                         existing.id != id
                             && existing.session_id == job.session_id
@@ -338,7 +420,7 @@ impl AppState {
                                          AND running_job.status = 'running'
                                    )
                                )
-                               OR (status = 'running' AND lease_expires_at < now())
+                               OR (status = 'running' AND (lease_expires_at IS NULL OR lease_expires_at <= now()))
                            )
                          RETURNING id, session_id, environment_id, status, trigger_event_id,
                                    pending_event_seq_start, pending_event_seq_end, processed_event_seq, reason,
@@ -588,6 +670,61 @@ impl AppState {
                 Ok(seq)
             }
         }
+    }
+
+    pub(crate) async fn session_loop_projection_covers(
+        &self,
+        session_id: Uuid,
+        event_seq: i64,
+    ) -> Result<bool, AppError> {
+        Ok(self
+            .session_loop_cursor_high_watermark(session_id)
+            .await?
+            .is_some_and(|high_watermark| high_watermark >= event_seq))
+    }
+
+    pub(crate) async fn session_loop_projection_covers_range(
+        &self,
+        session_id: Uuid,
+        seq_start: i64,
+        seq_end: i64,
+    ) -> Result<bool, AppError> {
+        if seq_start > seq_end {
+            return Ok(true);
+        }
+        let mut ranges = self
+            .list_session_loop_jobs()
+            .await?
+            .into_iter()
+            .filter(|job| job.session_id == session_id)
+            .filter_map(|job| {
+                let range_start = job.pending_event_seq_start?;
+                let range_end = match job.status {
+                    SessionLoopJobStatus::Queued | SessionLoopJobStatus::Running => {
+                        max_optional_i64(job.processed_event_seq, job.pending_event_seq_end)
+                    }
+                    SessionLoopJobStatus::Completed | SessionLoopJobStatus::Failed => {
+                        job.processed_event_seq
+                    }
+                }?;
+                (range_end >= range_start).then_some((range_start, range_end))
+            })
+            .collect::<Vec<_>>();
+        ranges.sort_unstable();
+        let mut next_seq = seq_start;
+        for (range_start, range_end) in ranges {
+            if range_end < next_seq {
+                continue;
+            }
+            if range_start > next_seq {
+                break;
+            }
+            if range_end >= seq_end {
+                return Ok(true);
+            }
+            next_seq = range_end.saturating_add(1);
+        }
+        Ok(false)
     }
 }
 

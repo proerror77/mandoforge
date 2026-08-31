@@ -4,9 +4,12 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{ExitCode, Stdio};
 use std::time::Duration;
 
+#[path = "../process_control.rs"]
+mod process_control;
 #[path = "../sandbox_runtime_protocol.rs"]
 mod sandbox_runtime_protocol;
 
+use process_control::{configure_process_group, terminate_process_group};
 use sandbox_runtime_protocol::{
     MAX_SANDBOX_RUNTIME_ENVELOPE_BYTES, SANDBOX_RUNTIME_SUBCOMMAND, SandboxRuntimeOperation,
     SandboxRuntimeRequest, parse_sandbox_runtime_request,
@@ -413,30 +416,6 @@ fn read_bounded_regular_file(
     output.truncate(max_bytes);
     Ok((output, truncated))
 }
-
-#[cfg(unix)]
-fn configure_process_group(process: &mut Command) {
-    use std::os::unix::process::CommandExt;
-
-    process.as_std_mut().process_group(0);
-}
-
-#[cfg(not(unix))]
-fn configure_process_group(_process: &mut Command) {}
-
-#[cfg(unix)]
-fn terminate_process_group(process_group_id: u32) {
-    let Ok(process_group_id) = i32::try_from(process_group_id) else {
-        return;
-    };
-    // SAFETY: a negative PID targets only the child-created process group.
-    unsafe {
-        libc::kill(-process_group_id, libc::SIGKILL);
-    }
-}
-
-#[cfg(not(unix))]
-fn terminate_process_group(_process_group_id: u32) {}
 
 fn emit_process_output(output: &ProcessOutput) -> Result<(), String> {
     std::io::stdout()

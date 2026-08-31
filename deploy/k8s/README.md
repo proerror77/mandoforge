@@ -22,8 +22,8 @@ It contains:
 - Scheduler CronJob for due policy, approval, release, and MCP automation, using a dedicated ServiceAccount with token automount disabled and Secret-sourced scheduler subject, role, and shared token headers.
 - Postgres StatefulSet and Service.
 - ConfigMap for runtime configuration.
-- Example Secret template for local/dev credentials. It is intentionally not part of the default kustomization; create `mandoforge-secrets` out of band before starting Pods.
-- Secret delivery contract ConfigMap documenting that production must supply `mandoforge-secrets` through an external secret manager, External Secrets Operator, SealedSecret, or equivalent controlled path.
+- Example Secret templates for local/dev control-plane and worker credentials. They are intentionally not part of the default kustomization; create `mandoforge-secrets` and the narrower `mandoforge-worker-secrets` out of band before starting Pods.
+- Secret delivery contract ConfigMap documenting that production must supply both Secrets through an external secret manager, External Secrets Operator, SealedSecret, or equivalent controlled path. Worker Pods reference only `DATABASE_URL`, the worker token, and optional provider/Vault data-plane keys from `mandoforge-worker-secrets`.
 - Durable workspace PVC for API-owned workspaces.
 
 Install the pinned Agent Sandbox controller, create a local/dev Secret, then
@@ -38,6 +38,7 @@ kubectl apply -f /tmp/agent-sandbox-manifest.yaml
 kubectl apply -f /tmp/agent-sandbox-extensions.yaml
 kubectl apply -f deploy/k8s/namespace.yaml
 kubectl apply -n agent-os -f deploy/k8s/secret.example.yaml
+kubectl apply -n agent-os -f deploy/k8s/worker-secret.example.yaml
 kubectl apply -k deploy/k8s
 kubectl -n agent-os port-forward svc/mandoforge-api 8787:8787
 ```
@@ -63,12 +64,13 @@ kubectl kustomize deploy/agent-sandbox-smoke --load-restrictor LoadRestrictionsN
 
 Production notes:
 
-- Do not apply `secret.example.yaml` to production. The default manifests include only the secret delivery contract; create `mandoforge-secrets` from a secret manager, External Secrets Operator, SealedSecret, or equivalent reviewed delivery path.
+- Do not apply `secret.example.yaml` or `worker-secret.example.yaml` to production. The default manifests include only the secret delivery contract; create `mandoforge-secrets` and `mandoforge-worker-secrets` from a reviewed secret-delivery path, and never expose scheduler, admin, controller, KMS, or Postgres-admin credentials to worker Pods.
 - Prefer external Postgres or a mature Postgres Operator for production.
+- The global migration ledger requires a migration role with `BYPASSRLS`. In `tenant_routed` mode set `MANDOFORGE_MIGRATION_DATABASE_URL` to that distinct credential and keep the `DATABASE_URL` runtime role non-superuser without `BYPASSRLS`; startup fails closed otherwise.
 - Review the workspace PVC storage class, backup policy, and retention policy before long-running workers.
-- Review and adapt the worker NetworkPolicy before enabling shell, Codex, HTTP, or MCP execution in shared clusters.
-- Keep Codex and sandbox execution disabled or tightly constrained before multi-tenant use; the current worker drains jobs through the API execution endpoint.
-- The checked-in production configuration selects `agent-sandbox` for environment lifecycle but keeps execution, mutation, and live mutation disabled. Enable those three gates only through a reviewed target-cluster rollout with fresh lifecycle evidence.
+- The default worker NetworkPolicies allow only Postgres, cluster DNS, and the in-cluster OTel collector. Add reviewed destination-aware egress through a CNI FQDN policy or egress proxy before enabling provider, HTTP, or MCP calls in shared clusters.
+- Keep Codex and sandbox execution disabled or tightly constrained before multi-tenant use; the worker drains the durable Postgres queue directly and does not call API `/run` endpoints.
+- The checked-in production configuration selects `agent-sandbox` for environment lifecycle but keeps execution, mutation, and live mutation disabled. Until a separate narrow Kubernetes bridge exists, keep all three gates disabled; a queue worker configured for Kubernetes live execution fails startup and must not receive Kubernetes API credentials or RBAC.
 - Treat `worker-hpa.yaml` and `worker-keda.yaml` as queue-worker autoscaling manifests. KEDA scales job claimers from queue pressure; it does not decide Workflow authority, approvals, policy, or Sandbox lifecycle. Production metrics and load validation are still required.
 - Treat the Remote Computer manifests as readiness skeletons until the runner gates are enabled. They include the Pod template, warm-pool example, queue scaler, state contract, and a JuiceFS state profile, but they do not by themselves prove production sidecar supervision or distributed Memory/Notes/Skills synchronization.
 - Treat `remote-computer-state-contract.yaml` as the mounted state layout contract for `/agent-state/memory`, `/agent-state/notes`, `/agent-state/skills`, artifacts, locks, and manifests. Its conflict policy is one active writer per session; shared Memory/Notes/Skills must stay read-mostly until a lock-aware sync manager is configured.
@@ -83,4 +85,4 @@ Production notes:
 - The Agent Sandbox template uses a per-sandbox PVC for `/workspace/sessions`, plus a single-project cache PVC for Cargo registry/git downloads, pnpm, uv, and sccache. The launcher keeps Cargo credentials, `HOME`, and `CARGO_TARGET_DIR` inside the session workspace. Create separate cache PVCs per repository, tenant, or worker pool before broad shared-cluster use; never put prompts, credentials, CLI conversation state, or target outputs in the shared cache.
 - MandoForge remains authoritative for WorkflowRun, TaskGrant, policy, approval, context, events, artifacts, and audit. The API creates a `SandboxClaim`, Agent Sandbox allocates the Sandbox/Pod/PVC, and the API resolves `agents.x-k8s.io/pod-name` before using Kubernetes `pods/exec`. KEDA only scales queue workers.
 - Replace the scheduler example shared token before production exposure. If `MANDOFORGE_SCHEDULER_TOKEN` is set in the API runtime, `/api/scheduler/run-due` requires the CronJob to send the matching `x-mandoforge-scheduler-token` header in addition to Admin authorization.
-- The bundled OTel Collector exports to the collector `debug` exporter so local clusters have a real OTLP target without external credentials. Its NetworkPolicy allows ingress from the API Pod to OTLP HTTP and health ports only. Replace or extend its exporter pipeline before claiming production collector rollout; keep `MANDOFORGE_OTEL_COLLECTOR_HEALTH_ENDPOINT` pointed at the collector health extension rather than the OTLP HTTP receiver.
+- The bundled OTel Collector exports to the collector `debug` exporter so local clusters have a real OTLP target without external credentials. Its NetworkPolicy allows ingress from API and worker Pods to OTLP HTTP and health ports only. Replace or extend its exporter pipeline before claiming production collector rollout; keep `MANDOFORGE_OTEL_COLLECTOR_HEALTH_ENDPOINT` pointed at the collector health extension rather than the OTLP HTTP receiver.

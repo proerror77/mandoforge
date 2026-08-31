@@ -35,7 +35,52 @@ Publish or select an image tag first:
 MANDOFORGE_IMAGE_TAG=<tag> MANDOFORGE_GIT_SHA=<exact-image-git-sha> scripts/whiskey-adoption-deploy.sh
 ```
 
-The deploy script copies [docker-compose.adoption.yml](../deploy/whiskey/docker-compose.adoption.yml), the Whiskey Codex controller, the Whiskey tenant routing controller, the Whiskey worker load controller, the Whiskey MCP pilot controller, the Whiskey eval/release controller, the Whiskey observability controller, the Whiskey provider rollout controller, the Whiskey approval notification controller, the Whiskey Vault/KMS controller, and the Whiskey finance controller to the remote host, creates `/opt/mandoforge-adoption/whiskey.env` if missing, starts the loopback Codex WebSocket target plus controllers when needed, pulls the configured image, and starts the API, Postgres, and worker. It then verifies the running container's image-baked revision independently of runtime environment variables and stores the image inspection under `evidence/deployment-image.json`.
+The deploy script copies [docker-compose.adoption.yml](../deploy/whiskey/docker-compose.adoption.yml), the Whiskey Codex controller, the Whiskey tenant routing controller, the Whiskey worker load controller, the Whiskey MCP pilot controller, the Whiskey eval/release controller, the Whiskey observability controller, the Whiskey provider rollout controller, the Whiskey approval notification controller, the Whiskey Vault/KMS controller, and the Whiskey finance controller to the remote host, creates `/opt/mandoforge-adoption/whiskey.env` if missing, starts the loopback Codex WebSocket target plus controllers when needed, pulls the configured image, and starts the API, Postgres, and worker. It verifies the running container's image-baked revision independently of runtime environment variables and stores the image inspection under `evidence/deployment-image.json`. The console assets come only from that pinned image; the evidence gate reads the live index, assets, and CSP header back from the running API instead of mixing in the caller's checkout artifacts.
+
+The Whiskey worker runs `mandoforge-api` directly in worker mode against the
+durable Postgres queue. It does not call API `/run` routes or receive the k3s
+kubeconfig. The process emits its configured tenant scope on every internal
+claim and maps its token to `MANDOFORGE_WORKER_SUBJECT`; provision that stable
+subject as a member of every scoped team/project it is allowed to execute.
+`MANDOFORGE_WORKER_ID` remains only the ephemeral lease owner.
+
+Before deployment, set distinct non-empty values in
+`/opt/mandoforge-adoption/whiskey.env`:
+
+```text
+MANDOFORGE_DEV_ADMIN_TOKEN=<administrative-token>
+MANDOFORGE_WORKER_TOKEN=<worker-only-token>
+```
+
+The file must be a regular non-symlink owned by the deployment user with mode
+`0600`. The deployment and evidence scripts enforce that contract and fail
+closed when the admin, worker, or scheduler token is missing or any two match.
+Controllers and evidence collection use only the administrative token; the
+worker container receives only the worker token and its data-plane runtime
+settings.
+
+Supply these 13 deployment secrets through the local secret manager or process
+environment before running the deploy script:
+
+```text
+WHISKEY_CODEX_APP_SERVER_CONTROLLER_TOKEN
+WHISKEY_TENANT_ROUTING_CONTROLLER_TOKEN
+WHISKEY_WORKER_LOAD_CONTROLLER_TOKEN
+WHISKEY_MCP_CONTROLLER_TOKEN
+WHISKEY_EVAL_RELEASE_CONTROLLER_TOKEN
+WHISKEY_OBSERVABILITY_CONTROLLER_TOKEN
+WHISKEY_PROVIDER_CONTROLLER_TOKEN
+WHISKEY_APPROVAL_NOTIFICATION_CONTROLLER_TOKEN
+WHISKEY_VAULT_KMS_CONTROLLER_TOKEN
+WHISKEY_VAULT_TOKEN
+WHISKEY_FINANCE_CLOSE_CONTROLLER_TOKEN
+WHISKEY_FINANCE_RECONCILIATION_CONTROLLER_TOKEN
+WHISKEY_SCHEDULER_TOKEN
+```
+
+Every value must be distinct, at least 24 token-safe characters, and not a
+public placeholder. The deploy script writes them to the protected remote env
+file; none has a built-in production default.
 
 The default image is:
 
@@ -91,11 +136,11 @@ Current Whiskey wiring starts a local tenant routing controller on the Docker ga
 
 ```bash
 MANDOFORGE_TENANT_ROUTING_CONTROLLER_REQUIRED=true
-MANDOFORGE_TENANT_ROUTING_MODE=tenant_routed
+MANDOFORGE_TENANT_ROUTING_MODE=single_runtime_tenant
 MANDOFORGE_TENANT_ROUTING_CONTROLLER_URL=http://host.docker.internal:18790/tenant/routing/validate
 ```
 
-The API now has an explicit tenant-routed runtime mode for Whiskey adoption. In that mode, request handling resolves `x-mandoforge-tenant-id` into a request-local tenant context, store queries bind that tenant, and Postgres connections refresh `mandoforge.tenant_id` on acquire. The controller still is not a production multi-tenant router: it validates the live Whiskey API readiness report against the payload sent by `/api/tenant-isolation/routing/validate`, verifies tenant header, RLS, and membership-scope signals, and preserves any remaining production blockers. This gives repeatable tenant-routed Whiskey evidence without claiming external enterprise multi-tenant adoption.
+Whiskey remains a single-runtime-tenant pilot because it has no trusted tenant-routing ingress. Direct loopback and evidence requests therefore use the configured tenant without accepting caller-selected tenant headers. The local controller may still record routing-readiness blockers, but it does not turn this host into a production multi-tenant router; tenant-routed evidence requires a reviewed ingress that authenticates and supplies tenant context.
 
 ## Codex App Server Lane
 

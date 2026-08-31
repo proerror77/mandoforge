@@ -33,3 +33,17 @@ images:
   - name: mandoforge-api
     newName: ghcr.io/proerror77/mandoforge/mandoforge-api
     newTag: latest
+patches:
+  - target:
+      group: batch
+      version: v1
+      kind: Job
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: MANDOFORGE_DEV_ADMIN_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: mandoforge-secrets
+              key: MANDOFORGE_DEV_ADMIN_TOKEN

@@ -31,6 +31,54 @@ render_manifest_json() {
   fi
 }
 
+verify_whiskey_worker_contract() {
+  local compose_json
+  [[ -f deploy/whiskey/docker-compose.adoption.yml ]] \
+    || fail "missing deploy/whiskey/docker-compose.adoption.yml"
+  command -v docker >/dev/null 2>&1 \
+    || fail "docker compose is required to validate the Whiskey worker contract"
+  compose_json="$(
+    MANDOFORGE_POSTGRES_PASSWORD=contract-check \
+    MANDOFORGE_DEV_ADMIN_TOKEN=admin-contract-check \
+    MANDOFORGE_WORKER_TOKEN=worker-contract-check \
+    MANDOFORGE_SCHEDULER_TOKEN=contract-check \
+    MANDOFORGE_TENANT_ID=00000000-0000-4000-8000-000000000001 \
+    MANDOFORGE_TENANT_ROUTING_MODE=single_runtime_tenant \
+    MANDOFORGE_WORKER_SUBJECT=contract-worker \
+      docker compose -f deploy/whiskey/docker-compose.adoption.yml config --format json
+  )" || fail "failed to render the Whiskey Compose contract"
+  jq -e '
+    .services.api as $api
+    | .services.worker as $worker
+    | $api.environment.MANDOFORGE_DEV_ADMIN_TOKEN == "admin-contract-check"
+      and ($api.environment | has("MANDOFORGE_WORKER_TOKEN") | not)
+      and $worker.command == ["mandoforge-api"]
+      and $worker.environment.MANDOFORGE_PROCESS_ROLE == "worker"
+      and $worker.environment.MANDOFORGE_SERVICE_NAME == "mandoforge-worker"
+      and $worker.environment.MANDOFORGE_TENANT_ROUTING_MODE == "single_runtime_tenant"
+      and $worker.environment.MANDOFORGE_TENANT_ID == "00000000-0000-4000-8000-000000000001"
+      and $worker.environment.MANDOFORGE_WORKER_SUBJECT == "contract-worker"
+      and $worker.environment.MANDOFORGE_WORKER_TOKEN == "worker-contract-check"
+      and $api.environment.MANDOFORGE_DEV_ADMIN_TOKEN != $worker.environment.MANDOFORGE_WORKER_TOKEN
+      and ($worker.environment | has("MANDOFORGE_DEV_ADMIN_TOKEN") | not)
+      and ($worker.environment | has("MANDOFORGE_SCHEDULER_TOKEN") | not)
+      and all($worker.environment | keys[];
+        test("(_CONTROLLER_TOKEN|DEV_ADMIN_TOKEN|SCHEDULER_TOKEN|KMS_TOKEN)$") | not)
+      and ($worker.environment.DATABASE_URL | length) > 0
+      and ($worker.environment.WORKER_ID | length) > 0
+      and ($worker.environment | has("BASE_URL") | not)
+      and $worker.environment.MANDOFORGE_REMOTE_COMPUTER_EXECUTION_TRANSPORT == "reserved"
+      and $worker.environment.MANDOFORGE_REMOTE_COMPUTER_EXECUTION_ENABLED == "false"
+      and $worker.environment.MANDOFORGE_REMOTE_COMPUTER_MUTATION_ENABLED == "false"
+      and $worker.environment.MANDOFORGE_REMOTE_COMPUTER_LIVE_MUTATION_ENABLED == "false"
+      and ($worker.depends_on | has("api") | not)
+      and any($worker.volumes[]?;
+        .source == "workspace-data" and .target == "/var/lib/mandoforge/workspaces")
+      and all($worker.volumes[]?; .target != "/etc/rancher/k3s/k3s.yaml")
+  ' <<<"$compose_json" >/dev/null \
+    || fail "Whiskey must use the tenant-scoped direct worker without API or Kubernetes credentials"
+}
+
 verify_kubernetes_access_contracts() {
   local role_json network_policy_json worker_manifest
   role_json="$(render_manifest_json deploy/k8s/api-agent-sandbox-rbac.yaml \
@@ -106,6 +154,24 @@ verify_kubernetes_access_contracts() {
       | length == 0
     ' <<<"$worker_json" >/dev/null \
       || fail "$worker_manifest must not project Kubernetes ServiceAccount tokens"
+    jq -e '
+      .spec.template.spec.containers[] | select(.name == "worker")
+      | ([.envFrom[]? | select(has("secretRef"))] | length) == 0
+        and ([.env[]? | select(.valueFrom.secretKeyRef != null) | .name] | sort)
+          == ([
+            "DATABASE_URL",
+            "DEEPSEEK_API_KEY",
+            "MANDOFORGE_PROVIDER_API_KEY",
+            "MANDOFORGE_VAULT_TOKEN",
+            "MANDOFORGE_WORKER_TOKEN"
+          ] | sort)
+        and all(.env[]? | select(.valueFrom.secretKeyRef != null);
+          .valueFrom.secretKeyRef.name == "mandoforge-worker-secrets"
+          and .valueFrom.secretKeyRef.key == .name)
+        and all(.env[]?;
+          (.name | test("(ADMIN|SCHEDULER|CONTROLLER|KMS|POSTGRES_PASSWORD)")) | not)
+    ' <<<"$worker_json" >/dev/null \
+      || fail "$worker_manifest must use only the worker-specific secret key whitelist"
   done
 }
 
@@ -136,6 +202,11 @@ static_contract_check() {
   require_executable scripts/production-launch-preflight.sh
   require_executable scripts/production-deployment-safety-gate.sh
   require_executable scripts/enterprise-product-completion-contract-gate.sh
+  require_executable scripts/verify-remote-computer-k8s-manifests.sh
+  require_executable scripts/verify-whiskey-evidence-auth-fallbacks.sh
+  scripts/verify-whiskey-evidence-auth-fallbacks.sh >/dev/null \
+    || fail "Whiskey credential separation contract failed"
+  verify_whiskey_worker_contract
 
   [[ -f deploy/k8s/kustomization.yaml ]] || fail "missing deploy/k8s/kustomization.yaml"
   [[ -f deploy/k8s/configmap.yaml ]] || fail "missing deploy/k8s/configmap.yaml"
@@ -268,6 +339,7 @@ static_contract_check() {
     local deploy_render_file="$EVIDENCE_DIR/deploy-k8s-render.yaml"
     local deploy_root_render_file="$EVIDENCE_DIR/deploy-root-render.yaml"
 
+    scripts/verify-remote-computer-k8s-manifests.sh
     verify_kubernetes_access_contracts
     kubectl kustomize deploy/k8s >"$deploy_render_file"
     kubectl kustomize deploy >"$deploy_root_render_file"

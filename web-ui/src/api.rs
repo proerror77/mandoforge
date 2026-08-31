@@ -157,27 +157,6 @@ pub struct WorkflowDefinition {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
-pub struct DynamicWorkflowPlan {
-    pub id: String,
-    #[serde(default)]
-    pub objective: String,
-    #[serde(default)]
-    pub status: String,
-    #[serde(default)]
-    pub runtime_adapter: String,
-    #[serde(default)]
-    pub phases: Value,
-    #[serde(default)]
-    pub materialization: Value,
-    #[serde(default)]
-    pub analysis: Value,
-    #[serde(default)]
-    pub plan: Value,
-    #[serde(default)]
-    pub created_at: String,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 pub struct TaskBoardSnapshot {
     #[serde(default)]
     pub generated_at: String,
@@ -290,7 +269,83 @@ pub struct CapabilityDiscovery {
     #[serde(default)]
     pub status: String,
     #[serde(default)]
+    pub generated_at: String,
+    #[serde(default)]
+    pub summary: Value,
+    #[serde(default)]
+    pub agent_cards: Vec<CapabilityAgentCard>,
+    #[serde(default)]
+    pub suggested_prompts: Vec<CapabilityPrompt>,
+    #[serde(default)]
+    pub onboarding_steps: Vec<DiscoveryStep>,
+    #[serde(default)]
+    pub empty_states: Vec<DiscoveryEmptyState>,
+    #[serde(default)]
     pub capabilities: Vec<Value>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct CapabilityAgentCard {
+    #[serde(default)]
+    pub agent_id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub agent_role: String,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub release_state: String,
+    #[serde(default)]
+    pub tools: Vec<String>,
+    #[serde(default)]
+    pub skill_ids: Vec<String>,
+    #[serde(default)]
+    pub workflow_pack_ids: Vec<String>,
+    #[serde(default)]
+    pub semantic_scopes: Value,
+    #[serde(default)]
+    pub primary_action: String,
+    #[serde(default)]
+    pub failure_modes: Value,
+    #[serde(default)]
+    pub sample_tasks: Value,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct CapabilityPrompt {
+    #[serde(default)]
+    pub target_view: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub prompt: String,
+    #[serde(default)]
+    pub action: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct DiscoveryStep {
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct DiscoveryEmptyState {
+    #[serde(default)]
+    pub view: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub action: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
@@ -826,16 +881,6 @@ where
         .json::<T>()
         .await
         .map_err(|error| format!("json decode failed: {error}"))
-}
-
-pub fn compile_dynamic_body(objective: &str, total_agents: u32, parallel_agents: u32) -> Value {
-    json!({
-        "objective": objective,
-        "runtime_adapter": "codex_app_server",
-        "execution_strategy": "native_dynamic",
-        "max_total_agents": total_agents,
-        "max_parallel_agents": parallel_agents
-    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

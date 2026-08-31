@@ -13,6 +13,12 @@ spec:
         - podSelector:
             matchLabels:
               app: mandoforge-api
+        - podSelector:
+            matchLabels:
+              app: mandoforge-worker
+        - podSelector:
+            matchLabels:
+              app: mandoforge-worker-isolated
       ports:
         - protocol: TCP
           port: 4318

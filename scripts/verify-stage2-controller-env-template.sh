@@ -10,6 +10,7 @@ production_preflight_script="scripts/stage2-production-evidence-preflight.sh"
 api_source="crates/mandoforge-api/src/main.rs"
 
 required_template_vars=(
+  MANDOFORGE_DEV_ADMIN_TOKEN
   RUN_STAGE2_PRODUCTION_VALIDATIONS
   VERIFY_STAGE2_VALIDATION_COVERAGE
   RUN_STAGE2_UI_ACTIONBOOK
@@ -295,6 +296,11 @@ fi
 
 if ! grep -q "MANDOFORGE_TENANT_ROUTING_CONTROLLER_URL" /tmp/mandoforge-stage2-controller-secret-render.yaml; then
   echo "Stage 2 controller Secret render is missing controller env data" >&2
+  exit 1
+fi
+
+if ! grep -q "MANDOFORGE_DEV_ADMIN_TOKEN" /tmp/mandoforge-stage2-controller-secret-render.yaml; then
+  echo "Stage 2 controller Secret render is missing API administrative auth" >&2
   exit 1
 fi
 

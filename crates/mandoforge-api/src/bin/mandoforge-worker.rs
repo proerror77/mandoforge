@@ -27,7 +27,6 @@ struct TaskBoardItem {
     workflow_step_run_id: String,
     agent_id: Option<String>,
     claimable: bool,
-    status: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -285,12 +284,7 @@ async fn process_workflow_step_jobs(
         return Ok(0);
     };
     let mut processed = 0usize;
-    for item in board
-        .items
-        .into_iter()
-        .filter(|item| item.claimable)
-        .filter(|item| item.status == "queued" || item.status == "scheduled")
-    {
+    for item in board.items.into_iter().filter(|item| item.claimable) {
         let Some(agent_id) = item
             .agent_id
             .as_deref()
@@ -554,7 +548,7 @@ mod tests {
                                 "workflow_step_run_id": step_id,
                                 "agent_id": agent_id,
                                 "claimable": true,
-                                "status": "queued"
+                                "status": "running"
                             }]
                         }))
                     }),

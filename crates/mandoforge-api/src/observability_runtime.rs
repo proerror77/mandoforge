@@ -1564,14 +1564,19 @@ pub(crate) async fn build_observability_summary(
                     _ => job.enqueued_at,
                 });
             }
-            ExecutionJobStatus::Running => running_jobs += 1,
-            ExecutionJobStatus::Failed => failed_jobs += 1,
+            ExecutionJobStatus::Running
+            | ExecutionJobStatus::Executing
+            | ExecutionJobStatus::Finalizing
+            | ExecutionJobStatus::CancelRequested => running_jobs += 1,
+            ExecutionJobStatus::Failed | ExecutionJobStatus::OutcomeUnknown => failed_jobs += 1,
             ExecutionJobStatus::Completed | ExecutionJobStatus::Canceled => {}
         }
         if job.attempt_count > 0
             && job.attempt_count < job.max_attempts
-            && job.status != ExecutionJobStatus::Completed
-            && job.status != ExecutionJobStatus::Canceled
+            && (matches!(
+                job.status,
+                ExecutionJobStatus::Queued | ExecutionJobStatus::Running
+            ) || (job.status == ExecutionJobStatus::Finalizing && job.last_error.is_some()))
         {
             retryable_jobs += 1;
         }
@@ -1633,8 +1638,12 @@ pub(crate) fn execution_job_status_label(status: &ExecutionJobStatus) -> &'stati
     match status {
         ExecutionJobStatus::Queued => "queued",
         ExecutionJobStatus::Running => "running",
+        ExecutionJobStatus::Executing => "executing",
+        ExecutionJobStatus::Finalizing => "finalizing",
+        ExecutionJobStatus::CancelRequested => "cancel_requested",
         ExecutionJobStatus::Completed => "completed",
         ExecutionJobStatus::Failed => "failed",
+        ExecutionJobStatus::OutcomeUnknown => "outcome_unknown",
         ExecutionJobStatus::Canceled => "canceled",
     }
 }

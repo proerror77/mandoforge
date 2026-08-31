@@ -1606,6 +1606,8 @@ mod environment_tests;
 mod execution_queue_tests;
 #[path = "main_tests/finance_controller_tests.rs"]
 mod finance_controller_tests;
+#[path = "main_tests/github_security_tests.rs"]
+mod github_security_tests;
 #[path = "main_tests/migration_tests.rs"]
 mod migration_tests;
 
@@ -1613,6 +1615,8 @@ mod migration_tests;
 mod observability_controller_tests;
 #[path = "main_tests/ontology_release_workflow_trigger_tests.rs"]
 mod ontology_release_workflow_trigger_tests;
+#[path = "main_tests/postgres_event_stream_tests.rs"]
+mod postgres_event_stream_tests;
 #[path = "main_tests/provider_controller_tests.rs"]
 mod provider_controller_tests;
 #[path = "main_tests/remote_computer_execution_tests.rs"]
@@ -2120,6 +2124,42 @@ fn tenant_runtime_mode_defaults_and_parses_env_override() {
         error
             .to_string()
             .contains("unsupported MANDOFORGE_TENANT_ROUTING_MODE")
+    );
+}
+
+#[test]
+fn tenant_routed_migrations_require_a_dedicated_database_url() {
+    assert_eq!(
+        db_bootstrap::migration_database_url_from_lookup(
+            |_| None,
+            "postgres://runtime",
+            TenantRuntimeMode::SingleRuntimeTenant,
+        )
+        .expect("single-tenant development may reuse its database URL"),
+        "postgres://runtime"
+    );
+    let error = db_bootstrap::migration_database_url_from_lookup(
+        |_| None,
+        "postgres://runtime",
+        TenantRuntimeMode::TenantRouted,
+    )
+    .expect_err("tenant-routed migrations need a separate credential");
+    assert!(
+        error
+            .to_string()
+            .contains("MANDOFORGE_MIGRATION_DATABASE_URL is required")
+    );
+    assert_eq!(
+        db_bootstrap::migration_database_url_from_lookup(
+            |key| {
+                (key == "MANDOFORGE_MIGRATION_DATABASE_URL")
+                    .then(|| " postgres://migration ".to_string())
+            },
+            "postgres://runtime",
+            TenantRuntimeMode::TenantRouted,
+        )
+        .expect("dedicated migration URL"),
+        "postgres://migration"
     );
 }
 
@@ -4231,6 +4271,17 @@ async fn execution_queue_tracks_job_lifecycle() {
     assert_eq!(running.worker_id.as_deref(), Some("test-worker"));
     assert!(running.lease_expires_at.is_some());
 
+    let renewed = queue
+        .renew_started(queued.id, "test-worker", running.claim_generation, 600)
+        .await
+        .expect("owning worker renews job lease");
+    assert!(renewed.lease_expires_at > running.lease_expires_at);
+    let stale_renewal = queue
+        .renew_started(queued.id, "stale-worker", running.claim_generation, 600)
+        .await
+        .expect_err("stale worker cannot renew job lease");
+    assert_eq!(stale_renewal.status, StatusCode::NOT_FOUND);
+
     let completed = queue.complete(queued.id).await.expect("complete job");
     assert_eq!(completed.status, ExecutionJobStatus::Completed);
     assert!(completed.completed_at.is_some());
@@ -4246,19 +4297,35 @@ async fn execution_queue_tracks_job_lifecycle() {
         })
         .await
         .expect("queue fenced job");
-    queue
+    let fenced_running = queue
         .start(fenced.id, "worker-a")
         .await
         .expect("start fenced job");
     let stale_complete = queue
-        .complete_started(fenced.id, "worker-b")
+        .begin_executing_started(fenced.id, "worker-b", fenced_running.claim_generation)
         .await
-        .expect_err("stale worker cannot complete running job");
+        .expect_err("stale worker cannot commit running job");
     assert_eq!(stale_complete.status, StatusCode::NOT_FOUND);
-    let fenced_requeued = queue
-        .retry_or_fail_started(fenced.id, "worker-a", "transient")
+    let retry_finalizing = queue
+        .begin_finalizing_started(
+            fenced.id,
+            "worker-a",
+            fenced_running.claim_generation,
+            Some("transient"),
+            json!({"stage": "transient"}),
+        )
         .await
-        .expect("owning worker can retry running job");
+        .expect("owning worker can finalize a failed attempt");
+    assert_eq!(retry_finalizing.status, ExecutionJobStatus::Finalizing);
+    let fenced_requeued = queue
+        .finish_finalizing_started(
+            fenced.id,
+            "worker-a",
+            retry_finalizing.claim_generation,
+            true,
+        )
+        .await
+        .expect("owning worker can requeue a finalized failed attempt");
     assert_eq!(fenced_requeued.status, ExecutionJobStatus::Queued);
     let fenced_restart = queue
         .start(fenced.id, "worker-b")
@@ -4266,12 +4333,38 @@ async fn execution_queue_tracks_job_lifecycle() {
         .expect("restart fenced job");
     assert_eq!(fenced_restart.worker_id.as_deref(), Some("worker-b"));
     let stale_retry = queue
-        .retry_or_fail_started(fenced.id, "worker-a", "late failure")
+        .begin_finalizing_started(
+            fenced.id,
+            "worker-a",
+            fenced_running.claim_generation,
+            Some("late failure"),
+            json!({"stage": "late_failure"}),
+        )
         .await
         .expect_err("stale worker cannot retry another worker's job");
     assert_eq!(stale_retry.status, StatusCode::NOT_FOUND);
+    queue
+        .begin_executing_started(fenced.id, "worker-b", fenced_restart.claim_generation)
+        .await
+        .expect("owning worker commits execution attempt");
+    let completion_finalizing = queue
+        .begin_finalizing_started(
+            fenced.id,
+            "worker-b",
+            fenced_restart.claim_generation,
+            None,
+            json!({}),
+        )
+        .await
+        .expect("owning worker begins completion finalization");
+    assert_eq!(completion_finalizing.status, ExecutionJobStatus::Finalizing);
     let fenced_completed = queue
-        .complete_started(fenced.id, "worker-b")
+        .finish_finalizing_started(
+            fenced.id,
+            "worker-b",
+            completion_finalizing.claim_generation,
+            false,
+        )
         .await
         .expect("owning worker completes running job");
     assert_eq!(fenced_completed.status, ExecutionJobStatus::Completed);
@@ -4331,34 +4424,451 @@ async fn execution_queue_tracks_job_lifecycle() {
         })
         .await
         .expect("queue cancelable job");
-    let canceled = queue.cancel(cancelable.id).await.expect("cancel job");
+    let cancel_requested = queue.cancel(cancelable.id).await.expect("cancel job");
+    assert_eq!(cancel_requested.status, ExecutionJobStatus::CancelRequested);
+    assert!(cancel_requested.completed_at.is_none());
+    let cancellation_claim = queue
+        .claim_cancellation(cancelable.id, "cancel-owner")
+        .await
+        .expect("claim cancellation cleanup");
+    let cancellation_cleanup = queue
+        .begin_cancellation_cleanup(
+            cancelable.id,
+            "cancel-owner",
+            cancellation_claim.claim_generation,
+        )
+        .await
+        .expect("begin cancellation cleanup");
+    let canceled = queue
+        .acknowledge_canceled(
+            cancelable.id,
+            "cancel-owner",
+            cancellation_cleanup.claim_generation,
+        )
+        .await
+        .expect("acknowledge cleanup");
     assert_eq!(canceled.status, ExecutionJobStatus::Canceled);
     assert!(canceled.completed_at.is_some());
     assert!(canceled.lease_expires_at.is_none());
-}
 
-#[tokio::test]
-async fn broker_execution_queue_is_reserved_until_implemented() {
-    for kind in [BrokerQueueKind::Redis, BrokerQueueKind::Nats] {
-        let queue = BrokerExecutionQueue::new(kind);
-        let request = ExecutionJobRequest {
+    let running_cancel = queue
+        .enqueue(ExecutionJobRequest {
             session_id: Uuid::new_v4(),
             environment_id: None,
             approval_id: Uuid::new_v4(),
             tool_call_id: Uuid::new_v4(),
-            tool_name: "file.write".to_string(),
+            tool_name: "shell.exec".to_string(),
             max_attempts: None,
-        };
+        })
+        .await
+        .expect("queue running cancellation job");
+    let running_cancel_claim = queue
+        .start(running_cancel.id, "cancel-owner")
+        .await
+        .expect("start running cancellation job");
+    let requested = queue
+        .cancel(running_cancel.id)
+        .await
+        .expect("request running cancellation");
+    assert_eq!(requested.status, ExecutionJobStatus::CancelRequested);
+    assert!(requested.completed_at.is_none());
+    let running_cancel_cleanup = queue
+        .begin_cancellation_cleanup(
+            running_cancel.id,
+            "cancel-owner",
+            running_cancel_claim.claim_generation,
+        )
+        .await
+        .expect("begin running cancellation cleanup");
+    let confirmed = queue
+        .acknowledge_canceled(
+            running_cancel.id,
+            "cancel-owner",
+            running_cancel_cleanup.claim_generation,
+        )
+        .await
+        .expect("cleanup owner acknowledges cancellation");
+    assert_eq!(confirmed.status, ExecutionJobStatus::Canceled);
+    assert!(confirmed.completed_at.is_some());
+}
 
-        assert!(queue.enqueue(request).await.is_err());
-        assert!(queue.start(Uuid::new_v4(), "worker").await.is_err());
-        assert!(queue.complete(Uuid::new_v4()).await.is_err());
-        assert!(queue.fail(Uuid::new_v4()).await.is_err());
-        assert!(queue.cancel(Uuid::new_v4()).await.is_err());
-        assert!(queue.retry_or_fail(Uuid::new_v4(), "error").await.is_err());
-        assert!(queue.list().await.is_err());
-        assert!(queue.get(Uuid::new_v4()).await.is_err());
-    }
+#[tokio::test]
+async fn deterministic_session_event_append_is_idempotent_and_collision_safe() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "idempotent event".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create session");
+    let event_id = Uuid::new_v4();
+
+    let first = state
+        .append_event_once(
+            event_id,
+            "worker",
+            Some(event_id),
+            session.id,
+            "execution.completed",
+            json!({"attempt": 1}),
+        )
+        .await
+        .expect("append event once");
+    let replay = state
+        .append_event_once(
+            event_id,
+            "worker",
+            Some(event_id),
+            session.id,
+            "execution.completed",
+            json!({"attempt": 1}),
+        )
+        .await
+        .expect("replay same event identity");
+
+    assert_eq!(replay.id, first.id);
+    assert_eq!(replay.seq, first.seq);
+    assert_eq!(replay.payload, json!({"attempt": 1}));
+    assert_eq!(
+        state
+            .list_events(session.id)
+            .await
+            .expect("list events")
+            .into_iter()
+            .filter(|event| event.id == event_id)
+            .count(),
+        1
+    );
+    let payload_collision = state
+        .append_event_once(
+            event_id,
+            "worker",
+            Some(event_id),
+            session.id,
+            "execution.completed",
+            json!({"attempt": 2}),
+        )
+        .await
+        .expect_err("same id cannot change event payload");
+    assert_eq!(payload_collision.status, StatusCode::BAD_REQUEST);
+    let collision = state
+        .append_event_once(
+            event_id,
+            "worker",
+            Some(event_id),
+            session.id,
+            "execution.failed",
+            json!({}),
+        )
+        .await
+        .expect_err("same id cannot name another event");
+    assert_eq!(collision.status, StatusCode::BAD_REQUEST);
+
+    let audit_id = Uuid::new_v4();
+    let mut audit = new_audit_log(
+        Some(session.id),
+        "worker",
+        Some(event_id),
+        "execution.completed",
+        "execution_job",
+        Some(event_id),
+        json!({"attempt": 1}),
+    );
+    audit.id = audit_id;
+    state
+        .append_audit_log(audit.clone())
+        .await
+        .expect("append audit once");
+    let replay = state
+        .append_audit_log(audit.clone())
+        .await
+        .expect("replay same audit identity");
+    assert_eq!(replay.details, json!({"attempt": 1}));
+    audit.details = json!({"attempt": 2});
+    let details_collision = state
+        .append_audit_log(audit.clone())
+        .await
+        .expect_err("same id cannot change audit details");
+    assert_eq!(details_collision.status, StatusCode::BAD_REQUEST);
+    audit.details = json!({"attempt": 1});
+    audit.action = "execution.failed".to_string();
+    let collision = state
+        .append_audit_log(audit)
+        .await
+        .expect_err("same id cannot name another audit action");
+    assert_eq!(collision.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn session_loop_job_lease_renewal_is_owner_fenced() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "session-loop lease renewal".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create session");
+    let queued = state
+        .enqueue_session_loop_job(session.id, None, "lease renewal test")
+        .await
+        .expect("enqueue session loop job");
+    let running = state
+        .start_session_loop_job(queued.id, "worker-a")
+        .await
+        .expect("start session loop job");
+
+    let renewed = state
+        .renew_session_loop_job_lease(queued.id, "worker-a", 600)
+        .await
+        .expect("owning worker renews session loop lease");
+    assert!(renewed.lease_expires_at > running.lease_expires_at);
+    let stale = state
+        .renew_session_loop_job_lease(queued.id, "worker-b", 600)
+        .await
+        .expect_err("stale worker cannot renew session loop lease");
+    assert_eq!(stale.status, StatusCode::NOT_FOUND);
+
+    let active_claim = state
+        .start_session_loop_job(queued.id, "worker-b")
+        .await
+        .expect_err("active session loop lease fences another worker");
+    assert_eq!(active_claim.status, StatusCode::NOT_FOUND);
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test state must use memory store");
+    };
+    inner
+        .write()
+        .await
+        .session_loop_jobs
+        .get_mut(&queued.id)
+        .expect("session loop job")
+        .lease_expires_at = None;
+
+    let reclaimed = state
+        .start_session_loop_job(queued.id, "worker-b")
+        .await
+        .expect("missing legacy lease is reclaimable");
+    assert_eq!(reclaimed.worker_id.as_deref(), Some("worker-b"));
+    assert_eq!(reclaimed.attempt_count, 2);
+    let stale_completion = state
+        .complete_session_loop_job(queued.id, "worker-a")
+        .await
+        .expect_err("old session loop owner stays fenced after recovery");
+    assert_eq!(stale_completion.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn workflow_step_lease_renewal_is_owner_fenced() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let now = Utc::now();
+    let mut step = test_workflow_step_run(
+        Uuid::new_v4(),
+        "lease-renewal",
+        "running",
+        empty_json_object(),
+        now,
+    );
+    step.claimed_by_worker = Some("worker-a".to_string());
+    step.claim_owner_version = WORKFLOW_STEP_CLAIM_OWNER_VERSION;
+    step.lease_expires_at = Some(now + chrono::Duration::seconds(60));
+    let step_id = step.id;
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test state must use memory store");
+    };
+    inner
+        .write()
+        .await
+        .workflow_step_runs
+        .insert(step_id, step.clone());
+
+    let renewed = state
+        .renew_workflow_step_run_lease(step_id, "worker-a", 600)
+        .await
+        .expect("owning worker renews workflow step lease");
+    assert!(renewed.lease_expires_at > step.lease_expires_at);
+    let stale = state
+        .renew_workflow_step_run_lease(step_id, "worker-b", 600)
+        .await
+        .expect_err("stale worker cannot renew workflow step lease");
+    assert_eq!(stale.status, StatusCode::NOT_FOUND);
+
+    let mut completed = renewed;
+    completed.status = "completed".to_string();
+    completed.completed_at = Some(Utc::now());
+    let stale = state
+        .update_claimed_workflow_step_run(completed.clone(), "worker-b")
+        .await
+        .expect_err("stale worker cannot complete workflow step");
+    assert_eq!(stale.status, StatusCode::NOT_FOUND);
+    let completed = state
+        .update_claimed_workflow_step_run(completed, "worker-a")
+        .await
+        .expect("owning worker completes workflow step");
+    assert_eq!(completed.status, "completed");
+}
+
+#[tokio::test]
+async fn workflow_step_requires_action_can_resume_on_new_worker() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let now = Utc::now();
+    let mut step = test_workflow_step_run(
+        Uuid::new_v4(),
+        "approval-resume",
+        "requires_action",
+        empty_json_object(),
+        now,
+    );
+    step.claimed_by_worker = Some("worker-a".to_string());
+    step.claim_owner_version = WORKFLOW_STEP_CLAIM_OWNER_VERSION;
+    step.lease_expires_at = None;
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test state must use memory store");
+    };
+    inner
+        .write()
+        .await
+        .workflow_step_runs
+        .insert(step.id, step.clone());
+
+    let mut completed = step.clone();
+    completed.status = "completed".to_string();
+    completed.claimed_by_worker = Some("worker-b".to_string());
+    completed.claim_owner_version = WORKFLOW_STEP_CLAIM_OWNER_VERSION;
+    completed.completed_at = Some(Utc::now());
+    let completed = state
+        .update_claimed_workflow_step_run(completed, "worker-b")
+        .await
+        .expect("available requires-action step can resume on a new worker");
+    assert_eq!(completed.status, "completed");
+    assert_eq!(completed.claimed_by_worker.as_deref(), Some("worker-b"));
+
+    step.status = "completed".to_string();
+    step.completed_at = Some(Utc::now());
+    let stale = state
+        .update_claimed_workflow_step_run(step, "worker-a")
+        .await
+        .expect_err("previous worker stays fenced after resume");
+    assert_eq!(stale.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn workflow_step_claim_is_atomic() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let now = Utc::now();
+    let queued = test_workflow_step_run(
+        Uuid::new_v4(),
+        "atomic-claim",
+        "queued",
+        empty_json_object(),
+        now,
+    );
+    let step_id = queued.id;
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test state must use memory store");
+    };
+    inner
+        .write()
+        .await
+        .workflow_step_runs
+        .insert(step_id, queued.clone());
+
+    let mut worker_a = queued.clone();
+    worker_a.status = "running".to_string();
+    worker_a.claimed_by_worker = Some("worker-a".to_string());
+    worker_a.claim_owner_version = WORKFLOW_STEP_CLAIM_OWNER_VERSION;
+    worker_a.lease_expires_at = Some(now + chrono::Duration::minutes(5));
+    state
+        .claim_workflow_step_run_if_available(worker_a, now)
+        .await
+        .expect("first worker claims queued step");
+
+    let mut worker_b = queued;
+    worker_b.status = "running".to_string();
+    worker_b.claimed_by_worker = Some("worker-b".to_string());
+    worker_b.claim_owner_version = WORKFLOW_STEP_CLAIM_OWNER_VERSION;
+    worker_b.lease_expires_at = Some(now + chrono::Duration::minutes(5));
+    let stale = state
+        .claim_workflow_step_run_if_available(worker_b, now)
+        .await
+        .expect_err("second worker cannot claim active step");
+    assert_eq!(stale.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn legacy_unversioned_workflow_claim_cannot_be_renewed_or_completed() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let now = Utc::now();
+    let mut legacy = test_workflow_step_run(
+        Uuid::new_v4(),
+        "legacy-owner-collision",
+        "running",
+        empty_json_object(),
+        now,
+    );
+    legacy.claimed_by_worker = Some("subject:alice".to_string());
+    legacy.lease_expires_at = Some(now + chrono::Duration::minutes(5));
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test state must use memory store");
+    };
+    inner
+        .write()
+        .await
+        .workflow_step_runs
+        .insert(legacy.id, legacy.clone());
+
+    let renew_error = state
+        .renew_workflow_step_run_lease(legacy.id, "subject:alice", 600)
+        .await
+        .expect_err("new subject owner must not renew a legacy unversioned claim");
+    assert_eq!(renew_error.status, StatusCode::NOT_FOUND);
+
+    inner
+        .write()
+        .await
+        .workflow_step_runs
+        .get_mut(&legacy.id)
+        .expect("legacy step")
+        .lease_expires_at = Some(now - chrono::Duration::seconds(1));
+    let mut replacement = legacy.clone();
+    replacement.claim_owner_version = WORKFLOW_STEP_CLAIM_OWNER_VERSION;
+    replacement.lease_expires_at = Some(now + chrono::Duration::minutes(5));
+    let reclaim_error = state
+        .claim_workflow_step_run_if_available(replacement, now)
+        .await
+        .expect_err("expired legacy unversioned claim must not be replayed");
+    assert_eq!(reclaim_error.status, StatusCode::NOT_FOUND);
+
+    let mut completed = legacy;
+    completed.status = "completed".to_string();
+    completed.claim_owner_version = WORKFLOW_STEP_CLAIM_OWNER_VERSION;
+    completed.completed_at = Some(now);
+    let completion_error = state
+        .update_claimed_workflow_step_run(completed, "subject:alice")
+        .await
+        .expect_err("new subject owner must not complete a legacy unversioned claim");
+    assert_eq!(completion_error.status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -4427,6 +4937,18 @@ async fn execution_job_cancel_route_marks_job_canceled_and_audits() {
     .await;
     assert_eq!(canceled.status, ExecutionJobStatus::Canceled);
     assert!(canceled.completed_at.is_some());
+    let repeated: execution_queue::ExecutionJob = request_json(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/execution-jobs/{}/cancel", job.id))
+            .header("x-mandoforge-subject", "operator-1")
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(repeated.status, ExecutionJobStatus::Canceled);
 
     let events: Vec<SessionEvent> = request_json(
         app.clone(),
@@ -4436,10 +4958,16 @@ async fn execution_job_cancel_route_marks_job_canceled_and_audits() {
             .expect("valid request"),
     )
     .await;
-    assert!(events.iter().any(|event| {
-        event.event_type == "execution.canceled"
-            && event.payload["execution_job_id"] == json!(job.id)
-    }));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| {
+                event.event_type == "execution.canceled"
+                    && event.payload["execution_job_id"] == json!(job.id)
+            })
+            .count(),
+        1
+    );
 
     let audit_logs: Vec<AuditLog> = request_json(
         app,
@@ -4451,10 +4979,91 @@ async fn execution_job_cancel_route_marks_job_canceled_and_audits() {
             .expect("valid request"),
     )
     .await;
-    assert!(
+    assert_eq!(
         audit_logs
             .iter()
-            .any(|log| { log.action == "execution.canceled" && log.resource_id == Some(job.id) })
+            .filter(|log| { log.action == "execution.canceled" && log.resource_id == Some(job.id) })
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn running_execution_cancel_waits_for_worker_cleanup_acknowledgement() {
+    let state = test_state_with_worker(Arc::new(QueueBackedExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "running cancellation".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create session");
+    let job = state
+        .execution_queue
+        .enqueue(ExecutionJobRequest {
+            session_id: session.id,
+            environment_id: None,
+            approval_id: Uuid::new_v4(),
+            tool_call_id: Uuid::new_v4(),
+            tool_name: "shell.exec".to_string(),
+            max_attempts: None,
+        })
+        .await
+        .expect("enqueue job");
+    state
+        .execution_queue
+        .start(job.id, "cancel-owner")
+        .await
+        .expect("start job");
+    let app = build_router(state.clone());
+
+    let requested: execution_queue::ExecutionJob = request_json(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/execution-jobs/{}/cancel", job.id))
+            .header("x-mandoforge-subject", "operator-1")
+            .header("x-mandoforge-roles", "operator")
+            .body(Body::empty())
+            .expect("valid cancel request"),
+    )
+    .await;
+    assert_eq!(requested.status, ExecutionJobStatus::CancelRequested);
+    assert!(requested.completed_at.is_none());
+
+    let canceled: execution_queue::ExecutionJob = request_json(
+        app.clone(),
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/execution-jobs/{}/run", job.id))
+            .header("x-mandoforge-worker-id", "cancel-owner")
+            .body(Body::empty())
+            .expect("valid worker acknowledgement"),
+    )
+    .await;
+    assert_eq!(canceled.status, ExecutionJobStatus::Canceled);
+    assert!(canceled.completed_at.is_some());
+
+    let events = state.list_events(session.id).await.expect("list events");
+    assert!(
+        events
+            .iter()
+            .any(|event| event.event_type == "execution.cancel_requested")
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event.event_type == "execution.canceled")
     );
 }
 
@@ -13806,6 +14415,62 @@ async fn workflow_definition_rejects_invalid_graph_before_persisting() {
 }
 
 #[tokio::test]
+async fn workflow_definition_rejects_retired_dynamic_workflow_inputs() {
+    let app = test_app().await;
+    let (status, _) = request_value(
+        app.clone(),
+        Request::builder()
+            .uri("/api/dynamic-workflow-plans")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let agents: Vec<Agent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri("/api/agents")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let agent_id = agents.first().expect("seeded agent").id;
+
+    for (field, value) in [
+        ("execution_strategy", json!("native_dynamic")),
+        ("runtime_mode", json!("dynamic_workflow")),
+        (
+            "handoff_rules",
+            json!({
+                "source": "dynamic_workflow_plan",
+                "dynamic_workflow_plan_id": Uuid::new_v4()
+            }),
+        ),
+    ] {
+        let mut body = json!({
+            "name": "Retired dynamic workflow input",
+            "entrypoint": format!("retired-dynamic-workflow-{}", Uuid::new_v4()),
+            "default_agent_id": agent_id,
+            "release_state": "draft"
+        });
+        body[field] = value;
+        let (status, _) = request_value(
+            app.clone(),
+            json_request_with_headers(
+                "POST",
+                "/api/workflow-definitions",
+                body,
+                &[("x-mandoforge-roles", "admin")],
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{field} must be rejected");
+    }
+}
+
+#[tokio::test]
 async fn delegated_runtime_workflow_records_external_envelope() {
     let app = test_app().await;
     let agents: Vec<Agent> = request_json(
@@ -13846,8 +14511,8 @@ async fn delegated_runtime_workflow_records_external_envelope() {
             "POST",
             "/api/workflow-definitions",
             json!({
-                "name": "Claude dynamic workflow envelope",
-                "entrypoint": "claude-dynamic-envelope",
+                "name": "Claude delegated workflow envelope",
+                "entrypoint": "claude-delegated-envelope",
                 "trigger_type": "manual",
                 "default_agent_id": agent.id,
                 "execution_strategy": "delegated_runtime",
@@ -13881,7 +14546,7 @@ async fn delegated_runtime_workflow_records_external_envelope() {
                 "workflow_definition_id": definition["id"],
                 "external_run_ref": "claude-run-001",
                 "runtime_envelope": {
-                    "prompt_ref": "work-item:dynamic-review",
+                    "prompt_ref": "work-item:delegated-review",
                     "delegated": true
                 },
                 "input_payload": {
@@ -13903,7 +14568,7 @@ async fn delegated_runtime_workflow_records_external_envelope() {
     );
     assert_eq!(
         run["runtime_envelope"]["request_envelope"]["prompt_ref"],
-        json!("work-item:dynamic-review")
+        json!("work-item:delegated-review")
     );
 
     let steps: Vec<Value> = request_json(
@@ -13942,1244 +14607,56 @@ async fn delegated_runtime_workflow_records_external_envelope() {
     }));
 }
 
-#[tokio::test]
-async fn dynamic_workflow_plan_validates_agent_fleet_policy() {
-    let app = test_app().await;
-
-    let (status, error) = request_value(
-        app,
-        json_request_with_headers(
-            "POST",
-            "/api/dynamic-workflow-plans",
-            json!({
-                "objective": "Audit a large codebase with cross-checking agents",
-                "phases": [
-                    {
-                        "key": "survey",
-                        "agent_count": 3,
-                        "prompt": "Survey independent subsystems and summarize risks."
-                    }
-                ],
-                "agent_fleet_policy": {
-                    "max_total_agents": 2,
-                    "max_parallel_agents": 2
-                }
-            }),
-            &[("x-mandoforge-roles", "admin")],
-        ),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(
-        error["error"]
-            .as_str()
-            .is_some_and(|message| message.contains("requests 3 agents"))
-    );
-}
-
-#[test]
-fn dynamic_workflow_plan_approval_requires_an_identified_approver() {
-    let error = validate_dynamic_workflow_plan_approval_review(&json!({}))
-        .expect_err("approval without an identified approver must fail");
-
-    assert!(error.message.contains("requires approved_by"));
-}
-
-#[tokio::test]
-async fn dynamic_workflow_plan_decisions_require_an_approver_identity() {
-    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
-    state.seed_demo_agent().await.expect("seed demo agent");
-    let agent = state
-        .list_agents()
-        .await
-        .expect("list agents")
-        .into_iter()
-        .next()
-        .expect("seeded agent");
-    let session = state
-        .create_session(CreateSession {
-            agent_id: agent.id,
-            environment_id: None,
-            title: "Scoped dynamic workflow review".to_string(),
-            message: None,
-        })
-        .await
-        .expect("create source session");
-    let app = build_router(state);
-    let plan: Value = request_json(
+async fn create_delegated_runtime_test_run(
+    app: Router,
+    runtime_adapter: &str,
+    objective: &str,
+) -> Value {
+    let agents: Vec<Agent> = request_json(
         app.clone(),
-        json_request_with_headers(
-            "POST",
-            "/api/dynamic-workflow-plans",
-            json!({
-                "source_session_id": session.id,
-                "objective": "Review a governed scoped workflow",
-                "phases": [{
-                    "key": "review",
-                    "agent_count": 1,
-                    "prompt": "Review the scoped workflow."
-                }]
-            }),
-            &[("x-mandoforge-roles", "admin")],
-        ),
-    )
-    .await;
-    let plan_id = plan["id"].as_str().expect("plan id");
-
-    let (status, error) = request_value(
-        app.clone(),
-        json_request_with_headers(
-            "POST",
-            &format!("/api/dynamic-workflow-plans/{plan_id}/review"),
-            json!({
-                "status": "approved",
-                "review": {"approved_by": "spoofed-subject"}
-            }),
-            &[
-                ("x-mandoforge-subject", "operator-1"),
-                ("x-mandoforge-roles", "operator"),
-            ],
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert!(
-        error["error"]
-            .as_str()
-            .is_some_and(|message| message.contains("ApprovalsDecide"))
-    );
-
-    let reviewed: Value = request_json(
-        app.clone(),
-        json_request_with_headers(
-            "POST",
-            &format!("/api/dynamic-workflow-plans/{plan_id}/review"),
-            json!({
-                "status": "approved",
-                "review": {"approved_by": "spoofed-subject"}
-            }),
-            &[
-                ("x-mandoforge-subject", "reviewer-1"),
-                ("x-mandoforge-roles", "approver"),
-            ],
-        ),
-    )
-    .await;
-    assert_eq!(reviewed["status"], json!("approved"));
-    assert_eq!(reviewed["review"]["approved_by"], json!("reviewer-1"));
-
-    let (status, error) = request_value(
-        app.clone(),
-        json_request_with_headers(
-            "POST",
-            &format!("/api/dynamic-workflow-plans/{plan_id}/review"),
-            json!({"review": {"note": "operator cannot clear approval"}}),
-            &[
-                ("x-mandoforge-subject", "operator-1"),
-                ("x-mandoforge-roles", "operator"),
-            ],
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert!(
-        error["error"]
-            .as_str()
-            .is_some_and(|message| message.contains("ApprovalsDecide"))
-    );
-    let persisted: Value = request_json(
-        app,
         Request::builder()
-            .uri(format!("/api/dynamic-workflow-plans/{plan_id}"))
-            .header("x-mandoforge-subject", "operator-1")
-            .header("x-mandoforge-roles", "operator")
+            .uri("/api/agents")
             .body(Body::empty())
             .expect("valid request"),
     )
     .await;
-    assert_eq!(persisted["status"], json!("approved"));
-    assert_eq!(persisted["review"]["approved_by"], json!("reviewer-1"));
-}
-
-#[tokio::test]
-async fn dynamic_workflow_plan_materialization_claim_is_atomic() {
-    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
-    state.seed_demo_agent().await.expect("seed demo agent");
-    let app = build_router(state.clone());
-    let plan: Value = request_json(
-        app.clone(),
-        json_request_with_headers(
-            "POST",
-            "/api/dynamic-workflow-plans",
-            json!({
-                "objective": "Claim one approved dynamic workflow exactly once",
-                "phases": [{
-                    "key": "claim",
-                    "agent_count": 1,
-                    "prompt": "Prove the materialization claim is atomic."
-                }]
-            }),
-            &[("x-mandoforge-roles", "admin")],
-        ),
-    )
-    .await;
-    let plan_id = Uuid::parse_str(plan["id"].as_str().expect("plan id")).expect("plan uuid");
-    let _: Value = request_json(
-        app,
-        json_request_with_headers(
-            "POST",
-            &format!("/api/dynamic-workflow-plans/{plan_id}/review"),
-            json!({"status": "approved", "review": {}}),
-            &[
-                ("x-mandoforge-subject", "claim-reviewer"),
-                ("x-mandoforge-roles", "admin"),
-            ],
-        ),
-    )
-    .await;
-    let first_definition_id = Uuid::new_v4();
-    let first_run_id = Uuid::new_v4();
-    let second_definition_id = Uuid::new_v4();
-    let second_run_id = Uuid::new_v4();
-    let first_claim_audit = state
-        .append_audit_log(new_audit_log(
-            None,
-            "system",
-            Some(first_run_id),
-            "dynamic_workflow_plan.materialization_claim_requested",
-            "dynamic_workflow_plan",
-            Some(plan_id),
-            json!({"workflow_run_id": first_run_id}),
-        ))
-        .await
-        .expect("first claim audit");
-    let second_claim_audit = state
-        .append_audit_log(new_audit_log(
-            None,
-            "system",
-            Some(second_run_id),
-            "dynamic_workflow_plan.materialization_claim_requested",
-            "dynamic_workflow_plan",
-            Some(plan_id),
-            json!({"workflow_run_id": second_run_id}),
-        ))
-        .await
-        .expect("second claim audit");
-    let (first, second) = tokio::join!(
-        state.claim_dynamic_workflow_plan_materialization(
-            plan_id,
-            first_claim_audit.id,
-            Utc::now(),
-        ),
-        state.claim_dynamic_workflow_plan_materialization(
-            plan_id,
-            second_claim_audit.id,
-            Utc::now(),
-        )
-    );
-    let (winning_claim_id, winning_definition_id, winning_run_id, losing_error) =
-        match (first, second) {
-            (Ok(_), Err(error)) => (
-                first_claim_audit.id,
-                first_definition_id,
-                first_run_id,
-                error,
-            ),
-            (Err(error), Ok(_)) => (
-                second_claim_audit.id,
-                second_definition_id,
-                second_run_id,
-                error,
-            ),
-            (Ok(_), Ok(_)) => panic!("both materialization claims succeeded"),
-            (Err(first), Err(second)) => {
-                panic!("both materialization claims failed: {first:?}; {second:?}")
-            }
-        };
-    assert_eq!(losing_error.status, StatusCode::CONFLICT);
-    assert!(losing_error.message.contains("already claimed"));
-
-    let completed = state
-        .update_dynamic_workflow_plan_materialized(
-            plan_id,
-            winning_claim_id,
-            winning_definition_id,
-            winning_run_id,
-            None,
-            Utc::now(),
-        )
-        .await
-        .expect("matching claim completes");
-    assert_eq!(completed.status, "materialized");
-    let duplicate = state
-        .update_dynamic_workflow_plan_materialized(
-            plan_id,
-            winning_claim_id,
-            winning_definition_id,
-            winning_run_id,
-            None,
-            Utc::now(),
-        )
-        .await
-        .expect_err("completed materialization cannot finalize twice");
-    assert_eq!(duplicate.status, StatusCode::CONFLICT);
-}
-
-#[tokio::test]
-async fn failed_dynamic_workflow_materialization_can_be_reapproved_and_reclaimed() {
-    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
-    state.seed_demo_agent().await.expect("seed demo agent");
-    let agent = state
-        .list_agents()
-        .await
-        .expect("list agents")
-        .into_iter()
-        .next()
-        .expect("seeded agent");
-    let source_session = state
-        .create_session(CreateSession {
-            agent_id: agent.id,
-            environment_id: None,
-            title: "Retryable dynamic workflow plan".to_string(),
-            message: None,
-        })
-        .await
-        .expect("create source session");
-    let app = build_router(state.clone());
-    let plan: DynamicWorkflowPlan = request_json(
-        app.clone(),
-        json_request_with_headers(
-            "POST",
-            "/api/dynamic-workflow-plans",
-            json!({
-                "source_session_id": source_session.id,
-                "objective": "Retry a failed dynamic workflow materialization",
-                "phases": [{
-                    "key": "retry",
-                    "agent_count": 1,
-                    "prompt": "Retry only after a new approval decision."
-                }]
-            }),
-            &[("x-mandoforge-roles", "admin")],
-        ),
-    )
-    .await;
-    let approved: DynamicWorkflowPlan = request_json(
-        app.clone(),
-        json_request_with_headers(
-            "POST",
-            &format!("/api/dynamic-workflow-plans/{}/review", plan.id),
-            json!({"status": "approved", "review": {}}),
-            &[
-                ("x-mandoforge-subject", "first-reviewer"),
-                ("x-mandoforge-roles", "approver"),
-            ],
-        ),
-    )
-    .await;
-    assert_eq!(approved.status, "approved");
-
-    let first_claim_audit = state
-        .append_audit_log(new_audit_log(
-            None,
-            "system",
-            None,
-            "dynamic_workflow_plan.materialization_claim_requested",
-            "dynamic_workflow_plan",
-            Some(plan.id),
-            json!({"attempt": 1}),
-        ))
-        .await
-        .expect("first materialization claim audit");
-    state
-        .claim_dynamic_workflow_plan_materialization(plan.id, first_claim_audit.id, Utc::now())
-        .await
-        .expect("claim first materialization attempt");
-    let failed = state
-        .fail_dynamic_workflow_plan_materialization(plan.id, first_claim_audit.id, None, Utc::now())
-        .await
-        .expect("fail first materialization attempt");
-    assert_eq!(failed.status, "materialization_failed");
-
-    let (status, error) = request_value(
-        app.clone(),
-        json_request_with_headers(
-            "POST",
-            &format!("/api/dynamic-workflow-plans/{}/review", plan.id),
-            json!({"status": "approved", "review": {}}),
-            &[
-                ("x-mandoforge-subject", "operator-1"),
-                ("x-mandoforge-roles", "operator"),
-            ],
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert!(
-        error["error"]
-            .as_str()
-            .is_some_and(|message| message.contains("ApprovalsDecide"))
-    );
-
-    let reapproved: DynamicWorkflowPlan = request_json(
-        app,
-        json_request_with_headers(
-            "POST",
-            &format!("/api/dynamic-workflow-plans/{}/review", plan.id),
-            json!({"status": "approved", "review": {"reason": "retry transient failure"}}),
-            &[
-                ("x-mandoforge-subject", "retry-reviewer"),
-                ("x-mandoforge-roles", "approver"),
-            ],
-        ),
-    )
-    .await;
-    assert_eq!(reapproved.status, "approved");
-    assert_eq!(reapproved.review["approved_by"], json!("retry-reviewer"));
-
-    let retry_claim_audit = state
-        .append_audit_log(new_audit_log(
-            None,
-            "system",
-            None,
-            "dynamic_workflow_plan.materialization_claim_requested",
-            "dynamic_workflow_plan",
-            Some(plan.id),
-            json!({"attempt": 2}),
-        ))
-        .await
-        .expect("retry materialization claim audit");
-    let reclaimed = state
-        .claim_dynamic_workflow_plan_materialization(plan.id, retry_claim_audit.id, Utc::now())
-        .await
-        .expect("reclaim reapproved materialization");
-    assert_eq!(reclaimed.status, "materializing");
-    let late_review_audit = state
-        .append_audit_log(new_audit_log(
-            None,
-            "retry-reviewer",
-            None,
-            "dynamic_workflow_plan.reviewed",
-            "dynamic_workflow_plan",
-            Some(plan.id),
-            json!({"status": "approved"}),
-        ))
-        .await
-        .expect("late review audit");
-    let still_claimed = state
-        .update_dynamic_workflow_plan_audit_trace_if_unchanged(
-            plan.id,
-            &reapproved.status,
-            reapproved.updated_at,
-            Some(late_review_audit.id),
-            late_review_audit.created_at,
-        )
-        .await
-        .expect("late review audit attachment converges to current plan");
-    assert_eq!(still_claimed.status, "materializing");
-    assert_eq!(still_claimed.audit_trace_id, Some(retry_claim_audit.id));
-    let retry_failed = state
-        .fail_dynamic_workflow_plan_materialization(plan.id, retry_claim_audit.id, None, Utc::now())
-        .await
-        .expect("active retry claim remains valid after late review audit");
-    assert_eq!(retry_failed.status, "materialization_failed");
-}
-
-#[tokio::test]
-async fn dynamic_workflow_plan_materializes_delegated_runtime_workflow() {
-    let app = test_app().await;
-
-    let plan: Value = request_json(
-            app.clone(),
-            json_request_with_headers(
-                "POST",
-                "/api/dynamic-workflow-plans",
-                json!({
-                    "objective": "Run a multi-agent migration audit",
-                    "phases": [
-                        {
-                            "key": "survey",
-                            "agent_count": 2,
-                            "max_parallel": 2,
-                            "prompt": "Inspect separate migration surfaces and report concrete risks."
-                        },
-                        {
-                            "key": "cross_check",
-                            "after": "survey",
-                            "agent_count": 1,
-                            "prompt": "Cross-check the survey findings and decide which findings survive."
-                        }
-                    ],
-                    "agent_fleet_policy": {
-                        "max_total_agents": 4,
-                        "max_parallel_agents": 2,
-                        "timeout_seconds": 1800
-                    },
-                    "governance": {
-                        "risk_level": "medium",
-                        "memory_scope": {
-                            "read": ["domain:engineering"],
-                            "write": ["session"]
-                        },
-                        "tool_scope": {
-                            "allowed_tools": ["file.read", "artifact.create"]
-                        },
-                        "connector_scope": {
-                            "allowed_connectors": []
-                        },
-                        "approval_policy": {
-                            "required_for": ["external_commit"]
-                        },
-                        "external_effects": {
-                            "mode": "draft_only"
-                        }
-                    },
-                    "validation": {
-                        "cross_check_required": true,
-                        "vote_threshold": 0.67,
-                        "required_artifacts": ["final_report"]
-                    },
-                    "materialization": {
-                        "execution_strategy": "delegated_runtime",
-                        "runtime_adapter": "claude_code",
-                        "runtime_mode": "dynamic_workflow",
-                        "runtime_capability_contract": {
-                            "max_total_agents": 4,
-                            "max_parallel_agents": 2,
-                            "allowed_tools": ["file.read", "artifact.create"]
-                        },
-                        "event_ingestion_policy": "normalized"
-                    }
-                }),
-                &[("x-mandoforge-roles", "admin")],
-            ),
-        )
-        .await;
-    let plan_id = plan["id"].as_str().expect("plan id");
-    assert_eq!(plan["status"], json!("proposed"));
-    assert_eq!(plan["reviewed_at"], Value::Null);
-    assert_eq!(plan["analysis"]["phase_count"], json!(2));
-    assert_eq!(plan["analysis"]["total_agent_count"], json!(3));
-    assert_eq!(plan["analysis"]["max_parallel_agents"], json!(2));
-    assert_eq!(
-        plan["analysis"]["execution_strategy"],
-        json!("delegated_runtime")
-    );
-
-    let reviewed: Value = request_json(
-        app.clone(),
-        json_request_with_headers(
-            "POST",
-            &format!("/api/dynamic-workflow-plans/{plan_id}/review"),
-            json!({
-                "status": "approved",
-                "review": {
-                    "approved_by": "architecture-review",
-                    "reason": "bounded delegated runtime with draft-only external effects"
-                }
-            }),
-            &[
-                ("x-mandoforge-subject", "architecture-review"),
-                ("x-mandoforge-roles", "admin"),
-            ],
-        ),
-    )
-    .await;
-    assert_eq!(reviewed["status"], json!("approved"));
-    assert!(reviewed["reviewed_at"].as_str().is_some());
-
-    let materialized: Value = request_json(
-        app.clone(),
-        json_request_with_headers(
-            "POST",
-            &format!("/api/dynamic-workflow-plans/{plan_id}/materialize"),
-            json!({
-                "title": "Dynamic workflow audit demo",
-                "input_payload": {}
-            }),
-            &[("x-mandoforge-roles", "admin")],
-        ),
-    )
-    .await;
-
-    assert_eq!(materialized["plan"]["status"], json!("materialized"));
-    assert!(materialized["plan"]["materialized_at"].as_str().is_some());
-    assert_eq!(
-        materialized["workflow_definition"]["release_state"],
-        json!("staged")
-    );
-    assert_eq!(
-        materialized["workflow_definition"]["execution_strategy"],
-        json!("delegated_runtime")
-    );
-    assert_eq!(
-        materialized["workflow_definition"]["runtime_adapter"],
-        json!("claude_code")
-    );
-    assert_eq!(
-        materialized["workflow_definition"]["runtime_mode"],
-        json!("dynamic_workflow")
-    );
-    assert_eq!(
-        materialized["workflow_definition"]["step_graph"]["steps"][0]["type"],
-        json!("delegated_runtime")
-    );
-    let pinned_agent_id = materialized["workflow_definition"]["step_graph"]["steps"][0]["agent_id"]
-        .as_str()
-        .expect("pinned agent id");
-    let pinned_agent_version_id =
-        materialized["workflow_definition"]["step_graph"]["steps"][0]["agent_version_id"]
-            .as_str()
-            .expect("pinned agent version id");
-    assert_eq!(
-        materialized["workflow_definition"]["handoff_rules"]["materialization_approval"]["approved_by"],
-        json!("architecture-review")
-    );
-    assert_eq!(
-        materialized["workflow_definition"]["handoff_rules"]["materialization_approval"]["scope"],
-        json!("single_materialization")
-    );
-    assert_eq!(
-        materialized["workflow_run"]["delegation_status"],
-        json!("submitted")
-    );
-    assert!(
-        materialized["workflow_run"]["root_task_grant_id"]
-            .as_str()
-            .is_some()
-    );
-    assert_eq!(
-        materialized["workflow_run"]["runtime_envelope"]["request_envelope"]["dynamic_workflow_plan_id"],
-        json!(plan_id)
-    );
-    assert_eq!(
-        materialized["workflow_run"]["runtime_envelope"]["runtime_capability_contract"]["max_parallel_agents"],
-        json!(2)
-    );
-
-    let session_id = materialized["workflow_run"]["primary_session_id"]
-        .as_str()
-        .expect("session id");
-    let session: Value = request_json(
-        app.clone(),
-        Request::builder()
-            .uri(format!("/api/sessions/{session_id}"))
-            .header("x-mandoforge-roles", "admin")
-            .body(Body::empty())
-            .expect("valid request"),
-    )
-    .await;
-    assert_eq!(session["agent_id"], json!(pinned_agent_id));
-    assert_eq!(session["agent_version_id"], json!(pinned_agent_version_id));
-
-    let workflow_definition_id = materialized["workflow_definition"]["id"]
-        .as_str()
-        .expect("workflow definition id");
-    let (status, error) = request_value(
-        app.clone(),
-        json_request_with_headers(
-            "POST",
-            "/api/workflow-runs",
-            json!({
-                "workflow_definition_id": workflow_definition_id,
-                "input_payload": {"objective": "unreviewed reuse"}
-            }),
-            &[("x-mandoforge-roles", "admin")],
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(
-        error["error"]
-            .as_str()
-            .is_some_and(|message| message.contains("released workflow definition"))
-    );
-
-    let (status, error) = request_value(
-        app.clone(),
-        json_request_with_headers(
-            "PATCH",
-            &format!("/api/workflow-definitions/{workflow_definition_id}"),
-            json!({"release_state": "released"}),
-            &[("x-mandoforge-roles", "admin")],
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert!(
-        error["error"]
-            .as_str()
-            .is_some_and(|message| message.contains("publish a Workflow Pack"))
-    );
-
-    let (status, error) = request_value(
-        app.clone(),
-        json_request_with_headers(
-            "PATCH",
-            &format!("/api/workflow-definitions/{workflow_definition_id}"),
-            json!({"handoff_rules": {"source": "manual"}}),
-            &[("x-mandoforge-roles", "admin")],
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(
-        error["error"]
-            .as_str()
-            .is_some_and(|message| message.contains("provenance is immutable"))
-    );
-
-    let (status, error) = request_value(
+    let definition: Value = request_json(
         app.clone(),
         json_request_with_headers(
             "POST",
             "/api/workflow-definitions",
             json!({
-                "name": "Forged dynamic release",
-                "entrypoint": "forged-dynamic-release",
-                "default_agent_id": pinned_agent_id,
-                "step_graph": {
-                    "steps": [{"key": "run", "type": "agent", "start": true}]
+                "name": "Delegated runtime test",
+                "entrypoint": format!("delegated-runtime-test-{}", Uuid::new_v4()),
+                "trigger_type": "manual",
+                "default_agent_id": agents.first().expect("seeded agent").id,
+                "execution_strategy": "delegated_runtime",
+                "runtime_adapter": runtime_adapter,
+                "runtime_mode": "normal",
+                "runtime_capability_contract": {
+                    "max_total_agents": 1,
+                    "max_parallel_agents": 1
                 },
-                "handoff_rules": {
-                    "source": "dynamic_workflow_plan",
-                    "dynamic_workflow_plan_id": plan_id,
-                    "materialization_approval": {"approved_by": "forged"}
-                },
+                "event_ingestion_policy": "normalized",
                 "release_state": "released"
             }),
             &[("x-mandoforge-roles", "admin")],
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(
-        error["error"]
-            .as_str()
-            .is_some_and(|message| message.contains("only be created from an approved"))
-    );
-
-    let run_id = materialized["workflow_run"]["id"].as_str().expect("run id");
-    let steps: Vec<Value> = request_json(
+    request_json(
         app,
-        Request::builder()
-            .uri(format!("/api/workflow-runs/{run_id}/steps"))
-            .header("x-mandoforge-roles", "admin")
-            .body(Body::empty())
-            .expect("valid request"),
-    )
-    .await;
-    assert_eq!(steps.len(), 1);
-    assert_eq!(steps[0]["step_type"], json!("delegated_runtime"));
-    assert_eq!(
-        steps[0]["input_payload"]["runtime_delegation"]["runtime_mode"],
-        json!("dynamic_workflow")
-    );
-}
-
-#[tokio::test]
-async fn production_dynamic_workflow_pins_the_independently_promoted_agent_version() {
-    let _env = env_lock().lock().expect("env lock");
-    let _provider_runtime = EnvVarGuard::set("MANDOFORGE_PROVIDER_RUNTIME_ENV", "production");
-    let _release_enforcement = EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENFORCEMENT", "required");
-    let _release_environment =
-        EnvVarGuard::set("MANDOFORGE_AGENT_RELEASE_ENVIRONMENT", "production");
-    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
-    let (agent, promoted_version, environment) =
-        seed_promoted_agent_for_test(&state, "production").await;
-    let mut unreleased_agent = agent.clone();
-    unreleased_agent.system_prompt = "Unreleased dynamic workflow prompt".to_string();
-    state
-        .insert_agent_version(&unreleased_agent, 2, json!({}))
-        .await
-        .expect("insert unreleased agent version");
-    let unreleased_version = state
-        .current_agent_version(agent.id)
-        .await
-        .expect("current unreleased version");
-    assert_ne!(promoted_version.id, unreleased_version.id);
-    let app = build_router(state.clone());
-
-    let plan: Value = request_json(
-        app.clone(),
         json_request_with_headers(
             "POST",
-            "/api/dynamic-workflow-plans",
+            "/api/workflow-runs",
             json!({
-                "objective": "Run a governed production migration audit",
-                "phases": [{
-                    "key": "audit",
-                    "agent_count": 1,
-                    "prompt": "Inspect the migration and emit bounded evidence."
-                }]
-            }),
-            &[("x-mandoforge-roles", "admin")],
-        ),
-    )
-    .await;
-    let plan_id = plan["id"].as_str().expect("plan id");
-    let reviewed: Value = request_json(
-        app.clone(),
-        json_request_with_headers(
-            "POST",
-            &format!("/api/dynamic-workflow-plans/{plan_id}/review"),
-            json!({
-                "status": "approved",
-                "review": {
-                    "approved_by": "production-release-reviewer",
-                    "reason": "single bounded production materialization"
-                }
-            }),
-            &[
-                ("x-mandoforge-subject", "production-release-reviewer"),
-                ("x-mandoforge-roles", "admin"),
-            ],
-        ),
-    )
-    .await;
-    let materialized: Value = request_json(
-        app.clone(),
-        json_request_with_headers(
-            "POST",
-            &format!("/api/dynamic-workflow-plans/{plan_id}/materialize"),
-            json!({
-                "environment_id": environment.id,
-                "title": "Governed production dynamic workflow"
-            }),
-            &[("x-mandoforge-roles", "admin")],
-        ),
-    )
-    .await;
-
-    assert_eq!(
-        materialized["workflow_definition"]["release_state"],
-        json!("staged")
-    );
-    assert_eq!(
-        materialized["workflow_definition"]["step_graph"]["steps"][0]["agent_version_id"],
-        json!(promoted_version.id)
-    );
-    assert_ne!(
-        materialized["workflow_definition"]["step_graph"]["steps"][0]["agent_version_id"],
-        json!(unreleased_version.id)
-    );
-    assert_eq!(
-        materialized["workflow_run"]["runtime_envelope"]["request_envelope"]["materialization_approval"]
-            ["review_audit_trace_id"],
-        reviewed["audit_trace_id"]
-    );
-    let session_id = materialized["workflow_run"]["primary_session_id"]
-        .as_str()
-        .expect("session id");
-    let session = state
-        .get_session(Uuid::parse_str(session_id).expect("session uuid"))
-        .await
-        .expect("materialized session");
-    assert_eq!(session.agent_version_id, Some(promoted_version.id));
-}
-
-#[tokio::test]
-async fn dynamic_workflow_compiler_pressure_and_adjudication_are_operator_ready() {
-    let app = test_app().await;
-
-    let compiled: Value = request_json(
-        app.clone(),
-        json_request_with_headers(
-            "POST",
-            "/api/dynamic-workflow-plans/compile",
-            json!({
-                "objective": "Audit dynamic workflow evidence across the repo",
-                "runtime_adapter": "claude_code",
-                "execution_strategy": "delegated_runtime",
-                "max_total_agents": 128,
-                "max_parallel_agents": 16
-            }),
-            &[("x-mandoforge-roles", "admin")],
-        ),
-    )
-    .await;
-    assert_eq!(compiled["compiler"]["status"], json!("compiled"));
-    assert_eq!(
-        compiled["request"]["agent_fleet_policy"]["max_total_agents"],
-        json!(128)
-    );
-    assert_eq!(
-        compiled["request"]["materialization"]["runtime_adapter"],
-        json!("claude_code")
-    );
-    assert_eq!(compiled["request"]["phases"].as_array().unwrap().len(), 3);
-
-    let plan: Value = request_json(
-        app.clone(),
-        json_request_with_headers(
-            "POST",
-            "/api/dynamic-workflow-plans",
-            compiled["request"].clone(),
-            &[("x-mandoforge-roles", "admin")],
-        ),
-    )
-    .await;
-    let plan_id = plan["id"].as_str().expect("plan id");
-    let pressure: Value = request_json(
-        app.clone(),
-        json_request_with_headers(
-            "POST",
-            &format!("/api/dynamic-workflow-plans/{plan_id}/pressure-test"),
-            json!({"target_agents": 128, "max_parallel_agents": 16}),
-            &[("x-mandoforge-roles", "admin")],
-        ),
-    )
-    .await;
-    assert_eq!(pressure["status"], json!("control_plane_passed"));
-    assert_eq!(pressure["simulated_batches"], json!(8));
-    assert_eq!(
-        pressure["evidence"]["type"],
-        json!("control_plane_pressure_simulation")
-    );
-
-    let _approved: Value = request_json(
-        app.clone(),
-        json_request_with_headers(
-            "POST",
-            &format!("/api/dynamic-workflow-plans/{plan_id}/review"),
-            json!({"status": "approved", "review": {"approved_by": "test"}}),
-            &[("x-mandoforge-roles", "admin")],
-        ),
-    )
-    .await;
-    let materialized: Value = request_json(
-        app.clone(),
-        json_request_with_headers(
-            "POST",
-            &format!("/api/dynamic-workflow-plans/{plan_id}/materialize"),
-            json!({"title": "Dynamic workflow adjudication demo"}),
-            &[("x-mandoforge-roles", "admin")],
-        ),
-    )
-    .await;
-    let run_id = materialized["workflow_run"]["id"].as_str().expect("run id");
-    let steps: Vec<Value> = request_json(
-        app.clone(),
-        Request::builder()
-            .uri(format!("/api/workflow-runs/{run_id}/steps"))
-            .header("x-mandoforge-roles", "admin")
-            .body(Body::empty())
-            .expect("valid request"),
-    )
-    .await;
-    let step_id = steps[0]["id"].as_str().expect("step id");
-    let _updated: Value = request_json(
-        app.clone(),
-        json_request_with_headers(
-            "PATCH",
-            &format!("/api/workflow-step-runs/{step_id}"),
-            json!({
-                "status": "completed",
-                "output_payload": {
-                    "validation": {"vote": true},
-                    "summary": "cross-check passed"
-                }
+                "workflow_definition_id": definition["id"],
+                "input_payload": {"goal": objective}
             }),
             &[("x-mandoforge-roles", "operator")],
         ),
     )
-    .await;
-    let adjudication: Value = request_json(
-        app.clone(),
-        json_request_with_headers(
-            "POST",
-            &format!("/api/dynamic-workflow-plans/{plan_id}/adjudicate"),
-            json!({"vote_threshold": 0.67}),
-            &[("x-mandoforge-roles", "admin")],
-        ),
-    )
-    .await;
-    assert_eq!(adjudication["status"], json!("completed"));
-    assert_eq!(adjudication["decision"], json!("accepted"));
-    assert_eq!(adjudication["positive_votes"], json!(1));
-}
-
-#[tokio::test]
-async fn dynamic_workflow_compiler_respects_default_ui_agent_limit() {
-    let app = test_app().await;
-
-    let compiled: Value = request_json(
-        app.clone(),
-        json_request_with_headers(
-            "POST",
-            "/api/dynamic-workflow-plans/compile",
-            json!({
-                "objective": "Run a multi-agent codebase audit and produce a cross-checked report.",
-                "runtime_adapter": "codex_app_server",
-                "max_total_agents": 4,
-                "max_parallel_agents": 2
-            }),
-            &[("x-mandoforge-roles", "admin")],
-        ),
-    )
-    .await;
-
-    assert_eq!(compiled["compiler"]["status"], json!("compiled"));
-    assert_eq!(
-        compiled["compiler"]["analysis"]["total_agent_count"],
-        json!(4)
-    );
-    assert_eq!(
-        compiled["request"]["agent_fleet_policy"]["max_total_agents"],
-        json!(4)
-    );
-    assert_eq!(
-        compiled["request"]["materialization"]["execution_strategy"],
-        json!("native_dynamic")
-    );
-
-    let plan: Value = request_json(
-        app,
-        json_request_with_headers(
-            "POST",
-            "/api/dynamic-workflow-plans",
-            compiled["request"].clone(),
-            &[("x-mandoforge-roles", "admin")],
-        ),
-    )
-    .await;
-    assert_eq!(plan["status"], json!("proposed"));
-    assert_eq!(plan["analysis"]["total_agent_count"], json!(4));
-}
-
-#[tokio::test]
-async fn dynamic_workflow_compiler_defaults_to_native_dynamic_feedback_graph() {
-    let app = test_app().await;
-
-    let compiled: Value = request_json(
-            app.clone(),
-            json_request_with_headers(
-                "POST",
-                "/api/dynamic-workflow-plans/compile",
-                json!({
-                    "objective": "Implement a milestone, evaluate it, repair gaps, and gate integration.",
-                    "runtime_adapter": "codex_app_server",
-                    "max_total_agents": 4,
-                    "max_parallel_agents": 2
-                }),
-                &[("x-mandoforge-roles", "admin")],
-            ),
-        )
-        .await;
-
-    assert_eq!(
-        compiled["request"]["materialization"]["execution_strategy"],
-        json!("native_dynamic")
-    );
-    assert_eq!(
-        compiled["compiler"]["analysis"]["execution_strategy"],
-        json!("native_dynamic")
-    );
-
-    let plan: Value = request_json(
-        app.clone(),
-        json_request_with_headers(
-            "POST",
-            "/api/dynamic-workflow-plans",
-            compiled["request"].clone(),
-            &[("x-mandoforge-roles", "admin")],
-        ),
-    )
-    .await;
-    let plan_id = plan["id"].as_str().expect("plan id");
-
-    let _approved: Value = request_json(
-        app.clone(),
-        json_request_with_headers(
-            "POST",
-            &format!("/api/dynamic-workflow-plans/{plan_id}/review"),
-            json!({"status": "approved", "review": {"approved_by": "test"}}),
-            &[("x-mandoforge-roles", "admin")],
-        ),
-    )
-    .await;
-
-    let materialized: Value = request_json(
-        app,
-        json_request_with_headers(
-            "POST",
-            &format!("/api/dynamic-workflow-plans/{plan_id}/materialize"),
-            json!({"title": "Native dynamic feedback graph"}),
-            &[("x-mandoforge-roles", "admin")],
-        ),
-    )
-    .await;
-    assert_eq!(
-        materialized["workflow_definition"]["execution_strategy"],
-        json!("native_dynamic")
-    );
-    let step_keys = materialized["workflow_definition"]["step_graph"]["steps"]
-        .as_array()
-        .expect("steps")
-        .iter()
-        .map(|step| step["key"].as_str().expect("step key"))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        step_keys,
-        vec![
-            "implement",
-            "implementation-evaluator",
-            "developer",
-            "troubleshooter",
-            "integration-tester",
-            "integration-gate-keeper",
-            "unexpected-error"
-        ]
-    );
-}
-
-#[tokio::test]
-async fn dynamic_workflow_plan_list_filters_unscoped_plans_for_non_admin() {
-    let app = test_app().await;
-
-    let plan: Value = request_json(
-            app.clone(),
-            json_request_with_headers(
-                "POST",
-                "/api/dynamic-workflow-plans",
-                json!({
-                    "objective": "Unscoped dynamic workflow should stay admin-only",
-                    "phases": [{"key": "audit", "agent_count": 1, "prompt": "Audit."}],
-                    "agent_fleet_policy": {"max_total_agents": 1, "max_parallel_agents": 1},
-                    "materialization": {
-                        "execution_strategy": "delegated_runtime",
-                        "runtime_adapter": "codex_app_server",
-                        "runtime_mode": "dynamic_workflow",
-                        "runtime_capability_contract": {"max_total_agents": 1, "max_parallel_agents": 1},
-                        "event_ingestion_policy": "normalized"
-                    }
-                }),
-                &[("x-mandoforge-roles", "admin")],
-            ),
-        )
-        .await;
-    let plan_id = plan["id"].as_str().expect("plan id");
-
-    let visible_plans: Vec<Value> = request_json(
-        app.clone(),
-        Request::builder()
-            .uri("/api/dynamic-workflow-plans")
-            .header("x-mandoforge-subject", "viewer-1")
-            .header("x-mandoforge-roles", "viewer")
-            .body(Body::empty())
-            .expect("valid request"),
-    )
-    .await;
-    assert!(
-        !visible_plans
-            .iter()
-            .any(|candidate| candidate["id"] == json!(plan_id))
-    );
-
-    let (status, error) = request_value(
-        app,
-        Request::builder()
-            .uri(format!("/api/dynamic-workflow-plans/{plan_id}"))
-            .header("x-mandoforge-subject", "viewer-1")
-            .header("x-mandoforge-roles", "viewer")
-            .body(Body::empty())
-            .expect("valid request"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert!(
-        error["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("unscoped dynamic workflow plan requires admin access")
-    );
-}
-
-#[tokio::test]
-async fn dynamic_workflow_adjudication_requires_explicit_votes() {
-    let app = test_app().await;
-
-    let plan: Value = request_json(
-            app.clone(),
-            json_request_with_headers(
-                "POST",
-                "/api/dynamic-workflow-plans",
-                json!({
-                    "objective": "Require explicit voting evidence",
-                    "phases": [{"key": "audit", "agent_count": 1, "prompt": "Audit."}],
-                    "agent_fleet_policy": {"max_total_agents": 1, "max_parallel_agents": 1},
-                    "materialization": {
-                        "execution_strategy": "delegated_runtime",
-                        "runtime_adapter": "codex_app_server",
-                        "runtime_mode": "dynamic_workflow",
-                        "runtime_capability_contract": {"max_total_agents": 1, "max_parallel_agents": 1},
-                        "event_ingestion_policy": "normalized"
-                    }
-                }),
-                &[("x-mandoforge-roles", "admin")],
-            ),
-        )
-        .await;
-    let plan_id = plan["id"].as_str().expect("plan id");
-    let _: Value = request_json(
-        app.clone(),
-        json_request_with_headers(
-            "POST",
-            &format!("/api/dynamic-workflow-plans/{plan_id}/review"),
-            json!({"status": "approved", "review": {"approved_by": "test"}}),
-            &[("x-mandoforge-roles", "admin")],
-        ),
-    )
-    .await;
-    let materialized: Value = request_json(
-        app.clone(),
-        json_request_with_headers(
-            "POST",
-            &format!("/api/dynamic-workflow-plans/{plan_id}/materialize"),
-            json!({"title": "Missing vote adjudication test"}),
-            &[("x-mandoforge-roles", "admin")],
-        ),
-    )
-    .await;
-    let run_id = materialized["workflow_run"]["id"].as_str().expect("run id");
-    let steps: Vec<Value> = request_json(
-        app.clone(),
-        Request::builder()
-            .uri(format!("/api/workflow-runs/{run_id}/steps"))
-            .header("x-mandoforge-roles", "admin")
-            .body(Body::empty())
-            .expect("valid request"),
-    )
-    .await;
-    let step_id = steps[0]["id"].as_str().expect("step id");
-    let _: Value = request_json(
-        app.clone(),
-        json_request_with_headers(
-            "PATCH",
-            &format!("/api/workflow-step-runs/{step_id}"),
-            json!({
-                "status": "completed",
-                "output_payload": {"summary": "completed without explicit vote"}
-            }),
-            &[("x-mandoforge-roles", "operator")],
-        ),
-    )
-    .await;
-    let adjudication: Value = request_json(
-        app,
-        json_request_with_headers(
-            "POST",
-            &format!("/api/dynamic-workflow-plans/{plan_id}/adjudicate"),
-            json!({"vote_threshold": 0.67}),
-            &[("x-mandoforge-roles", "admin")],
-        ),
-    )
-    .await;
-    assert_eq!(adjudication["decision"], json!("insufficient_evidence"));
-    assert_eq!(adjudication["positive_votes"], json!(0));
-    assert_eq!(adjudication["negative_votes"], json!(0));
-    assert_eq!(adjudication["evidence"]["missing_vote_count"], json!(1));
+    .await
 }
 
 #[tokio::test]
@@ -15187,67 +14664,14 @@ async fn delegated_runtime_step_calls_codex_app_server_and_records_artifact() {
     let codex_client = Arc::new(RecordingCodexAppServerClient::default());
     let app = test_app_with_codex_app_server(codex_client.clone()).await;
 
-    let plan: Value = request_json(
+    let run = create_delegated_runtime_test_run(
         app.clone(),
-        json_request_with_headers(
-            "POST",
-            "/api/dynamic-workflow-plans",
-            json!({
-                "objective": "Run a delegated Codex App Server workflow",
-                "phases": [
-                    {
-                        "key": "audit",
-                        "agent_count": 1,
-                        "prompt": "Audit runtime evidence and return a short report."
-                    }
-                ],
-                "agent_fleet_policy": {
-                    "max_total_agents": 1,
-                    "max_parallel_agents": 1
-                },
-                "materialization": {
-                    "execution_strategy": "delegated_runtime",
-                    "runtime_adapter": "codex_app_server",
-                    "runtime_mode": "dynamic_workflow",
-                    "runtime_capability_contract": {
-                        "max_total_agents": 1,
-                        "max_parallel_agents": 1
-                    },
-                    "event_ingestion_policy": "normalized"
-                }
-            }),
-            &[("x-mandoforge-roles", "admin")],
-        ),
+        "codex_app_server",
+        "Audit runtime evidence and return a short report.",
     )
     .await;
-    let plan_id = plan["id"].as_str().expect("plan id");
-    let _approved: Value = request_json(
-        app.clone(),
-        json_request_with_headers(
-            "POST",
-            &format!("/api/dynamic-workflow-plans/{plan_id}/review"),
-            json!({
-                "status": "approved",
-                "review": {"approved_by": "test"}
-            }),
-            &[("x-mandoforge-roles", "admin")],
-        ),
-    )
-    .await;
-    let materialized: Value = request_json(
-        app.clone(),
-        json_request_with_headers(
-            "POST",
-            &format!("/api/dynamic-workflow-plans/{plan_id}/materialize"),
-            json!({"title": "Codex delegated runtime test"}),
-            &[("x-mandoforge-roles", "admin")],
-        ),
-    )
-    .await;
-    let run_id = materialized["workflow_run"]["id"].as_str().expect("run id");
-    let session_id = materialized["workflow_run"]["primary_session_id"]
-        .as_str()
-        .expect("session id");
+    let run_id = run["id"].as_str().expect("run id");
+    let session_id = run["primary_session_id"].as_str().expect("session id");
     let steps: Vec<Value> = request_json(
         app.clone(),
         Request::builder()
@@ -15315,6 +14739,7 @@ async fn delegated_runtime_step_calls_codex_app_server_and_records_artifact() {
     .await;
     assert_eq!(artifacts.len(), 1);
     assert_eq!(artifacts[0].name, "delegated-runtime-result.json");
+    assert_eq!(artifacts[0].path, None);
     let events: Vec<SessionEvent> = request_json(
         app,
         Request::builder()
@@ -15343,52 +14768,14 @@ async fn delegated_runtime_step_keeps_codex_nonterminal_poll_running() {
     ]));
     let app = test_app_with_codex_app_server(codex_client.clone()).await;
 
-    let plan: Value = request_json(
-            app.clone(),
-            json_request_with_headers(
-                "POST",
-                "/api/dynamic-workflow-plans",
-                json!({
-                    "objective": "Run a nonterminal Codex App Server workflow",
-                    "phases": [{"key": "audit", "agent_count": 1, "prompt": "Audit."}],
-                    "agent_fleet_policy": {"max_total_agents": 1, "max_parallel_agents": 1},
-                    "materialization": {
-                        "execution_strategy": "delegated_runtime",
-                        "runtime_adapter": "codex_app_server",
-                        "runtime_mode": "dynamic_workflow",
-                        "runtime_capability_contract": {"max_total_agents": 1, "max_parallel_agents": 1},
-                        "event_ingestion_policy": "normalized"
-                    }
-                }),
-                &[("x-mandoforge-roles", "admin")],
-            ),
-        )
-        .await;
-    let plan_id = plan["id"].as_str().expect("plan id");
-    let _: Value = request_json(
+    let run = create_delegated_runtime_test_run(
         app.clone(),
-        json_request_with_headers(
-            "POST",
-            &format!("/api/dynamic-workflow-plans/{plan_id}/review"),
-            json!({"status": "approved", "review": {"approved_by": "test"}}),
-            &[("x-mandoforge-roles", "admin")],
-        ),
+        "codex_app_server",
+        "Run a nonterminal Codex App Server workflow.",
     )
     .await;
-    let materialized: Value = request_json(
-        app.clone(),
-        json_request_with_headers(
-            "POST",
-            &format!("/api/dynamic-workflow-plans/{plan_id}/materialize"),
-            json!({"title": "Codex nonterminal delegated runtime test"}),
-            &[("x-mandoforge-roles", "admin")],
-        ),
-    )
-    .await;
-    let run_id = materialized["workflow_run"]["id"].as_str().expect("run id");
-    let session_id = materialized["workflow_run"]["primary_session_id"]
-        .as_str()
-        .expect("session id");
+    let run_id = run["id"].as_str().expect("run id");
+    let session_id = run["primary_session_id"].as_str().expect("session id");
     let steps: Vec<Value> = request_json(
         app.clone(),
         Request::builder()
@@ -15465,49 +14852,13 @@ async fn delegated_runtime_step_runs_agent_cli_adapter_profile() {
     }
 
     let app = test_app().await;
-    let plan: Value = request_json(
-            app.clone(),
-            json_request_with_headers(
-                "POST",
-                "/api/dynamic-workflow-plans",
-                json!({
-                    "objective": "Run a delegated Claude Code workflow",
-                    "phases": [{"key": "audit", "agent_count": 1, "prompt": "Return a short report."}],
-                    "agent_fleet_policy": {"max_total_agents": 1, "max_parallel_agents": 1},
-                    "materialization": {
-                        "execution_strategy": "delegated_runtime",
-                        "runtime_adapter": "claude_code",
-                        "runtime_mode": "dynamic_workflow",
-                        "runtime_capability_contract": {"max_total_agents": 1, "max_parallel_agents": 1},
-                        "event_ingestion_policy": "normalized"
-                    }
-                }),
-                &[("x-mandoforge-roles", "admin")],
-            ),
-        )
-        .await;
-    let plan_id = plan["id"].as_str().expect("plan id");
-    let _: Value = request_json(
+    let run = create_delegated_runtime_test_run(
         app.clone(),
-        json_request_with_headers(
-            "POST",
-            &format!("/api/dynamic-workflow-plans/{plan_id}/review"),
-            json!({"status": "approved", "review": {"approved_by": "test"}}),
-            &[("x-mandoforge-roles", "admin")],
-        ),
+        "claude_code",
+        "Run a delegated Claude Code workflow.",
     )
     .await;
-    let materialized: Value = request_json(
-        app.clone(),
-        json_request_with_headers(
-            "POST",
-            &format!("/api/dynamic-workflow-plans/{plan_id}/materialize"),
-            json!({"title": "Claude Code delegated runtime test"}),
-            &[("x-mandoforge-roles", "admin")],
-        ),
-    )
-    .await;
-    let run_id = materialized["workflow_run"]["id"].as_str().expect("run id");
+    let run_id = run["id"].as_str().expect("run id");
     let steps: Vec<Value> = request_json(
         app.clone(),
         Request::builder()
@@ -15551,140 +14902,6 @@ async fn delegated_runtime_step_runs_agent_cli_adapter_profile() {
         std::env::remove_var("MANDOFORGE_AGENT_CLI_CLAUDE_CODE_COMMAND");
         std::env::remove_var("MANDOFORGE_AGENT_CLI_CLAUDE_CODE_ARGS");
     }
-}
-
-#[test]
-fn dynamic_workflow_native_step_graph_expands_phase_dependencies() {
-    let now = Utc::now();
-    let plan = DynamicWorkflowPlan {
-        id: Uuid::new_v4(),
-        source_work_item_id: None,
-        source_session_id: None,
-        objective: "Compare independent findings".to_string(),
-        status: "approved".to_string(),
-        phases: json!([
-            {
-                "key": "survey",
-                "agent_count": 2,
-                "prompt": "Survey independent inputs."
-            },
-            {
-                "key": "adjudicate",
-                "after": "survey",
-                "prompt": "Adjudicate all survey outputs."
-            }
-        ]),
-        agent_fleet_policy: json!({
-            "max_total_agents": 4,
-            "max_parallel_agents": 2
-        }),
-        governance: default_dynamic_workflow_governance(),
-        validation: default_dynamic_workflow_validation(),
-        materialization: json!({
-            "execution_strategy": "native_steps"
-        }),
-        analysis: empty_json_object(),
-        review: empty_json_object(),
-        workflow_definition_id: None,
-        workflow_run_id: None,
-        audit_trace_id: None,
-        created_at: now,
-        updated_at: now,
-        reviewed_at: None,
-        materialized_at: None,
-    };
-
-    let graph =
-        dynamic_workflow_plan_step_graph(&plan, "native_steps").expect("native graph is generated");
-    assert_eq!(graph["steps"].as_array().expect("steps").len(), 3);
-    assert_eq!(graph["steps"][0]["key"], json!("survey-1"));
-    assert_eq!(graph["steps"][1]["key"], json!("survey-2"));
-    assert_eq!(
-        graph["steps"][2]["depends_on"],
-        json!(["survey-1", "survey-2"])
-    );
-}
-
-#[test]
-fn dynamic_workflow_native_dynamic_graph_models_evaluator_feedback_loop() {
-    let now = Utc::now();
-    let plan = DynamicWorkflowPlan {
-        id: Uuid::new_v4(),
-        source_work_item_id: None,
-        source_session_id: None,
-        objective: "Implement a milestone and verify it with external evaluators".to_string(),
-        status: "approved".to_string(),
-        phases: json!([
-            {
-                "key": "implementation",
-                "prompt": "Implement the requested milestone."
-            }
-        ]),
-        agent_fleet_policy: json!({
-            "max_total_agents": 12,
-            "max_parallel_agents": 4
-        }),
-        governance: default_dynamic_workflow_governance(),
-        validation: default_dynamic_workflow_validation(),
-        materialization: json!({
-            "execution_strategy": "native_dynamic",
-            "runtime_adapter": "codex_app_server",
-            "runtime_mode": "dynamic_workflow"
-        }),
-        analysis: empty_json_object(),
-        review: empty_json_object(),
-        workflow_definition_id: None,
-        workflow_run_id: None,
-        audit_trace_id: None,
-        created_at: now,
-        updated_at: now,
-        reviewed_at: None,
-        materialized_at: None,
-    };
-
-    let graph = dynamic_workflow_plan_step_graph(&plan, "native_dynamic")
-        .expect("native dynamic graph is generated");
-    let steps = graph["steps"].as_array().expect("steps");
-    let keys = steps
-        .iter()
-        .map(|step| step["key"].as_str().expect("step key"))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        keys,
-        vec![
-            "implement",
-            "implementation-evaluator",
-            "developer",
-            "troubleshooter",
-            "integration-tester",
-            "integration-gate-keeper",
-            "unexpected-error"
-        ]
-    );
-    assert_eq!(steps[0]["start"], json!(true));
-    assert_eq!(steps[1]["depends_on"], json!(["implement"]));
-    assert_eq!(
-        steps[2]["condition"]["path"],
-        json!("/evaluation/found_gap")
-    );
-    assert_eq!(
-        steps[3]["condition"]["path"],
-        json!("/evaluation/found_issues")
-    );
-    assert_eq!(steps[5]["condition"]["path"], json!("/integration/no_gap"));
-    assert_eq!(
-        steps[6]["on_failure_of"],
-        json!([
-            "implement",
-            "developer",
-            "troubleshooter",
-            "integration-tester"
-        ])
-    );
-    assert_eq!(
-        graph["dynamic_loop"]["terminal_success_step"],
-        json!("integration-gate-keeper")
-    );
 }
 
 #[tokio::test]
@@ -16117,6 +15334,7 @@ async fn workflow_step_key_reservation_is_atomic() {
                     approval_ids: Vec::new(),
                     tool_call_ids: Vec::new(),
                     claimed_by_worker: None,
+                    claim_owner_version: 0,
                     lease_expires_at: None,
                     context_packet_id: None,
                     started_at: None,
@@ -17238,6 +16456,7 @@ fn test_workflow_step_run(
         approval_ids: Vec::new(),
         tool_call_ids: Vec::new(),
         claimed_by_worker: None,
+        claim_owner_version: 0,
         lease_expires_at: None,
         context_packet_id: None,
         started_at: None,
@@ -21760,6 +20979,813 @@ fn complete_agent_sandbox_production_checks() -> Value {
 }
 
 #[tokio::test]
+async fn execution_result_is_hidden_until_completion_and_fake_completion_is_ignored() {
+    let state = test_state_with_worker(Arc::new(QueueBackedExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "execution projection trust".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create session");
+    let tool_call_id = Uuid::new_v4();
+    let job = state
+        .execution_queue
+        .enqueue(ExecutionJobRequest {
+            session_id: session.id,
+            environment_id: None,
+            approval_id: Uuid::new_v4(),
+            tool_call_id,
+            tool_name: "shell.exec".to_string(),
+            max_attempts: None,
+        })
+        .await
+        .expect("enqueue execution");
+    let running = state
+        .execution_queue
+        .start(job.id, "projection-worker")
+        .await
+        .expect("start execution");
+    let executing = state
+        .execution_queue
+        .begin_executing_started(job.id, "projection-worker", running.claim_generation)
+        .await
+        .expect("commit execution");
+    let tool_result = state
+        .append_event_once_for_execution_claim(
+            &executing,
+            ExecutionJobStatus::Executing,
+            Uuid::new_v4(),
+            "tool",
+            Some(tool_call_id),
+            session.id,
+            "tool.result",
+            json!({
+                "execution_job_id": job.id,
+                "tool_call_id": tool_call_id,
+                "tool": "shell.exec",
+                "content": {"approval": "approved"},
+                "execution_outcome_known": true,
+                "attempt_count": executing.attempt_count,
+                "claim_generation": executing.claim_generation
+            }),
+        )
+        .await
+        .expect("append tool result");
+
+    let hidden = build_harness_context(
+        &state,
+        session.id,
+        Some(tool_result.seq),
+        Some(tool_result.seq),
+    )
+    .await
+    .expect("build hidden context");
+    assert_eq!(hidden.pending_event_count, 0);
+    assert_eq!(hidden.approved_tool_result_count, 0);
+
+    let finalizing = state
+        .execution_queue
+        .begin_finalizing_started(
+            job.id,
+            "projection-worker",
+            executing.claim_generation,
+            None,
+            json!({"stage": "tool_execution"}),
+        )
+        .await
+        .expect("begin finalization");
+    let pending = state
+        .execution_queue
+        .prepare_outcome_tail(job.id, "projection-worker", finalizing.claim_generation)
+        .await
+        .expect("prepare completion publication");
+    let completed = state
+        .execution_queue
+        .finish_finalizing_started(job.id, "projection-worker", pending.claim_generation, false)
+        .await
+        .expect("commit terminal execution state");
+    assert_eq!(completed.status, ExecutionJobStatus::Completed);
+    assert_eq!(
+        completed.finalization_details["stage"],
+        "completion_pending"
+    );
+    assert!(
+        state
+            .list_events(session.id)
+            .await
+            .expect("list pre-publication events")
+            .iter()
+            .all(|event| !execution_completion_event_matches_job(event, &completed))
+    );
+
+    let fake_completion = state
+        .append_event(
+            "worker",
+            Some(completed.id),
+            session.id,
+            "execution.completed",
+            json!({
+                "execution_job_id": completed.id,
+                "approval_id": completed.approval_id,
+                "tool_call_id": completed.tool_call_id,
+                "tool": completed.tool_name,
+                "status": "completed",
+                "worker_id": completed.worker_id,
+                "attempt_count": completed.attempt_count,
+                "claim_generation": completed.claim_generation - 1,
+                "reason": "stale execution generation"
+            }),
+        )
+        .await
+        .expect("append stale completion");
+    assert!(
+        project_session_event_to_loop(&state, &fake_completion)
+            .await
+            .expect("reject stale completion")
+            .is_none()
+    );
+
+    let later_user_message = state
+        .append_event(
+            "user",
+            None,
+            session.id,
+            "user.message",
+            json!({"message": "do not skip the hidden result"}),
+        )
+        .await
+        .expect("append later user message");
+    assert!(
+        project_session_event_to_loop(&state, &later_user_message)
+            .await
+            .expect("hold projection behind hidden result")
+            .is_none()
+    );
+
+    let still_hidden = build_harness_context(
+        &state,
+        session.id,
+        Some(tool_result.seq),
+        Some(tool_result.seq),
+    )
+    .await
+    .expect("completed status without marker stays hidden");
+    assert_eq!(still_hidden.pending_event_count, 0);
+    assert_eq!(still_hidden.approved_tool_result_count, 0);
+
+    let attempt_count = completed.attempt_count.to_string();
+    let claim_generation = completed.claim_generation.to_string();
+    let completion_event_id = deterministic_record_id(
+        completed.id,
+        "execution-completion-event",
+        &[attempt_count.as_str(), claim_generation.as_str()],
+    );
+    let completion_event = state
+        .append_event_once(
+            completion_event_id,
+            "worker",
+            Some(completed.id),
+            session.id,
+            "execution.completed",
+            json!({
+                "execution_job_id": completed.id,
+                "approval_id": completed.approval_id,
+                "tool_call_id": completed.tool_call_id,
+                "tool": completed.tool_name,
+                "status": "completed",
+                "worker_id": completed.worker_id,
+                "attempt_count": completed.attempt_count,
+                "claim_generation": completed.claim_generation,
+                "reason": "approved execution completed"
+            }),
+        )
+        .await
+        .expect("persist completion marker before simulated projection crash");
+    let post_marker_message = state
+        .append_event(
+            "user",
+            None,
+            session.id,
+            "user.message",
+            json!({"message": "arrived while completion projection was pending"}),
+        )
+        .await
+        .expect("append message after completion marker");
+    let recovered_projection = project_session_event_to_loop(&state, &post_marker_message)
+        .await
+        .expect("project later message with the pending completion floor")
+        .expect("later message repairs the completion projection gap");
+    assert_eq!(
+        recovered_projection.pending_event_seq_start,
+        Some(tool_result.seq)
+    );
+    assert_eq!(
+        recovered_projection.pending_event_seq_end,
+        Some(post_marker_message.seq)
+    );
+
+    execution::publish_execution_completion_tail(&state, &completed)
+        .await
+        .expect("publish completion after terminal state");
+    let published = state
+        .execution_queue
+        .get(completed.id)
+        .await
+        .expect("read published completion state");
+    assert_eq!(
+        published.finalization_details["stage"],
+        "completion_published"
+    );
+    let trusted_completion = state
+        .list_events(session.id)
+        .await
+        .expect("list completion events")
+        .into_iter()
+        .find(|event| execution_completion_event_matches_job(event, &published))
+        .expect("trusted completion marker");
+    assert_eq!(trusted_completion.id, completion_event.id);
+    assert!(trusted_completion.seq > later_user_message.seq);
+    let projected = state
+        .list_session_loop_jobs()
+        .await
+        .expect("list projected jobs")
+        .into_iter()
+        .find(|job| {
+            job.session_id == session.id
+                && job.pending_event_seq_start == Some(tool_result.seq)
+                && job.pending_event_seq_end == Some(post_marker_message.seq)
+        })
+        .expect("completion recovery projects the full deferred range");
+    assert_eq!(projected.pending_event_seq_start, Some(tool_result.seq));
+    assert_eq!(
+        projected.pending_event_seq_end,
+        Some(post_marker_message.seq)
+    );
+    let released = build_harness_context(
+        &state,
+        session.id,
+        projected.pending_event_seq_start,
+        projected.pending_event_seq_end,
+    )
+    .await
+    .expect("build released context");
+    assert_eq!(released.approved_tool_result_count, 1);
+    assert_eq!(released.execution_completed_count, 1);
+}
+
+#[tokio::test]
+async fn interleaved_execution_completions_release_the_earliest_pending_result() {
+    let state = test_state_with_worker(Arc::new(QueueBackedExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "interleaved completion projection".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create session");
+
+    let mut executing_jobs = Vec::new();
+    let mut result_events = Vec::new();
+    for label in ["A", "B"] {
+        let tool_call_id = Uuid::new_v4();
+        let job = state
+            .execution_queue
+            .enqueue(ExecutionJobRequest {
+                session_id: session.id,
+                environment_id: None,
+                approval_id: Uuid::new_v4(),
+                tool_call_id,
+                tool_name: "shell.exec".to_string(),
+                max_attempts: None,
+            })
+            .await
+            .expect("enqueue execution");
+        let running = state
+            .execution_queue
+            .start(job.id, "interleaved-worker")
+            .await
+            .expect("start execution");
+        let executing = state
+            .execution_queue
+            .begin_executing_started(job.id, "interleaved-worker", running.claim_generation)
+            .await
+            .expect("commit execution");
+        let result = state
+            .append_event_once_for_execution_claim(
+                &executing,
+                ExecutionJobStatus::Executing,
+                Uuid::new_v4(),
+                "tool",
+                Some(tool_call_id),
+                session.id,
+                "tool.result",
+                json!({
+                    "execution_job_id": executing.id,
+                    "tool_call_id": tool_call_id,
+                    "tool": executing.tool_name,
+                    "content": {"approval": "approved", "label": label},
+                    "execution_outcome_known": true,
+                    "attempt_count": executing.attempt_count,
+                    "claim_generation": executing.claim_generation
+                }),
+            )
+            .await
+            .expect("persist interleaved result");
+        executing_jobs.push(executing);
+        result_events.push(result);
+    }
+
+    let mut completed_jobs = Vec::new();
+    for executing in &executing_jobs {
+        let finalizing = state
+            .execution_queue
+            .begin_finalizing_started(
+                executing.id,
+                "interleaved-worker",
+                executing.claim_generation,
+                None,
+                json!({"stage": "tool_execution"}),
+            )
+            .await
+            .expect("begin finalization");
+        let pending = state
+            .execution_queue
+            .prepare_outcome_tail(
+                executing.id,
+                "interleaved-worker",
+                finalizing.claim_generation,
+            )
+            .await
+            .expect("prepare completion");
+        let completed = state
+            .execution_queue
+            .finish_finalizing_started(
+                executing.id,
+                "interleaved-worker",
+                pending.claim_generation,
+                false,
+            )
+            .await
+            .expect("finish execution");
+        execution::publish_execution_completion_tail(&state, &completed)
+            .await
+            .expect("publish completion tail");
+        completed_jobs.push(completed);
+    }
+
+    let first_pending = state
+        .execution_queue
+        .get(completed_jobs[0].id)
+        .await
+        .expect("read first completion");
+    assert_eq!(
+        first_pending.finalization_details["stage"],
+        "completion_pending"
+    );
+    execution::publish_execution_completion_tail(&state, &first_pending)
+        .await
+        .expect("publish first completion after second releases the barrier");
+
+    let mut published_jobs = Vec::new();
+    for job in &completed_jobs {
+        published_jobs.push(
+            state
+                .execution_queue
+                .get(job.id)
+                .await
+                .expect("read published job"),
+        );
+    }
+    assert!(
+        published_jobs
+            .iter()
+            .all(|job| { job.finalization_details["stage"] == "completion_published" })
+    );
+    let events = state.list_events(session.id).await.expect("list events");
+    let last_completion_seq = events
+        .iter()
+        .filter(|event| {
+            published_jobs
+                .iter()
+                .any(|job| execution_completion_event_matches_job(event, job))
+        })
+        .map(|event| event.seq)
+        .max()
+        .expect("completion markers");
+    let projected = state
+        .list_session_loop_jobs()
+        .await
+        .expect("list projected jobs")
+        .into_iter()
+        .find(|job| job.session_id == session.id && job.status == SessionLoopJobStatus::Queued)
+        .expect("queued projection");
+    assert_eq!(
+        projected.pending_event_seq_start,
+        Some(result_events[0].seq)
+    );
+    assert_eq!(projected.pending_event_seq_end, Some(last_completion_seq));
+    let released = build_harness_context(
+        &state,
+        session.id,
+        projected.pending_event_seq_start,
+        projected.pending_event_seq_end,
+    )
+    .await
+    .expect("build released interleaved context");
+    assert_eq!(released.approved_tool_result_count, 2);
+    assert_eq!(released.execution_completed_count, 2);
+}
+
+#[tokio::test]
+async fn terminal_session_acknowledges_pending_execution_completion() {
+    let state = test_state_with_worker(Arc::new(QueueBackedExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "terminal completion publication".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create session");
+    let tool_call_id = Uuid::new_v4();
+    let job = state
+        .execution_queue
+        .enqueue(ExecutionJobRequest {
+            session_id: session.id,
+            environment_id: None,
+            approval_id: Uuid::new_v4(),
+            tool_call_id,
+            tool_name: "shell.exec".to_string(),
+            max_attempts: None,
+        })
+        .await
+        .expect("enqueue execution");
+    let running = state
+        .execution_queue
+        .start(job.id, "terminal-worker")
+        .await
+        .expect("start execution");
+    let executing = state
+        .execution_queue
+        .begin_executing_started(job.id, "terminal-worker", running.claim_generation)
+        .await
+        .expect("commit execution");
+    state
+        .append_event_once_for_execution_claim(
+            &executing,
+            ExecutionJobStatus::Executing,
+            Uuid::new_v4(),
+            "tool",
+            Some(tool_call_id),
+            session.id,
+            "tool.result",
+            json!({
+                "execution_job_id": executing.id,
+                "tool_call_id": tool_call_id,
+                "tool": executing.tool_name,
+                "content": {"approval": "approved"},
+                "execution_outcome_known": true,
+                "attempt_count": executing.attempt_count,
+                "claim_generation": executing.claim_generation
+            }),
+        )
+        .await
+        .expect("persist result");
+    let finalizing = state
+        .execution_queue
+        .begin_finalizing_started(
+            job.id,
+            "terminal-worker",
+            executing.claim_generation,
+            None,
+            json!({"stage": "tool_execution"}),
+        )
+        .await
+        .expect("begin finalization");
+    let pending = state
+        .execution_queue
+        .prepare_outcome_tail(job.id, "terminal-worker", finalizing.claim_generation)
+        .await
+        .expect("prepare completion");
+    let completed = state
+        .execution_queue
+        .finish_finalizing_started(job.id, "terminal-worker", pending.claim_generation, false)
+        .await
+        .expect("finish execution");
+    set_managed_session_status(
+        &state,
+        session.id,
+        SessionStatus::Terminated,
+        "operator stopped session before completion projection",
+    )
+    .await
+    .expect("terminate session");
+
+    execution::publish_execution_completion_tail(&state, &completed)
+        .await
+        .expect("acknowledge terminal completion");
+    let published = state
+        .execution_queue
+        .get(job.id)
+        .await
+        .expect("read completion state");
+    assert_eq!(
+        published.finalization_details["stage"],
+        "completion_published"
+    );
+    assert!(
+        state
+            .list_session_loop_jobs()
+            .await
+            .expect("list loop jobs")
+            .into_iter()
+            .all(|job| job.session_id != session.id)
+    );
+}
+
+#[tokio::test]
+async fn expired_executing_recovers_known_outcomes_without_replaying_tools() {
+    let state = test_state_with_worker(Arc::new(QueueBackedExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "expired durable outcomes".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create session");
+    let mut jobs = Vec::new();
+    for name in ["result", "error", "unknown"] {
+        let now = Utc::now();
+        let tool_call = state
+            .insert_tool_call(ToolCall {
+                id: Uuid::new_v4(),
+                session_id: session.id,
+                event_id: None,
+                tool_name: "shell.exec".to_string(),
+                args: json!({"case": name}),
+                task_grant_id: None,
+                normalized_args_hash: None,
+                target_binding: json!({}),
+                status: "running".to_string(),
+                risk_level: "medium".to_string(),
+                policy_decision: json!({}),
+                result: None,
+                error: None,
+                started_at: Some(now),
+                completed_at: None,
+                created_at: now,
+            })
+            .await
+            .expect("insert tool call");
+        let job = state
+            .execution_queue
+            .enqueue(ExecutionJobRequest {
+                session_id: session.id,
+                environment_id: None,
+                approval_id: Uuid::new_v4(),
+                tool_call_id: tool_call.id,
+                tool_name: tool_call.tool_name,
+                max_attempts: Some(1),
+            })
+            .await
+            .expect("enqueue execution");
+        let running = state
+            .execution_queue
+            .start(job.id, "expired-owner")
+            .await
+            .expect("start execution");
+        let executing = state
+            .execution_queue
+            .begin_executing_started(job.id, "expired-owner", running.claim_generation)
+            .await
+            .expect("commit execution");
+        let executing = state
+            .execution_queue
+            .renew_started(job.id, "expired-owner", executing.claim_generation, 1)
+            .await
+            .expect("shorten execution lease");
+        jobs.push(executing);
+    }
+    state
+        .append_event_once_for_execution_claim(
+            &jobs[0],
+            ExecutionJobStatus::Executing,
+            Uuid::new_v4(),
+            "tool",
+            Some(jobs[0].tool_call_id),
+            session.id,
+            "tool.result",
+            json!({
+                "execution_job_id": jobs[0].id,
+                "tool_call_id": jobs[0].tool_call_id,
+                "tool": jobs[0].tool_name,
+                "content": {"approval": "approved", "value": "once"},
+                "execution_outcome_known": true,
+                "attempt_count": jobs[0].attempt_count,
+                "claim_generation": jobs[0].claim_generation
+            }),
+        )
+        .await
+        .expect("persist tool result");
+    state
+        .append_event_once_for_execution_claim(
+            &jobs[1],
+            ExecutionJobStatus::Executing,
+            Uuid::new_v4(),
+            "tool",
+            Some(jobs[1].tool_call_id),
+            session.id,
+            "tool.error",
+            json!({
+                "execution_job_id": jobs[1].id,
+                "tool_call_id": jobs[1].tool_call_id,
+                "tool": jobs[1].tool_name,
+                "content": {"error": "known failure"},
+                "execution_outcome_known": true,
+                "attempt_count": jobs[1].attempt_count,
+                "claim_generation": jobs[1].claim_generation
+            }),
+        )
+        .await
+        .expect("persist tool error");
+    state
+        .append_event_once_for_execution_claim(
+            &jobs[2],
+            ExecutionJobStatus::Executing,
+            Uuid::new_v4(),
+            "tool",
+            Some(jobs[2].tool_call_id),
+            session.id,
+            "tool.error",
+            json!({
+                "execution_job_id": jobs[2].id,
+                "tool_call_id": jobs[2].tool_call_id,
+                "tool": jobs[2].tool_name,
+                "content": {"error": "transport timeout"},
+                "execution_outcome_known": false,
+                "attempt_count": jobs[2].attempt_count,
+                "claim_generation": jobs[2].claim_generation
+            }),
+        )
+        .await
+        .expect("persist uncertain tool error");
+    let unknown_event_type = "execution.outcome_unknown";
+    let unknown_attempt = jobs[2].attempt_count.to_string();
+    state
+        .append_event_once_for_execution_claim(
+            &jobs[2],
+            ExecutionJobStatus::Executing,
+            deterministic_record_id(
+                jobs[2].id,
+                "execution-attempt-event",
+                &[unknown_attempt.as_str(), unknown_event_type],
+            ),
+            "worker",
+            Some(jobs[2].id),
+            session.id,
+            unknown_event_type,
+            json!({
+                "execution_job_id": jobs[2].id,
+                "approval_id": jobs[2].approval_id,
+                "tool_call_id": jobs[2].tool_call_id,
+                "tool": jobs[2].tool_name,
+                "attempt_count": jobs[2].attempt_count,
+                "reason": "execution outcome after side-effect commit requires reconciliation",
+                "requires_reconciliation": true
+            }),
+        )
+        .await
+        .expect("persist unknown evidence before simulated state-transition crash");
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+
+    let completed = crate::execution::recover_expired_execution_with_durable_outcome(
+        &state,
+        &jobs[0],
+        "recovery-worker",
+    )
+    .await
+    .expect("recover durable result");
+    let failed_finalizing = state
+        .execution_queue
+        .recover_expired_executing(
+            jobs[1].id,
+            "recovery-worker",
+            None,
+            json!({"stage": "outcome_reconciliation"}),
+        )
+        .await
+        .expect("claim durable error for reconciliation");
+    let failed =
+        crate::execution::run_claimed_execution_job(&state, &failed_finalizing, "recovery-worker")
+            .await
+            .expect("resume reconciliation after claim crash");
+    let unknown_finalizing = state
+        .execution_queue
+        .recover_expired_executing(
+            jobs[2].id,
+            "recovery-worker",
+            None,
+            json!({"stage": "outcome_reconciliation"}),
+        )
+        .await
+        .expect("claim unknown outcome for reconciliation");
+    let unknown =
+        crate::execution::run_claimed_execution_job(&state, &unknown_finalizing, "recovery-worker")
+            .await
+            .expect("resume unknown reconciliation after claim crash");
+    state
+        .append_event_once_for_execution_claim(
+            &jobs[2],
+            ExecutionJobStatus::Executing,
+            Uuid::new_v4(),
+            "tool",
+            Some(jobs[2].tool_call_id),
+            session.id,
+            "tool.result",
+            json!({
+                "execution_job_id": jobs[2].id,
+                "tool_call_id": jobs[2].tool_call_id,
+                "tool": jobs[2].tool_name,
+                "content": {"approval": "approved"},
+                "execution_outcome_known": true,
+                "attempt_count": jobs[2].attempt_count,
+                "claim_generation": jobs[2].claim_generation
+            }),
+        )
+        .await
+        .expect_err("expired owner cannot append an outcome after recovery claims the job");
+
+    assert_eq!(completed.status, ExecutionJobStatus::Completed);
+    assert_eq!(failed.status, ExecutionJobStatus::Failed);
+    assert_eq!(failed.last_error.as_deref(), Some("known failure"));
+    assert_eq!(unknown.status, ExecutionJobStatus::OutcomeUnknown);
+    let events = state.list_events(session.id).await.expect("list events");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| {
+                event.event_type == "execution.completed" && event.actor_id == Some(completed.id)
+            })
+            .count(),
+        1
+    );
+    assert!(!events.iter().any(|event| {
+        event.event_type == "execution.outcome_unknown"
+            && matches!(event.actor_id, Some(id) if id == completed.id || id == failed.id)
+    }));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| {
+                event.event_type == "execution.outcome_unknown"
+                    && event.actor_id == Some(unknown.id)
+            })
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn run_execution_job_emits_completion_event_and_projects_loop_without_route() {
     let state = test_state_with_worker(Arc::new(QueueBackedExecutionWorker));
     state.seed_demo_agent().await.expect("seed demo agent");
@@ -21832,6 +21858,10 @@ async fn run_execution_job_emits_completion_event_and_projects_loop_without_rout
                 && event.payload["execution_job_id"] == json!(completed.id)
         })
         .expect("execution lifecycle should emit durable completion event");
+    assert_eq!(
+        execution_completed_event.payload["attempt_count"],
+        json!(completed.attempt_count)
+    );
     let queued_resume_jobs = state
         .list_session_loop_jobs()
         .await
@@ -25127,6 +25157,7 @@ fn test_state_with_worker(execution_worker: Arc<dyn ExecutionWorker>) -> AppStat
         }
     }
     AppState {
+        process_role: ProcessRole::Worker,
         store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
         execution_queue: ExecutionQueue::default(),
         execution_worker,
@@ -25288,6 +25319,561 @@ async fn tenant_routed_header_requires_trusted_ingress() {
     drop(tenant_trust);
     let _tenant_trust = EnvVarGuard::set("MANDOFORGE_TRUST_X_MANDOFORGE_TENANT_ID", "1");
     assert!(resolve_request_tenant_id(&state, &headers).is_ok());
+}
+
+#[tokio::test]
+async fn tenant_routed_missing_header_fails_closed() {
+    let _env_guard = env_lock().lock().expect("env lock");
+    let _insecure_auth = EnvVarGuard::set("MANDOFORGE_INSECURE_DEV_AUTH", "0");
+    let mut state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.tenant_runtime_mode = TenantRuntimeMode::TenantRouted;
+
+    let error = resolve_request_tenant_id(&state, &HeaderMap::new())
+        .expect_err("missing tenant header should fail closed in tenant-routed mode");
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn tenant_routed_worker_token_is_scoped_by_an_explicit_tenant_header() {
+    let _env_guard = env_lock().lock().expect("env lock");
+    let _insecure_auth = EnvVarGuard::set("MANDOFORGE_INSECURE_DEV_AUTH", "0");
+    let _worker_token = EnvVarGuard::set("MANDOFORGE_WORKER_TOKEN", "worker-token");
+    let _tenant_trust = EnvVarGuard::remove("MANDOFORGE_TRUST_X_MANDOFORGE_TENANT_ID");
+    let mut state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.tenant_runtime_mode = TenantRuntimeMode::TenantRouted;
+    let tenant_id = state.configured_tenant_id();
+    let mut headers = HeaderMap::new();
+    headers.insert("authorization", "Bearer worker-token".parse().unwrap());
+    headers.insert(
+        "x-mandoforge-tenant-id",
+        tenant_id.to_string().parse().unwrap(),
+    );
+
+    state.process_role = ProcessRole::Api;
+    let error = resolve_request_tenant_id(&state, &headers)
+        .expect_err("API process must not accept the direct worker tenant bypass");
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+
+    state.process_role = ProcessRole::Worker;
+    assert_eq!(
+        resolve_request_tenant_id(&state, &headers).expect("worker tenant scope"),
+        tenant_id
+    );
+
+    headers.remove("x-mandoforge-tenant-id");
+    let error = resolve_request_tenant_id(&state, &headers)
+        .expect_err("worker token must not bypass the explicit tenant scope");
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+
+    headers.insert(
+        "x-mandoforge-tenant-id",
+        Uuid::new_v4().to_string().parse().unwrap(),
+    );
+    let error = resolve_request_tenant_id(&state, &headers)
+        .expect_err("worker token must remain bound to its configured tenant");
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn worker_token_principal_uses_stable_configured_subject() {
+    let _env_guard = env_lock().lock().expect("env lock");
+    let _insecure_auth = EnvVarGuard::set("MANDOFORGE_INSECURE_DEV_AUTH", "0");
+    let _worker_token = EnvVarGuard::set("MANDOFORGE_WORKER_TOKEN", "worker-token");
+    let _worker_subject = EnvVarGuard::set("MANDOFORGE_WORKER_SUBJECT", "runtime-worker");
+    let _dev_token = EnvVarGuard::remove("MANDOFORGE_DEV_ADMIN_TOKEN");
+    let _tenant_trust = EnvVarGuard::remove("MANDOFORGE_TRUST_X_MANDOFORGE_TENANT_ID");
+    let _subject_trust = EnvVarGuard::remove("MANDOFORGE_TRUST_X_MANDOFORGE_SUBJECT");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+
+    let mut headers = HeaderMap::new();
+    headers.insert("authorization", "Bearer worker-token".parse().unwrap());
+    headers.insert("x-mandoforge-subject", "admin-1".parse().unwrap());
+    headers.insert("x-mandoforge-worker-id", "worker-a".parse().unwrap());
+
+    let principal = principal_from_request(&state, &headers)
+        .await
+        .expect("worker token auth should succeed");
+    assert_eq!(principal.subject_id, "runtime-worker");
+    assert_eq!(principal.roles, vec![Role::Worker]);
+
+    let mut fallback_headers = HeaderMap::new();
+    fallback_headers.insert("authorization", "Bearer worker-token".parse().unwrap());
+    fallback_headers.insert("x-mandoforge-subject", "admin-1".parse().unwrap());
+    fallback_headers.insert("x-mandoforge-worker-id", "worker-b".parse().unwrap());
+
+    let fallback_principal = principal_from_request(&state, &fallback_headers)
+        .await
+        .expect("worker token auth should ignore caller and lease identities");
+    assert_eq!(fallback_principal.subject_id, "runtime-worker");
+    assert_eq!(fallback_principal.roles, vec![Role::Worker]);
+}
+
+#[test]
+fn worker_authorization_subject_is_distinct_from_lease_owner() {
+    let principal = Principal {
+        tenant_id: Uuid::new_v4(),
+        subject_id: "runtime-worker".to_string(),
+        roles: vec![Role::Worker],
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert("x-mandoforge-worker-id", "worker-pod-a".parse().unwrap());
+
+    assert_eq!(
+        workflow_step_execution_owner(&principal, &headers).expect("worker lease owner"),
+        "worker:worker-pod-a"
+    );
+
+    headers.insert("x-mandoforge-worker-id", "subject:alice".parse().unwrap());
+    let worker_owner =
+        workflow_step_execution_owner(&principal, &headers).expect("namespaced worker owner");
+    let human_owner = workflow_step_execution_owner(
+        &Principal {
+            tenant_id: principal.tenant_id,
+            subject_id: "alice".to_string(),
+            roles: vec![Role::Operator],
+        },
+        &HeaderMap::new(),
+    )
+    .expect("human lease owner");
+    assert_eq!(worker_owner, "worker:subject:alice");
+    assert_eq!(human_owner, "subject:alice");
+    assert_ne!(worker_owner, human_owner);
+}
+
+#[tokio::test]
+async fn worker_task_board_and_execution_authorization_follow_step_session_scope() {
+    let _env_guard = env_lock().lock().expect("env lock");
+    let _insecure_auth = EnvVarGuard::set("MANDOFORGE_INSECURE_DEV_AUTH", "0");
+    let _worker_token = EnvVarGuard::set("MANDOFORGE_WORKER_TOKEN", "worker-token");
+    let _worker_subject = EnvVarGuard::set("MANDOFORGE_WORKER_SUBJECT", "runtime-worker");
+    let _dev_token = EnvVarGuard::remove("MANDOFORGE_DEV_ADMIN_TOKEN");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let organization = state
+        .create_organization(
+            CreateOrganization {
+                name: "Worker Scope Org".to_string(),
+                slug: "worker-scope-org".to_string(),
+            },
+            None,
+        )
+        .await
+        .expect("organization");
+    let team = state
+        .create_team(
+            organization.id,
+            CreateTeam {
+                name: "Worker Scope Team".to_string(),
+                slug: "worker-scope-team".to_string(),
+            },
+        )
+        .await
+        .expect("team");
+    let visible_project = state
+        .create_project(
+            team.id,
+            CreateProject {
+                name: "Visible Project".to_string(),
+                slug: "visible-project".to_string(),
+            },
+        )
+        .await
+        .expect("visible project");
+    let hidden_project = state
+        .create_project(
+            team.id,
+            CreateProject {
+                name: "Hidden Project".to_string(),
+                slug: "hidden-project".to_string(),
+            },
+        )
+        .await
+        .expect("hidden project");
+    state
+        .create_membership(
+            organization.id,
+            CreateMembership {
+                user_id: "runtime-worker".to_string(),
+                team_id: Some(team.id),
+                project_id: Some(visible_project.id),
+                role: "worker".to_string(),
+            },
+        )
+        .await
+        .expect("worker membership");
+    assert_eq!(
+        state
+            .membership_roles_for_subject("runtime-worker")
+            .await
+            .expect("worker membership roles"),
+        vec![Role::Worker]
+    );
+
+    let now = Utc::now();
+    let create_agent = |name: &str, project_id| Agent {
+        id: Uuid::new_v4(),
+        name: name.to_string(),
+        kind: "specialist".to_string(),
+        team_id: Some(team.id),
+        project_id: Some(project_id),
+        runtime_profile_id: None,
+        agent_role: "specialist".to_string(),
+        provider: "openai-compatible".to_string(),
+        model: "gpt-5.5-mini".to_string(),
+        system_prompt: String::new(),
+        tools: Vec::new(),
+        tool_policy: json!({}),
+        mcp_server_ids: Vec::new(),
+        skill_ids: Vec::new(),
+        workflow_pack_ids: Vec::new(),
+        remote_computer_profile: json!({}),
+        semantic_scopes: json!({}),
+        release_state: "active".to_string(),
+        created_at: now,
+    };
+    let visible_agent = create_agent("Visible Agent", visible_project.id);
+    let hidden_agent = create_agent("Hidden Agent", hidden_project.id);
+    let visible_agent_id = visible_agent.id;
+    let hidden_agent_id = hidden_agent.id;
+    let visible_session = Session {
+        id: Uuid::new_v4(),
+        agent_id: visible_agent.id,
+        agent_version_id: None,
+        environment_id: None,
+        title: "visible session".to_string(),
+        status: SessionStatus::Idle,
+        created_at: now,
+        updated_at: now,
+    };
+    let hidden_session = Session {
+        id: Uuid::new_v4(),
+        agent_id: hidden_agent.id,
+        agent_version_id: None,
+        environment_id: None,
+        title: "hidden session".to_string(),
+        status: SessionStatus::Idle,
+        created_at: now,
+        updated_at: now,
+    };
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("test state must use memory store");
+    };
+    {
+        let mut store = inner.write().await;
+        store.agents.insert(visible_agent.id, visible_agent);
+        store.agents.insert(hidden_agent.id, hidden_agent);
+        store
+            .sessions
+            .insert(visible_session.id, visible_session.clone());
+        store
+            .sessions
+            .insert(hidden_session.id, hidden_session.clone());
+    }
+    let hidden_work_item = state
+        .create_work_item(CreateWorkItem {
+            organization_id: Some(organization.id),
+            team_id: Some(team.id),
+            project_id: Some(hidden_project.id),
+            title: "Hidden work item".to_string(),
+            description: None,
+            source: "manual".to_string(),
+            source_url: None,
+            status: "open".to_string(),
+            priority: "high".to_string(),
+            assignee: None,
+            metadata: json!({}),
+        })
+        .await
+        .expect("hidden work item");
+    let definition = state
+        .create_workflow_definition(WorkflowDefinition {
+            id: Uuid::new_v4(),
+            pack_installation_id: None,
+            pack_id: None,
+            pack_version: None,
+            name: "Worker session scope".to_string(),
+            entrypoint: format!("worker-session-scope-{}", Uuid::new_v4()),
+            trigger_type: "manual".to_string(),
+            default_agent_id: visible_agent_id,
+            default_environment_id: None,
+            input_schema_ref: None,
+            output_schema_ref: None,
+            step_graph: json!({
+                "steps": [
+                    {"key": "visible-step", "type": "agent", "start": true},
+                    {"key": "hidden-child-step", "type": "agent", "depends_on": ["visible-step"]},
+                    {
+                        "key": "visible-declared-step",
+                        "type": "agent",
+                        "agent_id": visible_agent_id,
+                        "depends_on": ["visible-step"]
+                    },
+                    {
+                        "key": "hidden-declared-step",
+                        "type": "agent",
+                        "agent_id": hidden_agent_id,
+                        "depends_on": ["visible-declared-step"],
+                        "input": {"private": "hidden-definition-secret"}
+                    }
+                ]
+            }),
+            handoff_rules: json!({}),
+            execution_strategy: "managed_graph".to_string(),
+            runtime_adapter: None,
+            runtime_mode: None,
+            runtime_capability_contract: json!({}),
+            event_ingestion_policy: default_event_ingestion_policy(),
+            approval_policy_ref: None,
+            eval_gate_refs: Vec::new(),
+            release_state: "released".to_string(),
+            created_at: now,
+            updated_at: now,
+            archived_at: None,
+        })
+        .await
+        .expect("workflow definition");
+    let run = state
+        .create_workflow_run(WorkflowRun {
+            id: Uuid::new_v4(),
+            workflow_definition_id: definition.id,
+            pack_installation_id: None,
+            source_event_id: None,
+            source_work_item_id: Some(hidden_work_item.id),
+            source_schedule_id: None,
+            status: "running".to_string(),
+            primary_session_id: visible_session.id,
+            root_task_grant_id: None,
+            input_payload: json!({}),
+            input_digest: "worker-session-scope".to_string(),
+            execution_strategy: "managed_graph".to_string(),
+            runtime_adapter: None,
+            runtime_mode: None,
+            delegation_status: None,
+            external_run_ref: None,
+            runtime_event_cursor: None,
+            runtime_envelope: json!({}),
+            started_at: Some(now),
+            completed_at: None,
+            audit_trace_id: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .expect("workflow run");
+    let mut visible_step = test_workflow_step_run(run.id, "visible-step", "queued", json!({}), now);
+    visible_step.agent_id = Some(visible_agent_id);
+    visible_step.session_id = Some(visible_session.id);
+    visible_step.status = "scheduled".to_string();
+    visible_step.scheduled_at = Some(now - chrono::Duration::seconds(1));
+    let mut hidden_step =
+        test_workflow_step_run(run.id, "hidden-child-step", "queued", json!({}), now);
+    hidden_step.agent_id = Some(hidden_agent_id);
+    hidden_step.session_id = Some(hidden_session.id);
+    hidden_step.status = "scheduled".to_string();
+    hidden_step.scheduled_at = Some(now - chrono::Duration::seconds(1));
+    state
+        .create_workflow_step_run_if_key_absent(visible_step.clone())
+        .await
+        .expect("visible step")
+        .expect("visible step created");
+    state
+        .create_workflow_step_run_if_key_absent(hidden_step.clone())
+        .await
+        .expect("hidden step")
+        .expect("hidden step created");
+    state
+        .create_workflow_transition(WorkflowTransition {
+            id: Uuid::new_v4(),
+            workflow_run_id: run.id,
+            from_step_run_id: Some(visible_step.id),
+            from_step_key: Some(visible_step.step_key.clone()),
+            to_step_run_id: Some(visible_step.id),
+            to_step_key: Some(visible_step.step_key.clone()),
+            transition_type: "visible".to_string(),
+            status: "completed".to_string(),
+            condition_payload: json!({}),
+            result_payload: json!({}),
+            created_at: now,
+        })
+        .await
+        .expect("visible transition");
+    state
+        .create_workflow_transition(WorkflowTransition {
+            id: Uuid::new_v4(),
+            workflow_run_id: run.id,
+            from_step_run_id: Some(visible_step.id),
+            from_step_key: Some(visible_step.step_key.clone()),
+            to_step_run_id: Some(hidden_step.id),
+            to_step_key: Some(hidden_step.step_key.clone()),
+            transition_type: "hidden".to_string(),
+            status: "completed".to_string(),
+            condition_payload: json!({}),
+            result_payload: json!({}),
+            created_at: now,
+        })
+        .await
+        .expect("hidden transition");
+    state
+        .create_workflow_transition(WorkflowTransition {
+            id: Uuid::new_v4(),
+            workflow_run_id: run.id,
+            from_step_run_id: Some(visible_step.id),
+            from_step_key: Some(visible_step.step_key.clone()),
+            to_step_run_id: None,
+            to_step_key: Some("hidden-declared-step".to_string()),
+            transition_type: "hidden_declared".to_string(),
+            status: "pending".to_string(),
+            condition_payload: json!({}),
+            result_payload: json!({}),
+            created_at: now,
+        })
+        .await
+        .expect("hidden declared transition");
+
+    let mut headers = HeaderMap::new();
+    headers.insert("authorization", "Bearer worker-token".parse().unwrap());
+    headers.insert("x-mandoforge-worker-id", "worker-a".parse().unwrap());
+    let board = handlers::workflows::worker_get_task_board(&state, &headers)
+        .await
+        .expect("worker task board");
+    assert_eq!(board.workflow_run_count, 1);
+    assert_eq!(board.workflow_step_count, 1);
+    assert_eq!(board.work_item_count, 0);
+    assert_eq!(board.items.len(), 1);
+    assert_eq!(board.items[0].workflow_step_run_id, visible_step.id);
+    assert_eq!(board.items[0].work_item_id, None);
+    assert_eq!(board.items[0].work_item_title, None);
+    assert_eq!(board.items[0].work_item_priority, None);
+
+    let public_board: TaskBoardSnapshot = request_json(
+        build_router(state.clone()),
+        Request::builder()
+            .uri("/api/task-board")
+            .header("authorization", "Bearer worker-token")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(public_board.workflow_run_count, 1);
+    assert_eq!(public_board.workflow_step_count, 1);
+    assert_eq!(public_board.work_item_count, 0);
+    assert_eq!(public_board.items.len(), 1);
+    assert_eq!(public_board.items[0].workflow_step_run_id, visible_step.id);
+    assert_eq!(public_board.items[0].work_item_id, None);
+
+    let inbox: AgentInboxSnapshot = request_json(
+        build_router(state.clone()),
+        Request::builder()
+            .uri(format!("/api/agents/{visible_agent_id}/inbox"))
+            .header("authorization", "Bearer worker-token")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(inbox.entries.len(), 1);
+    assert!(inbox.entries[0].work_item.is_none());
+
+    let visible_work_items: Vec<WorkItem> = request_json(
+        build_router(state.clone()),
+        Request::builder()
+            .uri("/api/work-items")
+            .header("authorization", "Bearer worker-token")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(visible_work_items.is_empty());
+
+    let visible_steps: Vec<WorkflowStepRun> = request_json(
+        build_router(state.clone()),
+        Request::builder()
+            .uri(format!("/api/workflow-runs/{}/steps", run.id))
+            .header("authorization", "Bearer worker-token")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(visible_steps.len(), 1);
+    assert_eq!(visible_steps[0].id, visible_step.id);
+
+    let visible_transitions: Vec<WorkflowTransition> = request_json(
+        build_router(state.clone()),
+        Request::builder()
+            .uri(format!("/api/workflow-runs/{}/transitions", run.id))
+            .header("authorization", "Bearer worker-token")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(visible_transitions.len(), 1);
+    assert_eq!(visible_transitions[0].transition_type, "visible");
+
+    let graph: WorkflowRunGraphConsole = request_json(
+        build_router(state.clone()),
+        Request::builder()
+            .uri(format!("/api/workflow-runs/{}/graph", run.id))
+            .header("authorization", "Bearer worker-token")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(graph.node_count, 2);
+    assert!(
+        graph
+            .nodes
+            .iter()
+            .any(|node| node.step_key == "visible-step")
+    );
+    assert!(
+        graph
+            .nodes
+            .iter()
+            .any(|node| node.step_key == "visible-declared-step" && node.declared)
+    );
+    assert!(graph.edges.iter().all(|edge| {
+        edge.from_step_key.as_deref() != Some("hidden-child-step")
+            && edge.to_step_key.as_deref() != Some("hidden-child-step")
+            && edge.from_step_key.as_deref() != Some("hidden-declared-step")
+            && edge.to_step_key.as_deref() != Some("hidden-declared-step")
+    }));
+    let graph_json = serde_json::to_string(&graph).expect("serialize graph");
+    assert!(!graph_json.contains("hidden-declared-step"));
+    assert!(!graph_json.contains("hidden-definition-secret"));
+    assert!(!graph_json.contains(&hidden_agent_id.to_string()));
+
+    let activation: WorkflowScheduledStepActivationRun = request_json(
+        build_router(state.clone()),
+        Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/api/workflow-runs/{}/scheduled-steps/run-due",
+                run.id
+            ))
+            .header("authorization", "Bearer worker-token")
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(activation.activated_step_ids, vec![visible_step.id]);
+    assert_eq!(
+        state
+            .get_workflow_step_run(hidden_step.id)
+            .await
+            .expect("hidden step remains")
+            .status,
+        "scheduled"
+    );
+
+    assert_eq!(
+        authorize_workflow_step_session(&state, &headers, &visible_step, &run)
+            .await
+            .expect("visible session authorization"),
+        visible_session.id
+    );
+    let error = authorize_workflow_step_session(&state, &headers, &hidden_step, &run)
+        .await
+        .expect_err("cross-project child session must fail closed");
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
@@ -25542,6 +26128,7 @@ async fn policy_rollout_can_rollback_and_run_due_activation() {
 
 async fn test_app_with_approval_webhook(approval_webhook_url: String) -> Router {
     let state = AppState {
+        process_role: ProcessRole::Worker,
         store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
         execution_queue: ExecutionQueue::default(),
         execution_worker: Arc::new(InlineExecutionWorker),
@@ -26545,6 +27132,7 @@ async fn vault_readiness_reports_secret_consumers_and_kms_gate() {
 #[tokio::test]
 async fn vault_kms_rotation_executes_external_endpoint_and_updates_catalog_metadata() {
     let state = AppState {
+        process_role: ProcessRole::Worker,
         store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
         execution_queue: ExecutionQueue::default(),
         execution_worker: Arc::new(InlineExecutionWorker),
@@ -26974,6 +27562,7 @@ fn vault_kms_recovery_readiness_rejects_pilot_backend_identity() {
 async fn appended_session_events_export_telemetry_when_enabled() {
     let exporter = Arc::new(RecordingTelemetryExporter::default());
     let state = AppState {
+        process_role: ProcessRole::Worker,
         store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
         execution_queue: ExecutionQueue::default(),
         execution_worker: Arc::new(InlineExecutionWorker),
@@ -27095,6 +27684,7 @@ async fn appended_session_events_export_telemetry_when_enabled() {
 async fn codex_app_server_routes_require_admin_and_call_adapter() {
     let codex_client = Arc::new(RecordingCodexAppServerClient::default());
     let state = AppState {
+        process_role: ProcessRole::Worker,
         store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
         execution_queue: ExecutionQueue::default(),
         execution_worker: Arc::new(InlineExecutionWorker),
@@ -27364,6 +27954,19 @@ async fn codex_app_server_routes_require_admin_and_call_adapter() {
         })
     );
 
+    let session_workspace = test_workspace_root().join(session.id.to_string());
+    let artifact_path = session_workspace.join("artifacts").join("codex-report.md");
+    tokio::fs::create_dir_all(
+        artifact_path
+            .parent()
+            .expect("artifact path should have parent"),
+    )
+    .await
+    .expect("create codex artifact dir");
+    tokio::fs::write(&artifact_path, "# Codex Report\n")
+        .await
+        .expect("write codex artifact");
+
     let synced: CodexArtifactSyncResponse = request_json(
         app.clone(),
         Request::builder()
@@ -27392,6 +27995,10 @@ async fn codex_app_server_routes_require_admin_and_call_adapter() {
     .await;
     assert_eq!(synced.artifact_count, 1);
     assert_eq!(synced.artifacts[0].name, "codex-report.md");
+    assert_eq!(
+        synced.artifacts[0].path.as_deref(),
+        Some("artifacts/codex-report.md")
+    );
 
     let artifacts: Vec<Artifact> = request_json(
         app.clone(),
@@ -27477,6 +28084,7 @@ async fn codex_app_server_routes_require_admin_and_call_adapter() {
 async fn approved_codex_exec_can_use_app_server_strategy() {
     let codex_client = Arc::new(RecordingCodexAppServerClient::default());
     let state = AppState {
+        process_role: ProcessRole::Worker,
         store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
         execution_queue: ExecutionQueue::default(),
         execution_worker: Arc::new(InlineExecutionWorker),
@@ -27614,8 +28222,11 @@ async fn approved_codex_exec_can_use_app_server_strategy() {
 
 #[tokio::test]
 async fn queue_backed_worker_runs_codex_app_server_polling() {
+    let _env_guard = env_lock().lock().expect("env lock");
+    let _insecure_auth = EnvVarGuard::set("MANDOFORGE_INSECURE_DEV_AUTH", "1");
     let codex_client = Arc::new(RecordingCodexAppServerClient::default());
     let state = AppState {
+        process_role: ProcessRole::Worker,
         store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
         execution_queue: ExecutionQueue::default(),
         execution_worker: Arc::new(QueueBackedExecutionWorker),
@@ -27853,12 +28464,15 @@ async fn queue_backed_worker_runs_codex_app_server_polling() {
 }
 
 #[tokio::test]
-async fn queue_backed_worker_retries_codex_app_server_across_leases() {
+async fn queue_backed_worker_does_not_replay_uncertain_codex_app_server_turn() {
+    let _env_guard = env_lock().lock().expect("env lock");
+    let _insecure_auth = EnvVarGuard::set("MANDOFORGE_INSECURE_DEV_AUTH", "1");
     let codex_client = Arc::new(RecordingCodexAppServerClient::with_poll_statuses(vec![
         "running",
         "completed",
     ]));
     let state = AppState {
+        process_role: ProcessRole::Worker,
         store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
         execution_queue: ExecutionQueue::default(),
         execution_worker: Arc::new(QueueBackedExecutionWorker),
@@ -27903,7 +28517,7 @@ async fn queue_backed_worker_retries_codex_app_server_across_leases() {
         json_request(
             "POST",
             "/api/sessions",
-            json!({"agent_id": agents[0].id, "title": "retry codex app server"}),
+            json!({"agent_id": agents[0].id, "title": "uncertain codex app server"}),
         ),
     )
     .await;
@@ -27915,7 +28529,7 @@ async fn queue_backed_worker_retries_codex_app_server_across_leases() {
             json!({
                 "session_id": session.id,
                 "args": {
-                    "task": "Keep polling through worker retries",
+                    "task": "Do not replay an uncertain turn",
                     "sandbox_mode": "workspace-write",
                     "execution_strategy": "app-server",
                     "poll_attempts": 1,
@@ -27947,7 +28561,7 @@ async fn queue_backed_worker_retries_codex_app_server_across_leases() {
         .expect("queued codex job")
         .id;
 
-    let requeued: execution_queue::ExecutionJob = request_json(
+    let uncertain: execution_queue::ExecutionJob = request_json(
         app.clone(),
         Request::builder()
             .method("POST")
@@ -27957,25 +28571,12 @@ async fn queue_backed_worker_retries_codex_app_server_across_leases() {
             .expect("valid request"),
     )
     .await;
-    assert_eq!(requeued.status, ExecutionJobStatus::Queued);
-    assert_eq!(requeued.attempt_count, 1);
+    assert_eq!(uncertain.status, ExecutionJobStatus::OutcomeUnknown);
+    assert_eq!(uncertain.attempt_count, 1);
     assert_eq!(
-        requeued.last_error.as_deref(),
+        uncertain.last_error.as_deref(),
         Some("Codex App Server turn ended with status running")
     );
-
-    let completed: execution_queue::ExecutionJob = request_json(
-        app.clone(),
-        Request::builder()
-            .method("POST")
-            .uri(format!("/api/execution-jobs/{job_id}/run"))
-            .header("x-mandoforge-worker-id", "codex-worker-b")
-            .body(Body::empty())
-            .expect("valid request"),
-    )
-    .await;
-    assert_eq!(completed.status, ExecutionJobStatus::Completed);
-    assert_eq!(completed.attempt_count, 2);
 
     let events: Vec<SessionEvent> = request_json(
         app.clone(),
@@ -27985,16 +28586,25 @@ async fn queue_backed_worker_retries_codex_app_server_across_leases() {
             .expect("valid request"),
     )
     .await;
+    assert!(events.iter().any(|event| {
+        event.event_type == "execution.outcome_unknown"
+            && event.payload["execution_job_id"] == json!(job_id)
+            && event.payload["requires_reconciliation"] == true
+    }));
     assert!(
-        events
+        !events
             .iter()
             .any(|event| event.event_type == "execution.retry_queued")
     );
-    assert!(events.iter().any(|event| {
-        event.event_type == "codex.task.completed"
-            && event.payload["runner"] == "app-server"
-            && event.payload["status"] == "completed"
-    }));
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.event_type == "execution.completed")
+    );
+    assert_eq!(
+        codex_client.calls.lock().await.as_slice(),
+        ["thread", "turn:thread-1", "poll:turn-1"]
+    );
 }
 
 #[tokio::test]
@@ -28145,7 +28755,7 @@ async fn queue_backed_worker_runs_allowlisted_agent_cli_profile() {
 }
 
 #[tokio::test]
-async fn queue_backed_worker_marks_nonzero_agent_cli_as_failed() {
+async fn queue_backed_worker_marks_nonzero_agent_cli_as_known_failure() {
     let _env_guard = env_lock().lock().expect("env lock");
     let shim_dir = test_workspace_root().join("agent-cli-shims");
     fs::create_dir_all(&shim_dir).expect("create shim dir");
@@ -28221,7 +28831,7 @@ async fn queue_backed_worker_marks_nonzero_agent_cli_as_failed() {
         .expect("agent CLI execution job queued")
         .id;
 
-    let requeued: execution_queue::ExecutionJob = request_json(
+    let (status, body) = request_value(
         app.clone(),
         Request::builder()
             .method("POST")
@@ -28231,41 +28841,13 @@ async fn queue_backed_worker_marks_nonzero_agent_cli_as_failed() {
             .expect("valid request"),
     )
     .await;
-    assert_eq!(requeued.status, ExecutionJobStatus::Queued);
-    assert_eq!(requeued.attempt_count, 1);
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
-        requeued
-            .last_error
-            .as_deref()
+        body["error"]
+            .as_str()
             .unwrap_or_default()
             .contains("exit code")
     );
-
-    let second_requeue: execution_queue::ExecutionJob = request_json(
-        app.clone(),
-        Request::builder()
-            .method("POST")
-            .uri(format!("/api/execution-jobs/{job_id}/run"))
-            .header("x-mandoforge-worker-id", "agent-cli-worker-fail-2")
-            .body(Body::empty())
-            .expect("valid request"),
-    )
-    .await;
-    assert_eq!(second_requeue.status, ExecutionJobStatus::Queued);
-    assert_eq!(second_requeue.attempt_count, 2);
-
-    let (status, error) = request_value(
-        app.clone(),
-        Request::builder()
-            .method("POST")
-            .uri(format!("/api/execution-jobs/{job_id}/run"))
-            .header("x-mandoforge-worker-id", "agent-cli-worker-fail-3")
-            .body(Body::empty())
-            .expect("valid request"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(error["error"].as_str().unwrap().contains("exit code"));
 
     let jobs: Vec<execution_queue::ExecutionJob> = request_json(
         app.clone(),
@@ -28280,6 +28862,11 @@ async fn queue_backed_worker_marks_nonzero_agent_cli_as_failed() {
         .find(|job| job.id == job_id)
         .expect("failed job");
     assert_eq!(failed_job.status, ExecutionJobStatus::Failed);
+    assert_eq!(failed_job.attempt_count, 1);
+    assert_eq!(
+        failed_job.finalization_details["stage"],
+        "failure_published"
+    );
     assert!(
         failed_job
             .last_error
@@ -28302,6 +28889,57 @@ async fn queue_backed_worker_marks_nonzero_agent_cli_as_failed() {
         .expect("agent CLI tool call");
     assert_eq!(agent_cli_call.status, "failed");
     assert!(agent_cli_call.error.is_some());
+
+    let events: Vec<SessionEvent> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/sessions/{}/events", session.id))
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let failure_event = events
+        .iter()
+        .find(|event| {
+            event.event_type == "execution.failed"
+                && event.payload["execution_job_id"] == json!(job_id)
+        })
+        .expect("durable execution failure event");
+    assert!(execution_failure_event_matches_job(
+        failure_event,
+        failed_job
+    ));
+    let mut forged_failure = failure_event.clone();
+    forged_failure.payload["claim_generation"] = json!(failed_job.claim_generation + 1);
+    assert!(!execution_failure_event_matches_job(
+        &forged_failure,
+        failed_job
+    ));
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.event_type == "execution.outcome_unknown")
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.event_type == "execution.retry_queued")
+    );
+    let resume_jobs = session_loop_jobs_for_session(app.clone(), session.id).await;
+    assert!(resume_jobs.iter().any(|job| {
+        job.status == SessionLoopJobStatus::Queued
+            && job.reason == "approved execution failed"
+            && job.trigger_event_id == Some(failure_event.id)
+    }));
+    let resumed: Session = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/sessions/{}", session.id))
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(resumed.status, SessionStatus::Idle);
 
     unsafe {
         std::env::remove_var("MANDOFORGE_ALLOW_REQUESTED_AGENT_CLI_PROFILE");
@@ -31816,13 +32454,13 @@ async fn memory_writeback_candidates_require_review_before_durable_memory() {
         ),
     )
     .await;
-    assert_eq!(generated.len(), 6);
+    assert_eq!(generated.len(), 5);
     assert_eq!(
         generated
             .iter()
             .filter(|candidate| candidate.candidate_type == "artifact")
             .count(),
-        3
+        2
     );
     for expected_type in [
         "session_summary",
@@ -32001,7 +32639,7 @@ async fn memory_writeback_candidates_require_review_before_durable_memory() {
             .expect("valid request"),
     )
     .await;
-    assert_eq!(listed.len(), 6);
+    assert_eq!(listed.len(), 5);
     assert!(listed.iter().any(|candidate| {
         candidate.id == approved_candidate.id
             && candidate.status == "approved"
@@ -32025,7 +32663,7 @@ async fn memory_writeback_candidates_require_review_before_durable_memory() {
     .await;
     assert!(events.iter().any(|event| {
         event.event_type == "memory_writeback.candidates_generated"
-            && event.payload["candidate_count"] == json!(6)
+            && event.payload["candidate_count"] == json!(5)
     }));
     assert!(
         events
@@ -32083,6 +32721,7 @@ async fn cost_alert_delivery_posts_budget_alerts_to_webhook() {
             .expect("mock cost alert webhook");
     });
     let state = AppState {
+        process_role: ProcessRole::Worker,
         store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
         execution_queue: ExecutionQueue::default(),
         execution_worker: Arc::new(InlineExecutionWorker),
@@ -32356,6 +32995,7 @@ async fn cost_alert_email_route_can_deliver_through_direct_smtp() {
     let addr = listener.local_addr().expect("smtp addr");
     let smtp_server = tokio::spawn(run_mock_smtp_server(listener));
     let state = AppState {
+        process_role: ProcessRole::Worker,
         store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
         execution_queue: ExecutionQueue::default(),
         execution_worker: Arc::new(InlineExecutionWorker),
@@ -32532,6 +33172,7 @@ async fn mcp_call_executes_through_tool_router_and_gateway_policy() {
     let _insecure_auth = EnvVarGuard::set("MANDOFORGE_INSECURE_DEV_AUTH", "1");
     let mcp_client = Arc::new(RecordingMcpGatewayClient::default());
     let state = AppState {
+        process_role: ProcessRole::Worker,
         store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
         execution_queue: ExecutionQueue::default(),
         execution_worker: Arc::new(InlineExecutionWorker),
@@ -33347,6 +33988,7 @@ async fn mcp_commit_write_uses_approval_commit_token_exact_binding() {
     let _insecure_auth = EnvVarGuard::set("MANDOFORGE_INSECURE_DEV_AUTH", "1");
     let mcp_client = Arc::new(RecordingMcpGatewayClient::default());
     let state = AppState {
+        process_role: ProcessRole::Worker,
         store: StoreBackend::Memory(Arc::new(RwLock::new(MemoryStore::default()))),
         execution_queue: ExecutionQueue::default(),
         execution_worker: Arc::new(QueueBackedExecutionWorker),
@@ -33624,6 +34266,35 @@ async fn mcp_commit_write_uses_approval_commit_token_exact_binding() {
     assert_eq!(requests[0].tool, "publish_post");
     assert_eq!(requests[0].args["content"], json!("Approved post"));
     drop(requests);
+
+    let duplicate_job = state
+        .execution_queue
+        .enqueue(ExecutionJobRequest {
+            session_id: completed.session_id,
+            environment_id: completed.environment_id,
+            approval_id: completed.approval_id,
+            tool_call_id: completed.tool_call_id,
+            tool_name: completed.tool_name.clone(),
+            max_attempts: Some(3),
+        })
+        .await
+        .expect("enqueue duplicate recovery attempt");
+    let uncertain = run_execution_job(&state, duplicate_job.id, "mcp-recovery-worker")
+        .await
+        .expect("consumed commit token should stop duplicate execution");
+    assert_eq!(uncertain.status, ExecutionJobStatus::OutcomeUnknown);
+    assert!(
+        uncertain
+            .last_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("already consumed")
+    );
+    assert_eq!(
+        mcp_client.requests.lock().await.len(),
+        1,
+        "consumed commit token must prevent another gateway call"
+    );
 
     let tamper_required: Value = request_json(
         app.clone(),
@@ -34814,6 +35485,10 @@ fn session_loop_projection_covers_durable_runtime_events() {
         session_loop_reason_for_event("execution.completed"),
         Some("approved execution completed")
     );
+    assert_eq!(
+        session_loop_reason_for_event("execution.failed"),
+        Some("approved execution failed")
+    );
     assert_eq!(session_loop_reason_for_event("agent.final"), None);
 }
 
@@ -34904,8 +35579,8 @@ async fn generic_runtime_diagnostics_replay_api_flow() {
         "policy.allowed",
         "policy.requires_approval",
         "approval.requested",
-        "artifact.created",
         "llm.response",
+        "session_loop.turn_summary",
         "thread.created",
         "thread.status_changed",
         "session.status_running",
@@ -34920,28 +35595,25 @@ async fn generic_runtime_diagnostics_replay_api_flow() {
             "missing event type {expected}: {event_types:?}"
         );
     }
+    assert_eq!(
+        event_types
+            .iter()
+            .filter(|event_type| **event_type == "llm.response")
+            .count(),
+        event_types
+            .iter()
+            .filter(|event_type| **event_type == "llm.request")
+            .count(),
+        "each provider request must emit exactly one llm.response"
+    );
     assert!(events.iter().any(|event| {
-        event.event_type == "llm.response"
+        event.event_type == "session_loop.turn_summary"
             && event
                 .payload
                 .get("tool_calls")
                 .and_then(Value::as_array)
                 .is_some_and(|calls| calls.iter().any(|call| call["tool_name"] == "shell.exec"))
     }));
-
-    let artifacts: Vec<Artifact> = request_json(
-        app.clone(),
-        Request::builder()
-            .uri(format!("/api/sessions/{}/artifacts", session.id))
-            .body(Body::empty())
-            .expect("valid request"),
-    )
-    .await;
-    assert!(
-        artifacts
-            .iter()
-            .any(|artifact| artifact.name == "diagnostics.md")
-    );
 
     let tool_calls: Vec<ToolCall> = request_json(
         app.clone(),
@@ -34972,7 +35644,6 @@ async fn generic_runtime_diagnostics_replay_api_flow() {
     for expected in [
         "session.started",
         "tool.completed",
-        "artifact.created",
         "policy.requires_approval",
         "approval.requested",
     ] {
@@ -35075,7 +35746,7 @@ async fn generic_runtime_diagnostics_replay_api_flow() {
     );
     assert!(event_types_after_approval.contains(&"agent.final"));
     assert!(events_after_approval.iter().any(|event| {
-        event.event_type == "llm.response"
+        event.event_type == "session_loop.turn_summary"
             && event
                 .payload
                 .get("final_message")
@@ -35241,7 +35912,6 @@ async fn session_events_user_message_drives_provider_loop() {
         "tool.call",
         "policy.requires_approval",
         "approval.requested",
-        "artifact.created",
         "agent.custom_tool_result",
     ] {
         assert!(
@@ -35249,6 +35919,7 @@ async fn session_events_user_message_drives_provider_loop() {
             "missing event type {expected}: {event_types:?}"
         );
     }
+    assert!(!event_types.contains(&"artifact.created"));
     assert!(events.iter().any(|event| {
         event.event_type == "llm.request"
             && event.payload["context"]["custom_tool_result_count"] == json!(1)
@@ -35937,6 +36608,63 @@ async fn terminal_session_rejects_new_event_driven_loop_work() {
 }
 
 #[tokio::test]
+async fn terminal_session_cannot_be_resurrected_by_concurrent_idle_transition() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "terminal transition race".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create session");
+    ensure_primary_session_thread(&state, session.id)
+        .await
+        .expect("create primary thread");
+
+    let (idle, terminated) = tokio::join!(
+        set_managed_session_status(&state, session.id, SessionStatus::Idle, "loop completion"),
+        set_managed_session_status(
+            &state,
+            session.id,
+            SessionStatus::Terminated,
+            "operator stop"
+        )
+    );
+
+    terminated.expect("terminal transition succeeds");
+    if let Err(error) = idle {
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
+    assert_eq!(
+        state
+            .get_session(session.id)
+            .await
+            .expect("read session")
+            .status,
+        SessionStatus::Terminated
+    );
+    assert_eq!(
+        state
+            .primary_session_thread(session.id)
+            .await
+            .expect("read primary thread")
+            .expect("primary thread")
+            .status,
+        "terminated"
+    );
+}
+
+#[tokio::test]
 async fn legacy_message_and_run_routes_enqueue_session_loop_jobs() {
     let app = test_app().await;
     let agents: Vec<Agent> = request_json(
@@ -36542,9 +37270,12 @@ async fn request_tenant_header_must_match_runtime_tenant() {
 
 #[tokio::test]
 async fn tenant_routed_mode_uses_request_tenant_context() {
+    let _env_guard = env_lock().lock().expect("env lock");
+    let _insecure_auth = EnvVarGuard::set("MANDOFORGE_INSECURE_DEV_AUTH", "1");
     let mut state = test_state_with_worker(Arc::new(InlineExecutionWorker));
     state.tenant_runtime_mode = TenantRuntimeMode::TenantRouted;
     state.seed_demo_agent().await.expect("seed demo agent");
+    let default_tenant = state.configured_tenant_id().to_string();
     let app = build_router(state);
     let alternate_tenant = "00000000-0000-4000-8000-000000000099";
 
@@ -36554,6 +37285,7 @@ async fn tenant_routed_mode_uses_request_tenant_context() {
             .uri("/api/agents")
             .header("x-mandoforge-subject", "admin-1")
             .header("x-mandoforge-roles", "admin")
+            .header("x-mandoforge-tenant-id", default_tenant)
             .body(Body::empty())
             .expect("valid request"),
     )
@@ -39000,7 +39732,7 @@ async fn task_board_agent_inbox_claim_binds_context_packet_and_grant() {
     assert_eq!(claim["step"]["status"], json!("running"));
     assert_eq!(
         claim["step"]["claimed_by_worker"],
-        json!("worker-whiskey-1")
+        json!("subject:operator-1")
     );
     assert_eq!(claim["step"]["agent_id"], json!(agent.id));
     assert!(claim["step"]["lease_expires_at"].as_str().is_some());
@@ -39016,6 +39748,25 @@ async fn task_board_agent_inbox_claim_binds_context_packet_and_grant() {
     assert_eq!(
         claim["context_packet"]["retrieved_objects"][0]["source_uri"],
         json!(format!("mandoforge://work-items/{work_item_id}"))
+    );
+
+    let (status, error) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "PATCH",
+            &format!("/api/workflow-step-runs/{step_id}"),
+            json!({"status": "completed"}),
+            &[
+                ("x-mandoforge-subject", "operator-2"),
+                ("x-mandoforge-roles", "operator"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        error["error"],
+        json!("workflow step update requires the current claim owner")
     );
 
     let grant: Value = request_json(
@@ -39228,7 +39979,7 @@ async fn workflow_step_run_endpoint_claims_and_executes_session_loop() {
     assert_eq!(executed["step"]["status"], json!("requires_action"));
     assert_eq!(
         executed["step"]["claimed_by_worker"],
-        json!("worker-whiskey-1")
+        json!("subject:operator-1")
     );
     assert_eq!(executed["step"]["task_grant_id"], json!(root_task_grant_id));
     assert_eq!(
@@ -39243,7 +39994,7 @@ async fn workflow_step_run_endpoint_claims_and_executes_session_loop() {
     );
     assert_eq!(
         executed["step"]["output_payload"]["worker_execution"]["worker_id"],
-        json!("worker-whiskey-1")
+        json!("subject:operator-1")
     );
     assert!(
         !executed["step"]["approval_ids"]
@@ -39258,7 +40009,7 @@ async fn workflow_step_run_endpoint_claims_and_executes_session_loop() {
             .is_empty()
     );
     assert!(
-        !executed["step"]["artifact_ids"]
+        executed["step"]["artifact_ids"]
             .as_array()
             .unwrap()
             .is_empty()
@@ -39374,7 +40125,7 @@ async fn workflow_step_run_endpoint_claims_and_executes_session_loop() {
     let resumed = run_next_session_loop_job(
         app.clone(),
         Uuid::parse_str(run["primary_session_id"].as_str().unwrap()).unwrap(),
-        "worker-whiskey-1",
+        "subject:operator-1",
     )
     .await;
     assert_eq!(resumed.status, SessionLoopJobStatus::Completed);
@@ -43217,6 +43968,21 @@ async fn approving_file_write_resumes_tool_and_creates_artifact() {
         artifact.name == "diagnostics.md" && artifact.path.as_deref() == Some("diagnostics.md")
     }));
 
+    let audit_logs: Vec<AuditLog> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/sessions/{}/audit-logs", session.id))
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert!(audit_logs.iter().any(|log| {
+        log.action == "artifact.created"
+            && artifacts
+                .iter()
+                .any(|artifact| Some(artifact.id) == log.resource_id)
+    }));
+
     let tool_calls: Vec<ToolCall> = request_json(
         app.clone(),
         Request::builder()
@@ -43739,7 +44505,7 @@ async fn queue_backed_worker_defers_approved_tool_until_job_run() {
         worker_readiness
             .runbook_actions
             .iter()
-            .any(|action| action.contains("mandoforge-worker"))
+            .any(|action| action.contains("MANDOFORGE_PROCESS_ROLE=worker"))
     );
     let worker_load_validation: WorkerLoadValidationRun = request_json(
         app.clone(),

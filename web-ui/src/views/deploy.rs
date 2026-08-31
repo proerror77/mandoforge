@@ -197,7 +197,9 @@ impl EvidenceRequirement {
                 "pilot_ready".to_string(),
                 lang.text(self.title, self.zh_title).to_string(),
                 if lang == UiLang::En {
-                    format!("Mentioned in current evidence (`{keyword}`), but not accepted as customer-grade evidence yet.")
+                    format!(
+                        "Mentioned in current evidence (`{keyword}`), but not accepted as customer-grade evidence yet."
+                    )
                 } else {
                     format!("当前证据提到 `{keyword}`，但还没有证明达到客户级就绪。")
                 },

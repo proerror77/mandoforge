@@ -30,7 +30,6 @@ pub(crate) enum View {
     Agents,
     Board,
     Workflows,
-    Dynamic,
     Semantic,
     Packs,
     Deploy,
@@ -38,13 +37,12 @@ pub(crate) enum View {
 }
 
 impl View {
-    pub(crate) const ALL: [View; 10] = [
+    pub(crate) const ALL: [View; 9] = [
         View::Overview,
         View::Wizard,
         View::Agents,
         View::Board,
         View::Workflows,
-        View::Dynamic,
         View::Semantic,
         View::Packs,
         View::Deploy,
@@ -67,7 +65,6 @@ impl View {
             View::Agents => "agents",
             View::Board => "board",
             View::Workflows => "workflows",
-            View::Dynamic => "dynamic",
             View::Semantic => "semantic",
             View::Packs => "packs",
             View::Deploy => "deploy",
@@ -83,7 +80,6 @@ impl View {
                 View::Agents => "Managed Agents",
                 View::Board => "Task Board",
                 View::Workflows => "Runs & Tasks",
-                View::Dynamic => "Dynamic Plans",
                 View::Semantic => "Ontology",
                 View::Packs => "Capabilities",
                 View::Deploy => "System Ops",
@@ -95,7 +91,6 @@ impl View {
                 View::Agents => "托管智能体",
                 View::Board => "任务板",
                 View::Workflows => "运行与任务",
-                View::Dynamic => "动态计划",
                 View::Semantic => "本体与工具",
                 View::Packs => "能力包",
                 View::Deploy => "系统运维",
@@ -112,7 +107,6 @@ impl View {
                 View::Agents => "Managed Agents / 托管智能体",
                 View::Board => "Task Board / 任务板",
                 View::Workflows => "Runs & Tasks / 运行与任务",
-                View::Dynamic => "Dynamic Plans / 动态计划",
                 View::Semantic => "Ontology / 本体与工具",
                 View::Packs => "Capabilities / 能力包",
                 View::Deploy => "System Ops / 系统运维",
@@ -124,7 +118,6 @@ impl View {
                 View::Agents => "托管智能体 / Managed Agents",
                 View::Board => "任务板 / Task Board",
                 View::Workflows => "运行与任务 / Runs & Tasks",
-                View::Dynamic => "动态计划 / Dynamic Plans",
                 View::Semantic => "本体与工具 / Ontology",
                 View::Packs => "能力包 / Capabilities",
                 View::Deploy => "系统运维 / System Ops",
@@ -138,7 +131,6 @@ impl View {
         match value {
             "managed-agents" | "agents" => View::Agents,
             "runs-tasks" | "runs" | "tasks" | "workflows" => View::Workflows,
-            "dynamic" => View::Dynamic,
             "board" => View::Board,
             "ontology" | "semantic" => View::Semantic,
             "capabilities" | "packs" => View::Packs,
@@ -162,7 +154,6 @@ pub(crate) struct ConsoleData {
     pub(crate) tool_calls: ApiState<Vec<ToolCall>>,
     pub(crate) workflow_runs: ApiState<Vec<WorkflowRun>>,
     pub(crate) workflow_definitions: ApiState<Vec<WorkflowDefinition>>,
-    pub(crate) dynamic_workflow_plans: ApiState<Vec<DynamicWorkflowPlan>>,
     pub(crate) task_board: ApiState<TaskBoardSnapshot>,
     pub(crate) work_items: ApiState<Vec<WorkItem>>,
     pub(crate) manager_plans: ApiState<Vec<Value>>,

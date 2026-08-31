@@ -133,7 +133,8 @@ remaining core gaps, and the evidence required for managed agent actions.
 Stage 1 implements the generic runtime kernel:
 
 - Rust + Axum API server.
-- Postgres-backed runtime store with in-memory fallback when `DATABASE_URL` is missing.
+- Postgres-backed runtime store; local in-memory mode requires the explicit
+  `MANDOFORGE_ALLOW_IN_MEMORY_STORE=1` opt-in.
 - Agents, agent versions, sessions, events, tool calls, approvals, artifacts, and audit logs.
 - Tool Router for all controlled external execution.
 - Policy Engine for allow, deny, and approval-required decisions.
@@ -199,7 +200,6 @@ Current managed-agent baseline:
 - `Environment(type=remote_computer)` now owns automatic Remote Computer assignment: approved execution jobs only auto-claim leases or warm-pool resources that match the session environment contract, and remote environments fail closed when the Remote Computer execution transport is not enabled.
 - The UI start form loads environments and binds new sessions to the selected environment.
 - The UI run view is organized around the managed-session objects first: Agent, Environment, Event Stream, Blocking Actions, Artifacts, and Threads. Raw worker, Remote Computer, provider, secret, MCP, and tenant infrastructure remain in system and advanced panels.
-- Dynamic Workflow Plans are now first-class review envelopes: `POST /api/dynamic-workflow-plans` validates phases, agent fleet limits, governance, validation, and materialization policy; review approval gates execution; materialization creates a normal `WorkflowDefinition`, `WorkflowRun`, primary session, root `TaskGrant`, and start steps. Delegated plans target adapters such as Claude Code or Codex App Server without letting the external runtime bypass MandoForge policy and audit.
 - Semantic Ontology Builder is proposal-only: `POST /api/semantic-ontology/builder` accepts operator/AI first-draft context, normalizes object and relation candidates, records source refs and review gates, and creates an `ontology_expansion` semantic object for review. It does not directly mutate the ontology registry or durable organizational memory.
 - Enterprise Ontology Fast-Onboarding is now exposed through the Semantic console and `/api/ontology/onboarding/*`: seed packs, demo runs, schema understanding, review graph, proposal review, materialization, calibration, and compiled tool specs. The operator workflow is documented in [Ontology Builder Usage](docs/ontology-builder-usage.md).
 
@@ -221,6 +221,7 @@ Start the API:
 
 ```bash
 MANDOFORGE_INSECURE_DEV_AUTH=1 \
+MANDOFORGE_ALLOW_IN_MEMORY_STORE=1 \
 MANDOFORGE_ALLOW_HOST_SHELL_EXEC=1 \
 cargo run -p mandoforge-api
 ```
@@ -302,6 +303,7 @@ cargo run -p mandoforge-api
 OpenAI-compatible provider:
 
 ```bash
+MANDOFORGE_ALLOW_IN_MEMORY_STORE=1 \
 MANDOFORGE_PROVIDER_BASE_URL=https://api.openai.com \
 MANDOFORGE_PROVIDER_API_KEY=... \
 MANDOFORGE_PROVIDER_MODEL=gpt-5.5-mini \
@@ -311,16 +313,19 @@ cargo run -p mandoforge-api
 Docker shell sandbox:
 
 ```bash
+MANDOFORGE_ALLOW_IN_MEMORY_STORE=1 \
 MANDOFORGE_SHELL_RUNNER=docker \
 MANDOFORGE_SHELL_DOCKER_IMAGE=alpine:3.20 \
 cargo run -p mandoforge-api
 ```
 
-Queue-backed execution worker:
+Local-only HTTP worker compatibility:
 
 ```bash
+MANDOFORGE_INSECURE_DEV_AUTH=true \
+MANDOFORGE_ALLOW_IN_MEMORY_STORE=1 \
 MANDOFORGE_EXECUTION_WORKER=queue \
-MANDOFORGE_DEV_ADMIN_TOKEN=local-worker-token \
+MANDOFORGE_DEV_ADMIN_TOKEN=local-admin-token \
 MANDOFORGE_WORKER_TOKEN=local-worker-token \
 cargo run -p mandoforge-api
 
@@ -330,10 +335,28 @@ WORKER_POOL=managed-agent \
 cargo run -p mandoforge-api --bin mandoforge-worker
 ```
 
-The same worker drains both session-loop jobs and approved execution jobs. It is
-the local entrypoint for the always-available runtime session loop. `WORKER_ENVIRONMENT_ID`
-binds a worker to one Environment id; `WORKER_POOL` or `WORKER_QUEUE` binds it
-to Environments whose `worker_queue_binding` names the same pool.
+The HTTP worker is a local compatibility path and requires the API process to
+run with `MANDOFORGE_INSECURE_DEV_AUTH=true`. Production workers use the same
+API binary, a durable Postgres queue, and no HTTP `/run` endpoint:
+
+```bash
+DATABASE_URL=postgres://mandoforge:mandoforge@127.0.0.1:5432/mandoforge \
+MANDOFORGE_PROCESS_ROLE=worker \
+MANDOFORGE_TENANT_ID=00000000-0000-4000-8000-000000000001 \
+MANDOFORGE_WORKER_TOKEN=... \
+MANDOFORGE_WORKER_SUBJECT=mandoforge-worker \
+WORKER_ID=worker-1 \
+cargo run -p mandoforge-api
+```
+
+The worker drains both session-loop jobs and approved execution jobs.
+Each worker process is scoped to `MANDOFORGE_TENANT_ID` and maps its token to
+the stable `MANDOFORGE_WORKER_SUBJECT`. Provision that subject as a member of
+each team or project whose sessions it may execute. `WORKER_ID` is the
+ephemeral lease owner (for example, a Pod name), not the authorization subject.
+`WORKER_ENVIRONMENT_ID` binds it to one Environment id; `WORKER_POOL` or
+`WORKER_QUEUE` binds it to Environments whose `worker_queue_binding` names the
+same pool.
 
 Governed coding-agent CLI profiles:
 
@@ -391,6 +414,7 @@ Agent -> Environment -> Session -> runtime adapter -> Events
 Codex App Server adapter:
 
 ```bash
+MANDOFORGE_ALLOW_IN_MEMORY_STORE=1 \
 MANDOFORGE_CODEX_APP_SERVER_URL=http://127.0.0.1:8789 \
 MANDOFORGE_CODEX_APP_SERVER_TIMEOUT_SECONDS=30 \
 MANDOFORGE_CODEX_EXECUTION_STRATEGY=auto \

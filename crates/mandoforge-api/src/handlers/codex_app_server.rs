@@ -648,7 +648,12 @@ async fn sync_codex_artifacts(
         if artifact_type.is_empty() {
             return Err(AppError::bad_request("artifact_type is required"));
         }
-        let path = normalize_codex_artifact_path(artifact_input.path.as_deref())?;
+        let path = resolve_existing_codex_artifact_path(
+            &state,
+            input.session_id,
+            artifact_input.path.as_deref(),
+        )
+        .await?;
         let artifact = Artifact {
             id: Uuid::new_v4(),
             session_id: input.session_id,
@@ -704,4 +709,43 @@ async fn sync_codex_artifacts(
         artifact_count: artifacts.len(),
         artifacts,
     }))
+}
+
+async fn resolve_existing_codex_artifact_path(
+    state: &AppState,
+    session_id: Uuid,
+    path: Option<&str>,
+) -> Result<Option<String>, AppError> {
+    let normalized = normalize_codex_artifact_path(path)?;
+    let Some(path) = normalized else {
+        return Ok(None);
+    };
+
+    let workspace = state.workspace_root.join(session_id.to_string());
+    tokio::fs::create_dir_all(&workspace).await?;
+    let workspace = tokio::fs::canonicalize(&workspace).await.map_err(|error| {
+        AppError::bad_request(format!("failed to prepare session workspace: {error}"))
+    })?;
+    let candidate = workspace.join(&path);
+    let resolved = tokio::fs::canonicalize(&candidate).await.map_err(|_| {
+        AppError::bad_request(
+            "Codex artifact path must reference an existing file inside the session workspace",
+        )
+    })?;
+    if !resolved.starts_with(&workspace) {
+        return Err(AppError::bad_request(
+            "Codex artifact path must be relative and stay inside the session workspace",
+        ));
+    }
+    let metadata = tokio::fs::metadata(&resolved).await.map_err(|_| {
+        AppError::bad_request(
+            "Codex artifact path must reference an existing file inside the session workspace",
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(AppError::bad_request(
+            "Codex artifact path must reference an existing file inside the session workspace",
+        ));
+    }
+    Ok(Some(path))
 }

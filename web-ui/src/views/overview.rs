@@ -96,7 +96,7 @@ pub(crate) fn OverviewView(props: &OverviewProps) -> Html {
                             number="02"
                             icon="◇"
                             title={lang.text("Runs & Tasks", "运行与任务")}
-                            detail={lang.text("Inspect runs, task board state, workflow templates, and dynamic plans.", "检查运行记录、任务板、流程模板和动态计划。")}
+                            detail={lang.text("Inspect runs, task board state, workflow templates, and approvals.", "检查运行记录、任务板、流程模板和审批。")}
                             value={if lang == UiLang::En { format!("{} runs", data.workflow_runs.data.len()) } else { format!("{} 次运行", data.workflow_runs.data.len()) }}
                             status={if active_runs > 0 { lang.text("RUNNING", "运行中") } else { lang.text("IDLE", "空闲") }}
                             tone={if active_runs > 0 { "info" } else { "neutral" }}
@@ -253,8 +253,8 @@ pub(crate) fn OverviewView(props: &OverviewProps) -> Html {
                     number="02"
                     title={lang.text("Runs & Tasks", "运行与任务")}
                     subtitle={lang.text("运行与任务", "Runs & Tasks")}
-                    description={lang.text("Review runs, task board state, workflow templates, dynamic plans, and approval queues.", "查看运行记录、任务板、流程模板、动态计划和审批队列。")}
-                    status={if lang == UiLang::En { format!("{} runs / {} dynamic plans", data.workflow_runs.data.len(), data.dynamic_workflow_plans.data.len()) } else { format!("{} 运行 / {} 动态计划", data.workflow_runs.data.len(), data.dynamic_workflow_plans.data.len()) }}
+                    description={lang.text("Review runs, task board state, workflow templates, and approval queues.", "查看运行记录、任务板、流程模板和审批队列。")}
+                    status={if lang == UiLang::En { format!("{} workflow runs", data.workflow_runs.data.len()) } else { format!("{} 个工作流运行", data.workflow_runs.data.len()) }}
                     tone={if active_runs > 0 { "info" } else { "neutral" }}
                     target={View::Workflows}
                     on_view={props.on_view.clone()}
