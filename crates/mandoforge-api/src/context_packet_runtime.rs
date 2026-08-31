@@ -2058,15 +2058,12 @@ impl ToolExecutor for ShellExecTool {
             ));
         }
         let runner = shell_runner();
-        let mut process = shell_command(&runner, &workspace, command).map_err(|error| {
-            AppError::bad_request(format!("failed to prepare shell.exec runner: {error}"))
-        })?;
-        let output = tokio::time::timeout(Duration::from_secs(30), process.output())
+        let output = run_shell_command(&runner, &workspace, command, Duration::from_secs(30))
             .await
-            .map_err(|_| AppError::bad_request("shell.exec timed out"))?
             .map_err(|error| {
                 AppError::bad_request(format!("failed to execute shell.exec: {error}"))
-            })?;
+            })?
+            .ok_or_else(|| AppError::bad_request("shell.exec timed out"))?;
         let stdout = truncate_output(&String::from_utf8_lossy(&output.stdout), 64 * 1024);
         let stderr = truncate_output(&String::from_utf8_lossy(&output.stderr), 64 * 1024);
         let result = json!({

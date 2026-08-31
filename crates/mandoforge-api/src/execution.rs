@@ -20,7 +20,7 @@ use crate::remote_computer_runner::{
     RemoteComputerRunnerConfig, RemoteComputerRunnerDryRunRequest, poll_agent_sandbox_binding,
     poll_kubernetes_pod_running_in_namespace, remote_computer_runner_for_config,
 };
-use crate::shell_runner::{shell_command, shell_runner};
+use crate::shell_runner::{run_shell_command, shell_runner};
 use crate::{
     AppError, AppState, Approval, Artifact, CreateRemoteComputer,
     CreateRemoteComputerJobAssignment, CreateRemoteComputerLease, Environment, ExecuteTool,
@@ -3155,13 +3155,11 @@ async fn execute_approved_shell(
         .ok_or_else(|| AppError::bad_request("shell.exec requires command"))?;
     let workspace = session_workspace(state, approval.session_id).await?;
     let runner = shell_runner();
-    let mut process = shell_command(&runner, &workspace, command).map_err(|error| {
-        AppError::bad_request(format!("failed to prepare shell.exec runner: {error}"))
-    })?;
     commit.begin().await?;
-    let output = tokio::time::timeout(Duration::from_secs(30), process.output())
+    let output = run_shell_command(&runner, &workspace, command, Duration::from_secs(30))
         .await
-        .map_err(|_| AppError::bad_request("shell.exec timed out"))??;
+        .map_err(|error| AppError::bad_request(format!("failed to execute shell.exec: {error}")))?
+        .ok_or_else(|| AppError::bad_request("shell.exec timed out"))?;
     let limit = execution_output_limit_bytes();
     let stdout = truncate_output(&String::from_utf8_lossy(&output.stdout), limit);
     let stderr = truncate_output(&String::from_utf8_lossy(&output.stderr), limit);

@@ -86,6 +86,7 @@ mod ontology_source_adapters;
 mod policy;
 mod policy_rollout_runtime;
 mod policy_runtime;
+mod process_control;
 mod provider;
 mod provider_governance_runtime;
 mod provider_mcp_runtime;
@@ -325,8 +326,8 @@ pub(crate) use semantic_synthesis_schedules::*;
 pub(crate) use session_handoff_runtime::*;
 pub(crate) use session_loop_runtime::*;
 #[cfg(test)]
-use shell_runner::docker_shell_args;
-use shell_runner::{shell_command, shell_runner};
+use shell_runner::{docker_shell_args, shell_command};
+use shell_runner::{run_shell_command, shell_runner};
 pub(crate) use stage2_readiness::build_stage2_completion_readiness;
 #[cfg(test)]
 pub(crate) use stage2_readiness::parse_stage2_open_gaps;
