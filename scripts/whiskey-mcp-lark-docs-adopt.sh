@@ -50,23 +50,12 @@ require_cmd() {
 
 require_cmd jq
 
-extract_tag_from_image() {
-  local image_ref="$1"
-  if [[ -z "$image_ref" ]]; then
-    return 0
-  fi
-  printf '%s\n' "${image_ref##*:}"
-}
-
-resolve_running_image_tag() {
+resolve_running_image_identity() {
   local compose_file="$REMOTE_ROOT/docker-compose.yml"
-  local ps_output
-  ps_output="$(ssh "$REMOTE_HOST" "docker compose -p mandoforge-adoption -f '$compose_file' ps --format json" 2>/dev/null || true)"
-  [[ -n "$ps_output" ]] || return 0
-
-  local image_ref
-  image_ref="$(printf '%s\n' "$ps_output" | jq -rs 'map(select(.Service == "api")) | .[0].Image // empty')"
-  extract_tag_from_image "$image_ref"
+  local inspect_json
+  inspect_json="$(ssh "$REMOTE_HOST" "container_id=\$(docker compose -p mandoforge-adoption -f '$compose_file' ps -q api); if [[ -n \"\$container_id\" ]]; then image_id=\$(docker inspect --format '{{.Image}}' \"\$container_id\"); docker image inspect \"\$image_id\"; fi" 2>/dev/null || true)"
+  [[ -n "$inspect_json" ]] || return 0
+  printf '%s\n' "$inspect_json" | jq -r '.[0].Config.Labels // {} | [.["org.opencontainers.image.version"], .["org.opencontainers.image.revision"]] | map(. // "") | @tsv'
 }
 
 resolve_env_image_tag() {
@@ -120,8 +109,13 @@ if [[ "$APPLY" == "1" ]]; then
   require_cmd ssh
 
   image_tag="${MANDOFORGE_IMAGE_TAG:-}"
+  git_sha="${MANDOFORGE_GIT_SHA:-}"
   if [[ -z "$image_tag" ]]; then
-    image_tag="$(resolve_running_image_tag)"
+    running_identity="$(resolve_running_image_identity)"
+    if [[ -n "$running_identity" ]]; then
+      IFS=$'\t' read -r image_tag running_git_sha <<<"$running_identity"
+      git_sha="${git_sha:-$running_git_sha}"
+    fi
   fi
   if [[ -z "$image_tag" ]]; then
     image_tag="$(resolve_env_image_tag)"
@@ -133,8 +127,13 @@ if [[ "$APPLY" == "1" ]]; then
     echo "Whiskey Lark docs adoption could not determine a deploy image tag; set MANDOFORGE_IMAGE_TAG explicitly" >&2
     exit 1
   fi
+  if [[ ! "$git_sha" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then
+    echo "Whiskey Lark docs adoption requires the selected image's exact Git SHA; set MANDOFORGE_GIT_SHA explicitly" >&2
+    exit 1
+  fi
 
   MANDOFORGE_IMAGE_TAG="$image_tag" \
+  MANDOFORGE_GIT_SHA="$git_sha" \
   WHISKEY_MCP_UPSTREAM_MODE=lark_docs_search \
   WHISKEY_WORKFLOW_PACK_MCP_QUERY="$QUERY" \
   scripts/whiskey-adoption-deploy.sh
@@ -163,8 +162,7 @@ fi
 printf '\n'
 if [[ "$scope_status" == "ready" ]]; then
   printf 'next_apply_command:\n'
-  printf 'WHISKEY_MCP_UPSTREAM_MODE=lark_docs_search WHISKEY_WORKFLOW_PACK_MCP_QUERY=%q scripts/whiskey-adoption-deploy.sh\n' "$QUERY"
-  printf 'WHISKEY_MCP_UPSTREAM_MODE=lark_docs_search WHISKEY_WORKFLOW_PACK_MCP_QUERY=%q RUN_STAGE2_PRODUCTION_VALIDATIONS=1 scripts/whiskey-adoption-evidence.sh\n' "$QUERY"
+  printf 'scripts/whiskey-mcp-lark-docs-adopt.sh --apply --query %q\n' "$QUERY"
 else
   printf 'scope is not ready; complete Feishu device-flow login before apply\n'
   printf 'post_auth_apply_command=scripts/whiskey-mcp-lark-docs-adopt.sh --apply --query %q\n' "$QUERY"

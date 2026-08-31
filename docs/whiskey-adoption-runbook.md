@@ -32,10 +32,10 @@ Keep the API bound to loopback unless a separate authenticated ingress is added.
 Publish or select an image tag first:
 
 ```bash
-MANDOFORGE_IMAGE_TAG=<tag> scripts/whiskey-adoption-deploy.sh
+MANDOFORGE_IMAGE_TAG=<tag> MANDOFORGE_GIT_SHA=<exact-image-git-sha> scripts/whiskey-adoption-deploy.sh
 ```
 
-The deploy script copies [docker-compose.adoption.yml](../deploy/whiskey/docker-compose.adoption.yml), the Whiskey Codex controller, the Whiskey tenant routing controller, the Whiskey worker load controller, the Whiskey MCP pilot controller, the Whiskey eval/release controller, the Whiskey observability controller, the Whiskey provider rollout controller, the Whiskey approval notification controller, the Whiskey Vault/KMS controller, and the Whiskey finance controller to the remote host, creates `/opt/mandoforge-adoption/whiskey.env` if missing, starts the loopback Codex WebSocket target plus controllers when needed, pulls the configured image, and starts the API, Postgres, and worker.
+The deploy script copies [docker-compose.adoption.yml](../deploy/whiskey/docker-compose.adoption.yml), the Whiskey Codex controller, the Whiskey tenant routing controller, the Whiskey worker load controller, the Whiskey MCP pilot controller, the Whiskey eval/release controller, the Whiskey observability controller, the Whiskey provider rollout controller, the Whiskey approval notification controller, the Whiskey Vault/KMS controller, and the Whiskey finance controller to the remote host, creates `/opt/mandoforge-adoption/whiskey.env` if missing, starts the loopback Codex WebSocket target plus controllers when needed, pulls the configured image, and starts the API, Postgres, and worker. It then verifies the running container's image-baked revision independently of runtime environment variables and stores the image inspection under `evidence/deployment-image.json`.
 
 The default image is:
 
@@ -114,7 +114,7 @@ MANDOFORGE_CODEX_APP_SERVER_OPS_CONTROLLER_TOKEN=<secret>
 Then redeploy and collect evidence:
 
 ```bash
-scripts/whiskey-adoption-deploy.sh
+MANDOFORGE_IMAGE_TAG=<tag> MANDOFORGE_GIT_SHA=<exact-image-git-sha> scripts/whiskey-adoption-deploy.sh
 scripts/whiskey-adoption-evidence.sh
 ```
 
@@ -193,7 +193,7 @@ When the scope needs to be re-established or refreshed, the direct repo-native a
 scripts/whiskey-mcp-lark-docs-adopt.sh --apply --query README
 ```
 
-If `MANDOFORGE_IMAGE_TAG` is unset, that helper now reuses the currently running Whiskey API image tag instead of assuming `latest`.
+If `MANDOFORGE_IMAGE_TAG` is unset, that helper reuses the currently running Whiskey API image's baked tag and Git revision instead of assuming `latest`. If a tag is supplied explicitly, its matching `MANDOFORGE_GIT_SHA` is also required.
 
 ## Eval/Release Lane
 

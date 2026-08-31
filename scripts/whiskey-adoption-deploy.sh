@@ -31,9 +31,8 @@ REMOTE_VAULT_KMS_CONTROLLER="$REMOTE_ROOT/vault-kms-controller.mjs"
 REMOTE_FINANCE_CONTROLLER="$REMOTE_ROOT/finance-controller.mjs"
 REMOTE_ENV="$REMOTE_ROOT/whiskey.env"
 REMOTE_ENV_LOADER="$REMOTE_ROOT/load-whiskey-env.sh"
-IMAGE_TAG="${MANDOFORGE_IMAGE_TAG:-latest}"
-GIT_SHA="${MANDOFORGE_GIT_SHA:-$(git rev-parse HEAD 2>/dev/null || printf unknown)}"
-GIT_SHA="${GIT_SHA:-unknown}"
+IMAGE_TAG="${MANDOFORGE_IMAGE_TAG:-}"
+GIT_SHA="${MANDOFORGE_GIT_SHA:-}"
 BUILD_TIME="${MANDOFORGE_BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 PULL_IMAGE="${WHISKEY_PULL_IMAGE:-1}"
 CODEX_WS_PORT="${WHISKEY_CODEX_APP_SERVER_WS_PORT:-18788}"
@@ -82,6 +81,15 @@ FINANCE_RECONCILIATION_CONTROLLER_TOKEN="${WHISKEY_FINANCE_RECONCILIATION_CONTRO
 FINANCE_EXPORT_DELIVERY_MODE="${WHISKEY_FINANCE_EXPORT_DELIVERY_MODE:-lark_drive}"
 FINANCE_EXPORT_LARK_AS="${WHISKEY_FINANCE_EXPORT_LARK_AS:-user}"
 FINANCE_EXPORT_LARK_FOLDER_TOKEN="${WHISKEY_FINANCE_EXPORT_LARK_FOLDER_TOKEN:-}"
+
+if [[ ! "$IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+  echo "Whiskey deployment requires an explicit valid image tag via MANDOFORGE_IMAGE_TAG" >&2
+  exit 1
+fi
+if [[ ! "$GIT_SHA" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then
+  echo "Whiskey deployment requires the image's exact Git SHA via MANDOFORGE_GIT_SHA" >&2
+  exit 1
+fi
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -493,14 +501,33 @@ remote_cmd="$remote_cmd && docker compose -p '$COMPOSE_PROJECT' -f '$REMOTE_COMP
 
 ssh "$REMOTE_HOST" "bash -lc $(printf '%q' "$remote_cmd")"
 
-ssh "$REMOTE_HOST" "IMAGE_TAG=$(printf '%q' "$IMAGE_TAG") GIT_SHA=$(printf '%q' "$GIT_SHA") REMOTE_ROOT=$(printf '%q' "$REMOTE_ROOT") bash -s" <<'REMOTE'
+ssh "$REMOTE_HOST" "IMAGE_TAG=$(printf '%q' "$IMAGE_TAG") GIT_SHA=$(printf '%q' "$GIT_SHA") COMPOSE_PROJECT=$(printf '%q' "$COMPOSE_PROJECT") REMOTE_ROOT=$(printf '%q' "$REMOTE_ROOT") bash -s" <<'REMOTE'
 set -euo pipefail
 
 REMOTE_ENV="$REMOTE_ROOT/whiskey.env"
 REMOTE_ENV_LOADER="$REMOTE_ROOT/load-whiskey-env.sh"
+REMOTE_COMPOSE="$REMOTE_ROOT/docker-compose.yml"
 cd "$REMOTE_ROOT"
 source "$REMOTE_ENV_LOADER"
 load_env_file "$REMOTE_ENV"
+
+api_container_id="$(docker compose -p "$COMPOSE_PROJECT" -f "$REMOTE_COMPOSE" ps -q api)"
+if [[ -z "$api_container_id" ]]; then
+  echo "Whiskey API container is not running" >&2
+  exit 1
+fi
+actual_image_id="$(docker inspect --format '{{.Image}}' "$api_container_id")"
+docker image inspect "$actual_image_id" > "$REMOTE_ROOT/evidence/deployment-image.json"
+baked_tag="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$actual_image_id")"
+baked_sha="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$actual_image_id")"
+if [[ "$baked_tag" != "$IMAGE_TAG" ]]; then
+  echo "Whiskey API baked image tag mismatch: expected $IMAGE_TAG, got ${baked_tag:-missing}" >&2
+  exit 1
+fi
+if [[ "$baked_sha" != "$GIT_SHA" ]]; then
+  echo "Whiskey API baked Git SHA mismatch: expected $GIT_SHA, got ${baked_sha:-missing}" >&2
+  exit 1
+fi
 
 version_json=""
 for _attempt in {1..30}; do
@@ -528,13 +555,13 @@ if [[ "$actual_tag" != "$IMAGE_TAG" ]]; then
   cat "$REMOTE_ROOT/evidence/deployment-version.json" >&2
   exit 1
 fi
-if [[ "$GIT_SHA" != "unknown" && -n "$actual_sha" && "$actual_sha" != "$GIT_SHA" ]]; then
-  echo "Whiskey API git SHA mismatch: expected $GIT_SHA, got $actual_sha" >&2
+if [[ -z "$actual_sha" || "$actual_sha" != "$GIT_SHA" ]]; then
+  echo "Whiskey API git SHA mismatch: expected $GIT_SHA, got ${actual_sha:-missing}" >&2
   cat "$REMOTE_ROOT/evidence/deployment-version.json" >&2
   exit 1
 fi
 
-printf 'Whiskey deployment version verified: tag=%s sha=%s\n' "$actual_tag" "${actual_sha:-unknown}"
+printf 'Whiskey deployment version verified: image=%s tag=%s sha=%s\n' "$actual_image_id" "$actual_tag" "$actual_sha"
 REMOTE
 
 echo "Whiskey MandoForge pilot is deployed on $REMOTE_HOST at http://127.0.0.1:18787"
