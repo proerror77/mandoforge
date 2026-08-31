@@ -31202,6 +31202,19 @@ async fn http_workflow_run_pins_ontology_release_into_root_task_grant() {
 #[tokio::test]
 async fn ontology_action_tool_executes_pinned_contract_as_proposal_only() {
     let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let mut approval_policy =
+        serde_json::to_value(PolicyConfig::default()).expect("serialize default policy");
+    approval_policy["approval_required"]
+        .as_array_mut()
+        .expect("approval rules")
+        .push(json!({"tool": "ontology.action.execute", "risk": "medium"}));
+    state
+        .activate_runtime_policy(
+            Uuid::new_v4(),
+            serde_json::from_value(approval_policy).expect("ontology approval policy"),
+            100,
+        )
+        .await;
     let release = ontology_release_candidate_for_test(&state, "commerce-vtest-action-tool").await;
     gate_ontology_release_with_actor(&state, release.id, "test")
         .await
@@ -31316,7 +31329,7 @@ async fn ontology_action_tool_executes_pinned_contract_as_proposal_only() {
             .as_array()
             .is_some_and(|tools| tools.iter().any(|tool| tool == "ontology.action.execute"))
     );
-    let result = execute_tool_invocation(
+    let approval_required = execute_tool_invocation(
         &state,
         "ontology.action.execute",
         ExecuteTool {
@@ -31335,9 +31348,61 @@ async fn ontology_action_tool_executes_pinned_contract_as_proposal_only() {
         ToolInvocationOrigin::ManualRoute,
     )
     .await
-    .expect("ontology action proposal");
+    .expect("ontology action approval request");
+    assert_eq!(approval_required["status"], json!("approval_required"));
+    let approval_id = Uuid::parse_str(
+        approval_required["approval_id"]
+            .as_str()
+            .expect("approval id"),
+    )
+    .expect("valid approval id");
+    let pending_approval = state
+        .get_approval(approval_id)
+        .await
+        .expect("pending ontology action approval");
+    let pending_tool_call_id = pending_approval.tool_call_id.expect("approval tool call");
+    let pending_tool_call = state
+        .get_tool_call(pending_tool_call_id)
+        .await
+        .expect("pending ontology action call");
+    let mut changed_action_args = pending_tool_call.args.clone();
+    changed_action_args["action"] = json!("commerce.cancel_order");
+    let error = state
+        .update_tool_call_args(pending_tool_call_id, changed_action_args)
+        .await
+        .expect_err("approval modification cannot change ontology action identity");
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        state
+            .get_tool_call(pending_tool_call_id)
+            .await
+            .expect("unchanged ontology action call")
+            .args["action"],
+        json!("commerce.refund_order")
+    );
+    let _ = decide_approval(
+        state.clone(),
+        approval_id,
+        "approved",
+        Some("test-approver".to_string()),
+    )
+    .await
+    .expect("approved ontology action proposal");
+    let approval = state
+        .get_approval(approval_id)
+        .await
+        .expect("approved ontology action");
+    let completed_call = state
+        .get_tool_call(approval.tool_call_id.expect("approval tool call"))
+        .await
+        .expect("completed ontology action call");
+    assert_eq!(completed_call.status, "completed");
+    let result = completed_call
+        .result
+        .expect("ontology action proposal result");
 
     assert_eq!(result["status"], json!("proposal_created"));
+    assert_eq!(result["approval"], json!("approved"));
     assert_eq!(result["ontology_release_id"], json!(release.id));
     assert_eq!(result["action"], json!("commerce.refund_order"));
     assert_eq!(result["execution_mode"], json!("proposal_only"));
@@ -31351,6 +31416,81 @@ async fn ontology_action_tool_executes_pinned_contract_as_proposal_only() {
             && artifact.content["status"] == json!("draft")
             && artifact.content["ontology_release_id"] == json!(release.id)
     }));
+    assert_eq!(
+        build_harness_context(&state, run.primary_session_id, None, None)
+            .await
+            .expect("approved ontology action context")
+            .approved_tool_result_count,
+        1
+    );
+    let invalid_approval = execute_tool_invocation(
+        &state,
+        "ontology.action.execute",
+        ExecuteTool {
+            session_id: run.primary_session_id,
+            task_grant_id: Some(grant_id),
+            args: json!({
+                "context_packet_id": packet.id,
+                "action": "commerce.refund_order",
+                "parameters": {"order_id": "order-invalid", "amount": "not-a-number"}
+            }),
+        },
+        ToolInvocationOrigin::ManualRoute,
+    )
+    .await
+    .expect("invalid action still requires approval before worker validation");
+    let invalid_approval_id = Uuid::parse_str(
+        invalid_approval["approval_id"]
+            .as_str()
+            .expect("invalid action approval id"),
+    )
+    .expect("valid approval id");
+    let artifacts_before_invalid = state
+        .list_artifacts(run.primary_session_id)
+        .await
+        .expect("artifacts before invalid approval")
+        .len();
+    let error = decide_approval(
+        state.clone(),
+        invalid_approval_id,
+        "approved",
+        Some("test-approver".to_string()),
+    )
+    .await
+    .expect_err("invalid approved proposal must fail without retry");
+    assert!(error.message.contains("amount must be decimal"));
+    let invalid_job = state
+        .execution_queue
+        .list()
+        .await
+        .expect("execution jobs")
+        .into_iter()
+        .find(|job| job.approval_id == invalid_approval_id)
+        .expect("invalid action execution job");
+    assert_eq!(invalid_job.status, ExecutionJobStatus::Failed);
+    let invalid_approval = state
+        .get_approval(invalid_approval_id)
+        .await
+        .expect("invalid approved action");
+    assert_eq!(
+        state
+            .get_tool_call(invalid_approval.tool_call_id.expect("invalid tool call"))
+            .await
+            .expect("failed invalid tool call")
+            .status,
+        "failed"
+    );
+    assert_eq!(
+        state
+            .list_artifacts(run.primary_session_id)
+            .await
+            .expect("artifacts after invalid approval")
+            .len(),
+        artifacts_before_invalid
+    );
+    state
+        .activate_runtime_policy(Uuid::new_v4(), PolicyConfig::default(), 100)
+        .await;
     let error = execute_tool_invocation(
         &state,
         "ontology.action.execute",
@@ -34350,6 +34490,33 @@ async fn mcp_commit_write_uses_approval_commit_token_exact_binding() {
             .as_str()
             .is_some_and(|hash| hash.starts_with("sha256:"))
     );
+
+    let StoreBackend::Memory(store) = &state.store else {
+        panic!("MCP commit test uses the memory store");
+    };
+    {
+        let mut store = store.write().await;
+        let legacy_call = store
+            .tool_calls
+            .get_mut(&waiting_call.id)
+            .expect("waiting MCP call");
+        legacy_call.normalized_args_hash = None;
+        legacy_call.target_binding = empty_json_object();
+    }
+    state
+        .modify_approval(
+            approval_id,
+            waiting_call.args.clone(),
+            Some("rebuild legacy commit binding".to_string()),
+        )
+        .await
+        .expect("legacy commit_write modification rebuilds binding from its task grant");
+    let waiting_call = state
+        .get_tool_call(waiting_call.id)
+        .await
+        .expect("rebound waiting MCP call");
+    assert!(waiting_call.normalized_args_hash.is_some());
+    assert_eq!(waiting_call.target_binding["server"], json!("social"));
 
     let approved: Approval = request_json(
         app.clone(),

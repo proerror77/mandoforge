@@ -11,10 +11,10 @@ use crate::{
     OntologySdkApplication, OntologySdkCatalogObject, Permission, Principal, SemanticObject,
     TaskGrant, ToolInvocationOrigin, authorize_collection_request, authorize_principal_request,
     execute_tool_invocation, new_audit_log, normalize_and_validate_subset,
-    ontology_action_tool_spec_for_release, ontology_release_current_status,
-    release_catalog_from_evidence, task_grant_allows_tool, task_grant_session_matches,
-    validate_ontology_action_parameters, visible_semantic_links_for_principal,
-    visible_semantic_objects_for_principal,
+    ontology_action_tool_spec_for_release, ontology_catalog_property_type,
+    ontology_release_current_status, release_catalog_from_evidence, task_grant_allows_tool,
+    task_grant_session_matches, validate_ontology_action_parameters,
+    visible_semantic_links_for_principal, visible_semantic_objects_for_principal,
 };
 
 #[derive(Debug, Deserialize, Default)]
@@ -591,24 +591,22 @@ fn object_property_values(content: &Value) -> BTreeMap<String, Value> {
 }
 
 fn property_value_matches(value: &Value, value_type: &str) -> bool {
-    match value_type.trim().to_ascii_lowercase().as_str() {
-        "unknown" | "" => true,
-        "string" | "text" => value.is_string(),
-        "uuid" => value
+    match ontology_catalog_property_type(value_type) {
+        Some("unknown") => true,
+        Some("string") => value.is_string(),
+        Some("uuid") => value
             .as_str()
             .is_some_and(|value| Uuid::parse_str(value).is_ok()),
-        "integer" | "int" | "int32" | "int64" => {
-            value.as_i64().is_some() || value.as_u64().is_some()
-        }
-        "number" | "decimal" | "float" | "double" => value.is_number(),
-        "boolean" | "bool" => value.is_boolean(),
-        "object" => value.is_object(),
-        "json" => !value.is_null(),
-        "array" => value.is_array(),
-        "date" => value
+        Some("integer") => value.as_i64().is_some() || value.as_u64().is_some(),
+        Some("number") => value.is_number(),
+        Some("boolean") => value.is_boolean(),
+        Some("object") => value.is_object(),
+        Some("json") => !value.is_null(),
+        Some("array") => value.is_array(),
+        Some("date") => value
             .as_str()
             .is_some_and(|value| chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").is_ok()),
-        "timestamp" | "datetime" => value
+        Some("timestamp") => value
             .as_str()
             .is_some_and(|value| chrono::DateTime::parse_from_rfc3339(value).is_ok()),
         _ => false,

@@ -622,6 +622,19 @@ fn catalog_object_properties(
     object_stable_key: &str,
     parent_object: Option<&OntologySdkCatalogObject>,
 ) -> Result<(Vec<OntologySdkCatalogProperty>, Option<String>), AppError> {
+    let primary_key_source = match proposal
+        .content
+        .get("primary_key_api_name")
+        .or_else(|| proposal.content.get("primary_key"))
+    {
+        Some(Value::String(value)) if !value.trim().is_empty() => Some(value.trim()),
+        Some(_) => {
+            return Err(AppError::bad_request(
+                "ontology object primary key must be a non-empty string",
+            ));
+        }
+        None => None,
+    };
     let property_source = proposal
         .content
         .get("properties")
@@ -633,6 +646,7 @@ fn catalog_object_properties(
                 .and_then(|schema| schema.get("properties").or_else(|| schema.get("fields")))
         });
     let mut entries = Vec::<(Option<String>, &Value)>::new();
+    let mut properties = Vec::new();
     match property_source {
         Some(Value::Array(values)) => {
             entries.extend(values.iter().map(|value| (None, value)));
@@ -650,23 +664,13 @@ fn catalog_object_properties(
             ));
         }
         None if parent_object.is_some() => {
-            let parent = parent_object.expect("guarded parent object");
-            return Ok((
-                parent.properties.clone(),
-                parent.primary_key_api_name.clone(),
-            ));
+            properties = parent_object
+                .expect("guarded parent object")
+                .properties
+                .clone();
         }
         None => {}
     }
-
-    let primary_key_source = proposal
-        .content
-        .get("primary_key_api_name")
-        .or_else(|| proposal.content.get("primary_key"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let mut properties = Vec::new();
     for (map_name, value) in entries {
         let source_name = value
             .get("source_name")
@@ -745,17 +749,41 @@ fn catalog_object_properties(
             ));
         }
     }
-    let primary_key_api_name = primary_key_source
-        .and_then(|primary_key| {
+    let primary_key_api_name = match primary_key_source {
+        Some(primary_key) => Some(
             properties
                 .iter()
                 .find(|property| {
                     property.source_name == primary_key || property.api_name == primary_key
                 })
-                .map(|property| property.api_name.clone())
-        })
-        .or_else(|| parent_object.and_then(|parent| parent.primary_key_api_name.clone()));
+                .ok_or_else(|| {
+                    AppError::bad_request(format!(
+                        "ontology object primary key {primary_key} is not a declared property"
+                    ))
+                })?
+                .api_name
+                .clone(),
+        ),
+        None => parent_object.and_then(|parent| parent.primary_key_api_name.clone()),
+    };
     Ok((properties, primary_key_api_name))
+}
+
+pub(crate) fn ontology_catalog_property_type(value_type: &str) -> Option<&'static str> {
+    match value_type.trim().to_ascii_lowercase().as_str() {
+        "unknown" | "" => Some("unknown"),
+        "string" | "text" => Some("string"),
+        "uuid" => Some("uuid"),
+        "integer" | "int" | "int32" | "int64" => Some("integer"),
+        "number" | "decimal" | "float" | "double" => Some("number"),
+        "boolean" | "bool" => Some("boolean"),
+        "object" => Some("object"),
+        "json" => Some("json"),
+        "array" => Some("array"),
+        "date" => Some("date"),
+        "timestamp" | "datetime" => Some("timestamp"),
+        _ => None,
+    }
 }
 
 fn validate_catalog(catalog: &OntologyReleaseCatalogV1) -> Result<(), AppError> {
@@ -896,6 +924,12 @@ fn validate_catalog(catalog: &OntologyReleaseCatalogV1) -> Result<(), AppError> 
                 return Err(AppError::forbidden(
                     "ontology release catalog object property type is missing",
                 ));
+            }
+            if ontology_catalog_property_type(&property.value_type).is_none() {
+                return Err(AppError::forbidden(format!(
+                    "ontology release catalog object property type {} is unsupported",
+                    property.value_type
+                )));
             }
         }
         if let Some(primary_key) = &object.primary_key_api_name {

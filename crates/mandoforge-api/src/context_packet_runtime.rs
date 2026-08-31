@@ -2585,113 +2585,176 @@ impl ToolExecutor for OntologyTypeLookupTool {
     }
 }
 
-#[async_trait]
-impl ToolExecutor for OntologyActionExecuteTool {
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: "ontology.action.execute",
-            risk: "medium",
-            description: "Validate a pinned ontology action contract and create an auditable proposal",
+pub(crate) struct ValidatedOntologyActionProposal {
+    packet: ContextPacket,
+    grant: TaskGrant,
+    release: OntologyRelease,
+    spec: OntologyOnboardingToolSpec,
+    contract_digest: String,
+    action_name: String,
+    parameters: Value,
+}
+
+struct PreparedOntologyActionProposal {
+    artifact: Artifact,
+    details: Value,
+    result: Value,
+}
+
+pub(crate) fn ontology_action_name_from_args(args: &Value) -> Result<&str, AppError> {
+    args.get("action")
+        .or_else(|| args.get("action_name"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::bad_request("ontology action requires action"))
+}
+
+pub(crate) async fn validate_ontology_action_proposal(
+    state: &AppState,
+    input: &ExecuteTool,
+) -> Result<ValidatedOntologyActionProposal, AppError> {
+    let (packet, grant) = context_packet_and_grant_for_tool_invocation(state, input).await?;
+    let grant = grant.ok_or_else(|| {
+        AppError::forbidden("ontology action execution requires a workflow TaskGrant")
+    })?;
+    let release_snapshot = packet
+        .replay_summary
+        .get("ontology_release")
+        .filter(|release| release.is_object())
+        .ok_or_else(|| AppError::forbidden("context packet has no pinned ontology release"))?;
+    let release_id = release_snapshot
+        .get("id")
+        .and_then(Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or_else(|| AppError::forbidden("pinned ontology release id is missing or invalid"))?;
+    let grant_release_id = grant
+        .approval_policy
+        .get("ontology_release_snapshot")
+        .and_then(|release| release.get("id"))
+        .and_then(Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok());
+    if grant_release_id != Some(release_id) {
+        return Err(AppError::forbidden(
+            "context packet ontology release is outside the TaskGrant authority",
+        ));
+    }
+    let release = state.get_ontology_release(release_id).await?;
+    if matches!(release.status.as_str(), "rolled_back" | "archived") {
+        return Err(AppError::forbidden(
+            "pinned ontology release has been revoked for new action proposals",
+        ));
+    }
+    if release_snapshot.get("version").and_then(Value::as_str) != Some(release.version.as_str())
+        || release_snapshot.get("domain_scope").and_then(Value::as_str)
+            != Some(release.domain_scope.as_str())
+    {
+        return Err(AppError::forbidden(
+            "pinned ontology release metadata does not match the release registry",
+        ));
+    }
+    let action_name = ontology_action_name_from_args(&input.args)?;
+    let (spec, contract_digest) = ontology_action_tool_spec_for_release(&release, action_name)?;
+    let parameters = input
+        .args
+        .get("parameters")
+        .cloned()
+        .unwrap_or_else(empty_json_object);
+    validate_ontology_action_parameters(&spec.input_schema, &parameters)?;
+    if !spec.read_only && spec.execution_mode != "proposal_only" {
+        return Err(AppError::forbidden(
+            "ontology action side effects are disabled unless the published contract is proposal_only",
+        ));
+    }
+    Ok(ValidatedOntologyActionProposal {
+        packet,
+        grant,
+        release,
+        spec,
+        contract_digest,
+        action_name: action_name.to_string(),
+        parameters,
+    })
+}
+
+impl ValidatedOntologyActionProposal {
+    fn prepare(self, input: &ExecuteTool, tool_call: &ToolCall) -> PreparedOntologyActionProposal {
+        let Self {
+            packet,
+            grant,
+            release,
+            spec,
+            contract_digest,
+            action_name,
+            parameters,
+        } = self;
+        let artifact = Artifact {
+            id: Uuid::new_v4(),
+            session_id: input.session_id,
+            artifact_type: "ontology_action_proposal".to_string(),
+            name: format!("{}-proposal.json", workflow_slug(&action_name)),
+            path: None,
+            content: json!({
+                "status": "draft",
+                "ontology_release_id": release.id,
+                "ontology_version": release.version,
+                "domain_scope": release.domain_scope,
+                "action": spec.name,
+                "action_contract_id": spec.id,
+                "contract_digest": contract_digest,
+                "target_object": spec.target_object,
+                "parameters": parameters,
+                "effects": spec.effects,
+                "executor": spec.executor,
+                "approval_required": spec.approval_required,
+                "transaction_profile": spec.transaction_profile,
+                "execution_mode": spec.execution_mode,
+                "commit_status": "blocked_pending_explicit_production_policy",
+                "context_packet_id": packet.id,
+                "task_grant_id": grant.id,
+            }),
+            created_at: Utc::now(),
+        };
+        let details = json!({
+            "artifact_id": artifact.id,
+            "ontology_release_id": release.id,
+            "action": spec.name,
+            "action_contract_id": spec.id,
+            "contract_digest": contract_digest,
+            "execution_mode": spec.execution_mode,
+            "declared_audit_event": spec.audit_event,
+            "tool_call_id": tool_call.id,
+            "task_grant_id": grant.id,
+            "context_packet_id": packet.id,
+        });
+        let result = json!({
+            "status": "proposal_created",
+            "artifact_id": artifact.id,
+            "ontology_release_id": release.id,
+            "action": spec.name,
+            "execution_mode": spec.execution_mode,
+            "approval_required": spec.approval_required,
+            "commit_status": "blocked_pending_explicit_production_policy",
+        });
+        PreparedOntologyActionProposal {
+            artifact,
+            details,
+            result,
         }
     }
 
-    async fn execute(
-        &self,
+    pub(crate) async fn execute(
+        self,
         state: &AppState,
         input: &ExecuteTool,
         tool_call: &ToolCall,
     ) -> Result<Value, AppError> {
-        let (packet, grant) = context_packet_and_grant_for_tool_invocation(state, input).await?;
-        let grant = grant.ok_or_else(|| {
-            AppError::forbidden("ontology action execution requires a workflow TaskGrant")
-        })?;
-        let release_snapshot = packet
-            .replay_summary
-            .get("ontology_release")
-            .filter(|release| release.is_object())
-            .ok_or_else(|| AppError::forbidden("context packet has no pinned ontology release"))?;
-        let release_id = release_snapshot
-            .get("id")
-            .and_then(Value::as_str)
-            .and_then(|value| Uuid::parse_str(value).ok())
-            .ok_or_else(|| {
-                AppError::forbidden("pinned ontology release id is missing or invalid")
-            })?;
-        let grant_release_id = grant
-            .approval_policy
-            .get("ontology_release_snapshot")
-            .and_then(|release| release.get("id"))
-            .and_then(Value::as_str)
-            .and_then(|value| Uuid::parse_str(value).ok());
-        if grant_release_id != Some(release_id) {
-            return Err(AppError::forbidden(
-                "context packet ontology release is outside the TaskGrant authority",
-            ));
-        }
-        let release = state.get_ontology_release(release_id).await?;
-        if matches!(release.status.as_str(), "rolled_back" | "archived") {
-            return Err(AppError::forbidden(
-                "pinned ontology release has been revoked for new action proposals",
-            ));
-        }
-        if release_snapshot.get("version").and_then(Value::as_str) != Some(release.version.as_str())
-            || release_snapshot.get("domain_scope").and_then(Value::as_str)
-                != Some(release.domain_scope.as_str())
-        {
-            return Err(AppError::forbidden(
-                "pinned ontology release metadata does not match the release registry",
-            ));
-        }
-        let action_name = input
-            .args
-            .get("action")
-            .or_else(|| input.args.get("action_name"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| AppError::bad_request("ontology action requires action"))?;
-        let (spec, contract_digest) = ontology_action_tool_spec_for_release(&release, action_name)?;
-        let parameters = input
-            .args
-            .get("parameters")
-            .cloned()
-            .unwrap_or_else(empty_json_object);
-        validate_ontology_action_parameters(&spec.input_schema, &parameters)?;
-        if !spec.read_only && spec.execution_mode != "proposal_only" {
-            return Err(AppError::forbidden(
-                "ontology action side effects are disabled unless the published contract is proposal_only",
-            ));
-        }
-
-        let artifact = state
-            .insert_artifact(Artifact {
-                id: Uuid::new_v4(),
-                session_id: input.session_id,
-                artifact_type: "ontology_action_proposal".to_string(),
-                name: format!("{}-proposal.json", workflow_slug(action_name)),
-                path: None,
-                content: json!({
-                    "status": "draft",
-                    "ontology_release_id": release.id,
-                    "ontology_version": release.version,
-                    "domain_scope": release.domain_scope,
-                    "action": spec.name,
-                    "action_contract_id": spec.id,
-                    "contract_digest": contract_digest,
-                    "target_object": spec.target_object,
-                    "parameters": parameters,
-                    "effects": spec.effects,
-                    "executor": spec.executor,
-                    "approval_required": spec.approval_required,
-                    "transaction_profile": spec.transaction_profile,
-                    "execution_mode": spec.execution_mode,
-                    "commit_status": "blocked_pending_explicit_production_policy",
-                    "context_packet_id": packet.id,
-                    "task_grant_id": grant.id,
-                }),
-                created_at: Utc::now(),
-            })
-            .await?;
+        let PreparedOntologyActionProposal {
+            artifact,
+            details,
+            result,
+        } = self.prepare(input, tool_call);
+        let artifact = state.insert_artifact(artifact).await?;
         state
             .append_event(
                 "system",
@@ -2721,18 +2784,6 @@ impl ToolExecutor for OntologyActionExecuteTool {
                 }),
             ))
             .await?;
-        let details = json!({
-            "artifact_id": artifact.id,
-            "ontology_release_id": release.id,
-            "action": spec.name,
-            "action_contract_id": spec.id,
-            "contract_digest": contract_digest,
-            "execution_mode": spec.execution_mode,
-            "declared_audit_event": spec.audit_event,
-            "tool_call_id": tool_call.id,
-            "task_grant_id": grant.id,
-            "context_packet_id": packet.id,
-        });
         state
             .append_event(
                 "system",
@@ -2753,15 +2804,49 @@ impl ToolExecutor for OntologyActionExecuteTool {
                 details,
             ))
             .await?;
-        Ok(json!({
-            "status": "proposal_created",
-            "artifact_id": artifact.id,
-            "ontology_release_id": release.id,
-            "action": spec.name,
-            "execution_mode": spec.execution_mode,
-            "approval_required": spec.approval_required,
-            "commit_status": "blocked_pending_explicit_production_policy",
-        }))
+        Ok(result)
+    }
+
+    pub(crate) async fn execute_approved(
+        self,
+        state: &AppState,
+        input: &ExecuteTool,
+        tool_call: &ToolCall,
+        job: &crate::execution_queue::ExecutionJob,
+        approval_id: Uuid,
+    ) -> Result<(), AppError> {
+        let PreparedOntologyActionProposal {
+            artifact,
+            details,
+            mut result,
+        } = self.prepare(input, tool_call);
+        result["approval"] = json!("approved");
+        state
+            .commit_approved_ontology_action_proposal(job, approval_id, artifact, details, result)
+            .await
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for OntologyActionExecuteTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: "ontology.action.execute",
+            risk: "medium",
+            description: "Validate a pinned ontology action contract and create an auditable proposal",
+        }
+    }
+
+    async fn execute(
+        &self,
+        state: &AppState,
+        input: &ExecuteTool,
+        tool_call: &ToolCall,
+    ) -> Result<Value, AppError> {
+        validate_ontology_action_proposal(state, input)
+            .await?
+            .execute(state, input, tool_call)
+            .await
     }
 }
 
@@ -2772,7 +2857,9 @@ pub(crate) fn validate_ontology_action_parameters(
     let parameters = parameters
         .as_object()
         .ok_or_else(|| AppError::bad_request("ontology action parameters must be a JSON object"))?;
-    if input_schema.get("type").and_then(Value::as_str) == Some("object") {
+    if input_schema.get("type").and_then(Value::as_str) == Some("object")
+        || (input_schema.get("type").is_none() && input_schema.get("properties").is_some())
+    {
         let properties = input_schema
             .get("properties")
             .and_then(Value::as_object)
@@ -2786,9 +2873,13 @@ pub(crate) fn validate_ontology_action_parameters(
                 )));
             }
         }
+        let mut normalized_schema = input_schema.clone();
+        if normalized_schema.get("type").is_none() {
+            normalized_schema["type"] = json!("object");
+        }
         return validate_handoff_payload_schema(
             &Value::Object(parameters.clone()),
-            Some(input_schema),
+            Some(&normalized_schema),
         );
     }
     let declarations = input_schema.as_object().ok_or_else(|| {
@@ -3454,34 +3545,22 @@ pub(crate) fn native_connector_target_binding(
     Ok(Value::Object(binding))
 }
 
-pub(crate) async fn refresh_tool_call_commit_binding_if_required(
-    state: &AppState,
-    tool_call: ToolCall,
-) -> Result<ToolCall, AppError> {
-    let Some(task_grant_id) = tool_call.task_grant_id else {
-        return Ok(tool_call);
-    };
-    let grant = state.get_task_grant(task_grant_id).await?;
-    if !task_grant_requires_approval_commit_token(&grant, &tool_call.tool_name) {
-        return Ok(tool_call);
-    }
-    let binding = approval_commit_binding_for_args(&tool_call.tool_name, &tool_call.args)?;
-    state
-        .update_tool_call_commit_binding(
-            tool_call.id,
-            Some(binding.normalized_args_hash),
-            binding.target_binding,
-        )
-        .await
-}
-
 pub(crate) async fn execute_tool_invocation(
     state: &AppState,
     name: &str,
     input: ExecuteTool,
     origin: ToolInvocationOrigin,
 ) -> Result<Value, AppError> {
-    let task_grant = enforce_task_grant_for_tool_invocation(state, name, &input).await?;
+    let session = state.get_session(input.session_id).await?;
+    if matches!(
+        session.status,
+        SessionStatus::Terminated | SessionStatus::Failed
+    ) {
+        return Err(AppError::bad_request(
+            "terminal session cannot accept new tool calls",
+        ));
+    }
+    let task_grant = preview_task_grant_for_tool_invocation(state, name, &input).await?;
     let agent_version = state.agent_version_for_session(input.session_id).await?;
     let policy = state.policy_for_session(input.session_id).await;
     let mut policy_decision =
@@ -3495,7 +3574,6 @@ pub(crate) async fn execute_tool_invocation(
             "commit_write connector calls require ApprovalCommitToken exact digest binding"
                 .to_string();
     }
-    let session = state.get_session(input.session_id).await?;
     let agent = state.get_agent(session.agent_id).await?;
     let semantic_context_gate = evaluate_semantic_context_gate(
         state,
@@ -3526,69 +3604,65 @@ pub(crate) async fn execute_tool_invocation(
             "target_binding": binding.target_binding
         });
     }
-    let call_event = state
-        .append_event(
-            "tool",
-            None,
-            input.session_id,
-            "tool.call",
-            json!({"tool": name, "args": input.args.clone(), "agent_version_id": agent_version.id, "agent_version": agent_version.version}),
-        )
-        .await?;
-    state
-        .append_event(
-            "agent",
-            Some(call_event.id),
-            input.session_id,
-            "agent.tool_use",
-            json!({
-                "event_id": call_event.id,
-                "tool": name,
-                "args": input.args.clone(),
-                "agent_version_id": agent_version.id,
-                "agent_version": agent_version.version
-            }),
-        )
-        .await?;
-    let tool_call = state
-        .insert_tool_call(ToolCall {
-            id: Uuid::new_v4(),
-            session_id: input.session_id,
-            event_id: Some(call_event.id),
-            tool_name: name.to_string(),
-            args: input.args.clone(),
-            task_grant_id: task_grant.as_ref().map(|grant| grant.id),
-            normalized_args_hash: commit_binding
-                .as_ref()
-                .map(|binding| binding.normalized_args_hash.clone()),
-            target_binding: commit_binding
-                .as_ref()
-                .map(|binding| binding.target_binding.clone())
-                .unwrap_or_else(empty_json_object),
-            status: if semantic_context_gate_blocked {
-                "denied"
-            } else {
-                match policy_decision.decision {
-                    "allowed" => "running",
-                    "requires_approval" => "waiting_approval",
-                    "denied" => "denied",
-                    _ => "denied",
-                }
+    let tool_call = ToolCall {
+        id: Uuid::new_v4(),
+        session_id: input.session_id,
+        event_id: Some(Uuid::new_v4()),
+        tool_name: name.to_string(),
+        args: input.args.clone(),
+        task_grant_id: task_grant.as_ref().map(|grant| grant.id),
+        normalized_args_hash: commit_binding
+            .as_ref()
+            .map(|binding| binding.normalized_args_hash.clone()),
+        target_binding: commit_binding
+            .as_ref()
+            .map(|binding| binding.target_binding.clone())
+            .unwrap_or_else(empty_json_object),
+        status: if semantic_context_gate_blocked {
+            "denied"
+        } else {
+            match policy_decision.decision {
+                "allowed" => "running",
+                "requires_approval" => "waiting_approval",
+                "denied" => "denied",
+                _ => "denied",
             }
-            .to_string(),
-            risk_level: policy_decision.risk_level.clone(),
-            policy_decision: policy_decision_payload,
-            result: None,
-            error: None,
-            started_at: if policy_decision.decision == "allowed" && !semantic_context_gate_blocked {
-                Some(Utc::now())
-            } else {
-                None
-            },
-            completed_at: None,
-            created_at: Utc::now(),
-        })
-        .await?;
+        }
+        .to_string(),
+        risk_level: policy_decision.risk_level.clone(),
+        policy_decision: policy_decision_payload,
+        result: None,
+        error: None,
+        started_at: if policy_decision.decision == "allowed" && !semantic_context_gate_blocked {
+            Some(Utc::now())
+        } else {
+            None
+        },
+        completed_at: None,
+        created_at: Utc::now(),
+    };
+    let (tool_call, task_grant) = match state
+        .commit_tool_invocation_start(tool_call, agent_version.id, agent_version.version)
+        .await
+    {
+        Ok(committed) => committed,
+        Err(error) => {
+            if error.message.starts_with("task grant")
+                && let Some(grant) = task_grant.as_ref()
+            {
+                record_task_grant_denied(
+                    state,
+                    input.session_id,
+                    Some(grant),
+                    Some(grant.workflow_run_id),
+                    name,
+                    &error.message,
+                )
+                .await?;
+            }
+            return Err(error);
+        }
+    };
 
     if let Some(gate) = semantic_context_gate
         .as_ref()
@@ -3817,57 +3891,15 @@ pub(crate) async fn execute_tool_invocation(
     } else {
         "completed"
     };
-    let event_type = if status == "waiting_approval" {
-        "policy.requires_approval"
-    } else {
-        "tool.result"
-    };
     let result_origin = match origin {
         ToolInvocationOrigin::ManualRoute => "manual",
         ToolInvocationOrigin::SessionLoop => "session_loop",
     };
     let result_event = state
-        .append_event(
-            if status == "waiting_approval" {
-                "system"
-            } else {
-                "tool"
-            },
-            Some(tool_call.id),
-            input.session_id,
-            event_type,
-            json!({"tool_call_id": tool_call.id, "tool": name, "origin": result_origin, "content": result}),
-        )
+        .commit_tool_invocation_result(tool_call.id, status, result.clone(), result_origin)
         .await?;
     if status == "completed" && origin == ToolInvocationOrigin::ManualRoute {
         project_session_event_to_loop(state, &result_event).await?;
     }
-    state
-        .append_event(
-            "agent",
-            Some(tool_call.id),
-            input.session_id,
-            "agent.tool_result",
-            json!({"tool_call_id": tool_call.id, "tool": name, "status": status, "content": result}),
-        )
-        .await?;
-    state
-        .update_tool_call_status(tool_call.id, status, Some(result.clone()), None)
-        .await?;
-    state
-        .append_audit_log(new_audit_log(
-            Some(input.session_id),
-            "tool",
-            Some(tool_call.id),
-            if status == "waiting_approval" {
-                "tool.waiting_approval"
-            } else {
-                "tool.completed"
-            },
-            "tool_call",
-            Some(tool_call.id),
-            json!({"tool": name, "risk_level": policy_decision.risk_level, "status": status}),
-        ))
-        .await?;
     Ok(result)
 }

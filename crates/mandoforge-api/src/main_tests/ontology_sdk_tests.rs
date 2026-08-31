@@ -93,6 +93,50 @@ fn ontology_sdk_catalog_rejects_duplicate_object_proposals() {
 }
 
 #[test]
+fn ontology_sdk_catalog_rejects_unresolved_primary_keys_and_unsupported_property_types() {
+    let unresolved_primary_key = proposal(
+        "object",
+        "Order",
+        json!({
+            "object_type": "Order",
+            "primary_key": "missing_id",
+            "properties": [{"name": "id", "type": "uuid"}]
+        }),
+    );
+    let error = build_ontology_release_catalog("commerce", &[unresolved_primary_key], None)
+        .expect_err("explicit primary key must resolve to a property");
+    assert!(error.message.contains("primary key missing_id"));
+
+    let unsupported_property = proposal(
+        "object",
+        "Order",
+        json!({
+            "object_type": "Order",
+            "properties": [{"name": "total", "type": "money"}]
+        }),
+    );
+    let error = build_ontology_release_catalog("commerce", &[unsupported_property], None)
+        .expect_err("unsupported property types must fail the catalog gate");
+    assert!(error.message.contains("property type money is unsupported"));
+}
+
+#[test]
+fn ontology_action_parameters_accept_object_schema_without_explicit_type() {
+    let schema = json!({
+        "properties": {
+            "order_id": {"type": "string"},
+            "amount": {"type": "number"}
+        },
+        "required": ["order_id"]
+    });
+    validate_ontology_action_parameters(&schema, &json!({"order_id": "order-1"}))
+        .expect("type-omitted object schema should match generated SDK semantics");
+    let error = validate_ontology_action_parameters(&schema, &json!({"amount": 12.5}))
+        .expect_err("required properties must still be enforced");
+    assert!(error.message.contains("missing required field order_id"));
+}
+
+#[test]
 fn ontology_sdk_catalog_requires_action_target_in_object_catalog() {
     let action = proposal(
         "action",
@@ -246,6 +290,7 @@ fn ontology_sdk_catalog_inherits_parent_api_names() {
         json!({
             "object_type": "Customer",
             "api_name": "Customer",
+            "primary_key": "display_name",
             "properties": [{"name": "display_name", "api_name": "displayName", "type": "string"}]
         }),
     );
@@ -288,6 +333,19 @@ fn ontology_sdk_catalog_inherits_parent_api_names() {
         child_catalog.objects[0].properties[0].stable_key,
         "object:Customer:property:display_name"
     );
+    assert_eq!(
+        child_catalog.objects[0].primary_key_api_name.as_deref(),
+        Some("displayName")
+    );
+
+    let invalid_primary_key = proposal(
+        "object",
+        "Customer",
+        json!({"object_type": "Customer", "primary_key": "missing_id"}),
+    );
+    let error = build_ontology_release_catalog("commerce", &[invalid_primary_key], Some(&parent))
+        .expect_err("an explicit child primary key must not silently retain the parent key");
+    assert!(error.message.contains("primary key missing_id"));
 
     let renamed_child = proposal(
         "object",

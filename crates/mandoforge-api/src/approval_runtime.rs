@@ -22,14 +22,17 @@ pub(crate) async fn decide_approval(
         expire_approval_record(&state, approval_id).await?;
         return Err(AppError::bad_request("approval expired"));
     }
+    if status == "rejected" {
+        let (updated, _, events) = state
+            .decline_approval_and_tool_call(approval_id, status, "user")
+            .await?;
+        project_declined_approval_events(&state, &events).await?;
+        return Ok(Json(updated));
+    }
     let updated = state.decide_approval(approval_id, status).await?;
     if status == "approved" {
         maybe_issue_approval_commit_token(&state, &updated, decider_subject.as_deref()).await?;
     }
-    let decision_result = match status {
-        "rejected" => record_rejected_approval_tool_result(&state, &updated).await?,
-        _ => None,
-    };
     let decision_event = state
         .append_event(
             "user",
@@ -60,8 +63,6 @@ pub(crate) async fn decide_approval(
                 .await?;
             }
         }
-    } else if status == "rejected" {
-        project_session_event_to_loop(&state, &decision_event).await?;
     }
     state
         .append_audit_log(new_audit_log(
@@ -74,7 +75,6 @@ pub(crate) async fn decide_approval(
             json!({
                 "tool_call_id": updated.tool_call_id,
                 "decision": status,
-                "tool_result_status": decision_result.map(|tool_call| tool_call.status),
             }),
         ))
         .await?;
@@ -278,68 +278,19 @@ pub(crate) async fn validate_approval_commit_token_for_tool_call(
     Ok(token)
 }
 
-async fn record_rejected_approval_tool_result(
+async fn project_declined_approval_events(
     state: &AppState,
-    approval: &Approval,
-) -> Result<Option<ToolCall>, AppError> {
-    let Some(tool_call_id) = approval.tool_call_id else {
-        return Ok(None);
-    };
-    let tool_call = state.get_tool_call(tool_call_id).await?;
-    let result = json!({
-        "status": "denied",
-        "approval": "rejected",
-        "approval_id": approval.id,
-        "reason": approval.reason,
-    });
-    let tool_result_event = state
-        .append_event(
-            "tool",
-            Some(tool_call.id),
-            approval.session_id,
-            "tool.result",
-            json!({
-                "tool_call_id": tool_call.id,
-                "tool": tool_call.tool_name,
-                "content": result,
-            }),
-        )
-        .await?;
-    project_session_event_to_loop(state, &tool_result_event).await?;
-    state
-        .append_event(
-            "agent",
-            Some(tool_call.id),
-            approval.session_id,
-            "agent.tool_result",
-            json!({
-                "tool_call_id": tool_call.id,
-                "tool": tool_call.tool_name,
-                "status": "denied",
-                "content": result,
-            }),
-        )
-        .await?;
-    let updated = state
-        .update_tool_call_status(tool_call.id, "denied", Some(result.clone()), None)
-        .await?;
-    state
-        .append_audit_log(new_audit_log(
-            Some(approval.session_id),
-            "tool",
-            Some(tool_call.id),
-            "tool.denied",
-            "tool_call",
-            Some(tool_call.id),
-            json!({
-                "tool": tool_call.tool_name,
-                "approval_id": approval.id,
-                "decision": "rejected",
-                "status": "denied",
-            }),
-        ))
-        .await?;
-    Ok(Some(updated))
+    events: &[SessionEvent],
+) -> Result<(), AppError> {
+    for event in events {
+        if let Err(error) = project_session_event_to_loop(state, event).await {
+            if session_accepts_worker_execution(state, event.session_id).await? {
+                return Err(error);
+            }
+            return Ok(());
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn approval_is_expired(approval: &Approval) -> bool {
@@ -389,30 +340,13 @@ pub(crate) async fn expire_approval_record(
     approval_id: Uuid,
 ) -> Result<Approval, AppError> {
     let approval = state.get_approval(approval_id).await?;
-    if approval.status != "pending" {
+    if !matches!(approval.status.as_str(), "pending" | "expired") {
         return Ok(approval);
     }
-    let updated = state.decide_approval(approval_id, "expired").await?;
-    state
-        .append_event(
-            "system",
-            Some(approval_id),
-            updated.session_id,
-            "approval.expired",
-            json!({"approval_id": approval_id, "decision": "expired", "expires_at": updated.expires_at}),
-        )
+    let (updated, _, events) = state
+        .decline_approval_and_tool_call(approval_id, "expired", "system")
         .await?;
-    state
-        .append_audit_log(new_audit_log(
-            Some(updated.session_id),
-            "system",
-            Some(approval_id),
-            "approval.expired",
-            "approval",
-            Some(approval_id),
-            json!({"tool_call_id": updated.tool_call_id, "decision": "expired", "expires_at": updated.expires_at}),
-        ))
-        .await?;
+    project_declined_approval_events(state, &events).await?;
     Ok(updated)
 }
 
@@ -575,15 +509,23 @@ pub(crate) async fn execute_due_approval_escalations(
     let mut skipped_count = 0;
     let mut notification_deliveries = Vec::new();
     let rules = state.list_approval_escalation_rules().await?;
-    for approval in state
-        .list_approvals()
-        .await?
-        .into_iter()
-        .filter(|approval| approval.status == "pending")
-    {
+    for approval in state.list_approvals_for_due_run().await? {
+        if approval.status == "expired" {
+            let updated = expire_approval_record(state, approval.id).await?;
+            if updated.status == "expired" {
+                expired_count += 1;
+            } else {
+                skipped_count += 1;
+            }
+            continue;
+        }
         if approval_is_expired_at(&approval, checked_at) {
-            expire_approval_record(state, approval.id).await?;
-            expired_count += 1;
+            let updated = expire_approval_record(state, approval.id).await?;
+            if updated.status == "expired" {
+                expired_count += 1;
+            } else {
+                skipped_count += 1;
+            }
             continue;
         }
         let Some(rule) = next_due_escalation_rule(&approval, &rules, checked_at) else {

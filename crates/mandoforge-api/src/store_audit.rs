@@ -187,7 +187,7 @@ impl AppState {
     }
 }
 
-fn validate_idempotent_audit_identity(
+pub(crate) fn validate_idempotent_audit_identity(
     existing: &AuditLog,
     requested: &AuditLog,
 ) -> Result<(), AppError> {

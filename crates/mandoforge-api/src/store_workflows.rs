@@ -14,7 +14,7 @@ use crate::{
     WorkflowStepRun, WorkflowTransition, WorkflowTransitionFilter,
 };
 
-const TASK_GRANT_COLUMNS: &str = "id, workflow_run_id, workflow_step_run_id, session_id, parent_grant_id, source_event_id, source_handoff_id, issuer_subject, grantee_agent_id, grantee_session_id, agent_class, objective, risk_level, status, expires_at, max_turns, max_tool_calls, max_runtime_seconds, max_cost_usd_micros, turns_used, tool_calls_used, cost_usd_micros_used, semantic_scopes, memory_scope, tool_scope, connector_scope, approval_policy, external_effects, context_packet_id, policy_revision_id, immutable_args_hash, audit_trace_id, created_at, updated_at";
+pub(crate) const TASK_GRANT_COLUMNS: &str = "id, workflow_run_id, workflow_step_run_id, session_id, parent_grant_id, source_event_id, source_handoff_id, issuer_subject, grantee_agent_id, grantee_session_id, agent_class, objective, risk_level, status, expires_at, max_turns, max_tool_calls, max_runtime_seconds, max_cost_usd_micros, turns_used, tool_calls_used, cost_usd_micros_used, semantic_scopes, memory_scope, tool_scope, connector_scope, approval_policy, external_effects, context_packet_id, policy_revision_id, immutable_args_hash, audit_trace_id, created_at, updated_at";
 
 async fn insert_workflow_step_run<'e, E>(
     executor: E,
@@ -117,6 +117,13 @@ fn task_grant_reservation_denial(
         }
         _ => None,
     }
+}
+
+pub(crate) fn task_grant_tool_call_reservation_denial(
+    grant: &TaskGrant,
+    now: DateTime<Utc>,
+) -> Option<(&'static str, bool)> {
+    task_grant_reservation_denial(grant, TaskGrantReservation::ToolCall, now)
 }
 
 impl AppState {

@@ -32,6 +32,7 @@ use crate::{
     record_remote_computer_job_assignment_event_for_execution_claim,
     remote_computer_runtime_identity, required_remote_computer_runtime_identity,
     resolve_mcp_runtime_secret_refs, revalidate_task_grant_for_tool_invocation,
+    validate_ontology_action_proposal,
 };
 
 const DEFAULT_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
@@ -566,6 +567,9 @@ pub(crate) async fn run_claimed_execution_job(
         ("mcp.call", _, _) => {
             execute_approved_mcp_call(state, &approval, &tool_call, &mut commit).await
         }
+        ("ontology.action.execute", _, _) => {
+            execute_approved_ontology_action(state, &approval, &tool_call, &mut commit).await
+        }
         _ => execute_approved_native_connector(state, &approval, &tool_call, &mut commit).await,
     };
     match result {
@@ -583,6 +587,16 @@ pub(crate) async fn run_claimed_execution_job(
         }
         Err(error) => {
             if let Some(executing) = commit.started() {
+                if error.execution_retry_safe {
+                    return retry_or_fail_started_execution_job(
+                        state,
+                        executing,
+                        remote_computer_assignment.as_ref(),
+                        error,
+                        json!({"stage": "tool_precommit_retry"}),
+                    )
+                    .await;
+                }
                 let durable_outcome = if error.execution_outcome_known {
                     record_known_tool_failure_if_missing(state, executing, &error).await?
                 } else {
@@ -955,6 +969,42 @@ async fn execute_approved_native_connector(
     Err(AppError::bad_request(format!(
         "native connector has no registered executor: {connector_id}"
     )))
+}
+
+async fn execute_approved_ontology_action(
+    state: &AppState,
+    approval: &Approval,
+    tool_call: &ToolCall,
+    commit: &mut ExecutionCommit<'_>,
+) -> Result<(), AppError> {
+    let input = ExecuteTool {
+        session_id: approval.session_id,
+        task_grant_id: tool_call.task_grant_id,
+        args: tool_call.args.clone(),
+    };
+    let proposal = match validate_ontology_action_proposal(state, &input).await {
+        Ok(proposal) => proposal,
+        Err(error)
+            if matches!(
+                error.status,
+                StatusCode::BAD_REQUEST | StatusCode::FORBIDDEN | StatusCode::NOT_FOUND
+            ) =>
+        {
+            commit.begin().await?;
+            return Err(error.with_known_execution_outcome());
+        }
+        Err(error) => return Err(error),
+    };
+    commit.begin().await?;
+    proposal
+        .execute_approved(
+            state,
+            &input,
+            tool_call,
+            commit.started().expect("execution commit started"),
+            approval.id,
+        )
+        .await
 }
 
 async fn execute_approved_ecommerce_native_connector(
@@ -1524,7 +1574,7 @@ async fn record_execution_failure_tail(
     Ok(())
 }
 
-fn execution_attempt_event_id(job: &ExecutionJob, event_type: &str) -> Uuid {
+pub(crate) fn execution_attempt_event_id(job: &ExecutionJob, event_type: &str) -> Uuid {
     let attempt_count = job.attempt_count.to_string();
     deterministic_record_id(
         job.id,

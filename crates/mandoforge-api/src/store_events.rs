@@ -19,7 +19,7 @@ use crate::{AppError, AppState, SessionEvent};
 
 const SESSION_EVENT_BROADCAST_CAPACITY: usize = 1024;
 const SESSION_EVENT_CATCH_UP_INTERVAL: Duration = Duration::from_secs(15);
-const POSTGRES_SESSION_EVENT_CHANNEL: &str = "mf_session_events";
+pub(crate) const POSTGRES_SESSION_EVENT_CHANNEL: &str = "mf_session_events";
 
 #[derive(Clone)]
 struct ExecutionClaimFence {
@@ -125,7 +125,7 @@ fn publish_session_event(event: &SessionEvent) {
     let _ = session_event_broadcaster().send(event.clone());
 }
 
-fn session_event_notify_payload(tenant_id: Uuid, event: &SessionEvent) -> String {
+pub(crate) fn session_event_notify_payload(tenant_id: Uuid, event: &SessionEvent) -> String {
     format!("{}:{}:{}", tenant_id, event.session_id, event.seq)
 }
 
@@ -492,15 +492,22 @@ impl AppState {
                 event
             }
         };
-        self.emit_telemetry_event(&event).await;
-        if matches!(&self.store, StoreBackend::Memory(_)) {
-            publish_session_event(&event);
-        }
+        self.emit_committed_session_events(std::slice::from_ref(&event))
+            .await;
         Ok(event)
+    }
+
+    pub(crate) async fn emit_committed_session_events(&self, events: &[SessionEvent]) {
+        for event in events {
+            self.emit_telemetry_event(event).await;
+            if matches!(&self.store, StoreBackend::Memory(_)) {
+                publish_session_event(event);
+            }
+        }
     }
 }
 
-fn validate_idempotent_event_identity(
+pub(crate) fn validate_idempotent_event_identity(
     event: &SessionEvent,
     actor_type: &str,
     actor_id: Option<Uuid>,

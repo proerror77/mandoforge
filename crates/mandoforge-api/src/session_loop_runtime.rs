@@ -108,7 +108,7 @@ pub(crate) async fn build_harness_context(
                     .get("content")
                     .and_then(|content| content.get("approval"))
                     .and_then(Value::as_str)
-                    == Some("rejected")
+                    .is_some_and(|decision| matches!(decision, "rejected" | "expired"))
         })
         .count();
     let manual_tool_result_count = context_events
@@ -399,94 +399,67 @@ pub(crate) async fn apply_provider_completion(
     status: &str,
     summary: &str,
 ) -> Result<Session, AppError> {
-    let args = json!({"status": status, "summary": summary});
-    let call_event = state
-        .append_event(
-            "tool",
-            None,
-            session_id,
-            "tool.call",
-            json!({"tool": "complete_task", "args": args}),
-        )
-        .await?;
-    let now = Utc::now();
-    let tool_call = state
-        .insert_tool_call(ToolCall {
-            id: Uuid::new_v4(),
-            session_id,
-            event_id: Some(call_event.id),
-            tool_name: "complete_task".to_string(),
-            args: args.clone(),
-            task_grant_id,
-            normalized_args_hash: None,
-            target_binding: empty_json_object(),
-            status: "completed".to_string(),
-            risk_level: "low".to_string(),
-            policy_decision: json!({
-                "decision": "allowed",
-                "reason": "terminal provider control tool",
-            }),
-            result: Some(args.clone()),
-            error: None,
-            started_at: Some(now),
-            completed_at: Some(now),
-            created_at: now,
-        })
-        .await?;
-    state
-        .append_event(
-            "agent",
-            Some(call_event.id),
-            session_id,
-            "agent.tool_use",
-            json!({"event_id": call_event.id, "tool_call_id": tool_call.id, "tool": "complete_task", "args": args}),
-        )
-        .await?;
-    state
-        .append_event(
-            "tool",
-            Some(tool_call.id),
-            session_id,
-            "tool.result",
-            json!({"tool_call_id": tool_call.id, "tool": "complete_task", "origin": "session_loop", "content": args}),
-        )
-        .await?;
-    let event_type = if status == "completed" {
-        "session.goal.completed"
+    let session_status = if status == "completed" {
+        SessionStatus::Terminated
     } else {
-        "session.goal.blocked"
+        SessionStatus::RequiresAction
     };
-    state
-        .append_event(
-            "agent",
-            None,
-            session_id,
-            event_type,
-            json!({"objective": summary, "summary": summary, "reason": summary}),
-        )
-        .await?;
-    state
-        .append_audit_log(new_audit_log(
-            Some(session_id),
-            "agent",
-            None,
-            event_type,
-            "session",
-            Some(session_id),
-            json!({"status": status, "summary": summary}),
-        ))
-        .await?;
-    set_managed_session_status(
-        state,
+    let thread = ensure_primary_session_thread(state, session_id).await?;
+    let thread_status = managed_thread_status_for_session(&session_status);
+    let args = json!({"status": status, "summary": summary});
+    let now = Utc::now();
+    let tool_call = ToolCall {
+        id: Uuid::new_v4(),
         session_id,
-        if status == "completed" {
-            SessionStatus::Terminated
-        } else {
-            SessionStatus::RequiresAction
-        },
-        summary,
-    )
-    .await
+        event_id: Some(Uuid::new_v4()),
+        tool_name: "complete_task".to_string(),
+        args: args.clone(),
+        task_grant_id,
+        normalized_args_hash: None,
+        target_binding: empty_json_object(),
+        status: "completed".to_string(),
+        risk_level: "low".to_string(),
+        policy_decision: json!({
+            "decision": "allowed",
+            "reason": "terminal provider control tool",
+        }),
+        result: Some(args.clone()),
+        error: None,
+        started_at: Some(now),
+        completed_at: Some(now),
+        created_at: now,
+    };
+    let committed = state
+        .commit_provider_completion(
+            tool_call,
+            thread.id,
+            session_status,
+            thread_status,
+            status,
+            summary,
+        )
+        .await;
+    let (_, session, events) = match committed {
+        Ok(committed) => committed,
+        Err(error) if error.status == axum::http::StatusCode::CONFLICT => {
+            return set_managed_session_status(
+                state,
+                session_id,
+                SessionStatus::RequiresAction,
+                &error.message,
+            )
+            .await;
+        }
+        Err(error) => return Err(error),
+    };
+    state.emit_committed_session_events(&events).await;
+    if matches!(
+        session.status,
+        SessionStatus::Terminated | SessionStatus::Failed
+    ) {
+        cleanup_remote_computer_session_runtimes(state, session.id, summary).await?;
+    }
+    Ok(session)
 }
 
 pub(crate) async fn run_provider_harness(
