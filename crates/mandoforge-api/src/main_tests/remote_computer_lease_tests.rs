@@ -333,6 +333,23 @@ async fn on_demand_cleanup_failure_keeps_lease_and_record_retryable() {
     let _mutation = EnvVarGuard::set("MANDOFORGE_REMOTE_COMPUTER_MUTATION_ENABLED", "false");
     let _live = EnvVarGuard::set("MANDOFORGE_REMOTE_COMPUTER_LIVE_MUTATION_ENABLED", "false");
     let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "runtime cleanup retry evidence".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create cleanup session");
     let identity = on_demand_test_identity("retryable-claim", "retryable-pod");
     let computer = state
         .create_remote_computer(CreateRemoteComputer {
@@ -354,7 +371,7 @@ async fn on_demand_cleanup_failure_keeps_lease_and_record_retryable() {
         .create_remote_computer_lease(
             computer.id,
             CreateRemoteComputerLease {
-                session_id: None,
+                session_id: Some(session.id),
                 worker_id: Some("cleanup-worker".to_string()),
                 lease_seconds: Some(60),
                 metadata: Some(json!({"on_demand": true})),
@@ -399,10 +416,56 @@ async fn on_demand_cleanup_failure_keeps_lease_and_record_retryable() {
         persisted_lease.metadata["runtime_cleanup_retry_assignment_status"],
         json!("released")
     );
+    assert_eq!(
+        persisted_lease.metadata
+            [crate::remote_computer_runtime::REMOTE_COMPUTER_RUNTIME_CLEANUP_RETRY_GENERATION_METADATA_KEY],
+        json!(1)
+    );
     assert!(
         persisted_lease.metadata["runtime_cleanup_assignment_id"].is_null(),
         "cleanup without an assignment must preserve an explicit null binding"
     );
+    cleanup_remote_computer_lease_runtime(
+        &state,
+        &persisted_lease,
+        None,
+        "test_cleanup_failure",
+        "released",
+    )
+    .await
+    .expect_err("a second failed deletion must remain retryable");
+    let second_retry = state
+        .list_remote_computer_leases()
+        .await
+        .expect("list leases after second retry")
+        .into_iter()
+        .find(|candidate| candidate.id == lease.id)
+        .expect("second retry lease");
+    assert_eq!(
+        second_retry.metadata
+            [crate::remote_computer_runtime::REMOTE_COMPUTER_RUNTIME_CLEANUP_RETRY_GENERATION_METADATA_KEY],
+        json!(2)
+    );
+    let failed_events = state
+        .list_events(session.id)
+        .await
+        .expect("cleanup failure events")
+        .into_iter()
+        .filter(|event| event.event_type == "remote_computer.runtime_cleanup_failed")
+        .collect::<Vec<_>>();
+    assert_eq!(failed_events.len(), 2);
+    assert_ne!(failed_events[0].id, failed_events[1].id);
+    assert_eq!(failed_events[0].payload["retry_generation"], json!(1));
+    assert_eq!(failed_events[1].payload["retry_generation"], json!(2));
+    let failed_audits = state
+        .list_audit_logs(Some(session.id))
+        .await
+        .expect("cleanup failure audits")
+        .into_iter()
+        .filter(|audit| audit.action == "remote_computer.runtime_cleanup_failed")
+        .collect::<Vec<_>>();
+    assert_eq!(failed_audits.len(), 2);
+    assert_ne!(failed_audits[0].id, failed_audits[1].id);
     let heartbeat_error = state
         .update_remote_computer_lease_status(
             lease.id,

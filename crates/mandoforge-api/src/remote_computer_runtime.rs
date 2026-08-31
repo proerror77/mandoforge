@@ -19,6 +19,8 @@ use crate::{
 };
 
 pub(crate) const REMOTE_COMPUTER_RUNTIME_IDENTITY_METADATA_KEY: &str = "runtime_identity";
+pub(crate) const REMOTE_COMPUTER_RUNTIME_CLEANUP_RETRY_GENERATION_METADATA_KEY: &str =
+    "runtime_cleanup_retry_generation";
 const REMOTE_COMPUTER_RUNTIME_IDENTITY_VERSION: &str = "v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -394,6 +396,13 @@ pub(crate) async fn cleanup_remote_computer_lease_runtime(
             "substrate": identity.substrate,
         });
         if response.status != "mutation_ok" {
+            let retry_generation = lease
+                .metadata
+                .get(REMOTE_COMPUTER_RUNTIME_CLEANUP_RETRY_GENERATION_METADATA_KEY)
+                .and_then(Value::as_u64)
+                .unwrap_or_default()
+                .checked_add(1)
+                .ok_or_else(|| AppError::internal("runtime cleanup retry generation overflow"))?;
             let mut retry_metadata = merge_runtime_cleanup_metadata(
                 &lease.metadata,
                 json!({
@@ -405,6 +414,8 @@ pub(crate) async fn cleanup_remote_computer_lease_runtime(
                 }),
             );
             retry_metadata[REMOTE_COMPUTER_RUNTIME_CLEANUP_RETRY_MARKER] = Value::Bool(true);
+            retry_metadata[REMOTE_COMPUTER_RUNTIME_CLEANUP_RETRY_GENERATION_METADATA_KEY] =
+                json!(retry_generation);
             retry_metadata
                 .as_object_mut()
                 .expect("merged cleanup metadata is an object")
@@ -709,7 +720,18 @@ async fn record_remote_computer_runtime_cleanup_evidence(
     } else {
         "remote_computer.runtime_cleanup_failed"
     };
-    let details = json!({
+    let retry_generation = if status == "failed" {
+        Some(
+            lease
+                .metadata
+                .get(REMOTE_COMPUTER_RUNTIME_CLEANUP_RETRY_GENERATION_METADATA_KEY)
+                .and_then(Value::as_u64)
+                .ok_or_else(|| AppError::internal("runtime cleanup retry generation is missing"))?,
+        )
+    } else {
+        None
+    };
+    let mut details = json!({
         "lease_id": lease.id,
         "remote_computer_id": lease.remote_computer_id,
         "assignment_id": assignment.map(|assignment| assignment.id),
@@ -718,8 +740,12 @@ async fn record_remote_computer_runtime_cleanup_evidence(
         "reason": reason,
         "runtime": runtime,
     });
+    if let Some(retry_generation) = retry_generation {
+        details["retry_generation"] = json!(retry_generation);
+    }
+    let event_id =
+        remote_computer_runtime_cleanup_event_id(lease.id, reason, status, retry_generation);
     if let Some(session_id) = lease.session_id {
-        let event_id = remote_computer_runtime_cleanup_event_id(lease.id, reason, status);
         state
             .append_event_once(
                 event_id,
@@ -731,7 +757,6 @@ async fn record_remote_computer_runtime_cleanup_evidence(
             )
             .await?;
     }
-    let event_id = remote_computer_runtime_cleanup_event_id(lease.id, reason, status);
     let mut audit = new_audit_log(
         lease.session_id,
         "system",
@@ -758,7 +783,15 @@ fn remote_computer_runtime_cleanup_event_id(
     lease_id: uuid::Uuid,
     reason: &str,
     status: &str,
+    retry_generation: Option<u64>,
 ) -> uuid::Uuid {
+    if let Some(retry_generation) = retry_generation {
+        return deterministic_record_id(
+            lease_id,
+            "remote-computer-runtime-cleanup-event",
+            &[reason, status, &retry_generation.to_string()],
+        );
+    }
     deterministic_record_id(
         lease_id,
         "remote-computer-runtime-cleanup-event",
@@ -771,7 +804,8 @@ pub(crate) fn remote_computer_runtime_cleanup_evidence_audit_ids(
     reason: &str,
 ) -> [uuid::Uuid; 2] {
     let cleaned_event_id = remote_computer_lease_runtime_cleaned_event_id(lease_id);
-    let runtime_event_id = remote_computer_runtime_cleanup_event_id(lease_id, reason, "completed");
+    let runtime_event_id =
+        remote_computer_runtime_cleanup_event_id(lease_id, reason, "completed", None);
     [
         deterministic_record_id(
             cleaned_event_id,
