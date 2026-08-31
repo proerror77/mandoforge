@@ -21091,7 +21091,7 @@ async fn execution_result_is_hidden_until_completion_and_fake_completion_is_igno
         .expect("begin finalization");
     let pending = state
         .execution_queue
-        .prepare_completion_tail(job.id, "projection-worker", finalizing.claim_generation)
+        .prepare_outcome_tail(job.id, "projection-worker", finalizing.claim_generation)
         .await
         .expect("prepare completion publication");
     let completed = state
@@ -21355,7 +21355,7 @@ async fn interleaved_execution_completions_release_the_earliest_pending_result()
             .expect("begin finalization");
         let pending = state
             .execution_queue
-            .prepare_completion_tail(
+            .prepare_outcome_tail(
                 executing.id,
                 "interleaved-worker",
                 finalizing.claim_generation,
@@ -21518,7 +21518,7 @@ async fn terminal_session_acknowledges_pending_execution_completion() {
         .expect("begin finalization");
     let pending = state
         .execution_queue
-        .prepare_completion_tail(job.id, "terminal-worker", finalizing.claim_generation)
+        .prepare_outcome_tail(job.id, "terminal-worker", finalizing.claim_generation)
         .await
         .expect("prepare completion");
     let completed = state
@@ -28887,6 +28887,10 @@ async fn queue_backed_worker_marks_nonzero_agent_cli_as_known_failure() {
         .expect("failed job");
     assert_eq!(failed_job.status, ExecutionJobStatus::Failed);
     assert_eq!(failed_job.attempt_count, 1);
+    assert_eq!(
+        failed_job.finalization_details["stage"],
+        "failure_published"
+    );
     assert!(
         failed_job
             .last_error
@@ -28918,9 +28922,23 @@ async fn queue_backed_worker_marks_nonzero_agent_cli_as_known_failure() {
             .expect("valid request"),
     )
     .await;
-    assert!(events.iter().any(|event| {
-        event.event_type == "execution.failed" && event.payload["execution_job_id"] == json!(job_id)
-    }));
+    let failure_event = events
+        .iter()
+        .find(|event| {
+            event.event_type == "execution.failed"
+                && event.payload["execution_job_id"] == json!(job_id)
+        })
+        .expect("durable execution failure event");
+    assert!(execution_failure_event_matches_job(
+        failure_event,
+        failed_job
+    ));
+    let mut forged_failure = failure_event.clone();
+    forged_failure.payload["claim_generation"] = json!(failed_job.claim_generation + 1);
+    assert!(!execution_failure_event_matches_job(
+        &forged_failure,
+        failed_job
+    ));
     assert!(
         !events
             .iter()
@@ -28931,6 +28949,21 @@ async fn queue_backed_worker_marks_nonzero_agent_cli_as_known_failure() {
             .iter()
             .any(|event| event.event_type == "execution.retry_queued")
     );
+    let resume_jobs = session_loop_jobs_for_session(app.clone(), session.id).await;
+    assert!(resume_jobs.iter().any(|job| {
+        job.status == SessionLoopJobStatus::Queued
+            && job.reason == "approved execution failed"
+            && job.trigger_event_id == Some(failure_event.id)
+    }));
+    let resumed: Session = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!("/api/sessions/{}", session.id))
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(resumed.status, SessionStatus::Idle);
 
     unsafe {
         std::env::remove_var("MANDOFORGE_ALLOW_REQUESTED_AGENT_CLI_PROFILE");
@@ -35475,6 +35508,10 @@ fn session_loop_projection_covers_durable_runtime_events() {
     assert_eq!(
         session_loop_reason_for_event("execution.completed"),
         Some("approved execution completed")
+    );
+    assert_eq!(
+        session_loop_reason_for_event("execution.failed"),
+        Some("approved execution failed")
     );
     assert_eq!(session_loop_reason_for_event("agent.final"), None);
 }

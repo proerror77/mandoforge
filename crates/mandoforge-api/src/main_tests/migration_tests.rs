@@ -545,6 +545,116 @@ async fn postgres_session_event_trigger_and_explicit_projection_converge() -> Re
             .filter(|event| event.name == "execution.completed")
             .count();
         anyhow::ensure!(completion_telemetry_count == 2);
+
+        let failure_session_id = Uuid::new_v4();
+        let failure_tool_call_id = Uuid::new_v4();
+        let failure_approval_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sessions (id, tenant_id, agent_id, title, status)
+             VALUES ($1, $2, $3, 'Failed execution projection', 'requires_action')",
+        )
+        .bind(failure_session_id)
+        .bind(tenant_id)
+        .bind(agent_id)
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO tool_calls
+                (id, tenant_id, session_id, tool_name, args, status, risk_level, policy_decision)
+             VALUES ($1, $2, $3, 'shell.exec', '{}'::jsonb, 'running', 'medium', '{}'::jsonb)",
+        )
+        .bind(failure_tool_call_id)
+        .bind(tenant_id)
+        .bind(failure_session_id)
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO approvals
+                (id, tenant_id, session_id, tool_call_id, action, risk_level, reason, status)
+             VALUES ($1, $2, $3, $4, 'shell.exec', 'medium', 'failure test', 'approved')",
+        )
+        .bind(failure_approval_id)
+        .bind(tenant_id)
+        .bind(failure_session_id)
+        .bind(failure_tool_call_id)
+        .execute(&pool)
+        .await?;
+        let failure_job = state
+            .execution_queue
+            .enqueue(ExecutionJobRequest {
+                session_id: failure_session_id,
+                environment_id: None,
+                approval_id: failure_approval_id,
+                tool_call_id: failure_tool_call_id,
+                tool_name: "shell.exec".to_string(),
+                max_attempts: None,
+            })
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        let failure_running = state
+            .execution_queue
+            .start(failure_job.id, "postgres-failure-worker")
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        let failure_executing = state
+            .execution_queue
+            .begin_executing_started(
+                failure_job.id,
+                "postgres-failure-worker",
+                failure_running.claim_generation,
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        let failure_finalizing = state
+            .execution_queue
+            .begin_finalizing_started(
+                failure_job.id,
+                "postgres-failure-worker",
+                failure_executing.claim_generation,
+                Some("known failure"),
+                json!({"stage": "tool_known_failure"}),
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        let failed = state
+            .execution_queue
+            .finish_finalizing_started(
+                failure_job.id,
+                "postgres-failure-worker",
+                failure_finalizing.claim_generation,
+                false,
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        anyhow::ensure!(failed.status == ExecutionJobStatus::Failed);
+        let failure_event = state
+            .list_events(failure_session_id)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))?
+            .into_iter()
+            .find(|event| execution_failure_event_matches_job(event, &failed))
+            .context("trusted execution failure event")?;
+        let failure_jobs = state
+            .list_session_loop_jobs()
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))?
+            .into_iter()
+            .filter(|job| job.session_id == failure_session_id)
+            .collect::<Vec<_>>();
+        anyhow::ensure!(failure_jobs.len() == 1, "expected one failure projection");
+        anyhow::ensure!(failure_jobs[0].trigger_event_id == Some(failure_event.id));
+        anyhow::ensure!(failure_jobs[0].reason == "approved execution failed");
+        execution::publish_execution_failure_tail(&state, &failed)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        let failure_telemetry_count = exporter
+            .events
+            .lock()
+            .await
+            .iter()
+            .filter(|event| event.name == "execution.failed")
+            .count();
+        anyhow::ensure!(failure_telemetry_count == 1);
         Ok(())
     }
     .await;
@@ -877,10 +987,11 @@ fn execution_completion_projection_migration_is_restart_safe() {
     assert!(migration.contains("UPDATE session_events AS event"));
     assert!(migration.contains("WITH backfilled_completion_events AS"));
     assert!(migration.contains("unresolved_boundaries AS"));
-    assert!(migration.contains("safe_completion_events AS"));
-    assert!(migration.contains("completion_recovery_ranges AS"));
+    assert!(migration.contains("backfilled_failure_events AS"));
+    assert!(migration.contains("safe_outcome_events AS"));
+    assert!(migration.contains("outcome_recovery_ranges AS"));
     assert!(migration.contains("SELECT DISTINCT ON (tenant_id, session_id)"));
-    assert!(migration.contains("completion_seq AS pending_end"));
+    assert!(migration.contains("outcome_seq AS pending_end"));
     assert!(!migration.contains("tail.seq AS pending_end"));
     assert!(migration.contains("INSERT INTO session_loop_jobs"));
     assert!(migration.contains("GREATEST(tool_result_seq, high_watermark + 1)"));
@@ -897,6 +1008,7 @@ fn execution_completion_projection_migration_is_restart_safe() {
     assert!(!migration.contains("AND status IN"));
     assert!(migration.contains("NEW.actor_type = 'worker'"));
     assert!(migration.contains("NEW.payload ->> 'status' = 'completed'"));
+    assert!(migration.contains("NEW.payload ->> 'status' = 'failed'"));
     assert!(migration.contains("status = 'completed'"));
     assert!(migration.contains("claim_generation::text = NEW.payload ->> 'claim_generation'"));
     assert!(migration.contains("tool_call_id::text = NEW.payload ->> 'tool_call_id'"));
@@ -913,13 +1025,14 @@ fn execution_completion_projection_migration_is_restart_safe() {
             "completion.payload ->> 'claim_generation' = hidden_job.claim_generation::text"
         )
     );
-    assert!(migration.contains("CREATE OR REPLACE FUNCTION record_completed_execution_event"));
+    assert!(migration.contains("CREATE OR REPLACE FUNCTION record_terminal_execution_event"));
     assert!(migration.contains("pg_advisory_xact_lock"));
     assert!(migration.contains("INSERT INTO session_events"));
     assert!(migration.contains("'execution.completed'"));
+    assert!(migration.contains("'execution.failed'"));
     assert!(migration.contains("'claim_generation', NEW.claim_generation"));
     assert!(migration.contains("AFTER UPDATE OF status ON execution_jobs"));
-    assert!(migration.contains("EXECUTE FUNCTION record_completed_execution_event()"));
+    assert!(migration.contains("EXECUTE FUNCTION record_terminal_execution_event()"));
     assert!(!migration.contains("IF completion_event_seq IS NULL"));
     assert!(!migration.contains("UPDATE sessions"));
     assert!(!migration.contains("UPDATE session_threads"));

@@ -39,6 +39,10 @@ pub(crate) async fn build_harness_context(
                     || execution_jobs
                         .iter()
                         .any(|job| execution_completion_event_matches_job(event, job)))
+                && (event.event_type != "execution.failed"
+                    || execution_jobs
+                        .iter()
+                        .any(|job| execution_failure_event_matches_job(event, job)))
         })
         .collect::<Vec<_>>();
     let context_events: Vec<&SessionEvent> =
@@ -56,6 +60,10 @@ pub(crate) async fn build_harness_context(
                             || execution_jobs
                                 .iter()
                                 .any(|job| execution_completion_event_matches_job(event, job)))
+                        && (event.event_type != "execution.failed"
+                            || execution_jobs
+                                .iter()
+                                .any(|job| execution_failure_event_matches_job(event, job)))
                 })
                 .collect()
         };
@@ -123,6 +131,19 @@ pub(crate) async fn build_harness_context(
             })
         })
         .collect::<Vec<_>>();
+    let execution_failed_events = context_events
+        .iter()
+        .filter(|event| event.event_type == "execution.failed")
+        .rev()
+        .take(10)
+        .map(|event| {
+            json!({
+                "event_id": event.id,
+                "created_at": event.created_at,
+                "payload": event.payload,
+            })
+        })
+        .collect::<Vec<_>>();
     let recent_custom_tool_results = context_events
         .iter()
         .filter(|event| event.event_type == "user.custom_tool_result")
@@ -172,9 +193,11 @@ pub(crate) async fn build_harness_context(
         rejected_tool_result_count: rejected_event_result_count,
         manual_tool_result_count,
         execution_completed_count: execution_completed_events.len(),
+        execution_failed_count: execution_failed_events.len(),
         custom_tool_result_count: recent_custom_tool_results.len(),
         recent_custom_tool_results,
         recent_execution_completed: execution_completed_events,
+        recent_execution_failed: execution_failed_events,
         recent_goal_events,
     })
 }
@@ -708,9 +731,14 @@ pub(crate) async fn project_session_event_to_loop_from(
     {
         return Ok(None);
     }
+    if event.event_type == "execution.failed"
+        && !trusted_execution_failure_event(state, event).await?
+    {
+        return Ok(None);
+    }
     if matches!(
         event.event_type.as_str(),
-        "approval.approved" | "approval.rejected" | "execution.completed"
+        "approval.approved" | "approval.rejected" | "execution.completed" | "execution.failed"
     ) {
         if !session_accepts_worker_execution(state, event.session_id).await? {
             return Ok(None);
@@ -779,6 +807,21 @@ async fn trusted_execution_completion_event(
         .any(|job| job.id == job_id && execution_completion_event_matches_job(event, &job)))
 }
 
+async fn trusted_execution_failure_event(
+    state: &AppState,
+    event: &SessionEvent,
+) -> Result<bool, AppError> {
+    let Some(job_id) = event.actor_id else {
+        return Ok(false);
+    };
+    Ok(state
+        .execution_queue
+        .list()
+        .await?
+        .into_iter()
+        .any(|job| job.id == job_id && execution_failure_event_matches_job(event, &job)))
+}
+
 pub(crate) fn execution_completion_event_matches_job(
     event: &SessionEvent,
     job: &crate::execution_queue::ExecutionJob,
@@ -789,6 +832,22 @@ pub(crate) fn execution_completion_event_matches_job(
         && event.event_type == "execution.completed"
         && event.payload["status"] == "completed"
         && job.status == ExecutionJobStatus::Completed
+        && event.payload["execution_job_id"] == json!(job.id)
+        && event.payload["tool_call_id"] == json!(job.tool_call_id)
+        && event.payload["attempt_count"] == json!(job.attempt_count)
+        && event.payload["claim_generation"] == json!(job.claim_generation)
+}
+
+pub(crate) fn execution_failure_event_matches_job(
+    event: &SessionEvent,
+    job: &crate::execution_queue::ExecutionJob,
+) -> bool {
+    event.actor_type == "worker"
+        && event.actor_id == Some(job.id)
+        && event.session_id == job.session_id
+        && event.event_type == "execution.failed"
+        && event.payload["status"] == "failed"
+        && job.status == ExecutionJobStatus::Failed
         && event.payload["execution_job_id"] == json!(job.id)
         && event.payload["tool_call_id"] == json!(job.tool_call_id)
         && event.payload["attempt_count"] == json!(job.attempt_count)

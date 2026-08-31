@@ -142,22 +142,22 @@ impl ExecutionQueue {
             .await
     }
 
-    pub(crate) async fn prepare_completion_tail(
+    pub(crate) async fn prepare_outcome_tail(
         &self,
         job_id: Uuid,
         worker_id: &str,
         claim_generation: i64,
     ) -> Result<ExecutionJob, AppError> {
         self.backend
-            .prepare_completion_tail(job_id, worker_id, claim_generation)
+            .prepare_outcome_tail(job_id, worker_id, claim_generation)
             .await
     }
 
-    pub(crate) async fn mark_completion_published(
+    pub(crate) async fn mark_outcome_published(
         &self,
         job_id: Uuid,
     ) -> Result<ExecutionJob, AppError> {
-        self.backend.mark_completion_published(job_id).await
+        self.backend.mark_outcome_published(job_id).await
     }
 
     pub(crate) async fn recover_expired_executing(
@@ -368,20 +368,20 @@ pub(crate) trait ExecutionQueueBackend: Send + Sync {
         ))
     }
 
-    async fn prepare_completion_tail(
+    async fn prepare_outcome_tail(
         &self,
         _job_id: Uuid,
         _worker_id: &str,
         _claim_generation: i64,
     ) -> Result<ExecutionJob, AppError> {
         Err(AppError::bad_request(
-            "execution queue backend does not support completion publication",
+            "execution queue backend does not support outcome publication",
         ))
     }
 
-    async fn mark_completion_published(&self, _job_id: Uuid) -> Result<ExecutionJob, AppError> {
+    async fn mark_outcome_published(&self, _job_id: Uuid) -> Result<ExecutionJob, AppError> {
         Err(AppError::bad_request(
-            "execution queue backend does not support completion publication",
+            "execution queue backend does not support outcome publication",
         ))
     }
 
@@ -1103,7 +1103,7 @@ impl ExecutionQueueBackend for MemoryExecutionQueue {
         Ok(job.clone())
     }
 
-    async fn prepare_completion_tail(
+    async fn prepare_outcome_tail(
         &self,
         job_id: Uuid,
         worker_id: &str,
@@ -1119,31 +1119,45 @@ impl ExecutionQueueBackend for MemoryExecutionQueue {
                     && job.status == ExecutionJobStatus::Finalizing
                     && job.worker_id.as_deref() == Some(worker_id)
                     && job.claim_generation == claim_generation
-                    && job.last_error.is_none()
                     && job
                         .lease_expires_at
                         .is_some_and(|lease_expires_at| lease_expires_at > now)
             })
             .ok_or_else(|| AppError::not_found("execution job not found"))?;
-        job.finalization_details = json!({"stage": "completion_pending"});
+        let stage = if job.last_error.is_some() {
+            "failure_pending"
+        } else {
+            "completion_pending"
+        };
+        job.finalization_details = json!({"stage": stage});
         Ok(job.clone())
     }
 
-    async fn mark_completion_published(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
+    async fn mark_outcome_published(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
         let mut state = self.inner.write().await;
         let job = state
             .jobs
             .iter_mut()
             .find(|job| {
                 job.id == job_id
-                    && job.status == ExecutionJobStatus::Completed
                     && matches!(
-                        job.finalization_details["stage"].as_str(),
-                        Some("completion_pending" | "completion_published")
+                        (&job.status, job.finalization_details["stage"].as_str()),
+                        (
+                            ExecutionJobStatus::Completed,
+                            Some("completion_pending" | "completion_published")
+                        ) | (
+                            ExecutionJobStatus::Failed,
+                            Some("failure_pending" | "failure_published")
+                        )
                     )
             })
             .ok_or_else(|| AppError::not_found("execution job not found"))?;
-        job.finalization_details = json!({"stage": "completion_published"});
+        let stage = match job.status {
+            ExecutionJobStatus::Completed => "completion_published",
+            ExecutionJobStatus::Failed => "failure_published",
+            _ => unreachable!("outcome publication requires a terminal job"),
+        };
+        job.finalization_details = json!({"stage": stage});
         Ok(job.clone())
     }
 

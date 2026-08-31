@@ -89,6 +89,7 @@ pub(crate) fn session_loop_reason_for_event(event_type: &str) -> Option<&str> {
         "approval.approved" => Some("approval approved"),
         "approval.rejected" => Some("approval rejected"),
         "execution.completed" => Some("approved execution completed"),
+        "execution.failed" => Some("approved execution failed"),
         _ => None,
     }
 }

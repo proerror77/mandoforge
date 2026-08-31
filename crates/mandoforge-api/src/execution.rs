@@ -1152,6 +1152,8 @@ async fn finish_finalizing_execution_job(
     let committed_known_failure = details["stage"] == "tool_known_failure"
         && reconcile_durable_tool_outcome(state, job).await? == DurableToolOutcome::Failure;
     let retryable_failure = failed && !committed_known_failure;
+    let terminal_failure = failed && (!retryable_failure || job.attempt_count >= job.max_attempts);
+    let queue_backend = state.execution_queue.backend_kind();
     let mut finalizing = job.clone();
     if failed {
         record_execution_failure_tail(state, job, assignment, retryable_failure, details).await?;
@@ -1165,12 +1167,12 @@ async fn finish_finalizing_execution_job(
             json!({"execution_job_status": "completed"}),
         )
         .await?;
-        if state.execution_queue.backend_kind() != "postgres" {
-            finalizing = state
-                .execution_queue
-                .prepare_completion_tail(job.id, worker_id, job.claim_generation)
-                .await?;
-        }
+    }
+    if queue_backend != "postgres" && (!failed || terminal_failure) {
+        finalizing = state
+            .execution_queue
+            .prepare_outcome_tail(job.id, worker_id, job.claim_generation)
+            .await?;
     }
     let finished = state
         .execution_queue
@@ -1181,8 +1183,14 @@ async fn finish_finalizing_execution_job(
             retryable_failure,
         )
         .await?;
-    if finished.status == crate::ExecutionJobStatus::Completed {
-        publish_execution_completion_tail(state, &finished).await?;
+    match finished.status {
+        crate::ExecutionJobStatus::Completed => {
+            publish_execution_completion_tail(state, &finished).await?
+        }
+        crate::ExecutionJobStatus::Failed => {
+            publish_execution_failure_tail(state, &finished).await?
+        }
+        _ => {}
     }
     Ok(finished)
 }
@@ -1191,7 +1199,6 @@ pub(crate) async fn publish_execution_completion_tail(
     state: &AppState,
     job: &ExecutionJob,
 ) -> Result<(), AppError> {
-    let event_type = "execution.completed";
     let queue_backend = state.execution_queue.backend_kind();
     let event = if queue_backend == "postgres" {
         state
@@ -1199,13 +1206,7 @@ pub(crate) async fn publish_execution_completion_tail(
             .await?
             .into_iter()
             .rev()
-            .find(|event| {
-                event.event_type == event_type
-                    && event.actor_id == Some(job.id)
-                    && event.payload["status"] == "completed"
-                    && event.payload["attempt_count"] == json!(job.attempt_count)
-                    && event.payload["claim_generation"] == json!(job.claim_generation)
-            })
+            .find(|event| crate::execution_completion_event_matches_job(event, job))
             .ok_or_else(|| AppError::internal("execution completion event was not committed"))?
     } else {
         if job.status != crate::ExecutionJobStatus::Completed
@@ -1224,20 +1225,51 @@ pub(crate) async fn publish_execution_completion_tail(
                 "worker",
                 Some(job.id),
                 job.session_id,
-                event_type,
+                "execution.completed",
                 execution_completed_payload(job),
             )
             .await?
     };
+    publish_execution_outcome_event(state, job, event).await
+}
+
+pub(crate) async fn publish_execution_failure_tail(
+    state: &AppState,
+    job: &ExecutionJob,
+) -> Result<(), AppError> {
+    if job.status != crate::ExecutionJobStatus::Failed
+        || (state.execution_queue.backend_kind() != "postgres"
+            && !matches!(
+                job.finalization_details["stage"].as_str(),
+                Some("failure_pending" | "failure_published")
+            ))
+    {
+        return Err(AppError::not_found(
+            "execution failure is not pending publication",
+        ));
+    }
+    let event = state
+        .list_events(job.session_id)
+        .await?
+        .into_iter()
+        .rev()
+        .find(|event| crate::execution_failure_event_matches_job(event, job))
+        .ok_or_else(|| AppError::internal("execution failure event was not committed"))?;
+    publish_execution_outcome_event(state, job, event).await
+}
+
+async fn publish_execution_outcome_event(
+    state: &AppState,
+    job: &ExecutionJob,
+    event: crate::SessionEvent,
+) -> Result<(), AppError> {
+    let queue_backend = state.execution_queue.backend_kind();
     if queue_backend == "postgres" {
         state.emit_telemetry_event(&event).await;
         return Ok(());
     }
     if !crate::session_accepts_worker_execution(state, job.session_id).await? {
-        state
-            .execution_queue
-            .mark_completion_published(job.id)
-            .await?;
+        state.execution_queue.mark_outcome_published(job.id).await?;
         return Ok(());
     }
 
@@ -1253,10 +1285,7 @@ pub(crate) async fn publish_execution_completion_tail(
     {
         return Ok(());
     }
-    state
-        .execution_queue
-        .mark_completion_published(job.id)
-        .await?;
+    state.execution_queue.mark_outcome_published(job.id).await?;
     Ok(())
 }
 
@@ -1471,17 +1500,24 @@ async fn record_execution_failure_tail(
     } else {
         "execution.failed"
     };
-    state
-        .append_event_once_for_execution_claim(
-            job,
-            crate::ExecutionJobStatus::Finalizing,
-            execution_attempt_event_id(job, event_type),
-            "worker",
-            Some(job.id),
-            job.session_id,
-            event_type,
-            merge_json_object(
-                json!({
+    if queued || state.execution_queue.backend_kind() != "postgres" {
+        let event_id = if queued {
+            execution_attempt_event_id(job, event_type)
+        } else {
+            execution_failure_event_id(job)
+        };
+        state
+            .append_event_once_for_execution_claim(
+                job,
+                crate::ExecutionJobStatus::Finalizing,
+                event_id,
+                "worker",
+                Some(job.id),
+                job.session_id,
+                event_type,
+                merge_json_object(
+                    details,
+                    json!({
                     "execution_job_id": job.id,
                     "approval_id": job.approval_id,
                     "tool_call_id": job.tool_call_id,
@@ -1489,14 +1525,18 @@ async fn record_execution_failure_tail(
                     "assignment_id": assignment.map(|assignment| assignment.id),
                     "remote_computer_id": assignment.map(|assignment| assignment.remote_computer_id),
                     "lease_id": assignment.map(|assignment| assignment.lease_id),
+                    "status": if queued { "queued" } else { "failed" },
+                    "worker_id": job.worker_id,
                     "attempt_count": job.attempt_count,
+                    "claim_generation": job.claim_generation,
                     "max_attempts": job.max_attempts,
                     "last_error": error_message.clone(),
+                    "reason": if queued { "execution retry queued" } else { "approved execution failed" },
                 }),
-                details,
-            ),
-        )
-        .await?;
+                ),
+            )
+            .await?;
+    }
     if !queued && state.get_tool_call(job.tool_call_id).await?.status != "failed" {
         state
             .update_tool_call_status(
@@ -1516,6 +1556,16 @@ fn execution_attempt_event_id(job: &ExecutionJob, event_type: &str) -> Uuid {
         job.id,
         "execution-attempt-event",
         &[attempt_count.as_str(), event_type],
+    )
+}
+
+fn execution_failure_event_id(job: &ExecutionJob) -> Uuid {
+    let attempt_count = job.attempt_count.to_string();
+    let claim_generation = job.claim_generation.to_string();
+    deterministic_record_id(
+        job.id,
+        "execution-failure-event",
+        &[attempt_count.as_str(), claim_generation.as_str()],
     )
 }
 

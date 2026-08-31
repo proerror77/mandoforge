@@ -55,14 +55,49 @@ WITH backfilled_completion_events AS (
           OR NOT event.payload ? 'claim_generation'
       )
     RETURNING event.id, event.tenant_id, event.session_id, event.seq, event.payload
-), completion_candidates AS (
+), backfilled_failure_events AS (
+    UPDATE session_events AS event
+    SET payload = event.payload || jsonb_build_object(
+            'status', 'failed',
+            'attempt_count', job.attempt_count,
+            'claim_generation', job.claim_generation
+        )
+    FROM execution_jobs AS job
+    WHERE event.tenant_id = job.tenant_id
+      AND event.session_id = job.session_id
+      AND event.event_type = 'execution.failed'
+      AND event.actor_type = 'worker'
+      AND event.actor_id = job.id
+      AND event.payload ->> 'execution_job_id' = job.id::text
+      AND event.payload ->> 'tool_call_id' = job.tool_call_id::text
+      AND job.status = 'failed'
+      AND (
+          NOT event.payload ? 'status'
+          OR event.payload ->> 'status' = 'failed'
+      )
+      AND (
+          NOT event.payload ? 'attempt_count'
+          OR event.payload ->> 'attempt_count' = job.attempt_count::text
+      )
+      AND (
+          NOT event.payload ? 'claim_generation'
+          OR event.payload ->> 'claim_generation' = job.claim_generation::text
+      )
+      AND (
+          NOT event.payload ? 'status'
+          OR NOT event.payload ? 'attempt_count'
+          OR NOT event.payload ? 'claim_generation'
+      )
+    RETURNING event.id, event.tenant_id, event.session_id, event.seq, event.payload
+), outcome_candidates AS (
     SELECT
-        completion.id AS completion_event_id,
+        completion.id AS outcome_event_id,
         completion.tenant_id,
         completion.session_id,
         session.environment_id,
         tool_result.seq AS tool_result_seq,
-        completion.seq AS completion_seq
+        completion.seq AS outcome_seq,
+        'approved execution completed' AS reason
     FROM backfilled_completion_events AS completion
     JOIN sessions AS session
       ON session.tenant_id = completion.tenant_id
@@ -77,6 +112,20 @@ WITH backfilled_completion_events AS (
           AND actor_id::text = completion.payload ->> 'tool_call_id'
           AND seq < completion.seq
     ) AS tool_result ON tool_result.seq IS NOT NULL
+    UNION ALL
+    SELECT
+        failure.id AS outcome_event_id,
+        failure.tenant_id,
+        failure.session_id,
+        session.environment_id,
+        failure.seq AS tool_result_seq,
+        failure.seq AS outcome_seq,
+        'approved execution failed' AS reason
+    FROM backfilled_failure_events AS failure
+    JOIN sessions AS session
+      ON session.tenant_id = failure.tenant_id
+     AND session.id = failure.session_id
+     AND session.status NOT IN ('terminated', 'failed')
 ), unresolved_boundaries AS (
     SELECT
         hidden_result.tenant_id,
@@ -121,11 +170,11 @@ WITH backfilled_completion_events AS (
           )
       )
     GROUP BY hidden_result.tenant_id, hidden_result.session_id
-), safe_completion_events AS (
+), safe_outcome_events AS (
     SELECT
         candidate.*,
         COALESCE(projected.high_watermark, 0) AS high_watermark
-    FROM completion_candidates AS candidate
+    FROM outcome_candidates AS candidate
     LEFT JOIN unresolved_boundaries AS unresolved
       ON unresolved.tenant_id = candidate.tenant_id
      AND unresolved.session_id = candidate.session_id
@@ -142,20 +191,21 @@ WITH backfilled_completion_events AS (
           AND session_id = candidate.session_id
     ) AS projected ON TRUE
     WHERE unresolved.seq IS NULL
-       OR candidate.completion_seq < unresolved.seq
-), completion_recovery_ranges AS (
+       OR candidate.outcome_seq < unresolved.seq
+), outcome_recovery_ranges AS (
     SELECT DISTINCT ON (tenant_id, session_id)
-        completion_event_id,
+        outcome_event_id,
         tenant_id,
         session_id,
         environment_id,
         MIN(tool_result_seq) OVER (
             PARTITION BY tenant_id, session_id
         ) AS tool_result_seq,
-        completion_seq AS pending_end,
-        high_watermark
-    FROM safe_completion_events
-    ORDER BY tenant_id, session_id, completion_seq DESC
+        outcome_seq AS pending_end,
+        high_watermark,
+        reason
+    FROM safe_outcome_events
+    ORDER BY tenant_id, session_id, outcome_seq DESC
 )
 INSERT INTO session_loop_jobs (
     id,
@@ -178,15 +228,15 @@ SELECT
     session_id,
     environment_id,
     'queued',
-    completion_event_id,
+    outcome_event_id,
     GREATEST(tool_result_seq, high_watermark + 1),
     pending_end,
     GREATEST(tool_result_seq, high_watermark + 1) - 1,
-    'approved execution completed',
+    reason,
     NOW(),
     0,
     3
-FROM completion_recovery_ranges
+FROM outcome_recovery_ranges
 WHERE high_watermark < pending_end
   AND GREATEST(tool_result_seq, high_watermark + 1) <= pending_end
 ON CONFLICT (tenant_id, session_id)
@@ -255,6 +305,22 @@ BEGIN
                 AND claim_generation::text = NEW.payload ->> 'claim_generation'
                 AND status = 'completed'
           ) THEN 'approved execution completed'
+        WHEN NEW.event_type = 'execution.failed'
+          AND NEW.actor_type = 'worker'
+          AND NEW.actor_id IS NOT NULL
+          AND NEW.payload ->> 'status' = 'failed'
+          AND NEW.payload ->> 'execution_job_id' = NEW.actor_id::text
+          AND EXISTS (
+              SELECT 1
+              FROM execution_jobs
+              WHERE tenant_id = NEW.tenant_id
+                AND id = NEW.actor_id
+                AND session_id = NEW.session_id
+                AND tool_call_id::text = NEW.payload ->> 'tool_call_id'
+                AND attempt_count::text = NEW.payload ->> 'attempt_count'
+                AND claim_generation::text = NEW.payload ->> 'claim_generation'
+                AND status = 'failed'
+          ) THEN 'approved execution failed'
         ELSE NULL
     END;
     IF projection_reason IS NULL THEN
@@ -423,23 +489,35 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION record_completed_execution_event()
+CREATE OR REPLACE FUNCTION record_terminal_execution_event()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    completion_event_seq BIGINT;
+    outcome_event_seq BIGINT;
+    outcome_event_type TEXT;
+    outcome_reason TEXT;
 BEGIN
-    IF OLD.status IS NOT DISTINCT FROM NEW.status OR NEW.status <> 'completed' THEN
+    IF OLD.status IS NOT DISTINCT FROM NEW.status
+      OR NEW.status NOT IN ('completed', 'failed') THEN
         RETURN NEW;
     END IF;
+
+    outcome_event_type := CASE NEW.status
+        WHEN 'completed' THEN 'execution.completed'
+        ELSE 'execution.failed'
+    END;
+    outcome_reason := CASE NEW.status
+        WHEN 'completed' THEN 'approved execution completed'
+        ELSE 'approved execution failed'
+    END;
 
     PERFORM pg_advisory_xact_lock(
         hashtextextended(NEW.tenant_id::text || ':' || NEW.session_id::text, 0)
     );
 
     SELECT COALESCE(MAX(seq), 0) + 1
-    INTO completion_event_seq
+    INTO outcome_event_seq
     FROM session_events
     WHERE tenant_id = NEW.tenant_id
       AND session_id = NEW.session_id;
@@ -459,27 +537,29 @@ BEGIN
         gen_random_uuid(),
         NEW.tenant_id,
         NEW.session_id,
-        completion_event_seq,
+        outcome_event_seq,
         'worker',
         NEW.id,
-        'execution.completed',
+        outcome_event_type,
         jsonb_build_object(
             'execution_job_id', NEW.id,
             'approval_id', NEW.approval_id,
             'tool_call_id', NEW.tool_call_id,
             'tool', NEW.tool_name,
-            'status', 'completed',
+            'status', NEW.status,
             'worker_id', NEW.worker_id,
             'attempt_count', NEW.attempt_count,
             'claim_generation', NEW.claim_generation,
-            'reason', 'approved execution completed'
+            'max_attempts', NEW.max_attempts,
+            'last_error', NEW.last_error,
+            'reason', outcome_reason
         ),
         NOW()
     );
 
     PERFORM pg_notify(
         'mf_session_events',
-        NEW.tenant_id::text || ':' || NEW.session_id::text || ':' || completion_event_seq::text
+        NEW.tenant_id::text || ':' || NEW.session_id::text || ':' || outcome_event_seq::text
     );
 
     RETURN NEW;
@@ -487,7 +567,9 @@ END;
 $$;
 
 DROP TRIGGER IF EXISTS trg_record_completed_execution_event ON execution_jobs;
-CREATE TRIGGER trg_record_completed_execution_event
+DROP TRIGGER IF EXISTS trg_record_terminal_execution_event ON execution_jobs;
+DROP FUNCTION IF EXISTS record_completed_execution_event();
+CREATE TRIGGER trg_record_terminal_execution_event
 AFTER UPDATE OF status ON execution_jobs
 FOR EACH ROW
-EXECUTE FUNCTION record_completed_execution_event();
+EXECUTE FUNCTION record_terminal_execution_event();

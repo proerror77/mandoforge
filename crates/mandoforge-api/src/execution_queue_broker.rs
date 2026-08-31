@@ -1394,11 +1394,13 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
             };
             pending_job.job.completed_at = terminal.then_some(now);
             pending_job.job.lease_expires_at = None;
-            let completion_pending = pending_job.job.status == ExecutionJobStatus::Completed
-                && pending_job.job.finalization_details["stage"] == "completion_pending";
+            let outcome_pending = matches!(
+                pending_job.job.finalization_details["stage"].as_str(),
+                Some("completion_pending" | "failure_pending")
+            );
             (
                 pending_job.job.clone(),
-                (terminal && !completion_pending).then(|| pending_job.message_id.clone()),
+                (terminal && !outcome_pending).then(|| pending_job.message_id.clone()),
             )
         };
         if let Some(message_id) = message_id {
@@ -1471,7 +1473,7 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
         Ok(job)
     }
 
-    async fn prepare_completion_tail(
+    async fn prepare_outcome_tail(
         &self,
         job_id: Uuid,
         worker_id: &str,
@@ -1486,7 +1488,6 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
         if pending_job.job.status != ExecutionJobStatus::Finalizing
             || pending_job.job.worker_id.as_deref() != Some(worker_id)
             || pending_job.job.claim_generation != claim_generation
-            || pending_job.job.last_error.is_some()
             || pending_job
                 .job
                 .lease_expires_at
@@ -1494,26 +1495,44 @@ impl ExecutionQueueBackend for BrokerExecutionQueue {
         {
             return Err(AppError::not_found("execution job not found"));
         }
-        pending_job.job.finalization_details = json!({"stage": "completion_pending"});
+        let stage = if pending_job.job.last_error.is_some() {
+            "failure_pending"
+        } else {
+            "completion_pending"
+        };
+        pending_job.job.finalization_details = json!({"stage": stage});
         Ok(pending_job.job.clone())
     }
 
-    async fn mark_completion_published(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
+    async fn mark_outcome_published(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
         let config = self.broker_config().await?;
         let (job, message_id) = {
             let mut pending = self.pending.write().await;
             let pending_job = pending
                 .get_mut(&job_id)
                 .ok_or_else(|| AppError::not_found("execution job not found"))?;
-            if pending_job.job.status != ExecutionJobStatus::Completed
-                || !matches!(
-                    pending_job.job.finalization_details["stage"].as_str(),
-                    Some("completion_pending" | "completion_published")
-                )
-            {
-                return Err(AppError::not_found("execution job not found"));
-            }
-            pending_job.job.finalization_details = json!({"stage": "completion_published"});
+            let stage = match pending_job.job.status {
+                ExecutionJobStatus::Completed
+                    if matches!(
+                        pending_job.job.finalization_details["stage"].as_str(),
+                        Some("completion_pending" | "completion_published")
+                    ) =>
+                {
+                    "completion_published"
+                }
+                ExecutionJobStatus::Failed
+                    if matches!(
+                        pending_job.job.finalization_details["stage"].as_str(),
+                        Some("failure_pending" | "failure_published")
+                    ) =>
+                {
+                    "failure_published"
+                }
+                _ => {
+                    return Err(AppError::not_found("execution job not found"));
+                }
+            };
+            pending_job.job.finalization_details = json!({"stage": stage});
             (pending_job.job.clone(), pending_job.message_id.clone())
         };
         self.ack_message_id(config, message_id).await?;

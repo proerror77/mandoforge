@@ -13,7 +13,8 @@ use std::{
 use uuid::Uuid;
 
 use crate::execution::{
-    publish_execution_completion_tail, recover_expired_execution_with_durable_outcome,
+    publish_execution_completion_tail, publish_execution_failure_tail,
+    recover_expired_execution_with_durable_outcome,
 };
 use crate::{
     AppError, AppState, CreateRemoteComputerJobAssignment, ExecutionJobStatus, Permission,
@@ -327,6 +328,12 @@ async fn run_execution_job_as_worker(
         && job.finalization_details["stage"] == "completion_pending"
     {
         publish_execution_completion_tail(state, &job).await?;
+        return state.execution_queue.get(id).await;
+    }
+    if job.status == ExecutionJobStatus::Failed
+        && job.finalization_details["stage"] == "failure_pending"
+    {
+        publish_execution_failure_tail(state, &job).await?;
         return state.execution_queue.get(id).await;
     }
     if job.status == ExecutionJobStatus::CancelRequested {
