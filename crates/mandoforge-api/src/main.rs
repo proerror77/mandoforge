@@ -67,8 +67,6 @@ mod eval_judge;
 mod eval_runtime;
 mod execution;
 mod execution_queue;
-#[cfg(test)]
-mod execution_queue_broker;
 mod handlers;
 mod http_shell;
 mod mcp_gateway;
@@ -211,10 +209,8 @@ use execution::{
 #[cfg(test)]
 use execution::{codex_jsonl_event_type, parse_codex_jsonl, run_execution_job};
 #[cfg(test)]
-use execution_queue::{ExecutionJobRequest, ExecutionQueueBackend};
+use execution_queue::ExecutionJobRequest;
 use execution_queue::{ExecutionJobStatus, ExecutionQueue};
-#[cfg(test)]
-use execution_queue_broker::{BrokerExecutionQueue, BrokerQueueKind};
 pub(crate) use http_shell::{api_cors_layer, security_headers_middleware};
 use mcp_gateway::{
     HttpMcpGatewayClient, McpCallRequest, McpGatewayClient, McpGatewayConfig,

@@ -4872,30 +4872,6 @@ async fn legacy_unversioned_workflow_claim_cannot_be_renewed_or_completed() {
 }
 
 #[tokio::test]
-async fn broker_execution_queue_is_reserved_until_implemented() {
-    for kind in [BrokerQueueKind::Redis, BrokerQueueKind::Nats] {
-        let queue = BrokerExecutionQueue::new(kind);
-        let request = ExecutionJobRequest {
-            session_id: Uuid::new_v4(),
-            environment_id: None,
-            approval_id: Uuid::new_v4(),
-            tool_call_id: Uuid::new_v4(),
-            tool_name: "file.write".to_string(),
-            max_attempts: None,
-        };
-
-        assert!(queue.enqueue(request).await.is_err());
-        assert!(queue.start(Uuid::new_v4(), "worker").await.is_err());
-        assert!(queue.complete(Uuid::new_v4()).await.is_err());
-        assert!(queue.fail(Uuid::new_v4()).await.is_err());
-        assert!(queue.cancel(Uuid::new_v4()).await.is_err());
-        assert!(queue.retry_or_fail(Uuid::new_v4(), "error").await.is_err());
-        assert!(queue.list().await.is_err());
-        assert!(queue.get(Uuid::new_v4()).await.is_err());
-    }
-}
-
-#[tokio::test]
 async fn execution_job_cancel_route_marks_job_canceled_and_audits() {
     let app = test_app_with_worker(Arc::new(QueueBackedExecutionWorker)).await;
     let agents: Vec<Agent> = request_json(
