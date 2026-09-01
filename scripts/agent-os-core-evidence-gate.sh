@@ -69,7 +69,7 @@ for event_type in \
   approval.approved \
   artifact.created \
   agent.final \
-  session.status_idle; do
+  session.goal.completed; do
   require_csv_item event_types "$event_types" "$event_type"
 done
 

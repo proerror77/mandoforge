@@ -59,6 +59,30 @@ pub(crate) async fn authorize_request(
     enforce_resource_scope(state, &principal, &request).await
 }
 
+/// Authorize an already-authenticated principal for a resource-scoped request.
+///
+/// HTTP handlers normally use [`authorize_request`] so the principal is derived
+/// from request headers.  Internal routes which have already performed a
+/// collection authorization must still re-run both the permission and resource
+/// scope checks for referenced identifiers; accepting a UUID alone would allow
+/// a subject to borrow another session's grant/context.
+pub(crate) async fn authorize_principal_request(
+    state: &AppState,
+    principal: &Principal,
+    permission: Permission,
+    resource_type: impl Into<String>,
+    resource_id: Option<Uuid>,
+) -> Result<(), AppError> {
+    let request = AuthorizationRequest {
+        tenant_id: state.current_tenant_id(),
+        permission,
+        resource_type: resource_type.into(),
+        resource_id,
+    };
+    state.authorizer.authorize(principal, &request).await?;
+    enforce_resource_scope(state, principal, &request).await
+}
+
 pub(crate) async fn authorize_collection_request(
     state: &AppState,
     headers: &HeaderMap,
@@ -688,6 +712,11 @@ async fn resource_scope(
         }
         "workflow_run" => {
             let run = state.get_workflow_run(resource_id).await?;
+            Ok(ResourceScope::Session(run.primary_session_id))
+        }
+        "task_grant" => {
+            let grant = state.get_task_grant(resource_id).await?;
+            let run = state.get_workflow_run(grant.workflow_run_id).await?;
             Ok(ResourceScope::Session(run.primary_session_id))
         }
         "tool_call" => {

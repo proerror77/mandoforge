@@ -1054,6 +1054,13 @@ pub(crate) async fn execute_scheduler_due_tasks(
             failed_remote_computer_reclaim_run(checked_at)
         }
     };
+    if remote_computer_reclaim.status == "attention" {
+        scheduler_task_failed(
+            &mut task_errors,
+            "remote_computer_reclaim",
+            AppError::internal("Remote Computer stale reclaim left expired leases allocated"),
+        );
+    }
     let mut mcp_health_runs = Vec::new();
     let mut mcp_rollout_runs = Vec::new();
     let mut team_count = 0usize;
@@ -1144,6 +1151,8 @@ pub(crate) async fn execute_scheduler_due_tasks(
     }
     if remote_computer_reclaim.reclaimed_attachment_count > 0
         || remote_computer_reclaim.reclaimed_lease_count > 0
+        || remote_computer_reclaim.replayed_cleanup_evidence_count > 0
+        || remote_computer_reclaim.status == "attention"
     {
         actions.push("remote_computer_reclaim_processed".to_string());
     }
@@ -1435,6 +1444,7 @@ fn failed_remote_computer_reclaim_run(checked_at: DateTime<Utc>) -> RemoteComput
         reclaimed_attachment_count: 0,
         expired_lease_count: 0,
         reclaimed_lease_count: 0,
+        replayed_cleanup_evidence_count: 0,
         attachments: Vec::new(),
         leases: Vec::new(),
         execution_enabled: false,

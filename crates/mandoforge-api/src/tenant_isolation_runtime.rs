@@ -479,6 +479,7 @@ pub(crate) fn tenant_isolation_tracked_tables() -> Vec<&'static str> {
         "ontology_releases",
         "ontology_release_workflow_triggers",
         "ontology_onboarding_runs",
+        "ontology_sdk_applications",
         "workflow_schedules",
     ]
 }

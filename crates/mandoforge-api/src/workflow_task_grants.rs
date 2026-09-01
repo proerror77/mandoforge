@@ -364,12 +364,13 @@ pub(crate) async fn record_task_grant_denied(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) async fn enforce_task_grant_for_tool_invocation(
     state: &AppState,
     tool_name: &str,
     input: &ExecuteTool,
 ) -> Result<Option<TaskGrant>, AppError> {
-    validate_task_grant_for_tool_invocation(state, tool_name, input, true).await
+    validate_task_grant_for_tool_invocation(state, tool_name, input, true, true, true).await
 }
 
 pub(crate) async fn revalidate_task_grant_for_tool_invocation(
@@ -377,7 +378,15 @@ pub(crate) async fn revalidate_task_grant_for_tool_invocation(
     tool_name: &str,
     input: &ExecuteTool,
 ) -> Result<Option<TaskGrant>, AppError> {
-    validate_task_grant_for_tool_invocation(state, tool_name, input, false).await
+    validate_task_grant_for_tool_invocation(state, tool_name, input, false, true, true).await
+}
+
+pub(crate) async fn preview_task_grant_for_tool_invocation(
+    state: &AppState,
+    tool_name: &str,
+    input: &ExecuteTool,
+) -> Result<Option<TaskGrant>, AppError> {
+    validate_task_grant_for_tool_invocation(state, tool_name, input, false, true, false).await
 }
 
 async fn validate_task_grant_for_tool_invocation(
@@ -385,21 +394,25 @@ async fn validate_task_grant_for_tool_invocation(
     tool_name: &str,
     input: &ExecuteTool,
     reserve_tool_call: bool,
+    record_denied: bool,
+    record_checked: bool,
 ) -> Result<Option<TaskGrant>, AppError> {
     let workflow_run = workflow_run_for_session(state, input.session_id).await?;
 
     let Some(task_grant_id) = input.task_grant_id else {
         if let Some(run) = workflow_run {
             let reason = "task grant is required for workflow tool execution";
-            record_task_grant_denied(
-                state,
-                input.session_id,
-                None,
-                Some(run.id),
-                tool_name,
-                reason,
-            )
-            .await?;
+            if record_denied {
+                record_task_grant_denied(
+                    state,
+                    input.session_id,
+                    None,
+                    Some(run.id),
+                    tool_name,
+                    reason,
+                )
+                .await?;
+            }
             return Err(AppError::forbidden(reason));
         }
         return Ok(None);
@@ -408,55 +421,7 @@ async fn validate_task_grant_for_tool_invocation(
     let mut grant = state.get_task_grant(task_grant_id).await?;
     let run = state.get_workflow_run(grant.workflow_run_id).await?;
     if let Some(reason) = workflow_run_execution_denial(&run.status) {
-        record_task_grant_denied(
-            state,
-            input.session_id,
-            Some(&grant),
-            Some(run.id),
-            tool_name,
-            reason,
-        )
-        .await?;
-        return Err(AppError::forbidden(reason));
-    }
-    if workflow_run
-        .as_ref()
-        .is_some_and(|workflow_run| workflow_run.id != run.id)
-        || !task_grant_session_matches(&grant, &run, input.session_id)
-    {
-        let reason = "task grant is not valid for this session";
-        record_task_grant_denied(
-            state,
-            input.session_id,
-            Some(&grant),
-            Some(run.id),
-            tool_name,
-            reason,
-        )
-        .await?;
-        return Err(AppError::forbidden(reason));
-    }
-    let session = state.get_session(input.session_id).await?;
-    if grant
-        .grantee_agent_id
-        .is_some_and(|agent_id| agent_id != session.agent_id)
-    {
-        let reason = "task grant grantee agent does not match this session";
-        record_task_grant_denied(
-            state,
-            input.session_id,
-            Some(&grant),
-            Some(run.id),
-            tool_name,
-            reason,
-        )
-        .await?;
-        return Err(AppError::forbidden(reason));
-    }
-    if let Some(agent_class) = grant.agent_class.as_deref() {
-        let agent = state.get_agent(session.agent_id).await?;
-        if !task_grant_agent_class_matches(&agent, agent_class) {
-            let reason = "task grant agent class does not match this session";
+        if record_denied {
             record_task_grant_denied(
                 state,
                 input.session_id,
@@ -466,44 +431,106 @@ async fn validate_task_grant_for_tool_invocation(
                 reason,
             )
             .await?;
+        }
+        return Err(AppError::forbidden(reason));
+    }
+    if workflow_run
+        .as_ref()
+        .is_some_and(|workflow_run| workflow_run.id != run.id)
+        || !task_grant_session_matches(&grant, &run, input.session_id)
+    {
+        let reason = "task grant is not valid for this session";
+        if record_denied {
+            record_task_grant_denied(
+                state,
+                input.session_id,
+                Some(&grant),
+                Some(run.id),
+                tool_name,
+                reason,
+            )
+            .await?;
+        }
+        return Err(AppError::forbidden(reason));
+    }
+    let session = state.get_session(input.session_id).await?;
+    if grant
+        .grantee_agent_id
+        .is_some_and(|agent_id| agent_id != session.agent_id)
+    {
+        let reason = "task grant grantee agent does not match this session";
+        if record_denied {
+            record_task_grant_denied(
+                state,
+                input.session_id,
+                Some(&grant),
+                Some(run.id),
+                tool_name,
+                reason,
+            )
+            .await?;
+        }
+        return Err(AppError::forbidden(reason));
+    }
+    if let Some(agent_class) = grant.agent_class.as_deref() {
+        let agent = state.get_agent(session.agent_id).await?;
+        if !task_grant_agent_class_matches(&agent, agent_class) {
+            let reason = "task grant agent class does not match this session";
+            if record_denied {
+                record_task_grant_denied(
+                    state,
+                    input.session_id,
+                    Some(&grant),
+                    Some(run.id),
+                    tool_name,
+                    reason,
+                )
+                .await?;
+            }
             return Err(AppError::forbidden(reason));
         }
     }
     if let Some(reason) = task_grant_lineage_denial(state, &grant).await? {
-        record_task_grant_denied(
-            state,
-            input.session_id,
-            Some(&grant),
-            Some(run.id),
-            tool_name,
-            &reason,
-        )
-        .await?;
+        if record_denied {
+            record_task_grant_denied(
+                state,
+                input.session_id,
+                Some(&grant),
+                Some(run.id),
+                tool_name,
+                &reason,
+            )
+            .await?;
+        }
         return Err(AppError::forbidden(reason));
     }
     if !task_grant_allows_tool(&grant, tool_name) {
         let reason = "task grant tool scope does not allow tool";
-        record_task_grant_denied(
-            state,
-            input.session_id,
-            Some(&grant),
-            Some(run.id),
-            tool_name,
-            reason,
-        )
-        .await?;
+        if record_denied {
+            record_task_grant_denied(
+                state,
+                input.session_id,
+                Some(&grant),
+                Some(run.id),
+                tool_name,
+                reason,
+            )
+            .await?;
+        }
         return Err(AppError::forbidden(reason));
     }
     if let Some(reason) = task_grant_connector_invocation_denial(&grant, tool_name, &input.args)? {
-        record_task_grant_denied(
-            state,
-            input.session_id,
-            Some(&grant),
-            Some(run.id),
-            tool_name,
-            &reason,
-        )
-        .await?;
+        if record_denied {
+            record_task_grant_denied(
+                state,
+                input.session_id,
+                Some(&grant),
+                Some(run.id),
+                tool_name,
+                &reason,
+            )
+            .await?;
+        }
         return Err(AppError::forbidden(reason));
     }
 
@@ -511,21 +538,25 @@ async fn validate_task_grant_for_tool_invocation(
         grant = match state.reserve_task_grant_tool_call(grant.id).await {
             Ok(grant) => grant,
             Err(error) => {
-                record_task_grant_denied(
-                    state,
-                    input.session_id,
-                    Some(&grant),
-                    Some(run.id),
-                    tool_name,
-                    &error.message,
-                )
-                .await?;
+                if record_denied {
+                    record_task_grant_denied(
+                        state,
+                        input.session_id,
+                        Some(&grant),
+                        Some(run.id),
+                        tool_name,
+                        &error.message,
+                    )
+                    .await?;
+                }
                 return Err(error);
             }
         };
     }
 
-    record_task_grant_checked(state, &grant, input.session_id, tool_name).await?;
+    if record_checked {
+        record_task_grant_checked(state, &grant, input.session_id, tool_name).await?;
+    }
     Ok(Some(grant))
 }
 

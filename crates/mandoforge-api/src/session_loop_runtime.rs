@@ -7,6 +7,22 @@ use uuid::Uuid;
 
 use crate::*;
 
+pub(crate) const CONTEXT_PACKET_REFRESH_DEFERRED_EVENT: &str = "context_packet.refresh_deferred";
+pub(crate) const CONTEXT_PACKET_REFRESH_COMPLETED_EVENT: &str = "context_packet.refresh_completed";
+
+fn context_packet_refresh_is_deferred(events: &[SessionEvent]) -> bool {
+    events
+        .iter()
+        .rev()
+        .find(|event| {
+            matches!(
+                event.event_type.as_str(),
+                CONTEXT_PACKET_REFRESH_DEFERRED_EVENT | CONTEXT_PACKET_REFRESH_COMPLETED_EVENT
+            )
+        })
+        .is_some_and(|event| event.event_type == CONTEXT_PACKET_REFRESH_DEFERRED_EVENT)
+}
+
 pub(crate) async fn build_harness_context(
     state: &AppState,
     session_id: Uuid,
@@ -108,7 +124,7 @@ pub(crate) async fn build_harness_context(
                     .get("content")
                     .and_then(|content| content.get("approval"))
                     .and_then(Value::as_str)
-                    == Some("rejected")
+                    .is_some_and(|decision| matches!(decision, "rejected" | "expired"))
         })
         .count();
     let manual_tool_result_count = context_events
@@ -172,8 +188,12 @@ pub(crate) async fn build_harness_context(
         })
         .collect::<Vec<_>>();
     let latest_goal_event = recent_goal_events.first().cloned();
+    let refresh_context = pending_events
+        .iter()
+        .any(|event| event.event_type == "user.message")
+        || context_packet_refresh_is_deferred(&events);
     let (task_grant_id, context_packet_id, rendered_context_packet, provider_tool_names) =
-        build_provider_context_packet(state, session_id).await?;
+        build_provider_context_packet(state, session_id, refresh_context).await?;
     Ok(HarnessContext {
         session_id,
         agent_version_id: agent_version.id,
@@ -205,6 +225,7 @@ pub(crate) async fn build_harness_context(
 pub(crate) async fn build_provider_context_packet(
     state: &AppState,
     session_id: Uuid,
+    refresh_requested: bool,
 ) -> Result<(Option<Uuid>, Option<Uuid>, Option<Value>, Vec<String>), AppError> {
     let active_task_grant = active_task_grant_for_session(state, session_id).await?;
     let task_grant_id = active_task_grant.as_ref().map(|(_, grant)| grant.id);
@@ -230,7 +251,64 @@ pub(crate) async fn build_provider_context_packet(
             .into_iter()
             .max_by_key(|packet| packet.version);
     }
-    if packet.is_none() && active_task_grant.is_some() {
+    let refresh_events = if refresh_requested {
+        state.list_events(session_id).await?
+    } else {
+        Vec::new()
+    };
+    let mut refresh_blockers = Vec::new();
+    if refresh_requested {
+        if let Some((_, grant)) = active_task_grant.as_ref()
+            && state
+                .list_workflow_step_runs(grant.workflow_run_id)
+                .await?
+                .iter()
+                .any(|step| step.session_id == Some(session_id) && step.status == "running")
+        {
+            refresh_blockers.push("workflow_step_running");
+        }
+        if state
+            .list_approvals()
+            .await?
+            .iter()
+            .any(|approval| approval.session_id == session_id && approval.status == "pending")
+        {
+            refresh_blockers.push("approval_pending");
+        }
+        if state
+            .list_tool_calls(Some(session_id))
+            .await?
+            .iter()
+            .any(|call| matches!(call.status.as_str(), "running" | "waiting_approval"))
+        {
+            refresh_blockers.push("tool_call_unresolved");
+        }
+    }
+    let refresh_allowed =
+        refresh_requested && active_task_grant.is_some() && refresh_blockers.is_empty();
+    if refresh_requested
+        && active_task_grant.is_some()
+        && !refresh_allowed
+        && !context_packet_refresh_is_deferred(&refresh_events)
+    {
+        state
+            .append_event(
+                "system",
+                task_grant_id,
+                session_id,
+                CONTEXT_PACKET_REFRESH_DEFERRED_EVENT,
+                json!({
+                    "status": "deferred",
+                    "task_grant_id": task_grant_id,
+                    "blockers": refresh_blockers,
+                }),
+            )
+            .await?;
+    }
+    if refresh_allowed {
+        packet = None;
+    }
+    if packet.is_none() && active_task_grant.is_some() && (!refresh_requested || refresh_allowed) {
         let generated_packet = generate_and_persist_context_packet(state, session_id).await?;
         if let Some((_, grant)) = active_task_grant.as_ref() {
             let grant = state
@@ -243,6 +321,21 @@ pub(crate) async fn build_provider_context_packet(
                 context_task_grant.as_ref(),
                 &agent_version,
             );
+        }
+        if refresh_requested {
+            state
+                .append_event(
+                    "system",
+                    task_grant_id,
+                    session_id,
+                    CONTEXT_PACKET_REFRESH_COMPLETED_EVENT,
+                    json!({
+                        "status": "completed",
+                        "task_grant_id": task_grant_id,
+                        "context_packet_id": generated_packet.id,
+                    }),
+                )
+                .await?;
         }
         packet = Some(generated_packet);
     }
@@ -303,14 +396,130 @@ pub(crate) fn provider_tool_names_for_grant_and_agent_version(
         .into_iter()
         .filter(|tool| agent_allowed.contains(tool.as_str()))
         .collect::<Vec<_>>();
-    if let Some(grant) = grant {
+    let mut names: Vec<String> = if let Some(grant) = grant {
         names
             .into_iter()
             .filter(|tool| task_grant_allows_tool(grant, tool))
             .collect()
     } else {
         names
+            .into_iter()
+            .filter(|tool| tool != "mcp.call")
+            .collect()
+    };
+    if !names.iter().any(|tool| tool == "complete_task") {
+        names.push("complete_task".to_string());
     }
+    names
+}
+
+pub(crate) fn provider_completion_request(
+    tool_calls: &[ProviderToolCall],
+) -> Result<Option<(String, String)>, AppError> {
+    let Some(call) = tool_calls
+        .iter()
+        .find(|call| call.tool_name == "complete_task")
+    else {
+        return Ok(None);
+    };
+    if tool_calls.len() != 1 {
+        return Err(AppError::bad_request(
+            "complete_task must be the only provider tool call",
+        ));
+    }
+    let status = call
+        .args
+        .get("status")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if !matches!(status, "completed" | "blocked") {
+        return Err(AppError::bad_request(
+            "complete_task status must be completed or blocked",
+        ));
+    }
+    let summary = call
+        .args
+        .get("summary")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if summary.is_empty() {
+        return Err(AppError::bad_request(
+            "complete_task summary must not be empty",
+        ));
+    }
+    Ok(Some((status.to_string(), summary.to_string())))
+}
+
+pub(crate) async fn apply_provider_completion(
+    state: &AppState,
+    session_id: Uuid,
+    task_grant_id: Option<Uuid>,
+    status: &str,
+    summary: &str,
+) -> Result<Session, AppError> {
+    let session_status = if status == "completed" {
+        SessionStatus::Terminated
+    } else {
+        SessionStatus::RequiresAction
+    };
+    let thread = ensure_primary_session_thread(state, session_id).await?;
+    let thread_status = managed_thread_status_for_session(&session_status);
+    let args = json!({"status": status, "summary": summary});
+    let now = Utc::now();
+    let tool_call = ToolCall {
+        id: Uuid::new_v4(),
+        session_id,
+        event_id: Some(Uuid::new_v4()),
+        tool_name: "complete_task".to_string(),
+        args: args.clone(),
+        task_grant_id,
+        normalized_args_hash: None,
+        target_binding: empty_json_object(),
+        status: "completed".to_string(),
+        risk_level: "low".to_string(),
+        policy_decision: json!({
+            "decision": "allowed",
+            "reason": "terminal provider control tool",
+        }),
+        result: Some(args.clone()),
+        error: None,
+        started_at: Some(now),
+        completed_at: Some(now),
+        created_at: now,
+    };
+    let committed = state
+        .commit_provider_completion(
+            tool_call,
+            thread.id,
+            session_status,
+            thread_status,
+            status,
+            summary,
+        )
+        .await;
+    let (_, session, events) = match committed {
+        Ok(committed) => committed,
+        Err(error) if error.status == axum::http::StatusCode::CONFLICT => {
+            return set_managed_session_status(
+                state,
+                session_id,
+                SessionStatus::RequiresAction,
+                &error.message,
+            )
+            .await;
+        }
+        Err(error) => return Err(error),
+    };
+    state.emit_committed_session_events(&events).await;
+    if matches!(
+        session.status,
+        SessionStatus::Terminated | SessionStatus::Failed
+    ) {
+        cleanup_remote_computer_session_runtimes(state, session.id, summary).await?;
+    }
+    Ok(session)
 }
 
 pub(crate) async fn run_provider_harness(
@@ -352,14 +561,65 @@ pub(crate) async fn run_provider_harness(
             json!({"span_id": span_id, "provider": provider_label, "client": provider.name(), "context": context}),
         )
         .await?;
-    let response = provider.complete(context).await?;
+    let response = match provider.complete(context).await {
+        Ok(response) => response,
+        Err(error) => {
+            let error_message = error.message.clone();
+            state
+                .append_event(
+                    "agent",
+                    Some(span_id),
+                    session_id,
+                    "llm.error",
+                    json!({
+                        "span_id": span_id,
+                        "provider": provider_label,
+                        "client": provider.name(),
+                        "status": "failed",
+                        "error": error_message.clone(),
+                    }),
+                )
+                .await?;
+            state
+                .append_event(
+                    "agent",
+                    Some(span_id),
+                    session_id,
+                    "span.model_request_end",
+                    json!({
+                        "span_id": span_id,
+                        "provider": provider_label,
+                        "client": provider.name(),
+                        "status": "failed",
+                    }),
+                )
+                .await?;
+            state
+                .append_audit_log(new_audit_log(
+                    Some(session_id),
+                    "agent",
+                    Some(span_id),
+                    "provider.request_failed",
+                    "provider_request",
+                    Some(span_id),
+                    json!({
+                        "provider": provider_label,
+                        "client": provider.name(),
+                        "status": "failed",
+                        "error": error_message,
+                    }),
+                ))
+                .await?;
+            return Err(error);
+        }
+    };
     state
         .append_event(
             "agent",
             Some(span_id),
             session_id,
             "llm.response",
-            json!({"span_id": span_id, "provider": provider_label, "client": provider.name(), "tool_calls": &response.tool_calls, "final_message": &response.final_message, "usage": &response.usage}),
+            json!({"span_id": span_id, "provider": provider_label, "client": provider.name(), "plan": &response.plan, "tool_calls": &response.tool_calls, "final_message": &response.final_message, "usage": &response.usage}),
         )
         .await?;
     state
@@ -372,6 +632,7 @@ pub(crate) async fn run_provider_harness(
                 "span_id": span_id,
                 "provider": provider_label,
                 "client": provider.name(),
+                "status": "completed",
                 "tool_call_count": response.tool_calls.len(),
                 "final_message_present": response.final_message.is_some(),
                 "usage": response.usage
@@ -992,9 +1253,13 @@ pub(crate) async fn run_session_loop(
         )
         .await?;
 
+    let completion = provider_completion_request(&provider_response.tool_calls)?;
     let session_task_grant_id = active_task_grant.as_ref().map(|(_, grant)| grant.id);
     let mut waiting_for_approval = false;
     for tool_call in &provider_response.tool_calls {
+        if tool_call.tool_name == "complete_task" {
+            continue;
+        }
         let result = execute_tool_invocation(
             state,
             &tool_call.tool_name,
@@ -1044,6 +1309,11 @@ pub(crate) async fn run_session_loop(
                 json!({"message": final_message}),
             )
             .await?;
+    }
+
+    if let Some((status, summary)) = completion {
+        return apply_provider_completion(state, id, session_task_grant_id, &status, &summary)
+            .await;
     }
 
     let session = if waiting_for_approval {

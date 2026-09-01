@@ -7,12 +7,20 @@ use crate::remote_computer_runner::{
     RemoteComputerRunnerDryRunResponse, RemoteComputerRunnerReadiness,
     remote_computer_runner_for_config,
 };
+use crate::store_remote_computers::{
+    remote_computer_runtime_cleanup_claim_is_active,
+    remote_computer_runtime_cleanup_outcome_matches,
+};
 use crate::{
-    AppError, AppState, RemoteComputer, RemoteComputerJobAssignment, RemoteComputerLease,
-    UpdateRemoteComputerLease, deterministic_record_id, new_audit_log,
+    AppError, AppState, REMOTE_COMPUTER_RUNTIME_CLEANUP_CLAIM_UNTIL_MARKER,
+    REMOTE_COMPUTER_RUNTIME_CLEANUP_MARKER, REMOTE_COMPUTER_RUNTIME_CLEANUP_RETRY_MARKER,
+    RemoteComputer, RemoteComputerJobAssignment, RemoteComputerLease, UpdateRemoteComputerLease,
+    deterministic_record_id, new_audit_log,
 };
 
 pub(crate) const REMOTE_COMPUTER_RUNTIME_IDENTITY_METADATA_KEY: &str = "runtime_identity";
+pub(crate) const REMOTE_COMPUTER_RUNTIME_CLEANUP_RETRY_GENERATION_METADATA_KEY: &str =
+    "runtime_cleanup_retry_generation";
 const REMOTE_COMPUTER_RUNTIME_IDENTITY_VERSION: &str = "v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -295,14 +303,7 @@ pub(crate) async fn cleanup_remote_computer_lease_runtime(
         ));
     }
     if lease.status != "leased" {
-        replay_remote_computer_lease_runtime_cleanup_evidence(state, lease, assignment, reason)
-            .await?;
-        return Ok(json!({
-            "status": "already_converged",
-            "lease_id": lease.id,
-            "remote_computer_id": lease.remote_computer_id,
-            "lease_status": lease.status,
-        }));
+        return replay_converged_remote_computer_cleanup(state, lease).await;
     }
     if let Some(assignment) = assignment
         && (assignment.lease_id != lease.id
@@ -311,6 +312,76 @@ pub(crate) async fn cleanup_remote_computer_lease_runtime(
         return Err(AppError::internal(
             "Remote Computer cleanup assignment does not match its lease",
         ));
+    }
+    let lease = match state
+        .claim_remote_computer_lease_runtime_cleanup(
+            lease.id,
+            reason,
+            assignment_status,
+            assignment.map(|assignment| assignment.id),
+        )
+        .await?
+    {
+        Some(lease) => lease,
+        None => {
+            let current = state
+                .list_remote_computer_leases()
+                .await?
+                .into_iter()
+                .find(|current| current.id == lease.id)
+                .ok_or_else(|| AppError::not_found("Remote computer lease not found"))?;
+            if remote_computer_runtime_cleanup_converged(&current) {
+                return replay_converged_remote_computer_cleanup(state, &current).await;
+            }
+            if remote_computer_runtime_cleanup_claim_is_active(&current.metadata, Utc::now())
+                && remote_computer_runtime_cleanup_outcome_matches(
+                    &current.metadata,
+                    assignment_status,
+                    assignment.map(|assignment| assignment.id),
+                )
+            {
+                return Ok(json!({
+                    "status": "runtime_cleanup_in_progress",
+                    "lease_id": current.id,
+                    "remote_computer_id": current.remote_computer_id,
+                    "lease_status": current.status,
+                }));
+            }
+            return Err(AppError::internal(
+                "Remote Computer runtime cleanup is already claimed or no longer active",
+            ));
+        }
+    };
+
+    if lease
+        .metadata
+        .get(REMOTE_COMPUTER_RUNTIME_CLEANUP_RETRY_MARKER)
+        .and_then(Value::as_bool)
+        == Some(true)
+        && lease
+            .metadata
+            .get(REMOTE_COMPUTER_RUNTIME_CLEANUP_RETRY_GENERATION_METADATA_KEY)
+            .and_then(Value::as_u64)
+            .is_some()
+    {
+        let retry_reason = lease
+            .metadata
+            .get("runtime_cleanup_retry_reason")
+            .and_then(Value::as_str)
+            .ok_or_else(|| AppError::internal("runtime cleanup retry reason is missing"))?;
+        let retry_runtime = lease
+            .metadata
+            .get("runtime_cleanup_retry")
+            .ok_or_else(|| AppError::internal("runtime cleanup retry evidence is missing"))?;
+        record_remote_computer_runtime_cleanup_evidence(
+            state,
+            &lease,
+            assignment,
+            retry_reason,
+            "failed",
+            retry_runtime,
+        )
+        .await?;
     }
 
     let remote_computer = state
@@ -356,9 +427,36 @@ pub(crate) async fn cleanup_remote_computer_lease_runtime(
             "substrate": identity.substrate,
         });
         if response.status != "mutation_ok" {
+            let retry_generation = lease
+                .metadata
+                .get(REMOTE_COMPUTER_RUNTIME_CLEANUP_RETRY_GENERATION_METADATA_KEY)
+                .and_then(Value::as_u64)
+                .unwrap_or_default()
+                .checked_add(1)
+                .ok_or_else(|| AppError::internal("runtime cleanup retry generation overflow"))?;
+            let mut retry_metadata = merge_runtime_cleanup_metadata(
+                &lease.metadata,
+                json!({
+                    "runtime_cleanup_retry_reason": reason,
+                    "runtime_cleanup_retry_at": Utc::now(),
+                    "runtime_cleanup_retry": runtime_evidence,
+                    "runtime_cleanup_retry_assignment_status": assignment_status,
+                    "runtime_cleanup_assignment_id": assignment.map(|assignment| assignment.id),
+                }),
+            );
+            retry_metadata[REMOTE_COMPUTER_RUNTIME_CLEANUP_RETRY_MARKER] = Value::Bool(true);
+            retry_metadata[REMOTE_COMPUTER_RUNTIME_CLEANUP_RETRY_GENERATION_METADATA_KEY] =
+                json!(retry_generation);
+            retry_metadata
+                .as_object_mut()
+                .expect("merged cleanup metadata is an object")
+                .remove(REMOTE_COMPUTER_RUNTIME_CLEANUP_CLAIM_UNTIL_MARKER);
+            let retry_lease = state
+                .schedule_remote_computer_lease_cleanup_retry(lease.id, retry_metadata)
+                .await?;
             record_remote_computer_runtime_cleanup_evidence(
                 state,
-                lease,
+                &retry_lease,
                 assignment,
                 reason,
                 "failed",
@@ -395,16 +493,23 @@ pub(crate) async fn cleanup_remote_computer_lease_runtime(
     };
 
     let lease_status = if on_demand { "failed" } else { "released" };
-    let lease_metadata = merge_runtime_cleanup_metadata(
+    let mut lease_metadata = merge_runtime_cleanup_metadata(
         &lease.metadata,
         json!({
             "runtime_cleanup_reason": reason,
             "runtime_cleanup_at": Utc::now(),
             "runtime_cleanup": runtime_evidence,
+            "runtime_cleanup_assignment_id": updated_assignment.as_ref().map(|assignment| assignment.id),
         }),
     );
+    lease_metadata[REMOTE_COMPUTER_RUNTIME_CLEANUP_MARKER] = Value::Bool(true);
+    let metadata = lease_metadata
+        .as_object_mut()
+        .expect("merged cleanup metadata is an object");
+    metadata.remove(REMOTE_COMPUTER_RUNTIME_CLEANUP_RETRY_MARKER);
+    metadata.remove(REMOTE_COMPUTER_RUNTIME_CLEANUP_CLAIM_UNTIL_MARKER);
     let updated_lease = state
-        .update_remote_computer_lease_status(
+        .transition_remote_computer_lease_after_runtime_cleanup(
             lease.id,
             lease_status,
             UpdateRemoteComputerLease {
@@ -436,13 +541,58 @@ pub(crate) async fn cleanup_remote_computer_lease_runtime(
     }))
 }
 
+async fn replay_converged_remote_computer_cleanup(
+    state: &AppState,
+    lease: &RemoteComputerLease,
+) -> Result<Value, AppError> {
+    if !remote_computer_runtime_cleanup_converged(lease) {
+        return Err(AppError::internal(
+            "Remote Computer lease is terminal without converged runtime cleanup",
+        ));
+    }
+    let reason = lease.metadata["runtime_cleanup_reason"]
+        .as_str()
+        .filter(|reason| !reason.trim().is_empty())
+        .ok_or_else(|| AppError::internal("Remote Computer cleanup reason is missing"))?;
+    let assignments = state.list_remote_computer_job_assignments().await?;
+    let assignment = match lease.metadata.get("runtime_cleanup_assignment_id") {
+        Some(Value::String(assignment_id)) => {
+            let assignment_id = uuid::Uuid::parse_str(assignment_id)
+                .map_err(|_| AppError::internal("Remote Computer cleanup assignment is invalid"))?;
+            Some(
+                assignments
+                    .iter()
+                    .find(|assignment| assignment.id == assignment_id)
+                    .ok_or_else(|| {
+                        AppError::internal("Remote Computer cleanup assignment is missing")
+                    })?,
+            )
+        }
+        Some(Value::Null) | None => None,
+        Some(_) => {
+            return Err(AppError::internal(
+                "Remote Computer cleanup assignment is invalid",
+            ));
+        }
+    };
+    replay_remote_computer_lease_runtime_cleanup_evidence(state, lease, assignment, reason).await?;
+    Ok(json!({
+        "status": "already_converged",
+        "lease_id": lease.id,
+        "remote_computer_id": lease.remote_computer_id,
+        "lease_status": lease.status,
+    }))
+}
+
 pub(crate) async fn replay_remote_computer_lease_runtime_cleanup_evidence(
     state: &AppState,
     lease: &RemoteComputerLease,
     assignment: Option<&RemoteComputerJobAssignment>,
     reason: &str,
 ) -> Result<(), AppError> {
-    if lease.metadata["runtime_cleanup_reason"].as_str() != Some(reason) {
+    if lease.metadata["runtime_cleanup_reason"].as_str() != Some(reason)
+        || !remote_computer_runtime_cleanup_converged(lease)
+    {
         return Ok(());
     }
     let runtime = lease
@@ -478,7 +628,7 @@ async fn record_remote_computer_lease_runtime_cleaned_event(
         "metadata": lease.metadata,
         "execution_enabled": false
     });
-    let event_id = deterministic_record_id(lease.id, "remote-computer-lease-event", &[event_type]);
+    let event_id = remote_computer_lease_runtime_cleaned_event_id(lease.id);
     if let Some(session_id) = lease.session_id {
         state
             .append_event_once(
@@ -520,10 +670,48 @@ pub(crate) async fn cleanup_remote_computer_session_runtimes(
         let assignment = assignments
             .iter()
             .find(|assignment| assignment.lease_id == lease.id && assignment.status == "assigned");
-        results.push(
-            cleanup_remote_computer_lease_runtime(state, lease, assignment, reason, "released")
-                .await?,
-        );
+        match cleanup_remote_computer_lease_runtime(state, lease, assignment, reason, "released")
+            .await
+        {
+            Ok(result) => results.push(result),
+            Err(error) => {
+                let retry = state
+                    .list_remote_computer_leases()
+                    .await?
+                    .into_iter()
+                    .find(|candidate| candidate.id == lease.id);
+                let Some(retry) = retry else {
+                    return Err(error);
+                };
+                let runtime_retry_scheduled = retry.status == "leased"
+                    && retry
+                        .lease_expires_at
+                        .is_some_and(|expires_at| expires_at <= Utc::now())
+                    && retry.metadata["runtime_cleanup_retry_reason"].as_str() == Some(reason);
+                let evidence_retry_scheduled =
+                    matches!(retry.status.as_str(), "released" | "failed")
+                        && retry.metadata["runtime_cleanup_reason"].as_str() == Some(reason)
+                        && remote_computer_runtime_cleanup_converged(&retry);
+                if !runtime_retry_scheduled && !evidence_retry_scheduled {
+                    return Err(error);
+                }
+                tracing::error!(
+                    lease_id = %lease.id,
+                    error = %error.message,
+                    "terminal session runtime cleanup scheduled for immediate retry"
+                );
+                results.push(json!({
+                    "status": if runtime_retry_scheduled {
+                        "runtime_retry_scheduled"
+                    } else {
+                        "evidence_retry_scheduled"
+                    },
+                    "lease_id": retry.id,
+                    "lease_status": retry.status,
+                    "lease_expires_at": retry.lease_expires_at,
+                }));
+            }
+        }
     }
     Ok(results)
 }
@@ -536,6 +724,18 @@ fn merge_runtime_cleanup_metadata(existing: &Value, patch: Value) -> Value {
         }
     }
     Value::Object(merged)
+}
+
+pub(crate) fn remote_computer_runtime_cleanup_converged(lease: &RemoteComputerLease) -> bool {
+    lease
+        .metadata
+        .get(REMOTE_COMPUTER_RUNTIME_CLEANUP_MARKER)
+        .and_then(Value::as_bool)
+        == Some(true)
+        && matches!(
+            lease.metadata["runtime_cleanup"]["delete_status"].as_str(),
+            Some("mutation_ok" | "not_required")
+        )
 }
 
 async fn record_remote_computer_runtime_cleanup_evidence(
@@ -551,7 +751,18 @@ async fn record_remote_computer_runtime_cleanup_evidence(
     } else {
         "remote_computer.runtime_cleanup_failed"
     };
-    let details = json!({
+    let retry_generation = if status == "failed" {
+        Some(
+            lease
+                .metadata
+                .get(REMOTE_COMPUTER_RUNTIME_CLEANUP_RETRY_GENERATION_METADATA_KEY)
+                .and_then(Value::as_u64)
+                .ok_or_else(|| AppError::internal("runtime cleanup retry generation is missing"))?,
+        )
+    } else {
+        None
+    };
+    let mut details = json!({
         "lease_id": lease.id,
         "remote_computer_id": lease.remote_computer_id,
         "assignment_id": assignment.map(|assignment| assignment.id),
@@ -560,12 +771,12 @@ async fn record_remote_computer_runtime_cleanup_evidence(
         "reason": reason,
         "runtime": runtime,
     });
+    if let Some(retry_generation) = retry_generation {
+        details["retry_generation"] = json!(retry_generation);
+    }
+    let event_id =
+        remote_computer_runtime_cleanup_event_id(lease.id, reason, status, retry_generation);
     if let Some(session_id) = lease.session_id {
-        let event_id = deterministic_record_id(
-            lease.id,
-            "remote-computer-runtime-cleanup-event",
-            &[reason, status],
-        );
         state
             .append_event_once(
                 event_id,
@@ -577,11 +788,6 @@ async fn record_remote_computer_runtime_cleanup_evidence(
             )
             .await?;
     }
-    let event_id = deterministic_record_id(
-        lease.id,
-        "remote-computer-runtime-cleanup-event",
-        &[reason, status],
-    );
     let mut audit = new_audit_log(
         lease.session_id,
         "system",
@@ -594,6 +800,55 @@ async fn record_remote_computer_runtime_cleanup_evidence(
     audit.id = deterministic_record_id(event_id, "audit", &[event_type]);
     state.append_audit_log(audit).await?;
     Ok(())
+}
+
+fn remote_computer_lease_runtime_cleaned_event_id(lease_id: uuid::Uuid) -> uuid::Uuid {
+    deterministic_record_id(
+        lease_id,
+        "remote-computer-lease-event",
+        &["remote_computer.lease_runtime_cleaned"],
+    )
+}
+
+fn remote_computer_runtime_cleanup_event_id(
+    lease_id: uuid::Uuid,
+    reason: &str,
+    status: &str,
+    retry_generation: Option<u64>,
+) -> uuid::Uuid {
+    if let Some(retry_generation) = retry_generation {
+        return deterministic_record_id(
+            lease_id,
+            "remote-computer-runtime-cleanup-event",
+            &[reason, status, &retry_generation.to_string()],
+        );
+    }
+    deterministic_record_id(
+        lease_id,
+        "remote-computer-runtime-cleanup-event",
+        &[reason, status],
+    )
+}
+
+pub(crate) fn remote_computer_runtime_cleanup_evidence_audit_ids(
+    lease_id: uuid::Uuid,
+    reason: &str,
+) -> [uuid::Uuid; 2] {
+    let cleaned_event_id = remote_computer_lease_runtime_cleaned_event_id(lease_id);
+    let runtime_event_id =
+        remote_computer_runtime_cleanup_event_id(lease_id, reason, "completed", None);
+    [
+        deterministic_record_id(
+            cleaned_event_id,
+            "audit",
+            &["remote_computer.lease_runtime_cleaned"],
+        ),
+        deterministic_record_id(
+            runtime_event_id,
+            "audit",
+            &["remote_computer.runtime_cleanup_completed"],
+        ),
+    ]
 }
 
 pub(crate) fn remote_computer_runner_request_is_exec(

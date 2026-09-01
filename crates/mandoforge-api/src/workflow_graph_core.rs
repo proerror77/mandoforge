@@ -682,6 +682,50 @@ pub(crate) fn json_optional_string_array_contains(value: Option<&Value>, expecte
     }
 }
 
+pub(crate) fn json_schema_enum_contains(allowed_values: &[Value], value: &Value) -> bool {
+    allowed_values.iter().any(|allowed| match (allowed, value) {
+        (Value::Number(allowed), Value::Number(value)) => json_schema_numbers_equal(allowed, value),
+        _ => allowed == value,
+    })
+}
+
+fn json_schema_numbers_equal(left: &serde_json::Number, right: &serde_json::Number) -> bool {
+    match (left.is_f64(), right.is_f64()) {
+        (true, true) => left.as_f64() == right.as_f64(),
+        (true, false) => left
+            .as_f64()
+            .is_some_and(|value| json_schema_integer_equals_float(right, value)),
+        (false, true) => right
+            .as_f64()
+            .is_some_and(|value| json_schema_integer_equals_float(left, value)),
+        (false, false) => {
+            if let (Some(left), Some(right)) = (left.as_i64(), right.as_i64()) {
+                left == right
+            } else if let (Some(left), Some(right)) = (left.as_u64(), right.as_u64()) {
+                left == right
+            } else {
+                false
+            }
+        }
+    }
+}
+
+fn json_schema_integer_equals_float(integer: &serde_json::Number, value: f64) -> bool {
+    if !value.is_finite() || value.fract() != 0.0 {
+        return false;
+    }
+    if let Some(integer) = integer.as_i64() {
+        return (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&value)
+            && value as i64 == integer
+            && integer as f64 == value;
+    }
+    integer.as_u64().is_some_and(|integer| {
+        (0.0..18_446_744_073_709_551_616.0).contains(&value)
+            && value as u64 == integer
+            && integer as f64 == value
+    })
+}
+
 pub(crate) fn validate_handoff_payload_schema(
     payload: &Value,
     schema: Option<&Value>,
@@ -715,6 +759,18 @@ pub(crate) fn validate_handoff_payload_schema(
         let Some(value) = payload_object.get(key) else {
             continue;
         };
+        if let Some(allowed_values) = property_schema.get("enum") {
+            let allowed_values = allowed_values.as_array().ok_or_else(|| {
+                AppError::bad_request(format!(
+                    "handoff payload_schema enum for field {key} must be an array"
+                ))
+            })?;
+            if !json_schema_enum_contains(allowed_values, value) {
+                return Err(AppError::bad_request(format!(
+                    "handoff payload field {key} is not an allowed enum value"
+                )));
+            }
+        }
         let Some(expected_type) = property_schema.get("type").and_then(Value::as_str) else {
             continue;
         };

@@ -11,7 +11,7 @@ use crate::{
     secrets::{SecretProvider, SecretProviderConfig, SecretRef, secret_provider_from_env},
 };
 
-const PROVIDER_HARNESS_RUNTIME_CONTRACT: &str = "You are MandoForge's managed-agent provider harness. First read rendered_context_packet when it is present: it is the bounded ontology, memory, tool, and policy context for this task. Do not invent domain definitions outside that packet. If the packet is missing needed ontology detail, use only the listed ontology tools and include the current context_packet_id in the tool arguments. Runtime actions must go through the supplied tools, TaskGrant, and policy path.";
+const PROVIDER_HARNESS_RUNTIME_CONTRACT: &str = "You are MandoForge's managed-agent provider harness. First read rendered_context_packet when it is present: it is the bounded ontology, memory, tool, and policy context for this task. Do not invent domain definitions outside that packet. If the packet is missing needed ontology detail, use only the listed ontology tools and include the current context_packet_id in the tool arguments. Runtime actions must go through the supplied tools, TaskGrant, and policy path. A final message does not complete the task: call complete_task exactly once, with status completed or blocked and a non-empty summary, only when no other tool call remains.";
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct HarnessContext {
@@ -85,80 +85,50 @@ impl ProviderClient for MockProviderClient {
     }
 
     async fn complete(&self, context: HarnessContext) -> Result<ProviderResponse, AppError> {
-        if context.approved_tool_result_count > 0 {
-            return Ok(ProviderResponse {
-                plan: vec!["Review approved tool output and produce the final response".to_string()],
-                tool_calls: Vec::new(),
-                final_message: Some(
-                    "Approved execution completed. The session timeline now contains the approved tool result and final provider response."
-                        .to_string(),
-                ),
-                usage: Some(ProviderTokenUsage {
-                    prompt_tokens: 120,
-                    completion_tokens: 45,
-                    total_tokens: 165,
-                }),
-            });
+        if context.execution_failed_count > 0 {
+            return Ok(mock_terminal_response(
+                "Report the terminal worker execution failure",
+                "blocked",
+                "Worker execution failed. The durable failure is recorded in the session timeline.",
+                104,
+                38,
+            ));
         }
         if context.rejected_tool_result_count > 0 {
-            return Ok(ProviderResponse {
-                plan: vec!["Record rejected approval and stop the blocked tool path".to_string()],
-                tool_calls: Vec::new(),
-                final_message: Some(
-                    "Approval rejected. The session timeline records the denied tool result and no blocked tool execution was run."
-                        .to_string(),
-                ),
-                usage: Some(ProviderTokenUsage {
-                    prompt_tokens: 96,
-                    completion_tokens: 32,
-                    total_tokens: 128,
-                }),
-            });
+            return Ok(mock_terminal_response(
+                "Record rejected approval and stop the blocked tool path",
+                "blocked",
+                "Approval rejected. The session timeline records the denied tool result and no blocked tool execution was run.",
+                96,
+                32,
+            ));
+        }
+        if context.approved_tool_result_count > 0 {
+            return Ok(mock_terminal_response(
+                "Review approved tool output and produce the final response",
+                "completed",
+                "Approved execution completed. The session timeline now contains the approved tool result and final provider response.",
+                120,
+                45,
+            ));
         }
         if context.manual_tool_result_count > 0 {
-            return Ok(ProviderResponse {
-                plan: vec!["Review manual tool result and continue the session timeline".to_string()],
-                tool_calls: Vec::new(),
-                final_message: Some(
-                    "Manual tool result processed. The session loop consumed the durable tool result event and recorded a final provider response."
-                        .to_string(),
-                ),
-                usage: Some(ProviderTokenUsage {
-                    prompt_tokens: 88,
-                    completion_tokens: 30,
-                    total_tokens: 118,
-                }),
-            });
-        }
-        if context.execution_failed_count > 0 {
-            return Ok(ProviderResponse {
-                plan: vec!["Report the terminal worker execution failure".to_string()],
-                tool_calls: Vec::new(),
-                final_message: Some(
-                    "Worker execution failed. The durable failure is recorded in the session timeline."
-                        .to_string(),
-                ),
-                usage: Some(ProviderTokenUsage {
-                    prompt_tokens: 104,
-                    completion_tokens: 38,
-                    total_tokens: 142,
-                }),
-            });
+            return Ok(mock_terminal_response(
+                "Review manual tool result and continue the session timeline",
+                "completed",
+                "Manual tool result processed. The session loop consumed the durable tool result event and recorded a final provider response.",
+                88,
+                30,
+            ));
         }
         if context.execution_completed_count > 0 {
-            return Ok(ProviderResponse {
-                plan: vec!["Review completed worker execution and stop dispatching new runtime work".to_string()],
-                tool_calls: Vec::new(),
-                final_message: Some(
-                    "Worker execution completed. The session timeline now contains the Codex App Server run, runtime events, and final tool result."
-                        .to_string(),
-                ),
-                usage: Some(ProviderTokenUsage {
-                    prompt_tokens: 104,
-                    completion_tokens: 38,
-                    total_tokens: 142,
-                }),
-            });
+            return Ok(mock_terminal_response(
+                "Review completed worker execution and stop dispatching new runtime work",
+                "completed",
+                "Worker execution completed. The session timeline now contains the Codex App Server run, runtime events, and final tool result.",
+                104,
+                38,
+            ));
         }
         if context
             .last_user_message
@@ -223,6 +193,28 @@ impl ProviderClient for MockProviderClient {
                 total_tokens: 240,
             }),
         })
+    }
+}
+
+fn mock_terminal_response(
+    plan: &str,
+    status: &str,
+    summary: &str,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+) -> ProviderResponse {
+    ProviderResponse {
+        plan: vec![plan.to_string()],
+        tool_calls: vec![ProviderToolCall {
+            tool_name: "complete_task".to_string(),
+            args: json!({"status": status, "summary": summary}),
+        }],
+        final_message: Some(summary.to_string()),
+        usage: Some(ProviderTokenUsage {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: prompt_tokens + completion_tokens,
+        }),
     }
 }
 
@@ -399,34 +391,39 @@ impl ProviderClient for OpenAiCompatibleProviderClient {
             .send()
             .await?;
         let status = response.status();
-        let value: Value = response.json().await?;
-        if !status.is_success() {
-            return Err(AppError::bad_request(format!(
-                "provider request failed with status {status}: {}",
-                redact_provider_error(&value)
-            )));
-        }
-        parse_openai_compatible_provider_response(&value)
+        let body = response.bytes().await?;
+        parse_openai_compatible_http_response(status, &body)
     }
 }
 
+fn parse_openai_compatible_http_response(
+    status: reqwest::StatusCode,
+    body: &[u8],
+) -> Result<ProviderResponse, AppError> {
+    if !status.is_success() {
+        let value = serde_json::from_slice(body).unwrap_or(Value::Null);
+        return Err(AppError::bad_request(format!(
+            "provider request failed with status {status}: {}",
+            redact_provider_error(&value)
+        )));
+    }
+    parse_openai_compatible_provider_response(&serde_json::from_slice(body)?)
+}
+
+const DEFAULT_PROVIDER_TOOL_EXCLUSIONS: &[&str] = &["native.connector.call"];
+
 pub(crate) fn default_provider_tool_names() -> Vec<String> {
-    [
-        "file.read",
-        "sql.get_schema",
-        "sql.query",
-        "shell.exec",
-        "codex.exec",
-        "artifact.create",
-        "semantic_object.fetch",
-        "semantic_object.search",
-        "semantic_link.expand",
-        "ontology.action.execute",
-        "ontology_type.lookup",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect()
+    provider_tool_schema_catalog()
+        .into_iter()
+        .filter_map(|schema| {
+            schema
+                .get("function")
+                .and_then(|function| function.get("name"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .filter(|name| !DEFAULT_PROVIDER_TOOL_EXCLUSIONS.contains(&name.as_str()))
+        .collect()
 }
 
 fn provider_tool_schemas(allowed_tool_names: &[String]) -> Value {
@@ -434,7 +431,38 @@ fn provider_tool_schemas(allowed_tool_names: &[String]) -> Value {
         .iter()
         .map(String::as_str)
         .collect::<HashSet<_>>();
-    let schemas = vec![
+    Value::Array(
+        provider_tool_schema_catalog()
+            .into_iter()
+            .filter(|schema| {
+                schema
+                    .get("function")
+                    .and_then(|function| function.get("name"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| allowed.contains(name))
+            })
+            .collect(),
+    )
+}
+
+fn provider_tool_schema_catalog() -> Vec<Value> {
+    vec![
+        json!({
+            "type": "function",
+            "function": {
+                "name": "complete_task",
+                "description": "Explicitly finish or block the current task. This must be the only tool call in the provider response.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "status": {"type": "string", "enum": ["completed", "blocked"]},
+                        "summary": {"type": "string"}
+                    },
+                    "required": ["status", "summary"],
+                    "additionalProperties": false
+                }
+            }
+        }),
         json!({
             "type": "function",
             "function": {
@@ -521,6 +549,22 @@ fn provider_tool_schemas(allowed_tool_names: &[String]) -> Value {
         json!({
             "type": "function",
             "function": {
+                "name": "mcp.call",
+                "description": "Call a TaskGrant-scoped MCP tool. Server, tool, and arguments remain bounded by the active agent version and TaskGrant.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "server": {"type": "string"},
+                        "tool": {"type": "string"},
+                        "args": {"type": "object", "additionalProperties": true}
+                    },
+                    "required": ["server", "tool"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
                 "name": "native.connector.call",
                 "description": "Request a policy-governed native connector operation. External effects require an exact approval commit binding.",
                 "parameters": {
@@ -589,13 +633,13 @@ fn provider_tool_schemas(allowed_tool_names: &[String]) -> Value {
             "type": "function",
             "function": {
                 "name": "ontology.action.execute",
-                "description": "Validate an action from the pinned ontology release and create a proposal-only artifact. This never commits external side effects.",
+                "description": "Validate one published proposal-only ontology action and create an auditable approval-bound proposal. Direct side effects and customer writeback are disabled.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "context_packet_id": {"type": "string", "description": "The current rendered_context_packet.context_packet_id."},
                         "action": {"type": "string", "description": "Published action name from the pinned ontology release."},
-                        "parameters": {"type": "object", "description": "Parameters matching the published action contract."}
+                        "parameters": {"type": "object", "description": "Parameters matching the published proposal-only action contract."}
                     },
                     "required": ["context_packet_id", "action", "parameters"]
                 }
@@ -617,19 +661,7 @@ fn provider_tool_schemas(allowed_tool_names: &[String]) -> Value {
                 }
             }
         }),
-    ];
-    Value::Array(
-        schemas
-            .into_iter()
-            .filter(|schema| {
-                schema
-                    .get("function")
-                    .and_then(|function| function.get("name"))
-                    .and_then(Value::as_str)
-                    .is_some_and(|name| allowed.contains(name))
-            })
-            .collect(),
-    )
+    ]
 }
 
 pub(crate) fn parse_openai_compatible_provider_response(
@@ -645,16 +677,18 @@ pub(crate) fn parse_openai_compatible_provider_response(
         .get("content")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let tool_calls = message
-        .get("tool_calls")
-        .and_then(Value::as_array)
-        .map(|calls| {
+    let tool_calls = match message.get("tool_calls") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(value) => {
+            let calls = value.as_array().ok_or_else(|| {
+                AppError::bad_request("provider response tool_calls must be an array")
+            })?;
             calls
                 .iter()
-                .filter_map(parse_provider_tool_call)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+                .map(parse_provider_tool_call)
+                .collect::<Result<Vec<_>, _>>()?
+        }
+    };
     let plan = provider_plan_from_content(content).unwrap_or_else(|| {
         vec![format!(
             "Provider returned {} runtime tool call(s)",
@@ -692,16 +726,35 @@ fn parse_provider_token_usage(value: Option<&Value>) -> Option<ProviderTokenUsag
     })
 }
 
-fn parse_provider_tool_call(value: &Value) -> Option<ProviderToolCall> {
-    let function = value.get("function")?;
-    let tool_name = function.get("name")?.as_str()?.to_string();
+fn parse_provider_tool_call(value: &Value) -> Result<ProviderToolCall, AppError> {
+    let function = value
+        .get("function")
+        .and_then(Value::as_object)
+        .ok_or_else(|| AppError::bad_request("provider response tool call function is required"))?;
+    let tool_name = function
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            AppError::bad_request("provider response tool call function name is required")
+        })?;
     let arguments = function
         .get("arguments")
         .and_then(Value::as_str)
-        .unwrap_or("{}");
-    let args =
-        serde_json::from_str(arguments).unwrap_or_else(|_| json!({"raw_arguments": arguments}));
-    Some(ProviderToolCall { tool_name, args })
+        .ok_or_else(|| {
+            AppError::bad_request("provider response tool call arguments are required")
+        })?;
+    let args: Value = serde_json::from_str(arguments).map_err(|_| {
+        AppError::bad_request("provider response tool call arguments must be valid JSON")
+    })?;
+    if !args.is_object() {
+        return Err(AppError::bad_request(
+            "provider response tool call arguments must be a JSON object",
+        ));
+    }
+    Ok(ProviderToolCall { tool_name, args })
 }
 
 fn provider_plan_from_content(content: &str) -> Option<Vec<String>> {
@@ -743,10 +796,87 @@ fn redact_provider_error(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        OpenAiCompatibleProviderClient, default_provider_tool_names,
-        provider_api_key_from_env_value, provider_api_key_secret_ref, provider_tool_schemas,
+        HarnessContext, MockProviderClient, OpenAiCompatibleProviderClient, ProviderClient,
+        default_provider_tool_names, parse_openai_compatible_http_response,
+        parse_openai_compatible_provider_response, provider_api_key_from_env_value,
+        provider_api_key_secret_ref, provider_tool_schemas,
     };
     use crate::secrets::ReservedSecretProvider;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    fn mock_harness_context() -> HarnessContext {
+        HarnessContext {
+            session_id: Uuid::new_v4(),
+            agent_version_id: Uuid::new_v4(),
+            agent_version: 1,
+            system_prompt: String::new(),
+            task_grant_id: None,
+            context_packet_id: None,
+            rendered_context_packet: None,
+            provider_tool_names: Vec::new(),
+            event_count: 0,
+            pending_event_seq_start: None,
+            pending_event_seq_end: None,
+            pending_event_count: 0,
+            last_user_message: None,
+            latest_goal_event: None,
+            approved_tool_result_count: 0,
+            rejected_tool_result_count: 0,
+            manual_tool_result_count: 0,
+            custom_tool_result_count: 0,
+            execution_completed_count: 0,
+            execution_failed_count: 0,
+            recent_custom_tool_results: Vec::new(),
+            recent_execution_completed: Vec::new(),
+            recent_execution_failed: Vec::new(),
+            recent_goal_events: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_provider_terminal_results_call_complete_task() {
+        let mut approved = mock_harness_context();
+        approved.approved_tool_result_count = 1;
+        let mut rejected = mock_harness_context();
+        rejected.rejected_tool_result_count = 1;
+        let mut manual = mock_harness_context();
+        manual.manual_tool_result_count = 1;
+        let mut execution_completed = mock_harness_context();
+        execution_completed.execution_completed_count = 1;
+        let mut execution_failed = mock_harness_context();
+        execution_failed.execution_failed_count = 1;
+
+        for (context, expected_status) in [
+            (approved, "completed"),
+            (rejected, "blocked"),
+            (manual, "completed"),
+            (execution_completed, "completed"),
+            (execution_failed, "blocked"),
+        ] {
+            let response = MockProviderClient
+                .complete(context)
+                .await
+                .expect("mock response");
+            assert_eq!(response.tool_calls.len(), 1);
+            assert_eq!(response.tool_calls[0].tool_name, "complete_task");
+            assert_eq!(response.tool_calls[0].args["status"], expected_status);
+            assert!(
+                response.tool_calls[0].args["summary"]
+                    .as_str()
+                    .is_some_and(|summary| !summary.is_empty())
+            );
+        }
+
+        let mut mixed = mock_harness_context();
+        mixed.approved_tool_result_count = 1;
+        mixed.execution_failed_count = 1;
+        let response = MockProviderClient
+            .complete(mixed)
+            .await
+            .expect("mixed result response");
+        assert_eq!(response.tool_calls[0].args["status"], "blocked");
+    }
 
     #[test]
     fn default_tools_exclude_approval_only_native_connector_calls() {
@@ -761,6 +891,92 @@ mod tests {
             provider_tool_schemas(&["native.connector.call".to_string()])[0]["function"]["name"],
             "native.connector.call"
         );
+        assert!(default_tools.iter().any(|tool| tool == "mcp.call"));
+        let mcp_only =
+            provider_tool_schemas(&["mcp.call".to_string(), "custom.unknown".to_string()]);
+        assert_eq!(mcp_only.as_array().map(Vec::len), Some(1));
+        assert_eq!(mcp_only[0]["function"]["name"], "mcp.call");
+    }
+
+    #[test]
+    fn provider_tool_call_parser_rejects_malformed_calls_without_argument_echo() {
+        let malformed = [
+            json!({
+                "choices": [{"message": {"tool_calls": "not-an-array"}}]
+            }),
+            json!({
+                "choices": [{"message": {"tool_calls": [{"function": {}}]}}]
+            }),
+            json!({
+                "choices": [{"message": {"tool_calls": [{"function": {
+                    "name": "shell.exec",
+                    "arguments": "{invalid secret-argument}"
+                }}]}}]
+            }),
+            json!({
+                "choices": [{"message": {"tool_calls": [{"function": {
+                    "name": "shell.exec",
+                    "arguments": "[1, 2, 3]"
+                }}]}}]
+            }),
+        ];
+        for response in malformed {
+            let error = parse_openai_compatible_provider_response(&response)
+                .expect_err("malformed provider tool call must fail closed");
+            assert!(!error.message.contains("secret-argument"));
+        }
+    }
+
+    #[test]
+    fn provider_tool_call_parser_accepts_only_json_object_arguments() {
+        let response = json!({
+            "choices": [{"message": {"tool_calls": [{"function": {
+                "name": "file.read",
+                "arguments": "{\"paths\":[\"README.md\"]}"
+            }}]}}]
+        });
+        let parsed =
+            parse_openai_compatible_provider_response(&response).expect("valid provider tool call");
+        assert_eq!(parsed.tool_calls.len(), 1);
+        assert_eq!(parsed.tool_calls[0].tool_name, "file.read");
+        assert_eq!(parsed.tool_calls[0].args["paths"][0], "README.md");
+    }
+
+    #[test]
+    fn provider_parser_accepts_null_tool_calls_as_no_calls() {
+        let response = json!({
+            "choices": [{"message": {"content": "done", "tool_calls": null}}]
+        });
+
+        let parsed = parse_openai_compatible_provider_response(&response).expect("final response");
+
+        assert!(parsed.tool_calls.is_empty());
+        assert_eq!(parsed.final_message.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn ontology_action_provider_schema_is_proposal_only() {
+        let schemas = provider_tool_schemas(&["ontology.action.execute".to_string()]);
+        let schema = &schemas[0]["function"];
+
+        assert!(
+            schema["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("proposal-only"))
+        );
+        assert!(schema["parameters"]["properties"]["idempotency_key"].is_null());
+    }
+
+    #[test]
+    fn provider_http_error_preserves_non_json_status_without_echoing_body() {
+        let error = parse_openai_compatible_http_response(
+            reqwest::StatusCode::BAD_GATEWAY,
+            b"<html>upstream secret</html>",
+        )
+        .expect_err("non-JSON provider errors must preserve the HTTP status");
+
+        assert!(error.message.contains("502 Bad Gateway"));
+        assert!(!error.message.contains("upstream secret"));
     }
 
     #[test]

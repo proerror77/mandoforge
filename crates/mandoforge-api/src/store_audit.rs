@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use anyhow::Result;
 use uuid::Uuid;
 
@@ -185,9 +187,39 @@ impl AppState {
             }
         }
     }
+
+    pub(crate) async fn existing_audit_log_ids(
+        &self,
+        ids: &[Uuid],
+    ) -> Result<HashSet<Uuid>, AppError> {
+        if ids.is_empty() {
+            return Ok(HashSet::new());
+        }
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let logs = &inner.read().await.audit_logs;
+                Ok(ids
+                    .iter()
+                    .copied()
+                    .filter(|id| logs.contains_key(id))
+                    .collect())
+            }
+            StoreBackend::Postgres(pool) => Ok(sqlx::query_scalar::<_, Uuid>(
+                "SELECT id
+                 FROM audit_logs
+                 WHERE tenant_id = $1 AND id = ANY($2::uuid[])",
+            )
+            .bind(self.current_tenant_id())
+            .bind(ids)
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .collect()),
+        }
+    }
 }
 
-fn validate_idempotent_audit_identity(
+pub(crate) fn validate_idempotent_audit_identity(
     existing: &AuditLog,
     requested: &AuditLog,
 ) -> Result<(), AppError> {

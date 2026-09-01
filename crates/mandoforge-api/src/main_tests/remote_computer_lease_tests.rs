@@ -12,6 +12,34 @@ fn on_demand_test_identity(resource_name: &str, pod_name: &str) -> RemoteCompute
     )
 }
 
+async fn pooled_cleanup_test_lease(state: &AppState, name: &str) -> RemoteComputerLease {
+    let computer = state
+        .create_remote_computer(CreateRemoteComputer {
+            id: None,
+            name: name.to_string(),
+            profile: Some("workspace-write".to_string()),
+            namespace: None,
+            pod_name: Some(format!("{name}-pod")),
+            workspace_path: None,
+            state_mount_path: None,
+            metadata: Some(json!({"warm_pool": true})),
+        })
+        .await
+        .expect("create pooled cleanup computer");
+    state
+        .create_remote_computer_lease(
+            computer.id,
+            CreateRemoteComputerLease {
+                session_id: None,
+                worker_id: Some("cleanup-worker".to_string()),
+                lease_seconds: Some(60),
+                metadata: Some(json!({"on_demand": false})),
+            },
+        )
+        .await
+        .expect("create pooled cleanup lease")
+}
+
 #[tokio::test]
 async fn remote_computer_lease_rejects_non_positive_duration() {
     let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
@@ -42,10 +70,122 @@ async fn remote_computer_lease_rejects_non_positive_duration() {
         .await
         .expect_err("zero lease duration should fail");
     assert_eq!(error.status, StatusCode::BAD_REQUEST);
+
     assert!(
         error
             .message
             .contains("remote computer lease_seconds must be positive")
+    );
+}
+
+#[tokio::test]
+async fn remote_computer_lease_rejects_client_cleanup_markers() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let computer = state
+        .create_remote_computer(CreateRemoteComputer {
+            id: None,
+            name: "cleanup-marker-test".to_string(),
+            profile: None,
+            namespace: None,
+            pod_name: None,
+            workspace_path: None,
+            state_mount_path: None,
+            metadata: None,
+        })
+        .await
+        .expect("create remote computer");
+    let mut cleanup_metadata = json!({});
+    cleanup_metadata[REMOTE_COMPUTER_RUNTIME_CLEANUP_MARKER] = json!(true);
+
+    let error = state
+        .create_remote_computer_lease(
+            computer.id,
+            CreateRemoteComputerLease {
+                session_id: None,
+                worker_id: Some("worker-1".to_string()),
+                lease_seconds: Some(60),
+                metadata: Some(cleanup_metadata.clone()),
+            },
+        )
+        .await
+        .expect_err("client cleanup marker must not be accepted at lease creation");
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+
+    let mut retry_metadata = json!({});
+    retry_metadata[REMOTE_COMPUTER_RUNTIME_CLEANUP_RETRY_MARKER] = json!(true);
+    let error = state
+        .create_remote_computer_lease(
+            computer.id,
+            CreateRemoteComputerLease {
+                session_id: None,
+                worker_id: Some("worker-1".to_string()),
+                lease_seconds: Some(60),
+                metadata: Some(retry_metadata.clone()),
+            },
+        )
+        .await
+        .expect_err("client cleanup retry marker must not be accepted at lease creation");
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+
+    let mut claim_metadata = json!({});
+    claim_metadata[REMOTE_COMPUTER_RUNTIME_CLEANUP_CLAIM_UNTIL_MARKER] = json!(Utc::now());
+    let error = state
+        .create_remote_computer_lease(
+            computer.id,
+            CreateRemoteComputerLease {
+                session_id: None,
+                worker_id: Some("worker-1".to_string()),
+                lease_seconds: Some(60),
+                metadata: Some(claim_metadata),
+            },
+        )
+        .await
+        .expect_err("client cleanup claim marker must not be accepted at lease creation");
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+
+    let lease = state
+        .create_remote_computer_lease(
+            computer.id,
+            CreateRemoteComputerLease {
+                session_id: None,
+                worker_id: Some("worker-1".to_string()),
+                lease_seconds: Some(60),
+                metadata: None,
+            },
+        )
+        .await
+        .expect("create clean lease");
+    let error = state
+        .update_remote_computer_lease_status(
+            lease.id,
+            "released",
+            UpdateRemoteComputerLease {
+                reason: Some("spoof cleanup".to_string()),
+                metadata: Some(cleanup_metadata),
+            },
+        )
+        .await
+        .expect_err("client cleanup marker must not be accepted at lease transition");
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    let error = state
+        .update_remote_computer_lease_status(
+            lease.id,
+            "released",
+            UpdateRemoteComputerLease {
+                reason: Some("spoof cleanup retry".to_string()),
+                metadata: Some(retry_metadata),
+            },
+        )
+        .await
+        .expect_err("client cleanup retry marker must not be accepted at lease transition");
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        state
+            .list_remote_computer_leases()
+            .await
+            .expect("list leases")[0]
+            .status,
+        "leased"
     );
 }
 
@@ -193,6 +333,23 @@ async fn on_demand_cleanup_failure_keeps_lease_and_record_retryable() {
     let _mutation = EnvVarGuard::set("MANDOFORGE_REMOTE_COMPUTER_MUTATION_ENABLED", "false");
     let _live = EnvVarGuard::set("MANDOFORGE_REMOTE_COMPUTER_LIVE_MUTATION_ENABLED", "false");
     let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let agent = state
+        .list_agents()
+        .await
+        .expect("list agents")
+        .into_iter()
+        .next()
+        .expect("seeded agent");
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "runtime cleanup retry evidence".to_string(),
+            message: None,
+        })
+        .await
+        .expect("create cleanup session");
     let identity = on_demand_test_identity("retryable-claim", "retryable-pod");
     let computer = state
         .create_remote_computer(CreateRemoteComputer {
@@ -214,7 +371,7 @@ async fn on_demand_cleanup_failure_keeps_lease_and_record_retryable() {
         .create_remote_computer_lease(
             computer.id,
             CreateRemoteComputerLease {
-                session_id: None,
+                session_id: Some(session.id),
                 worker_id: Some("cleanup-worker".to_string()),
                 lease_seconds: Some(60),
                 metadata: Some(json!({"on_demand": true})),
@@ -242,6 +399,172 @@ async fn on_demand_cleanup_failure_keeps_lease_and_record_retryable() {
         .find(|candidate| candidate.id == lease.id)
         .expect("persisted lease");
     assert_eq!(persisted_lease.status, "leased");
+    assert!(
+        persisted_lease
+            .lease_expires_at
+            .is_some_and(|expires_at| expires_at <= Utc::now())
+    );
+    assert_eq!(
+        persisted_lease.metadata[REMOTE_COMPUTER_RUNTIME_CLEANUP_RETRY_MARKER],
+        json!(true)
+    );
+    assert_eq!(
+        persisted_lease.metadata["runtime_cleanup_retry_reason"],
+        json!("test_cleanup_failure")
+    );
+    assert_eq!(
+        persisted_lease.metadata["runtime_cleanup_retry_assignment_status"],
+        json!("released")
+    );
+    assert_eq!(
+        persisted_lease.metadata
+            [crate::remote_computer_runtime::REMOTE_COMPUTER_RUNTIME_CLEANUP_RETRY_GENERATION_METADATA_KEY],
+        json!(1)
+    );
+    assert!(
+        persisted_lease.metadata["runtime_cleanup_assignment_id"].is_null(),
+        "cleanup without an assignment must preserve an explicit null binding"
+    );
+    cleanup_remote_computer_lease_runtime(
+        &state,
+        &persisted_lease,
+        None,
+        "test_cleanup_failure",
+        "released",
+    )
+    .await
+    .expect_err("a second failed deletion must remain retryable");
+    let second_retry = state
+        .list_remote_computer_leases()
+        .await
+        .expect("list leases after second retry")
+        .into_iter()
+        .find(|candidate| candidate.id == lease.id)
+        .expect("second retry lease");
+    assert_eq!(
+        second_retry.metadata
+            [crate::remote_computer_runtime::REMOTE_COMPUTER_RUNTIME_CLEANUP_RETRY_GENERATION_METADATA_KEY],
+        json!(2)
+    );
+    let failed_events = state
+        .list_events(session.id)
+        .await
+        .expect("cleanup failure events")
+        .into_iter()
+        .filter(|event| event.event_type == "remote_computer.runtime_cleanup_failed")
+        .collect::<Vec<_>>();
+    assert_eq!(failed_events.len(), 2);
+    assert_ne!(failed_events[0].id, failed_events[1].id);
+    assert_eq!(failed_events[0].payload["retry_generation"], json!(1));
+    assert_eq!(failed_events[1].payload["retry_generation"], json!(2));
+    let failed_audits = state
+        .list_audit_logs(Some(session.id))
+        .await
+        .expect("cleanup failure audits")
+        .into_iter()
+        .filter(|audit| audit.action == "remote_computer.runtime_cleanup_failed")
+        .collect::<Vec<_>>();
+    assert_eq!(failed_audits.len(), 2);
+    assert_ne!(failed_audits[0].id, failed_audits[1].id);
+
+    let pending_runtime = json!({
+        "delete_attempted": false,
+        "delete_status": "mutation_blocked",
+        "delete_status_code": null,
+        "namespace": identity.namespace,
+        "resource_name": identity.resource_name,
+        "substrate": identity.substrate,
+    });
+    let mut pending_metadata = second_retry.metadata.clone();
+    pending_metadata[crate::remote_computer_runtime::REMOTE_COMPUTER_RUNTIME_CLEANUP_RETRY_GENERATION_METADATA_KEY] = json!(3);
+    pending_metadata["runtime_cleanup_retry"] = pending_runtime.clone();
+    let pending_lease = state
+        .schedule_remote_computer_lease_cleanup_retry(lease.id, pending_metadata)
+        .await
+        .expect("persist pending cleanup evidence generation");
+    let pending_event_id = deterministic_record_id(
+        lease.id,
+        "remote-computer-runtime-cleanup-event",
+        &["test_cleanup_failure", "failed", "3"],
+    );
+    let pending_audit_id = deterministic_record_id(
+        pending_event_id,
+        "audit",
+        &["remote_computer.runtime_cleanup_failed"],
+    );
+    state
+        .append_event_once(
+            pending_event_id,
+            "system",
+            None,
+            session.id,
+            "remote_computer.runtime_cleanup_failed",
+            json!({
+                "lease_id": lease.id,
+                "remote_computer_id": computer.id,
+                "assignment_id": null,
+                "session_id": session.id,
+                "status": "failed",
+                "reason": "test_cleanup_failure",
+                "runtime": pending_runtime,
+                "retry_generation": 3,
+            }),
+        )
+        .await
+        .expect("persist event before simulated audit interruption");
+    cleanup_remote_computer_lease_runtime(
+        &state,
+        &pending_lease,
+        None,
+        "test_cleanup_failure",
+        "released",
+    )
+    .await
+    .expect_err("cleanup must replay pending evidence before the next failed deletion");
+    let fourth_retry = state
+        .list_remote_computer_leases()
+        .await
+        .expect("list leases after replayed evidence")
+        .into_iter()
+        .find(|candidate| candidate.id == lease.id)
+        .expect("fourth retry lease");
+    assert_eq!(
+        fourth_retry.metadata
+            [crate::remote_computer_runtime::REMOTE_COMPUTER_RUNTIME_CLEANUP_RETRY_GENERATION_METADATA_KEY],
+        json!(4)
+    );
+    assert!(
+        state
+            .list_audit_logs(Some(session.id))
+            .await
+            .expect("cleanup failure audits after replay")
+            .iter()
+            .any(|audit| audit.id == pending_audit_id),
+        "the pending generation audit must be repaired before advancing"
+    );
+    let heartbeat_error = state
+        .update_remote_computer_lease_status(
+            lease.id,
+            "leased",
+            UpdateRemoteComputerLease {
+                reason: None,
+                metadata: Some(json!({"heartbeat": true})),
+            },
+        )
+        .await
+        .expect_err("heartbeats must not erase a pending cleanup retry");
+    assert!(heartbeat_error.message.contains("cleanup is pending"));
+    assert_eq!(
+        state
+            .list_remote_computer_leases()
+            .await
+            .expect("list leases after rejected heartbeat")
+            .into_iter()
+            .find(|candidate| candidate.id == lease.id)
+            .expect("persisted retry lease")
+            .metadata["runtime_cleanup_retry_reason"],
+        json!("test_cleanup_failure")
+    );
     let persisted_computer = state
         .list_remote_computers()
         .await
@@ -250,6 +573,109 @@ async fn on_demand_cleanup_failure_keeps_lease_and_record_retryable() {
         .find(|candidate| candidate.id == computer.id)
         .expect("persisted computer");
     assert_eq!(persisted_computer.status, "leased");
+}
+
+#[tokio::test]
+async fn cleanup_claim_rejects_stale_intent_without_overwriting_retry() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let lease = pooled_cleanup_test_lease(&state, "cleanup-intent-fence").await;
+    let claimed = state
+        .claim_remote_computer_lease_runtime_cleanup(
+            lease.id,
+            "execution_job_cancel",
+            "canceled",
+            None,
+        )
+        .await
+        .expect("claim cancellation cleanup")
+        .expect("cancellation cleanup owner");
+    let mut retry_metadata = claimed.metadata;
+    retry_metadata
+        .as_object_mut()
+        .expect("cleanup metadata object")
+        .remove(REMOTE_COMPUTER_RUNTIME_CLEANUP_CLAIM_UNTIL_MARKER);
+    state
+        .schedule_remote_computer_lease_cleanup_retry(lease.id, retry_metadata)
+        .await
+        .expect("schedule cancellation cleanup retry");
+
+    let stale_claim = state
+        .claim_remote_computer_lease_runtime_cleanup(
+            lease.id,
+            "expired_lease_reclaim",
+            "released",
+            Some(Uuid::new_v4()),
+        )
+        .await
+        .expect("stale cleanup claim result");
+    assert!(stale_claim.is_none());
+    let persisted = state
+        .list_remote_computer_leases()
+        .await
+        .expect("list leases")
+        .into_iter()
+        .find(|candidate| candidate.id == lease.id)
+        .expect("persisted lease");
+    assert_eq!(
+        persisted.metadata["runtime_cleanup_retry_reason"],
+        json!("execution_job_cancel")
+    );
+    assert_eq!(
+        persisted.metadata["runtime_cleanup_retry_assignment_status"],
+        json!("canceled")
+    );
+    assert!(persisted.metadata["runtime_cleanup_assignment_id"].is_null());
+
+    assert!(
+        state
+            .claim_remote_computer_lease_runtime_cleanup(
+                lease.id,
+                "execution_job_cancel",
+                "canceled",
+                None,
+            )
+            .await
+            .expect("resume cancellation cleanup")
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn equivalent_active_cleanup_claim_is_reported_in_progress() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let lease = pooled_cleanup_test_lease(&state, "equivalent-cleanup-claim").await;
+    state
+        .claim_remote_computer_lease_runtime_cleanup(
+            lease.id,
+            "expired_lease_reclaim",
+            "released",
+            None,
+        )
+        .await
+        .expect("claim stale cleanup")
+        .expect("stale cleanup owner");
+
+    let result = cleanup_remote_computer_lease_runtime(
+        &state,
+        &lease,
+        None,
+        "provider_terminal_cleanup",
+        "released",
+    )
+    .await
+    .expect("equivalent cleanup owner must not fail terminal completion");
+    assert_eq!(result["status"], "runtime_cleanup_in_progress");
+    assert_eq!(
+        state
+            .list_remote_computer_leases()
+            .await
+            .expect("list leases")
+            .into_iter()
+            .find(|candidate| candidate.id == lease.id)
+            .expect("persisted lease")
+            .metadata["runtime_cleanup_retry_reason"],
+        json!("expired_lease_reclaim")
+    );
 }
 
 #[tokio::test]

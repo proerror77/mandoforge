@@ -53,6 +53,26 @@ drain_session_loop() {
     >/dev/null
 }
 
+session_events() {
+  local session_id="$1"
+  curl -fsS "$BASE_URL/api/sessions/$session_id/events" "${auth_headers[@]}"
+}
+
+session_tool_calls() {
+  local session_id="$1"
+  curl -fsS "$BASE_URL/api/sessions/$session_id/tool-calls" "${auth_headers[@]}"
+}
+
+session_audit_logs() {
+  local session_id="$1"
+  curl -fsS "$BASE_URL/api/sessions/$session_id/audit-logs" "${auth_headers[@]}"
+}
+
+session_artifacts() {
+  local session_id="$1"
+  curl -fsS "$BASE_URL/api/sessions/$session_id/artifacts" "${auth_headers[@]}"
+}
+
 curl -fsS "$BASE_URL/healthz" >/dev/null
 
 AGENT_ID="$(
@@ -90,11 +110,22 @@ SHELL_APPROVAL_ID="$(
 curl -fsS -X POST "$BASE_URL/api/approvals/$SHELL_APPROVAL_ID/approve" "${auth_headers[@]}" >/dev/null
 drain_session_loop "$SESSION_ID" "shell approval"
 
+ARTIFACT_SESSION_ID="$(
+  curl -fsS -X POST "$BASE_URL/api/sessions" \
+    "${auth_headers[@]}" \
+    -H 'content-type: application/json' \
+    -d "$(jq -nc --arg agent_id "$AGENT_ID" '{
+      agent_id: $agent_id,
+      title: "Stage 1 artifact demo"
+    }')" \
+    | jq -r '.id'
+)"
+
 WRITE_APPROVAL_ID="$(
   curl -fsS -X POST "$BASE_URL/api/tools/file.write/execute" \
     "${auth_headers[@]}" \
     -H 'content-type: application/json' \
-    -d "$(jq -nc --arg session_id "$SESSION_ID" '{
+    -d "$(jq -nc --arg session_id "$ARTIFACT_SESSION_ID" '{
       session_id: $session_id,
       args: {
         path: "diagnostics.md",
@@ -104,29 +135,43 @@ WRITE_APPROVAL_ID="$(
     | jq -r '.approval_id'
 )"
 curl -fsS -X POST "$BASE_URL/api/approvals/$WRITE_APPROVAL_ID/approve" "${auth_headers[@]}" >/dev/null
+drain_session_loop "$ARTIFACT_SESSION_ID" "approved file.write"
 
 EVENT_TYPES="$(
-  curl -fsS "$BASE_URL/api/sessions/$SESSION_ID/events" \
-    "${auth_headers[@]}" \
-    | jq -r '[.[].event_type] | unique | join(",")'
+  jq -rn \
+    --argjson primary "$(session_events "$SESSION_ID")" \
+    --argjson artifact "$(session_events "$ARTIFACT_SESSION_ID")" '
+      [$primary[], $artifact[]]
+      | map(.event_type)
+      | unique
+      | join(",")
+    '
 )"
 TOOL_CALLS="$(
-  curl -fsS "$BASE_URL/api/sessions/$SESSION_ID/tool-calls" \
-    "${auth_headers[@]}" \
-    | jq -r '[.[] | "\(.tool_name):\(.status)"] | join(",")'
+  jq -rn \
+    --argjson primary "$(session_tool_calls "$SESSION_ID")" \
+    --argjson artifact "$(session_tool_calls "$ARTIFACT_SESSION_ID")" '
+      [$primary[], $artifact[]]
+      | map("\(.tool_name):\(.status)")
+      | unique
+      | join(",")
+    '
 )"
 ARTIFACTS="$(
-  curl -fsS "$BASE_URL/api/sessions/$SESSION_ID/artifacts" \
-    "${auth_headers[@]}" \
-    | jq -r '[.[].name] | join(",")'
+  session_artifacts "$ARTIFACT_SESSION_ID" | jq -r '[.[].name] | join(",")'
 )"
 AUDIT_ACTIONS="$(
-  curl -fsS "$BASE_URL/api/sessions/$SESSION_ID/audit-logs" \
-    "${auth_headers[@]}" \
-    | jq -r '[.[].action] | unique | join(",")'
+  jq -rn \
+    --argjson primary "$(session_audit_logs "$SESSION_ID")" \
+    --argjson artifact "$(session_audit_logs "$ARTIFACT_SESSION_ID")" '
+      [$primary[], $artifact[]]
+      | map(.action)
+      | unique
+      | join(",")
+    '
 )"
 
-WORKSPACE_FILE="$WORKSPACE_ROOT/$SESSION_ID/diagnostics.md"
+WORKSPACE_FILE="$WORKSPACE_ROOT/$ARTIFACT_SESSION_ID/diagnostics.md"
 if [[ ! -f "$WORKSPACE_FILE" ]]; then
   echo "expected workspace artifact missing: $WORKSPACE_FILE" >&2
   exit 1

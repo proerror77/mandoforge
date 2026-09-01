@@ -1085,18 +1085,29 @@ async fn ontology_release_candidate_captures_materialized_proposals() {
     let run = create_demo_ontology_onboarding_run_for_test(&state)
         .await
         .expect("demo run");
-    let object_proposal = run
-        .proposals
-        .iter()
-        .find(|proposal| proposal.proposal_type == "object")
-        .map(|proposal| proposal.id)
-        .expect("object proposal");
     let action_proposal = run
         .proposals
         .iter()
         .find(|proposal| proposal.proposal_type == "action")
         .map(|proposal| proposal.id)
         .expect("action proposal");
+    let action_target = run
+        .proposals
+        .iter()
+        .find(|proposal| proposal.id == action_proposal)
+        .and_then(|proposal| proposal.content.get("target_object"))
+        .and_then(Value::as_str)
+        .expect("action target");
+    let object_proposal = run
+        .proposals
+        .iter()
+        .find(|proposal| {
+            proposal.proposal_type == "object"
+                && proposal.content.get("object_type").and_then(Value::as_str)
+                    == Some(action_target)
+        })
+        .map(|proposal| proposal.id)
+        .expect("action target object proposal");
     review_ontology_onboarding_proposal_for_test(
         &state,
         object_proposal,
@@ -1157,19 +1168,42 @@ async fn ontology_release_candidate_excludes_rejected_materialized_proposals() {
     let run = create_demo_ontology_onboarding_run_for_test(&state)
         .await
         .expect("demo run");
-    let object_proposal = run
-        .proposals
-        .iter()
-        .find(|proposal| proposal.proposal_type == "object" && proposal.name == "Order")
-        .map(|proposal| proposal.id)
-        .expect("object proposal");
     let action_proposal = run
         .proposals
         .iter()
         .find(|proposal| proposal.proposal_type == "action")
         .map(|proposal| proposal.id)
         .expect("action proposal");
-    for proposal_id in [object_proposal, action_proposal] {
+    let action_target = run
+        .proposals
+        .iter()
+        .find(|proposal| proposal.id == action_proposal)
+        .and_then(|proposal| proposal.content.get("target_object"))
+        .and_then(Value::as_str)
+        .expect("action target");
+    let target_object_proposal = run
+        .proposals
+        .iter()
+        .find(|proposal| {
+            proposal.proposal_type == "object"
+                && proposal.content.get("object_type").and_then(Value::as_str)
+                    == Some(action_target)
+        })
+        .map(|proposal| proposal.id)
+        .expect("action target object proposal");
+    let rejected_object_proposal = run
+        .proposals
+        .iter()
+        .find(|proposal| {
+            proposal.proposal_type == "object" && proposal.id != target_object_proposal
+        })
+        .map(|proposal| proposal.id)
+        .expect("rejected object proposal");
+    for proposal_id in [
+        target_object_proposal,
+        rejected_object_proposal,
+        action_proposal,
+    ] {
         review_ontology_onboarding_proposal_for_test(
             &state,
             proposal_id,
@@ -1184,7 +1218,7 @@ async fn ontology_release_candidate_excludes_rejected_materialized_proposals() {
         .expect("materialize approved proposals");
     review_ontology_onboarding_proposal_for_test(
         &state,
-        object_proposal,
+        rejected_object_proposal,
         "reject",
         Some("business owner pulled approval after materialization"),
     )
@@ -1204,7 +1238,7 @@ async fn ontology_release_candidate_excludes_rejected_materialized_proposals() {
     .await
     .expect("release candidate");
 
-    assert_eq!(release.object_count, 0);
+    assert!(release.object_count >= 1);
     assert!(release.action_count >= 1);
     assert!(
         !release
@@ -1212,7 +1246,7 @@ async fn ontology_release_candidate_excludes_rejected_materialized_proposals() {
             .as_array()
             .expect("evidence refs")
             .iter()
-            .any(|evidence| evidence["proposal_id"] == json!(object_proposal))
+            .any(|evidence| evidence["proposal_id"] == json!(rejected_object_proposal))
     );
 }
 
@@ -1228,14 +1262,25 @@ async fn ontology_release_candidate_tracks_reused_materialized_objects_by_key() 
         .find(|proposal| proposal.proposal_type == "action" && proposal.name == "refund_order")
         .map(|proposal| proposal.id)
         .expect("first action proposal");
-    review_ontology_onboarding_proposal_for_test(
-        &state,
-        first_action,
-        "approve",
-        Some("first release action"),
-    )
-    .await
-    .expect("approve first action");
+    let first_target_object = first
+        .proposals
+        .iter()
+        .find(|proposal| {
+            proposal.proposal_type == "object"
+                && proposal.content.get("object_type").and_then(Value::as_str) == Some("Order")
+        })
+        .map(|proposal| proposal.id)
+        .expect("first action target object proposal");
+    for proposal_id in [first_target_object, first_action] {
+        review_ontology_onboarding_proposal_for_test(
+            &state,
+            proposal_id,
+            "approve",
+            Some("first release fixture"),
+        )
+        .await
+        .expect("approve first release fixture");
+    }
     materialize_ontology_onboarding_run_for_test(&state, first.id)
         .await
         .expect("materialize first run");
@@ -1246,6 +1291,24 @@ async fn ontology_release_candidate_tracks_reused_materialized_objects_by_key() 
         .into_iter()
         .find(|object| object.object_key == "commerce.action.refund_order")
         .expect("first action object");
+    let first_release = create_ontology_release_candidate_with_actor(
+        &state,
+        first.id,
+        CreateOntologyReleaseCandidateRequest {
+            version: Some("commerce-vtest-reused-action-parent".to_string()),
+            migration_policy: Some(default_ontology_release_migration_policy()),
+            release_class: None,
+        },
+        "test",
+    )
+    .await
+    .expect("first release candidate");
+    gate_ontology_release_with_actor(&state, first_release.id, "test")
+        .await
+        .expect("gate first release");
+    promote_ontology_release_with_actor(&state, first_release.id, "test")
+        .await
+        .expect("promote first release");
 
     let second = create_demo_ontology_onboarding_run_for_test(&state)
         .await
@@ -1256,14 +1319,25 @@ async fn ontology_release_candidate_tracks_reused_materialized_objects_by_key() 
         .find(|proposal| proposal.proposal_type == "action" && proposal.name == "refund_order")
         .map(|proposal| proposal.id)
         .expect("second action proposal");
-    review_ontology_onboarding_proposal_for_test(
-        &state,
-        second_action,
-        "approve",
-        Some("second release reuses existing action object"),
-    )
-    .await
-    .expect("approve second action");
+    let second_target_object = second
+        .proposals
+        .iter()
+        .find(|proposal| {
+            proposal.proposal_type == "object"
+                && proposal.content.get("object_type").and_then(Value::as_str) == Some("Order")
+        })
+        .map(|proposal| proposal.id)
+        .expect("second action target object proposal");
+    for proposal_id in [second_target_object, second_action] {
+        review_ontology_onboarding_proposal_for_test(
+            &state,
+            proposal_id,
+            "approve",
+            Some("second release fixture"),
+        )
+        .await
+        .expect("approve second release fixture");
+    }
     materialize_ontology_onboarding_run_for_test(&state, second.id)
         .await
         .expect("materialize second run");
@@ -1307,14 +1381,33 @@ async fn ontology_release_generated_versions_include_entropy() {
         .find(|proposal| proposal.proposal_type == "action")
         .map(|proposal| proposal.id)
         .expect("action proposal");
-    review_ontology_onboarding_proposal_for_test(
-        &state,
-        action_proposal,
-        "approve",
-        Some("release action"),
-    )
-    .await
-    .expect("approve action");
+    let target_object = run
+        .proposals
+        .iter()
+        .find(|proposal| proposal.id == action_proposal)
+        .and_then(|proposal| proposal.content.get("target_object"))
+        .and_then(Value::as_str)
+        .expect("action target");
+    let target_object_proposal = run
+        .proposals
+        .iter()
+        .find(|proposal| {
+            proposal.proposal_type == "object"
+                && proposal.content.get("object_type").and_then(Value::as_str)
+                    == Some(target_object)
+        })
+        .map(|proposal| proposal.id)
+        .expect("action target object proposal");
+    for proposal_id in [target_object_proposal, action_proposal] {
+        review_ontology_onboarding_proposal_for_test(
+            &state,
+            proposal_id,
+            "approve",
+            Some("release fixture"),
+        )
+        .await
+        .expect("approve release fixture");
+    }
     materialize_ontology_onboarding_run_for_test(&state, run.id)
         .await
         .expect("materialize action");
@@ -1407,14 +1500,26 @@ async fn ontology_release_candidate_for_test(state: &AppState, version: &str) ->
     let run = create_demo_ontology_onboarding_run_for_test(state)
         .await
         .expect("demo run");
-    let proposal_ids = ["object", "action"]
-        .into_iter()
-        .filter_map(|proposal_type| {
-            run.proposals
-                .iter()
-                .find(|proposal| proposal.proposal_type == proposal_type)
-                .map(|proposal| proposal.id)
+    let action = run
+        .proposals
+        .iter()
+        .find(|proposal| proposal.proposal_type == "action")
+        .expect("action proposal");
+    let target_object = action
+        .content
+        .get("target_object")
+        .and_then(Value::as_str)
+        .expect("action target object");
+    let proposal_ids = run
+        .proposals
+        .iter()
+        .filter(|proposal| {
+            proposal.id == action.id
+                || (proposal.proposal_type == "object"
+                    && proposal.content.get("object_type").and_then(Value::as_str)
+                        == Some(target_object))
         })
+        .map(|proposal| proposal.id)
         .collect::<Vec<_>>();
     for proposal_id in proposal_ids {
         review_ontology_onboarding_proposal_for_test(
@@ -1615,10 +1720,14 @@ mod migration_tests;
 mod observability_controller_tests;
 #[path = "main_tests/ontology_release_workflow_trigger_tests.rs"]
 mod ontology_release_workflow_trigger_tests;
+#[path = "main_tests/ontology_sdk_tests.rs"]
+mod ontology_sdk_tests;
 #[path = "main_tests/postgres_event_stream_tests.rs"]
 mod postgres_event_stream_tests;
 #[path = "main_tests/provider_controller_tests.rs"]
 mod provider_controller_tests;
+#[path = "main_tests/provider_harness_tests.rs"]
+mod provider_harness_tests;
 #[path = "main_tests/remote_computer_execution_tests.rs"]
 mod remote_computer_execution_tests;
 #[path = "main_tests/remote_computer_lease_tests.rs"]
@@ -7343,7 +7452,7 @@ async fn agent_handoff_events_require_allowlist_approval_and_payload_schema() {
                                 "required": ["assessment_id"],
                                 "properties": {
                                     "assessment_id": {"type": "string"},
-                                    "impact_score": {"type": "number"}
+                                    "impact_score": {"type": "number", "enum": [1]}
                                 }
                             }
                         }]
@@ -7372,7 +7481,7 @@ async fn agent_handoff_events_require_allowlist_approval_and_payload_schema() {
             json!({
                 "target_agent_id": target.id,
                 "intent": "draft_assessment",
-                "payload": {"assessment_id": "a-1", "impact_score": 0.8},
+                "payload": {"assessment_id": "a-1", "impact_score": 1.0},
                 "schema_version": "handoff.v1",
                 "risk_level": "high",
                 "approval_required": false
@@ -7416,7 +7525,7 @@ async fn agent_handoff_events_require_allowlist_approval_and_payload_schema() {
             json!({
                 "target_agent_id": target.id,
                 "intent": "draft_assessment",
-                "payload": {"assessment_id": "a-1", "impact_score": 0.8},
+                "payload": {"assessment_id": "a-1", "impact_score": 1.0},
                 "schema_version": "handoff.v1",
                 "risk_level": "high",
                 "approval_required": true
@@ -11523,7 +11632,9 @@ async fn semantic_synthesis_run_creates_reflection_artifact_and_review_candidate
 
 #[tokio::test]
 async fn semantic_synthesis_run_requires_idle_or_completed_checkpoint() {
-    let app = test_app().await;
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed demo agent");
+    let app = build_router(state.clone());
     let agents: Vec<Agent> = request_json(
         app.clone(),
         Request::builder()
@@ -11567,6 +11678,33 @@ async fn semantic_synthesis_run_requires_idle_or_completed_checkpoint() {
             "semantic synthesis requires a completed session or idle managed-session checkpoint"
         ),
         "unexpected error body: {body}"
+    );
+    state
+        .append_event(
+            "system",
+            None,
+            session.id,
+            "workflow.run.completed",
+            json!({"workflow_run_id": Uuid::new_v4()}),
+        )
+        .await
+        .expect("append partial-session checkpoint");
+    let (status, body) = request_value(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/sessions/{}/memory-writeback-candidates", session.id),
+            json!({}),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("memory writeback candidates require a completed session")
     );
     let artifacts: Vec<Artifact> = request_json(
         app,
@@ -30917,6 +31055,18 @@ async fn rendered_context_pins_active_ontology_release_by_domain_scope() {
         json!("active_ontology_release")
     );
     assert!(
+        rendered.ontology_scope["ontology_release"]["catalog_summary"]["objects"]
+            .as_array()
+            .is_some_and(|objects| !objects.is_empty())
+    );
+    assert!(
+        rendered.ontology_scope["ontology_release"]["catalog_summary"]["actions"]
+            .as_array()
+            .is_some_and(|actions| actions.iter().all(|action| {
+                action["api_name"].is_string() && action["input_schema"].is_object()
+            }))
+    );
+    assert!(
         !rendered
             .available_tools
             .iter()
@@ -31018,6 +31168,20 @@ async fn workflow_run_pins_ontology_release_before_context_packet_generation() {
         rendered.ontology_scope["ontology_release"]["id"],
         json!(initial.id)
     );
+    let (_, original_packet_id, _, _) =
+        build_provider_context_packet(&state, run.primary_session_id, false)
+            .await
+            .expect("reuse provider context");
+    let (_, refreshed_packet_id, refreshed, _) =
+        build_provider_context_packet(&state, run.primary_session_id, true)
+            .await
+            .expect("refresh provider context");
+    assert!(original_packet_id.is_some());
+    assert_ne!(refreshed_packet_id, original_packet_id);
+    assert_eq!(
+        refreshed.expect("refreshed context")["ontology_scope"]["ontology_release"]["id"],
+        json!(initial.id)
+    );
 }
 
 #[tokio::test]
@@ -31067,6 +31231,19 @@ async fn http_workflow_run_pins_ontology_release_into_root_task_grant() {
 #[tokio::test]
 async fn ontology_action_tool_executes_pinned_contract_as_proposal_only() {
     let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let mut approval_policy =
+        serde_json::to_value(PolicyConfig::default()).expect("serialize default policy");
+    approval_policy["approval_required"]
+        .as_array_mut()
+        .expect("approval rules")
+        .push(json!({"tool": "ontology.action.execute", "risk": "medium"}));
+    state
+        .activate_runtime_policy(
+            Uuid::new_v4(),
+            serde_json::from_value(approval_policy).expect("ontology approval policy"),
+            100,
+        )
+        .await;
     let release = ontology_release_candidate_for_test(&state, "commerce-vtest-action-tool").await;
     gate_ontology_release_with_actor(&state, release.id, "test")
         .await
@@ -31162,7 +31339,7 @@ async fn ontology_action_tool_executes_pinned_contract_as_proposal_only() {
         .await
         .expect("bind context packet");
     let (_, _, rendered, provider_tools) =
-        build_provider_context_packet(&state, run.primary_session_id)
+        build_provider_context_packet(&state, run.primary_session_id, false)
             .await
             .expect("provider context");
     let rendered = rendered.expect("rendered context");
@@ -31181,7 +31358,7 @@ async fn ontology_action_tool_executes_pinned_contract_as_proposal_only() {
             .as_array()
             .is_some_and(|tools| tools.iter().any(|tool| tool == "ontology.action.execute"))
     );
-    let result = execute_tool_invocation(
+    let approval_required = execute_tool_invocation(
         &state,
         "ontology.action.execute",
         ExecuteTool {
@@ -31200,9 +31377,61 @@ async fn ontology_action_tool_executes_pinned_contract_as_proposal_only() {
         ToolInvocationOrigin::ManualRoute,
     )
     .await
-    .expect("ontology action proposal");
+    .expect("ontology action approval request");
+    assert_eq!(approval_required["status"], json!("approval_required"));
+    let approval_id = Uuid::parse_str(
+        approval_required["approval_id"]
+            .as_str()
+            .expect("approval id"),
+    )
+    .expect("valid approval id");
+    let pending_approval = state
+        .get_approval(approval_id)
+        .await
+        .expect("pending ontology action approval");
+    let pending_tool_call_id = pending_approval.tool_call_id.expect("approval tool call");
+    let pending_tool_call = state
+        .get_tool_call(pending_tool_call_id)
+        .await
+        .expect("pending ontology action call");
+    let mut changed_action_args = pending_tool_call.args.clone();
+    changed_action_args["action"] = json!("commerce.cancel_order");
+    let error = state
+        .update_tool_call_args(pending_tool_call_id, changed_action_args)
+        .await
+        .expect_err("approval modification cannot change ontology action identity");
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        state
+            .get_tool_call(pending_tool_call_id)
+            .await
+            .expect("unchanged ontology action call")
+            .args["action"],
+        json!("commerce.refund_order")
+    );
+    let _ = decide_approval(
+        state.clone(),
+        approval_id,
+        "approved",
+        Some("test-approver".to_string()),
+    )
+    .await
+    .expect("approved ontology action proposal");
+    let approval = state
+        .get_approval(approval_id)
+        .await
+        .expect("approved ontology action");
+    let completed_call = state
+        .get_tool_call(approval.tool_call_id.expect("approval tool call"))
+        .await
+        .expect("completed ontology action call");
+    assert_eq!(completed_call.status, "completed");
+    let result = completed_call
+        .result
+        .expect("ontology action proposal result");
 
     assert_eq!(result["status"], json!("proposal_created"));
+    assert_eq!(result["approval"], json!("approved"));
     assert_eq!(result["ontology_release_id"], json!(release.id));
     assert_eq!(result["action"], json!("commerce.refund_order"));
     assert_eq!(result["execution_mode"], json!("proposal_only"));
@@ -31216,6 +31445,81 @@ async fn ontology_action_tool_executes_pinned_contract_as_proposal_only() {
             && artifact.content["status"] == json!("draft")
             && artifact.content["ontology_release_id"] == json!(release.id)
     }));
+    assert_eq!(
+        build_harness_context(&state, run.primary_session_id, None, None)
+            .await
+            .expect("approved ontology action context")
+            .approved_tool_result_count,
+        1
+    );
+    let invalid_approval = execute_tool_invocation(
+        &state,
+        "ontology.action.execute",
+        ExecuteTool {
+            session_id: run.primary_session_id,
+            task_grant_id: Some(grant_id),
+            args: json!({
+                "context_packet_id": packet.id,
+                "action": "commerce.refund_order",
+                "parameters": {"order_id": "order-invalid", "amount": "not-a-number"}
+            }),
+        },
+        ToolInvocationOrigin::ManualRoute,
+    )
+    .await
+    .expect("invalid action still requires approval before worker validation");
+    let invalid_approval_id = Uuid::parse_str(
+        invalid_approval["approval_id"]
+            .as_str()
+            .expect("invalid action approval id"),
+    )
+    .expect("valid approval id");
+    let artifacts_before_invalid = state
+        .list_artifacts(run.primary_session_id)
+        .await
+        .expect("artifacts before invalid approval")
+        .len();
+    let error = decide_approval(
+        state.clone(),
+        invalid_approval_id,
+        "approved",
+        Some("test-approver".to_string()),
+    )
+    .await
+    .expect_err("invalid approved proposal must fail without retry");
+    assert!(error.message.contains("amount must be decimal"));
+    let invalid_job = state
+        .execution_queue
+        .list()
+        .await
+        .expect("execution jobs")
+        .into_iter()
+        .find(|job| job.approval_id == invalid_approval_id)
+        .expect("invalid action execution job");
+    assert_eq!(invalid_job.status, ExecutionJobStatus::Failed);
+    let invalid_approval = state
+        .get_approval(invalid_approval_id)
+        .await
+        .expect("invalid approved action");
+    assert_eq!(
+        state
+            .get_tool_call(invalid_approval.tool_call_id.expect("invalid tool call"))
+            .await
+            .expect("failed invalid tool call")
+            .status,
+        "failed"
+    );
+    assert_eq!(
+        state
+            .list_artifacts(run.primary_session_id)
+            .await
+            .expect("artifacts after invalid approval")
+            .len(),
+        artifacts_before_invalid
+    );
+    state
+        .activate_runtime_policy(Uuid::new_v4(), PolicyConfig::default(), 100)
+        .await;
     let error = execute_tool_invocation(
         &state,
         "ontology.action.execute",
@@ -32439,7 +32743,7 @@ async fn memory_writeback_candidates_require_review_before_durable_memory() {
             .expect("valid request"),
     )
     .await;
-    assert!(matches!(checkpointed.status, SessionStatus::Idle));
+    assert!(matches!(checkpointed.status, SessionStatus::Terminated));
 
     let generated: Vec<MemoryWritebackCandidate> = request_json(
         app.clone(),
@@ -34216,6 +34520,33 @@ async fn mcp_commit_write_uses_approval_commit_token_exact_binding() {
             .is_some_and(|hash| hash.starts_with("sha256:"))
     );
 
+    let StoreBackend::Memory(store) = &state.store else {
+        panic!("MCP commit test uses the memory store");
+    };
+    {
+        let mut store = store.write().await;
+        let legacy_call = store
+            .tool_calls
+            .get_mut(&waiting_call.id)
+            .expect("waiting MCP call");
+        legacy_call.normalized_args_hash = None;
+        legacy_call.target_binding = empty_json_object();
+    }
+    state
+        .modify_approval(
+            approval_id,
+            waiting_call.args.clone(),
+            Some("rebuild legacy commit binding".to_string()),
+        )
+        .await
+        .expect("legacy commit_write modification rebuilds binding from its task grant");
+    let waiting_call = state
+        .get_tool_call(waiting_call.id)
+        .await
+        .expect("rebound waiting MCP call");
+    assert!(waiting_call.normalized_args_hash.is_some());
+    assert_eq!(waiting_call.target_binding["server"], json!("social"));
+
     let approved: Approval = request_json(
         app.clone(),
         Request::builder()
@@ -34848,16 +35179,22 @@ async fn native_connector_commit_write_enforces_side_effect_scope_and_exact_bind
         .into_iter()
         .find(|job| job.approval_id == approval_id)
         .expect("queued native connector commit");
-    let completed = run_execution_job(&state, job.id, "native-connector-worker")
+    let retryable = run_execution_job(&state, job.id, "native-connector-worker")
         .await
-        .expect("native connector commit executes");
-    assert_eq!(completed.status, ExecutionJobStatus::Completed);
-    let consumed_token = state
+        .expect("unsupported native connector remains retryable");
+    assert_eq!(retryable.status, ExecutionJobStatus::Queued);
+    assert!(
+        retryable
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("no registered executor"))
+    );
+    let unconsumed_token = state
         .approval_commit_token_for_approval(approval_id)
         .await
         .expect("commit token")
         .expect("native approval should keep token record");
-    assert_eq!(consumed_token.status, "consumed");
+    assert_eq!(unconsumed_token.status, "issued");
 
     let tamper_required: Value = request_json(
         app.clone(),
@@ -34933,7 +35270,9 @@ async fn native_connector_commit_write_enforces_side_effect_scope_and_exact_bind
             .last_error
             .as_deref()
             .unwrap_or_default()
-            .contains("approval commit token digest does not match")
+            .contains("approval commit token digest does not match"),
+        "unexpected retry error: {:?}",
+        tamper_retry.last_error
     );
 }
 
@@ -35710,7 +36049,7 @@ async fn generic_runtime_diagnostics_replay_api_flow() {
         completed_resume_loop.status,
         SessionLoopJobStatus::Completed
     );
-    let idle_after_resume: Session = request_json(
+    let completed_after_resume: Session = request_json(
         app.clone(),
         Request::builder()
             .uri(format!("/api/sessions/{}", session.id))
@@ -35718,7 +36057,10 @@ async fn generic_runtime_diagnostics_replay_api_flow() {
             .expect("valid request"),
     )
     .await;
-    assert!(matches!(idle_after_resume.status, SessionStatus::Idle));
+    assert!(matches!(
+        completed_after_resume.status,
+        SessionStatus::Terminated
+    ));
 
     let events_after_approval: Vec<SessionEvent> = request_json(
         app.clone(),
@@ -35734,7 +36076,7 @@ async fn generic_runtime_diagnostics_replay_api_flow() {
         .collect();
     assert!(event_types_after_approval.contains(&"approval.approved"));
     assert!(event_types_after_approval.contains(&"execution.completed"));
-    assert!(event_types_after_approval.contains(&"session.loop.idle"));
+    assert!(event_types_after_approval.contains(&"session.goal.completed"));
     assert!(event_types_after_approval.contains(&"thread.status_changed"));
     assert!(
         event_types_after_approval
@@ -35783,7 +36125,7 @@ async fn generic_runtime_diagnostics_replay_api_flow() {
     )
     .await;
     assert_eq!(completed_threads.len(), 1);
-    assert_eq!(completed_threads[0].status, "idle");
+    assert_eq!(completed_threads[0].status, "terminated");
 }
 
 #[tokio::test]
@@ -40139,14 +40481,14 @@ async fn workflow_step_run_endpoint_claims_and_executes_session_loop() {
             .expect("valid request"),
     )
     .await;
-    let completed_step = resumed_steps
+    let resumed_step = resumed_steps
         .iter()
         .find(|step| step["id"] == json!(step_id))
-        .expect("completed workflow step");
-    assert_eq!(completed_step["status"], json!("completed"));
-    assert!(completed_step["completed_at"].as_str().is_some());
+        .expect("resumed workflow step");
+    assert_eq!(resumed_step["status"], json!("requires_action"));
+    assert!(resumed_step["completed_at"].is_null());
     assert!(
-        completed_step["output_payload"]["worker_execution"]["session_loop_resume"]
+        resumed_step["output_payload"]["worker_execution"]["session_loop_resume"]
             .as_bool()
             .unwrap_or(false)
     );
@@ -44048,10 +44390,11 @@ async fn approving_file_write_resumes_tool_and_creates_artifact() {
         event.event_type == "llm.request"
             && event.payload["context"]["approved_tool_result_count"] == json!(1)
     }));
-    assert!(events_after_resume.iter().any(|event| {
-        event.event_type == "session.loop.idle"
-            && event.payload["reason"] == json!("provider tool loop idled")
-    }));
+    assert!(
+        events_after_resume
+            .iter()
+            .any(|event| event.event_type == "session.goal.completed")
+    );
     assert!(events_after_resume.iter().any(|event| {
         event.event_type == "execution.completed"
             && event.payload["reason"] == json!("approved execution completed")

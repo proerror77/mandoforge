@@ -267,3 +267,12 @@ reconstructable from `session_events`, `tool_calls`, and `audit_logs`.
 - [x] Stage 5.3: Add human approval / rejection flow before writeback candidates become durable organizational memory.
 - [x] Stage 5.4: Add freshness and trust gates for high-risk tasks so stale or untrusted context cannot silently drive execution.
 - [x] Stage 5.5: Add optional retrieval backends after the object/link/context packet model is stable; do not make vector search the first semantic layer dependency.
+
+## Ontology SDK MVP / Phase 1-3
+
+- [x] Phase 1: publish a promoted-release catalog snapshot with stable API names, property metadata, relation endpoints, and action contract digests.
+- [x] Phase 1: persist immutable, tenant-scoped application manifests bound to an authenticated subject and exact release/catalog digest.
+- [x] Phase 2: expose subject-bound read-only object/relation projections and proposal-only actions through the existing policy/approval path.
+- [x] Phase 3 MVP: deterministically generate a strict TypeScript read/propose-only client from the resolved application catalog and verify it against an isolated Node 18 example.
+- [ ] Publish an npm package or add OpenAPI/ObjectSet compatibility (deferred beyond this MVP).
+- [ ] Enable semantic writeback or customer-grade Postgres transactions (P0-2 remains explicitly incomplete).

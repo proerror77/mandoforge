@@ -13,9 +13,8 @@ use crate::{
     ModifyApproval, Permission, approval_is_expired, authorize_approval_decision,
     authorize_collection_request, authorize_request, decide_approval, enforce_resource_scope,
     escalate_approval_record, execute_due_approval_escalations, expire_approval_record,
-    new_audit_log, principal_from_request, refresh_tool_call_commit_binding_if_required,
-    validate_approval_escalation_rule_input, validate_approval_group_input,
-    visible_session_ids_for_principal,
+    new_audit_log, principal_from_request, validate_approval_escalation_rule_input,
+    validate_approval_group_input, visible_session_ids_for_principal,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -101,12 +100,6 @@ async fn modify_approval(
     if approval_is_expired(&approval) {
         expire_approval_record(&state, id).await?;
         return Err(AppError::bad_request("approval expired"));
-    }
-    if let Some(tool_call_id) = approval.tool_call_id {
-        let tool_call = state
-            .update_tool_call_args(tool_call_id, input.args.clone())
-            .await?;
-        refresh_tool_call_commit_binding_if_required(&state, tool_call).await?;
     }
     let updated = state
         .modify_approval(id, input.args.clone(), input.comment.clone())

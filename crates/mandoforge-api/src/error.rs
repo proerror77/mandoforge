@@ -11,6 +11,7 @@ pub(crate) struct AppError {
     pub(crate) status: StatusCode,
     pub(crate) message: String,
     pub(crate) execution_outcome_known: bool,
+    pub(crate) execution_retry_safe: bool,
 }
 
 impl AppError {
@@ -19,6 +20,7 @@ impl AppError {
             status: StatusCode::UNAUTHORIZED,
             message: message.into(),
             execution_outcome_known: false,
+            execution_retry_safe: false,
         }
     }
 
@@ -27,6 +29,7 @@ impl AppError {
             status: StatusCode::NOT_FOUND,
             message: message.into(),
             execution_outcome_known: false,
+            execution_retry_safe: false,
         }
     }
 
@@ -35,6 +38,7 @@ impl AppError {
             status: StatusCode::BAD_REQUEST,
             message: message.into(),
             execution_outcome_known: false,
+            execution_retry_safe: false,
         }
     }
 
@@ -43,6 +47,7 @@ impl AppError {
             status: StatusCode::CONFLICT,
             message: message.into(),
             execution_outcome_known: false,
+            execution_retry_safe: false,
         }
     }
 
@@ -51,6 +56,7 @@ impl AppError {
             status: StatusCode::FORBIDDEN,
             message: message.into(),
             execution_outcome_known: false,
+            execution_retry_safe: false,
         }
     }
 
@@ -61,11 +67,19 @@ impl AppError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: "internal server error".to_string(),
             execution_outcome_known: false,
+            execution_retry_safe: false,
         }
     }
 
     pub(crate) fn with_known_execution_outcome(mut self) -> Self {
         self.execution_outcome_known = true;
+        self.execution_retry_safe = false;
+        self
+    }
+
+    pub(crate) fn with_retry_safe_execution(mut self) -> Self {
+        self.execution_outcome_known = false;
+        self.execution_retry_safe = true;
         self
     }
 }
@@ -83,6 +97,7 @@ impl From<anyhow::Error> for AppError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: error.to_string(),
             execution_outcome_known: false,
+            execution_retry_safe: false,
         }
     }
 }
@@ -106,6 +121,7 @@ impl From<sqlx::Error> for AppError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: error.to_string(),
             execution_outcome_known: false,
+            execution_retry_safe: false,
         }
     }
 }
@@ -117,6 +133,7 @@ impl From<reqwest::Error> for AppError {
             status: StatusCode::BAD_GATEWAY,
             message: "provider transport error".to_string(),
             execution_outcome_known: false,
+            execution_retry_safe: false,
         }
     }
 }
@@ -133,6 +150,7 @@ impl From<StatusCode> for AppError {
             status,
             message: status.to_string(),
             execution_outcome_known: false,
+            execution_retry_safe: false,
         }
     }
 }

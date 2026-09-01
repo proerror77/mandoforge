@@ -18,6 +18,8 @@ pub(crate) mod ontology;
 pub(crate) mod ontology_intelligence;
 pub(crate) mod ontology_onboarding;
 pub(crate) mod ontology_releases;
+pub(crate) mod ontology_sdk_applications;
+pub(crate) mod ontology_sdk_consumers;
 pub(crate) mod packs;
 pub(crate) mod policy;
 pub(crate) mod providers;

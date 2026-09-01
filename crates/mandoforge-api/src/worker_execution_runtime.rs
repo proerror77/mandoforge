@@ -498,6 +498,7 @@ mod tests {
                     status: axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                     message: "temporary store failure".to_string(),
                     execution_outcome_known: false,
+                    execution_retry_safe: false,
                 }),
                 "test lease",
             )
@@ -513,6 +514,7 @@ mod tests {
                     status: axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                     message: "persistent store failure".to_string(),
                     execution_outcome_known: false,
+                    execution_retry_safe: false,
                 }),
                 "test lease",
             )
