@@ -306,11 +306,21 @@ pub(crate) fn ontology_release_from_row(row: PgRow) -> Result<OntologyRelease, A
 pub(crate) fn ontology_onboarding_run_record_from_row(
     row: PgRow,
 ) -> Result<OntologyOnboardingRunRecord, AppError> {
+    let source_dataset_manifest = row
+        .try_get::<Option<Value>, _>("source_dataset_manifest")?
+        .map(serde_json::from_value)
+        .transpose()?;
+    let source_profiles = row
+        .try_get::<Option<Value>, _>("source_profiles")?
+        .map(serde_json::from_value)
+        .transpose()?;
     Ok(OntologyOnboardingRunRecord {
         id: row.try_get("id")?,
         industry: row.try_get("industry")?,
         source_mode: row.try_get("source_mode")?,
         domain_scope: row.try_get("domain_scope")?,
+        source_dataset_manifest,
+        source_profiles,
         status: row.try_get("status")?,
         dataset_count: row.try_get("dataset_count")?,
         profile_count: row.try_get("profile_count")?,

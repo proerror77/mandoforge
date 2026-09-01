@@ -170,6 +170,8 @@ pub(crate) struct OntologyOnboardingRunRecord {
     pub(crate) industry: String,
     pub(crate) source_mode: String,
     pub(crate) domain_scope: String,
+    pub(crate) source_dataset_manifest: Option<Vec<OntologyOnboardingDataset>>,
+    pub(crate) source_profiles: Option<Vec<OntologyDatasetProfile>>,
     pub(crate) status: String,
     pub(crate) dataset_count: i32,
     pub(crate) profile_count: i32,
