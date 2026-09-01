@@ -164,6 +164,23 @@ pub(crate) struct OntologyOnboardingRun {
     pub(crate) generated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct OntologyOnboardingRunRecord {
+    pub(crate) id: Uuid,
+    pub(crate) industry: String,
+    pub(crate) source_mode: String,
+    pub(crate) domain_scope: String,
+    pub(crate) status: String,
+    pub(crate) dataset_count: i32,
+    pub(crate) profile_count: i32,
+    pub(crate) proposal_count: i32,
+    pub(crate) approved_count: i32,
+    pub(crate) materialized_count: i32,
+    pub(crate) actor_subject: String,
+    pub(crate) created_at: DateTime<Utc>,
+    pub(crate) updated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct ReviewOntologyOnboardingProposalRequest {
     pub(crate) decision: String,

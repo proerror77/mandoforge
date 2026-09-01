@@ -928,6 +928,12 @@ pub(crate) fn ontology_profile_fk<'a>(
     })
 }
 
+fn ontology_i32_count(value: usize, field: &str) -> Result<i32, AppError> {
+    i32::try_from(value).map_err(|_| {
+        AppError::bad_request(format!("ontology {field} exceeds database integer range"))
+    })
+}
+
 #[cfg(test)]
 pub(crate) async fn create_demo_ontology_onboarding_run_for_test(
     state: &AppState,
@@ -3349,6 +3355,24 @@ pub(crate) async fn create_ontology_onboarding_run_with_actor(
     let datasets = source.datasets.clone();
     let profiles = ontology_profile_demo_datasets(&datasets);
     let proposals = ontology_generate_seed_proposals_for_run(run_id, &seed, &datasets, &profiles);
+    let now = Utc::now();
+    state
+        .create_ontology_onboarding_run_record(OntologyOnboardingRunRecord {
+            id: run_id,
+            industry: seed.industry.clone(),
+            source_mode: source.source_mode.clone(),
+            domain_scope: seed.domain_scope.clone(),
+            status: "creating".to_string(),
+            dataset_count: ontology_i32_count(datasets.len(), "dataset_count")?,
+            profile_count: ontology_i32_count(profiles.len(), "profile_count")?,
+            proposal_count: 0,
+            approved_count: 0,
+            materialized_count: 0,
+            actor_subject: actor_subject.to_string(),
+            created_at: now,
+            updated_at: now,
+        })
+        .await?;
     for proposal in &proposals {
         state
             .create_semantic_object(CreateSemanticObject {
@@ -3404,6 +3428,10 @@ pub(crate) async fn create_ontology_onboarding_run_with_actor(
             }),
         ))
         .await?;
+    state
+        .refresh_ontology_onboarding_run_record(run_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("ontology onboarding run not found"))?;
     Ok(OntologyOnboardingRun {
         id: run_id,
         status: "pending_review".to_string(),
@@ -3416,7 +3444,7 @@ pub(crate) async fn create_ontology_onboarding_run_with_actor(
         datasets,
         profiles,
         proposals,
-        generated_at: Utc::now(),
+        generated_at: now,
     })
 }
 
@@ -3430,6 +3458,24 @@ pub(crate) async fn create_ontology_onboarding_run_from_adapter(
     let profiles = ontology_profile_demo_datasets(&datasets);
     let seed = adapted.seed.clone();
     let proposals = ontology_generate_seed_proposals_for_run(run_id, &seed, &datasets, &profiles);
+    let now = Utc::now();
+    state
+        .create_ontology_onboarding_run_record(OntologyOnboardingRunRecord {
+            id: run_id,
+            industry: seed.industry.clone(),
+            source_mode: adapted.bundle.source_mode.clone(),
+            domain_scope: seed.domain_scope.clone(),
+            status: "creating".to_string(),
+            dataset_count: ontology_i32_count(datasets.len(), "dataset_count")?,
+            profile_count: ontology_i32_count(profiles.len(), "profile_count")?,
+            proposal_count: 0,
+            approved_count: 0,
+            materialized_count: 0,
+            actor_subject: actor_subject.to_string(),
+            created_at: now,
+            updated_at: now,
+        })
+        .await?;
     for proposal in &proposals {
         state
             .create_semantic_object(CreateSemanticObject {
@@ -3486,6 +3532,10 @@ pub(crate) async fn create_ontology_onboarding_run_from_adapter(
             }),
         ))
         .await?;
+    state
+        .refresh_ontology_onboarding_run_record(run_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("ontology onboarding run not found"))?;
     Ok(OntologyOnboardingRun {
         id: run_id,
         status: "pending_review".to_string(),
@@ -3498,7 +3548,7 @@ pub(crate) async fn create_ontology_onboarding_run_from_adapter(
         datasets,
         profiles,
         proposals,
-        generated_at: Utc::now(),
+        generated_at: now,
     })
 }
 
@@ -3565,16 +3615,22 @@ pub(crate) fn ontology_generic_seed_and_source(
 pub(crate) async fn list_ontology_onboarding_runs_for_state(
     state: &AppState,
 ) -> Result<Vec<OntologyOnboardingRun>, AppError> {
+    let proposal_objects = ontology_onboarding_proposal_objects(state).await?;
     let mut grouped = BTreeMap::<Uuid, Vec<SemanticObject>>::new();
-    for object in ontology_onboarding_proposal_objects(state).await? {
+    for object in proposal_objects {
         if let Some(run_id) = ontology_onboarding_object_run_id(&object) {
             grouped.entry(run_id).or_default().push(object);
         }
     }
-    let mut runs = grouped
-        .into_iter()
-        .map(|(run_id, objects)| ontology_onboarding_run_from_objects(run_id, &objects))
-        .collect::<Result<Vec<_>, _>>()?;
+    let records = state.list_ontology_onboarding_run_records().await?;
+    let mut runs = Vec::with_capacity(records.len() + grouped.len());
+    for record in records {
+        let objects = grouped.remove(&record.id).unwrap_or_default();
+        runs.push(ontology_onboarding_run_from_record(&record, &objects)?);
+    }
+    for (run_id, objects) in grouped {
+        runs.push(ontology_onboarding_run_from_objects(run_id, &objects)?);
+    }
     runs.sort_by_key(|run| std::cmp::Reverse(run.generated_at));
     Ok(runs)
 }
@@ -3583,6 +3639,14 @@ pub(crate) async fn get_ontology_onboarding_run_for_state(
     state: &AppState,
     run_id: Uuid,
 ) -> Result<OntologyOnboardingRun, AppError> {
+    if let Some(record) = state.find_ontology_onboarding_run_record(run_id).await? {
+        let objects = ontology_onboarding_proposal_objects(state)
+            .await?
+            .into_iter()
+            .filter(|object| ontology_onboarding_object_run_id(object) == Some(run_id))
+            .collect::<Vec<_>>();
+        return ontology_onboarding_run_from_record(&record, &objects);
+    }
     let objects = ontology_onboarding_proposal_objects(state)
         .await?
         .into_iter()
@@ -3635,6 +3699,7 @@ pub(crate) async fn review_ontology_onboarding_proposal_with_actor(
             },
         )
         .await?;
+    state.refresh_ontology_onboarding_run_record(run_id).await?;
     state
         .append_audit_log(new_audit_log(
             None,
@@ -3739,8 +3804,10 @@ pub(crate) async fn materialize_ontology_onboarding_run_with_actor(
                 },
             )
             .await?;
+        state.refresh_ontology_onboarding_run_record(run_id).await?;
         materialized_proposal_count += 1;
     }
+    state.refresh_ontology_onboarding_run_record(run_id).await?;
     let result = OntologyOnboardingMaterializationResult {
         run_id,
         status: if materialized_proposal_count == 0 {
@@ -4960,6 +5027,36 @@ pub(crate) fn ontology_release_migration_policy_ready(policy: &Value) -> bool {
             .get("rollback")
             .and_then(Value::as_str)
             .is_some_and(|value| !value.trim().is_empty())
+}
+
+pub(crate) fn ontology_onboarding_run_from_record(
+    record: &OntologyOnboardingRunRecord,
+    objects: &[SemanticObject],
+) -> Result<OntologyOnboardingRun, AppError> {
+    let (_, source) = ontology_seed_and_source_for_request(&record.industry, &record.source_mode)?;
+    let mut proposals = objects
+        .iter()
+        .map(ontology_onboarding_object_proposal)
+        .collect::<Result<Vec<_>, _>>()?;
+    proposals.sort_by(|left, right| {
+        left.proposal_type
+            .cmp(&right.proposal_type)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    Ok(OntologyOnboardingRun {
+        id: record.id,
+        status: record.status.clone(),
+        source_mode: record.source_mode.clone(),
+        dataset_count: record.dataset_count.max(0) as usize,
+        profile_count: record.profile_count.max(0) as usize,
+        proposal_count: record.proposal_count.max(0) as usize,
+        approved_count: record.approved_count.max(0) as usize,
+        materialized_count: record.materialized_count.max(0) as usize,
+        datasets: source.datasets.clone(),
+        profiles: ontology_profile_demo_datasets(&source.datasets),
+        proposals,
+        generated_at: record.created_at,
+    })
 }
 
 pub(crate) async fn ontology_release_action_profiles_ready(

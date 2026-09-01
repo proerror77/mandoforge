@@ -22,6 +22,11 @@ The important product rule is proposal-first governance. AI and deterministic
 validators can draft object, relation, metric, logic, action, and merge
 proposals. Published semantic state changes only after review.
 
+Run identity, lifecycle status, and counters are stored in
+`ontology_onboarding_runs`. Proposal payloads remain in `semantic_objects` and
+link back through `run_id`; older proposal-only runs remain readable during the
+migration period.
+
 ## Current Surfaces
 
 The current implementation exposes two related paths.

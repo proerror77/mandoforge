@@ -146,6 +146,227 @@ fn ontology_onboarding_demo_generates_required_proposals() {
     }));
 }
 
+#[tokio::test]
+async fn ontology_onboarding_run_uses_durable_control_plane_record() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let run = create_demo_ontology_onboarding_run_for_test(&state)
+        .await
+        .expect("demo run");
+
+    let records = state
+        .list_ontology_onboarding_run_records()
+        .await
+        .expect("run records");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].id, run.id);
+    assert_eq!(records[0].domain_scope, "commerce");
+    assert_eq!(records[0].proposal_count as usize, run.proposal_count);
+    assert_eq!(
+        list_ontology_onboarding_runs_for_state(&state)
+            .await
+            .expect("listed runs")
+            .len(),
+        1
+    );
+
+    let proposal = run
+        .proposals
+        .iter()
+        .find(|proposal| proposal.proposal_type == "metric")
+        .expect("metric proposal");
+    review_ontology_onboarding_proposal_for_test(&state, proposal.id, "approve", None)
+        .await
+        .expect("review proposal");
+    let reviewed = state
+        .find_ontology_onboarding_run_record(run.id)
+        .await
+        .expect("reviewed run record")
+        .expect("durable run record");
+    assert_eq!(reviewed.status, "reviewing");
+    assert_eq!(reviewed.approved_count, 1);
+
+    materialize_ontology_onboarding_run_for_test(&state, run.id)
+        .await
+        .expect("materialize run");
+    let materialized = state
+        .find_ontology_onboarding_run_record(run.id)
+        .await
+        .expect("materialized run record")
+        .expect("durable run record");
+    assert_eq!(materialized.status, "materialized");
+    assert_eq!(materialized.materialized_count, 1);
+
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("memory store");
+    };
+    let mut store = inner.write().await;
+    let stale = store
+        .ontology_onboarding_runs
+        .get_mut(&run.id)
+        .expect("durable run record");
+    stale.status = "reviewing".to_string();
+    stale.materialized_count = 0;
+    drop(store);
+    assert_eq!(
+        materialize_ontology_onboarding_run_for_test(&state, run.id)
+            .await
+            .expect("reconcile materialized run")
+            .status,
+        "no_approved_changes"
+    );
+    let reconciled = state
+        .find_ontology_onboarding_run_record(run.id)
+        .await
+        .expect("reconciled run record")
+        .expect("durable run record");
+    assert_eq!(reconciled.status, "materialized");
+    assert_eq!(reconciled.materialized_count, 1);
+    assert!(
+        state
+            .list_semantic_objects()
+            .await
+            .expect("semantic objects")
+            .iter()
+            .all(|object| object.object_type != "ontology_onboarding_run")
+    );
+}
+
+#[tokio::test]
+async fn ontology_onboarding_legacy_run_remains_readable_without_duplication() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let run = create_demo_ontology_onboarding_run_for_test(&state)
+        .await
+        .expect("demo run");
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("memory store");
+    };
+    inner.write().await.ontology_onboarding_runs.remove(&run.id);
+
+    let listed = list_ontology_onboarding_runs_for_state(&state)
+        .await
+        .expect("legacy runs");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, run.id);
+    assert_eq!(
+        get_ontology_onboarding_run_for_state(&state, run.id)
+            .await
+            .expect("legacy run")
+            .proposal_count,
+        run.proposal_count
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires MANDOFORGE_TEST_POSTGRES_URL"]
+async fn postgres_ontology_onboarding_run_records_are_tenant_scoped() {
+    let database_url = std::env::var("MANDOFORGE_TEST_POSTGRES_URL")
+        .expect("MANDOFORGE_TEST_POSTGRES_URL is required");
+    let bootstrap_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .expect("connect bootstrap postgres");
+    run_migrations(&bootstrap_pool)
+        .await
+        .expect("run migrations");
+    let tenant_a = Uuid::new_v4();
+    let tenant_b = Uuid::new_v4();
+    for (tenant_id, label) in [(tenant_a, "a"), (tenant_b, "b")] {
+        sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3)")
+            .bind(tenant_id)
+            .bind(format!("Onboarding Postgres tenant {label}"))
+            .bind(format!(
+                "onboarding-postgres-{label}-{}",
+                tenant_id.simple()
+            ))
+            .execute(&bootstrap_pool)
+            .await
+            .expect("insert tenant");
+    }
+
+    let tenant_pool = |tenant_id| {
+        let database_url = database_url.clone();
+        async move {
+            let tenant_setting = format!("SET mandoforge.tenant_id = '{tenant_id}'");
+            PgPoolOptions::new()
+                .max_connections(2)
+                .after_connect(move |connection, _| {
+                    let tenant_setting = tenant_setting.clone();
+                    Box::pin(async move {
+                        connection.execute(tenant_setting.as_str()).await?;
+                        Ok(())
+                    })
+                })
+                .connect(&database_url)
+                .await
+                .expect("connect tenant postgres")
+        }
+    };
+    let mut state_a = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state_a.store = StoreBackend::Postgres(tenant_pool(tenant_a).await);
+    state_a.tenant_id = tenant_a;
+    let mut state_b = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state_b.store = StoreBackend::Postgres(tenant_pool(tenant_b).await);
+    state_b.tenant_id = tenant_b;
+
+    let run = create_ontology_onboarding_run_with_actor(
+        &state_a,
+        "ecommerce",
+        "demo_ecommerce",
+        "postgres-test",
+    )
+    .await
+    .expect("create tenant A run");
+    let record = state_a
+        .find_ontology_onboarding_run_record(run.id)
+        .await
+        .expect("find tenant A run")
+        .expect("tenant A run");
+    assert_eq!(record.actor_subject, "postgres-test");
+    assert_eq!(record.proposal_count as usize, run.proposal_count);
+    assert_eq!(
+        state_a
+            .list_ontology_onboarding_run_records()
+            .await
+            .expect("list tenant A runs")
+            .iter()
+            .filter(|candidate| candidate.id == run.id)
+            .count(),
+        1
+    );
+    assert!(
+        state_b
+            .find_ontology_onboarding_run_record(run.id)
+            .await
+            .expect("find tenant B run")
+            .is_none()
+    );
+
+    let proposal_ids = run
+        .proposals
+        .iter()
+        .filter(|proposal| proposal.proposal_type == "metric")
+        .take(2)
+        .map(|proposal| proposal.id)
+        .collect::<Vec<_>>();
+    assert_eq!(proposal_ids.len(), 2);
+    let (first_review, second_review) = tokio::join!(
+        review_ontology_onboarding_proposal_for_test(&state_a, proposal_ids[0], "approve", None,),
+        review_ontology_onboarding_proposal_for_test(&state_a, proposal_ids[1], "approve", None,),
+    );
+    first_review.expect("review first Postgres proposal");
+    second_review.expect("review second Postgres proposal");
+    assert_eq!(
+        state_a
+            .find_ontology_onboarding_run_record(run.id)
+            .await
+            .expect("find reviewed run")
+            .expect("reviewed run")
+            .approved_count,
+        2
+    );
+}
+
 #[test]
 fn ontology_builder_dag_validates_execution_levels_and_cycles() {
     let dag = ontology_builder_dag_for_mode("pipeline_mapping_v2", None, Some("raw_snapshot"))
