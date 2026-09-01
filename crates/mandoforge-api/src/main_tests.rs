@@ -56,6 +56,107 @@ impl Drop for EnvVarGuard {
     }
 }
 
+async fn assert_ontology_onboarding_create_is_atomic(state: &AppState) {
+    let run_id = Uuid::new_v4();
+    let collision_key = format!("ontology:onboarding:collision:{}", Uuid::new_v4());
+    state
+        .create_semantic_object(CreateSemanticObject {
+            source_id: None,
+            object_type: "artifact".to_string(),
+            object_key: collision_key.clone(),
+            title: "Atomic onboarding collision".to_string(),
+            summary: "Forces the onboarding transaction to roll back.".to_string(),
+            content: json!({}),
+            semantic_scopes: json!({}),
+            source_uri: Some("mandoforge://test/onboarding-atomicity".to_string()),
+            provenance: json!({"source": "test"}),
+            trust_level: "source_attested".to_string(),
+            freshness: "current".to_string(),
+            status: "active".to_string(),
+        })
+        .await
+        .expect("create collision object");
+    let datasets = ontology_demo_datasets()
+        .into_iter()
+        .take(1)
+        .collect::<Vec<_>>();
+    let profiles = ontology_profile_demo_datasets(&datasets);
+    let source_dataset_manifest = ontology_onboarding_source_dataset_manifest(&datasets);
+    let now = Utc::now();
+    let audit = new_audit_log(
+        None,
+        "user",
+        None,
+        "ontology_onboarding.demo_run_created",
+        "ontology_onboarding_run",
+        Some(run_id),
+        json!({"run_id": run_id}),
+    );
+    let audit_id = audit.id;
+    let result = state
+        .create_ontology_onboarding_run(
+            OntologyOnboardingRunRecord {
+                id: run_id,
+                industry: "ecommerce".to_string(),
+                source_mode: "demo_ecommerce".to_string(),
+                domain_scope: "commerce".to_string(),
+                source_dataset_manifest: Some(source_dataset_manifest),
+                source_profiles: Some(profiles),
+                status: "pending_review".to_string(),
+                dataset_count: 1,
+                profile_count: 1,
+                proposal_count: 1,
+                approved_count: 0,
+                materialized_count: 0,
+                actor_subject: "atomic-test".to_string(),
+                created_at: now,
+                updated_at: now,
+            },
+            vec![CreateSemanticObject {
+                source_id: None,
+                object_type: "ontology_onboarding_proposal".to_string(),
+                object_key: collision_key,
+                title: "Atomic onboarding proposal".to_string(),
+                summary: "Must roll back with the run and audit.".to_string(),
+                content: json!({"run_id": run_id}),
+                semantic_scopes: json!({}),
+                source_uri: Some(format!(
+                    "mandoforge://ontology/onboarding/runs/{run_id}/proposals/atomic"
+                )),
+                provenance: json!({"source": "test"}),
+                trust_level: "source_attested".to_string(),
+                freshness: "current".to_string(),
+                status: "active".to_string(),
+            }],
+            audit,
+        )
+        .await;
+    result.expect_err("duplicate proposal key must fail atomically");
+    assert!(
+        state
+            .find_ontology_onboarding_run_record(run_id)
+            .await
+            .expect("find rolled back run")
+            .is_none()
+    );
+    assert!(
+        state
+            .list_semantic_objects()
+            .await
+            .expect("list semantic objects")
+            .iter()
+            .all(|object| ontology_onboarding_object_run_id(object) != Some(run_id))
+    );
+    assert!(
+        state
+            .list_audit_logs(None)
+            .await
+            .expect("list audit logs")
+            .iter()
+            .all(|entry| entry.id != audit_id)
+    );
+}
+
 #[test]
 fn ontology_onboarding_demo_profiles_have_expected_tables_and_evidence() {
     let datasets = ontology_demo_datasets();
@@ -144,6 +245,418 @@ fn ontology_onboarding_demo_generates_required_proposals() {
             && proposal.name == "Customer identity rule"
             && proposal.content["enabled"].as_bool() == Some(false)
     }));
+}
+
+#[tokio::test]
+async fn ontology_onboarding_run_uses_durable_control_plane_record() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let run = create_demo_ontology_onboarding_run_for_test(&state)
+        .await
+        .expect("demo run");
+
+    let records = state
+        .list_ontology_onboarding_run_records()
+        .await
+        .expect("run records");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].id, run.id);
+    assert_eq!(records[0].domain_scope, "commerce");
+    assert_eq!(
+        records[0]
+            .source_dataset_manifest
+            .as_ref()
+            .expect("durable source dataset manifest")
+            .len(),
+        run.dataset_count
+    );
+    assert_eq!(
+        records[0]
+            .source_profiles
+            .as_ref()
+            .expect("durable source profiles")
+            .len(),
+        run.profile_count
+    );
+    assert!(
+        records[0]
+            .source_dataset_manifest
+            .as_ref()
+            .expect("durable source dataset manifest")
+            .iter()
+            .all(|dataset| {
+                dataset.rows.is_empty()
+                    && dataset
+                        .fields
+                        .iter()
+                        .all(|field| field.sample_values.is_empty())
+            })
+    );
+    assert_eq!(records[0].proposal_count as usize, run.proposal_count);
+    assert_eq!(
+        list_ontology_onboarding_runs_for_state(&state)
+            .await
+            .expect("listed runs")
+            .len(),
+        1
+    );
+
+    let proposal = run
+        .proposals
+        .iter()
+        .find(|proposal| proposal.proposal_type == "metric")
+        .expect("metric proposal");
+    review_ontology_onboarding_proposal_for_test(&state, proposal.id, "approve", None)
+        .await
+        .expect("review proposal");
+    let reviewed = state
+        .find_ontology_onboarding_run_record(run.id)
+        .await
+        .expect("reviewed run record")
+        .expect("durable run record");
+    assert_eq!(reviewed.status, "reviewing");
+    assert_eq!(reviewed.approved_count, 1);
+
+    materialize_ontology_onboarding_run_for_test(&state, run.id)
+        .await
+        .expect("materialize run");
+    let materialized = state
+        .find_ontology_onboarding_run_record(run.id)
+        .await
+        .expect("materialized run record")
+        .expect("durable run record");
+    assert_eq!(materialized.status, "materialized");
+    assert_eq!(materialized.materialized_count, 1);
+
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("memory store");
+    };
+    let mut store = inner.write().await;
+    let stale = store
+        .ontology_onboarding_runs
+        .get_mut(&run.id)
+        .expect("durable run record");
+    stale.status = "reviewing".to_string();
+    stale.materialized_count = 0;
+    drop(store);
+    assert_eq!(
+        materialize_ontology_onboarding_run_for_test(&state, run.id)
+            .await
+            .expect("reconcile materialized run")
+            .status,
+        "no_approved_changes"
+    );
+    let reconciled = state
+        .find_ontology_onboarding_run_record(run.id)
+        .await
+        .expect("reconciled run record")
+        .expect("durable run record");
+    assert_eq!(reconciled.status, "materialized");
+    assert_eq!(reconciled.materialized_count, 1);
+    assert!(
+        state
+            .list_semantic_objects()
+            .await
+            .expect("semantic objects")
+            .iter()
+            .all(|object| object.object_type != "ontology_onboarding_run")
+    );
+}
+
+#[tokio::test]
+async fn ontology_onboarding_create_is_atomic_in_memory() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    assert_ontology_onboarding_create_is_atomic(&state).await;
+}
+
+#[tokio::test]
+async fn ontology_onboarding_adapter_source_survives_readback() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let adapted = ontology_source_adapters::adapt_salesforce(
+        ontology_source_adapters::SalesforceAdapterInput {
+            objects: None,
+            instance_label: Some("durable-salesforce".to_string()),
+        },
+    )
+    .expect("adapt Salesforce source");
+    let expected_manifest = ontology_onboarding_source_dataset_manifest(&adapted.bundle.datasets);
+    let run = create_ontology_onboarding_run_from_adapter(&state, adapted, "adapter-test")
+        .await
+        .expect("create adapter run");
+    let readback = get_ontology_onboarding_run_for_state(&state, run.id)
+        .await
+        .expect("read adapter run");
+
+    assert_eq!(readback.dataset_count, run.dataset_count);
+    assert_eq!(readback.profile_count, run.profile_count);
+    assert_eq!(
+        serde_json::to_value(&readback.datasets).expect("serialize readback datasets"),
+        serde_json::to_value(expected_manifest).expect("serialize expected Salesforce manifest")
+    );
+    assert_eq!(
+        serde_json::to_value(&readback.profiles).expect("serialize readback profiles"),
+        serde_json::to_value(&run.profiles).expect("serialize created profiles")
+    );
+}
+
+#[tokio::test]
+async fn ontology_onboarding_readback_reconciles_generic_proposal_mutations() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let run = create_demo_ontology_onboarding_run_for_test(&state)
+        .await
+        .expect("demo run");
+    let object = state
+        .list_semantic_objects()
+        .await
+        .expect("semantic objects")
+        .into_iter()
+        .find(|object| ontology_onboarding_object_run_id(object) == Some(run.id))
+        .expect("onboarding proposal object");
+    let mut approved_content = object.content.clone();
+    approved_content["review_status"] = json!("approved");
+    state
+        .update_semantic_object(
+            object.id,
+            UpdateSemanticObject {
+                title: None,
+                summary: None,
+                content: Some(approved_content),
+                semantic_scopes: None,
+                source_uri: None,
+                provenance: None,
+                trust_level: None,
+                freshness: None,
+                status: None,
+            },
+        )
+        .await
+        .expect("generic proposal update");
+    assert_eq!(
+        state
+            .find_ontology_onboarding_run_record(run.id)
+            .await
+            .expect("stale run record")
+            .expect("durable run record")
+            .approved_count,
+        0
+    );
+    let stale_record = state
+        .find_ontology_onboarding_run_record(run.id)
+        .await
+        .expect("stale run record")
+        .expect("durable run record");
+    let current_objects = ontology_onboarding_proposal_objects(&state)
+        .await
+        .expect("current proposal objects")
+        .into_iter()
+        .filter(|candidate| ontology_onboarding_object_run_id(candidate) == Some(run.id))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ontology_onboarding_run_from_record(&stale_record, &current_objects)
+            .expect("consistent run snapshot")
+            .approved_count,
+        1
+    );
+    assert_eq!(
+        get_ontology_onboarding_run_for_state(&state, run.id)
+            .await
+            .expect("reconciled updated run")
+            .approved_count,
+        1
+    );
+
+    state
+        .archive_semantic_object(object.id)
+        .await
+        .expect("generic proposal archive");
+    let readback = get_ontology_onboarding_run_for_state(&state, run.id)
+        .await
+        .expect("reconciled archived run");
+    assert_eq!(readback.proposal_count, run.proposal_count - 1);
+    assert_eq!(readback.approved_count, 0);
+    let record = state
+        .find_ontology_onboarding_run_record(run.id)
+        .await
+        .expect("reconciled run record")
+        .expect("durable run record");
+    assert_eq!(record.proposal_count as usize, readback.proposal_count);
+    assert_eq!(record.approved_count as usize, readback.approved_count);
+}
+
+#[tokio::test]
+async fn ontology_onboarding_legacy_run_remains_readable_without_duplication() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let run = create_demo_ontology_onboarding_run_for_test(&state)
+        .await
+        .expect("demo run");
+    let StoreBackend::Memory(inner) = &state.store else {
+        panic!("memory store");
+    };
+    inner.write().await.ontology_onboarding_runs.remove(&run.id);
+
+    let listed = list_ontology_onboarding_runs_for_state(&state)
+        .await
+        .expect("legacy runs");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, run.id);
+    assert_eq!(
+        get_ontology_onboarding_run_for_state(&state, run.id)
+            .await
+            .expect("legacy run")
+            .proposal_count,
+        run.proposal_count
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires MANDOFORGE_TEST_POSTGRES_URL"]
+async fn postgres_ontology_onboarding_run_records_are_tenant_scoped() {
+    let database_url = std::env::var("MANDOFORGE_TEST_POSTGRES_URL")
+        .expect("MANDOFORGE_TEST_POSTGRES_URL is required");
+    let bootstrap_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .expect("connect bootstrap postgres");
+    run_migrations(&bootstrap_pool)
+        .await
+        .expect("run migrations");
+    let tenant_a = Uuid::new_v4();
+    let tenant_b = Uuid::new_v4();
+    for (tenant_id, label) in [(tenant_a, "a"), (tenant_b, "b")] {
+        sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3)")
+            .bind(tenant_id)
+            .bind(format!("Onboarding Postgres tenant {label}"))
+            .bind(format!(
+                "onboarding-postgres-{label}-{}",
+                tenant_id.simple()
+            ))
+            .execute(&bootstrap_pool)
+            .await
+            .expect("insert tenant");
+    }
+
+    let tenant_pool = |tenant_id| {
+        let database_url = database_url.clone();
+        async move {
+            let tenant_setting = format!("SET mandoforge.tenant_id = '{tenant_id}'");
+            PgPoolOptions::new()
+                .max_connections(2)
+                .after_connect(move |connection, _| {
+                    let tenant_setting = tenant_setting.clone();
+                    Box::pin(async move {
+                        connection.execute(tenant_setting.as_str()).await?;
+                        Ok(())
+                    })
+                })
+                .connect(&database_url)
+                .await
+                .expect("connect tenant postgres")
+        }
+    };
+    let mut state_a = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state_a.store = StoreBackend::Postgres(tenant_pool(tenant_a).await);
+    state_a.tenant_id = tenant_a;
+    let mut state_b = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state_b.store = StoreBackend::Postgres(tenant_pool(tenant_b).await);
+    state_b.tenant_id = tenant_b;
+
+    assert_ontology_onboarding_create_is_atomic(&state_a).await;
+
+    let run = create_ontology_onboarding_run_with_actor(
+        &state_a,
+        "ecommerce",
+        "demo_ecommerce",
+        "postgres-test",
+    )
+    .await
+    .expect("create tenant A run");
+    let record = state_a
+        .find_ontology_onboarding_run_record(run.id)
+        .await
+        .expect("find tenant A run")
+        .expect("tenant A run");
+    assert_eq!(record.actor_subject, "postgres-test");
+    assert_eq!(record.proposal_count as usize, run.proposal_count);
+    let StoreBackend::Postgres(tenant_a_pool) = &state_a.store else {
+        panic!("tenant A PostgreSQL store");
+    };
+    let partial_snapshot_error = sqlx::query(
+        "UPDATE ontology_onboarding_runs
+         SET source_profiles = NULL
+         WHERE tenant_id = $1 AND id = $2",
+    )
+    .bind(tenant_a)
+    .bind(run.id)
+    .execute(tenant_a_pool)
+    .await
+    .expect_err("database must reject a partial source snapshot");
+    assert_eq!(
+        partial_snapshot_error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("ontology_onboarding_source_snapshot_shape")
+    );
+    let raw_manifest_error = sqlx::query(
+        "UPDATE ontology_onboarding_runs
+         SET source_dataset_manifest = jsonb_set(
+             source_dataset_manifest,
+             '{0,rows}',
+             '[{\"secret\":\"must-not-persist\"}]'::jsonb
+         )
+         WHERE tenant_id = $1 AND id = $2",
+    )
+    .bind(tenant_a)
+    .bind(run.id)
+    .execute(tenant_a_pool)
+    .await
+    .expect_err("database must reject raw rows in source manifest");
+    assert_eq!(
+        raw_manifest_error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("ontology_onboarding_source_snapshot_shape")
+    );
+    assert_eq!(
+        state_a
+            .list_ontology_onboarding_run_records()
+            .await
+            .expect("list tenant A runs")
+            .iter()
+            .filter(|candidate| candidate.id == run.id)
+            .count(),
+        1
+    );
+    assert!(
+        state_b
+            .find_ontology_onboarding_run_record(run.id)
+            .await
+            .expect("find tenant B run")
+            .is_none()
+    );
+
+    let proposal_ids = run
+        .proposals
+        .iter()
+        .filter(|proposal| proposal.proposal_type == "metric")
+        .take(2)
+        .map(|proposal| proposal.id)
+        .collect::<Vec<_>>();
+    assert_eq!(proposal_ids.len(), 2);
+    let (first_review, second_review) = tokio::join!(
+        review_ontology_onboarding_proposal_for_test(&state_a, proposal_ids[0], "approve", None,),
+        review_ontology_onboarding_proposal_for_test(&state_a, proposal_ids[1], "approve", None,),
+    );
+    first_review.expect("review first Postgres proposal");
+    second_review.expect("review second Postgres proposal");
+    assert_eq!(
+        state_a
+            .find_ontology_onboarding_run_record(run.id)
+            .await
+            .expect("find reviewed run")
+            .expect("reviewed run")
+            .approved_count,
+        2
+    );
 }
 
 #[test]

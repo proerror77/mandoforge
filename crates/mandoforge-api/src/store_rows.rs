@@ -7,11 +7,11 @@ use crate::{
     AgentTeammate, AgentVersion, AppError, Approval, ApprovalCommitToken, ApprovalEscalationRule,
     ApprovalGroup, ApprovalNotificationChannelPolicy, Artifact, AuditLog, ContextPacket,
     CostAlertRoute, Environment, EvalCase, EvalDataset, EvalRun, ManagerAgentPlan, McpServerRecord,
-    Membership, MemoryWritebackCandidate, OntologyRelease, OntologySdkApplication,
-    OntologySdkSubsetManifest, Organization, PolicyRevision, Project, ProviderAccess,
-    ProviderRecord, SecretRecord, SemanticLink, SemanticObject, SemanticSource, Session,
-    SessionEvent, SessionLoopJob, SessionLoopJobStatus, SessionStatus, SessionThread, Squad,
-    SquadMember, TaskGrant, Team, TenantInvitation, ToolCall, UsageRollup, WorkItem,
+    Membership, MemoryWritebackCandidate, OntologyOnboardingRunRecord, OntologyRelease,
+    OntologySdkApplication, OntologySdkSubsetManifest, Organization, PolicyRevision, Project,
+    ProviderAccess, ProviderRecord, SecretRecord, SemanticLink, SemanticObject, SemanticSource,
+    Session, SessionEvent, SessionLoopJob, SessionLoopJobStatus, SessionStatus, SessionThread,
+    Squad, SquadMember, TaskGrant, Team, TenantInvitation, ToolCall, UsageRollup, WorkItem,
     WorkItemActivityEntry, WorkItemAssignment, WorkItemReview, WorkflowDefinition,
     WorkflowPackBinding, WorkflowPackInstallation, WorkflowPackProfileAsset,
     WorkflowPackRuntimeObject, WorkflowRun, WorkflowStepRun, WorkflowTransition,
@@ -298,6 +298,36 @@ pub(crate) fn ontology_release_from_row(row: PgRow) -> Result<OntologyRelease, A
         rolled_back_by: row.try_get("rolled_back_by")?,
         rolled_back_at: row.try_get("rolled_back_at")?,
         archived_at: row.try_get("archived_at")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+pub(crate) fn ontology_onboarding_run_record_from_row(
+    row: PgRow,
+) -> Result<OntologyOnboardingRunRecord, AppError> {
+    let source_dataset_manifest = row
+        .try_get::<Option<Value>, _>("source_dataset_manifest")?
+        .map(serde_json::from_value)
+        .transpose()?;
+    let source_profiles = row
+        .try_get::<Option<Value>, _>("source_profiles")?
+        .map(serde_json::from_value)
+        .transpose()?;
+    Ok(OntologyOnboardingRunRecord {
+        id: row.try_get("id")?,
+        industry: row.try_get("industry")?,
+        source_mode: row.try_get("source_mode")?,
+        domain_scope: row.try_get("domain_scope")?,
+        source_dataset_manifest,
+        source_profiles,
+        status: row.try_get("status")?,
+        dataset_count: row.try_get("dataset_count")?,
+        profile_count: row.try_get("profile_count")?,
+        proposal_count: row.try_get("proposal_count")?,
+        approved_count: row.try_get("approved_count")?,
+        materialized_count: row.try_get("materialized_count")?,
+        actor_subject: row.try_get("actor_subject")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })

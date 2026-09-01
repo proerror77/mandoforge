@@ -928,6 +928,12 @@ pub(crate) fn ontology_profile_fk<'a>(
     })
 }
 
+fn ontology_i32_count(value: usize, field: &str) -> Result<i32, AppError> {
+    i32::try_from(value).map_err(|_| {
+        AppError::bad_request(format!("ontology {field} exceeds database integer range"))
+    })
+}
+
 #[cfg(test)]
 pub(crate) async fn create_demo_ontology_onboarding_run_for_test(
     state: &AppState,
@@ -3348,10 +3354,13 @@ pub(crate) async fn create_ontology_onboarding_run_with_actor(
     let (seed, source) = ontology_seed_and_source_for_request(industry, source_mode)?;
     let datasets = source.datasets.clone();
     let profiles = ontology_profile_demo_datasets(&datasets);
+    let source_dataset_manifest = ontology_onboarding_source_dataset_manifest(&datasets);
     let proposals = ontology_generate_seed_proposals_for_run(run_id, &seed, &datasets, &profiles);
-    for proposal in &proposals {
-        state
-            .create_semantic_object(CreateSemanticObject {
+    let now = Utc::now();
+    let proposal_inputs = proposals
+        .iter()
+        .map(|proposal| {
+            Ok(CreateSemanticObject {
                 source_id: None,
                 object_type: "ontology_onboarding_proposal".to_string(),
                 object_key: ontology_onboarding_proposal_object_key(run_id, proposal.id),
@@ -3383,26 +3392,47 @@ pub(crate) async fn create_ontology_onboarding_run_with_actor(
                 freshness: "current".to_string(),
                 status: "active".to_string(),
             })
-            .await?;
-    }
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
+    let audit_log = new_audit_log(
+        None,
+        "user",
+        None,
+        "ontology_onboarding.demo_run_created",
+        "ontology_onboarding_run",
+        Some(run_id),
+        json!({
+            "subject": actor_subject,
+            "run_id": run_id,
+            "dataset_count": datasets.len(),
+            "profile_count": profiles.len(),
+            "proposal_count": proposals.len(),
+            "industry": seed.industry,
+            "source_mode": source.source_mode,
+        }),
+    );
     state
-        .append_audit_log(new_audit_log(
-            None,
-            "user",
-            None,
-            "ontology_onboarding.demo_run_created",
-            "ontology_onboarding_run",
-            Some(run_id),
-            json!({
-                "subject": actor_subject,
-                "run_id": run_id,
-                "dataset_count": datasets.len(),
-                "profile_count": profiles.len(),
-                "proposal_count": proposals.len(),
-                "industry": seed.industry,
-                "source_mode": source.source_mode,
-            }),
-        ))
+        .create_ontology_onboarding_run(
+            OntologyOnboardingRunRecord {
+                id: run_id,
+                industry: seed.industry.clone(),
+                source_mode: source.source_mode.clone(),
+                domain_scope: seed.domain_scope.clone(),
+                source_dataset_manifest: Some(source_dataset_manifest),
+                source_profiles: Some(profiles.clone()),
+                status: "pending_review".to_string(),
+                dataset_count: ontology_i32_count(datasets.len(), "dataset_count")?,
+                profile_count: ontology_i32_count(profiles.len(), "profile_count")?,
+                proposal_count: ontology_i32_count(proposals.len(), "proposal_count")?,
+                approved_count: 0,
+                materialized_count: 0,
+                actor_subject: actor_subject.to_string(),
+                created_at: now,
+                updated_at: now,
+            },
+            proposal_inputs,
+            audit_log,
+        )
         .await?;
     Ok(OntologyOnboardingRun {
         id: run_id,
@@ -3416,7 +3446,7 @@ pub(crate) async fn create_ontology_onboarding_run_with_actor(
         datasets,
         profiles,
         proposals,
-        generated_at: Utc::now(),
+        generated_at: now,
     })
 }
 
@@ -3428,11 +3458,14 @@ pub(crate) async fn create_ontology_onboarding_run_from_adapter(
     let run_id = Uuid::new_v4();
     let datasets = adapted.bundle.datasets.clone();
     let profiles = ontology_profile_demo_datasets(&datasets);
+    let source_dataset_manifest = ontology_onboarding_source_dataset_manifest(&datasets);
     let seed = adapted.seed.clone();
     let proposals = ontology_generate_seed_proposals_for_run(run_id, &seed, &datasets, &profiles);
-    for proposal in &proposals {
-        state
-            .create_semantic_object(CreateSemanticObject {
+    let now = Utc::now();
+    let proposal_inputs = proposals
+        .iter()
+        .map(|proposal| {
+            Ok(CreateSemanticObject {
                 source_id: None,
                 object_type: "ontology_onboarding_proposal".to_string(),
                 object_key: ontology_onboarding_proposal_object_key(run_id, proposal.id),
@@ -3464,27 +3497,48 @@ pub(crate) async fn create_ontology_onboarding_run_from_adapter(
                 freshness: "current".to_string(),
                 status: "active".to_string(),
             })
-            .await?;
-    }
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
+    let audit_log = new_audit_log(
+        None,
+        "user",
+        None,
+        "ontology_onboarding.adapter_run_created",
+        "ontology_onboarding_run",
+        Some(run_id),
+        json!({
+            "subject": actor_subject,
+            "run_id": run_id,
+            "adapter_type": adapted.adapter_type,
+            "source_label": adapted.source_label,
+            "schema_only": adapted.schema_only,
+            "dataset_count": datasets.len(),
+            "proposal_count": proposals.len(),
+            "warnings": adapted.warnings,
+        }),
+    );
     state
-        .append_audit_log(new_audit_log(
-            None,
-            "user",
-            None,
-            "ontology_onboarding.adapter_run_created",
-            "ontology_onboarding_run",
-            Some(run_id),
-            json!({
-                "subject": actor_subject,
-                "run_id": run_id,
-                "adapter_type": adapted.adapter_type,
-                "source_label": adapted.source_label,
-                "schema_only": adapted.schema_only,
-                "dataset_count": datasets.len(),
-                "proposal_count": proposals.len(),
-                "warnings": adapted.warnings,
-            }),
-        ))
+        .create_ontology_onboarding_run(
+            OntologyOnboardingRunRecord {
+                id: run_id,
+                industry: seed.industry.clone(),
+                source_mode: adapted.bundle.source_mode.clone(),
+                domain_scope: seed.domain_scope.clone(),
+                source_dataset_manifest: Some(source_dataset_manifest),
+                source_profiles: Some(profiles.clone()),
+                status: "pending_review".to_string(),
+                dataset_count: ontology_i32_count(datasets.len(), "dataset_count")?,
+                profile_count: ontology_i32_count(profiles.len(), "profile_count")?,
+                proposal_count: ontology_i32_count(proposals.len(), "proposal_count")?,
+                approved_count: 0,
+                materialized_count: 0,
+                actor_subject: actor_subject.to_string(),
+                created_at: now,
+                updated_at: now,
+            },
+            proposal_inputs,
+            audit_log,
+        )
         .await?;
     Ok(OntologyOnboardingRun {
         id: run_id,
@@ -3498,7 +3552,7 @@ pub(crate) async fn create_ontology_onboarding_run_from_adapter(
         datasets,
         profiles,
         proposals,
-        generated_at: Utc::now(),
+        generated_at: now,
     })
 }
 
@@ -3562,19 +3616,50 @@ pub(crate) fn ontology_generic_seed_and_source(
     (seed, source)
 }
 
+pub(crate) fn ontology_onboarding_source_dataset_manifest(
+    datasets: &[OntologyOnboardingDataset],
+) -> Vec<OntologyOnboardingDataset> {
+    datasets
+        .iter()
+        .cloned()
+        .map(|mut dataset| {
+            dataset.rows.clear();
+            for field in &mut dataset.fields {
+                field.sample_values.clear();
+            }
+            dataset
+        })
+        .collect()
+}
+
 pub(crate) async fn list_ontology_onboarding_runs_for_state(
     state: &AppState,
 ) -> Result<Vec<OntologyOnboardingRun>, AppError> {
+    let records = state.list_ontology_onboarding_run_records().await?;
+    let mut refreshed_records = Vec::with_capacity(records.len());
+    for record in records {
+        refreshed_records.push(
+            state
+                .refresh_ontology_onboarding_run_record(record.id)
+                .await?
+                .unwrap_or(record),
+        );
+    }
+    let proposal_objects = ontology_onboarding_proposal_objects(state).await?;
     let mut grouped = BTreeMap::<Uuid, Vec<SemanticObject>>::new();
-    for object in ontology_onboarding_proposal_objects(state).await? {
+    for object in proposal_objects {
         if let Some(run_id) = ontology_onboarding_object_run_id(&object) {
             grouped.entry(run_id).or_default().push(object);
         }
     }
-    let mut runs = grouped
-        .into_iter()
-        .map(|(run_id, objects)| ontology_onboarding_run_from_objects(run_id, &objects))
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut runs = Vec::with_capacity(refreshed_records.len() + grouped.len());
+    for record in refreshed_records {
+        let objects = grouped.remove(&record.id).unwrap_or_default();
+        runs.push(ontology_onboarding_run_from_record(&record, &objects)?);
+    }
+    for (run_id, objects) in grouped {
+        runs.push(ontology_onboarding_run_from_objects(run_id, &objects)?);
+    }
     runs.sort_by_key(|run| std::cmp::Reverse(run.generated_at));
     Ok(runs)
 }
@@ -3583,6 +3668,22 @@ pub(crate) async fn get_ontology_onboarding_run_for_state(
     state: &AppState,
     run_id: Uuid,
 ) -> Result<OntologyOnboardingRun, AppError> {
+    if state
+        .find_ontology_onboarding_run_record(run_id)
+        .await?
+        .is_some()
+    {
+        let record = state
+            .refresh_ontology_onboarding_run_record(run_id)
+            .await?
+            .ok_or_else(|| AppError::not_found("ontology onboarding run not found"))?;
+        let objects = ontology_onboarding_proposal_objects(state)
+            .await?
+            .into_iter()
+            .filter(|object| ontology_onboarding_object_run_id(object) == Some(run_id))
+            .collect::<Vec<_>>();
+        return ontology_onboarding_run_from_record(&record, &objects);
+    }
     let objects = ontology_onboarding_proposal_objects(state)
         .await?
         .into_iter()
@@ -3635,6 +3736,7 @@ pub(crate) async fn review_ontology_onboarding_proposal_with_actor(
             },
         )
         .await?;
+    state.refresh_ontology_onboarding_run_record(run_id).await?;
     state
         .append_audit_log(new_audit_log(
             None,
@@ -3739,8 +3841,10 @@ pub(crate) async fn materialize_ontology_onboarding_run_with_actor(
                 },
             )
             .await?;
+        state.refresh_ontology_onboarding_run_record(run_id).await?;
         materialized_proposal_count += 1;
     }
+    state.refresh_ontology_onboarding_run_record(run_id).await?;
     let result = OntologyOnboardingMaterializationResult {
         run_id,
         status: if materialized_proposal_count == 0 {
@@ -3840,16 +3944,17 @@ pub(crate) fn ontology_onboarding_object_run_id(object: &SemanticObject) -> Opti
 pub(crate) fn ontology_onboarding_object_proposal(
     object: &SemanticObject,
 ) -> Result<OntologyOnboardingProposalDraft, AppError> {
-    serde_json::from_value(
-        object
-            .content
-            .get("proposal")
-            .cloned()
-            .ok_or_else(|| AppError::bad_request("ontology onboarding proposal missing content"))?,
-    )
-    .map_err(|error| {
-        AppError::bad_request(format!("invalid ontology onboarding proposal: {error}"))
-    })
+    let mut proposal: OntologyOnboardingProposalDraft =
+        serde_json::from_value(object.content.get("proposal").cloned().ok_or_else(|| {
+            AppError::bad_request("ontology onboarding proposal missing content")
+        })?)
+        .map_err(|error| {
+            AppError::bad_request(format!("invalid ontology onboarding proposal: {error}"))
+        })?;
+    if let Some(review_status) = object.content.get("review_status").and_then(Value::as_str) {
+        proposal.review_status = review_status.to_string();
+    }
+    Ok(proposal)
 }
 
 pub(crate) fn ontology_onboarding_object_materialized(object: &SemanticObject) -> bool {
@@ -4960,6 +5065,62 @@ pub(crate) fn ontology_release_migration_policy_ready(policy: &Value) -> bool {
             .get("rollback")
             .and_then(Value::as_str)
             .is_some_and(|value| !value.trim().is_empty())
+}
+
+pub(crate) fn ontology_onboarding_run_from_record(
+    record: &OntologyOnboardingRunRecord,
+    objects: &[SemanticObject],
+) -> Result<OntologyOnboardingRun, AppError> {
+    let datasets = match record.source_dataset_manifest.as_ref() {
+        Some(datasets) => datasets.clone(),
+        None => {
+            ontology_seed_and_source_for_request(&record.industry, &record.source_mode)?
+                .1
+                .datasets
+        }
+    };
+    let mut proposals = objects
+        .iter()
+        .map(ontology_onboarding_object_proposal)
+        .collect::<Result<Vec<_>, _>>()?;
+    proposals.sort_by(|left, right| {
+        left.proposal_type
+            .cmp(&right.proposal_type)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    let approved_count = proposals
+        .iter()
+        .filter(|proposal| proposal.review_status == "approved")
+        .count();
+    let materialized_count = objects
+        .iter()
+        .filter(|object| ontology_onboarding_object_materialized(object))
+        .count();
+    let status = if materialized_count > 0 {
+        "materialized"
+    } else if approved_count > 0 {
+        "reviewing"
+    } else {
+        "pending_review"
+    };
+    let profiles = record
+        .source_profiles
+        .clone()
+        .unwrap_or_else(|| ontology_profile_demo_datasets(&datasets));
+    Ok(OntologyOnboardingRun {
+        id: record.id,
+        status: status.to_string(),
+        source_mode: record.source_mode.clone(),
+        dataset_count: record.dataset_count.max(0) as usize,
+        profile_count: record.profile_count.max(0) as usize,
+        proposal_count: proposals.len(),
+        approved_count,
+        materialized_count,
+        profiles,
+        datasets,
+        proposals,
+        generated_at: record.created_at,
+    })
 }
 
 pub(crate) async fn ontology_release_action_profiles_ready(

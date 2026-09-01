@@ -344,43 +344,7 @@ impl AppState {
         &self,
         input: CreateSemanticObject,
     ) -> Result<SemanticObject, AppError> {
-        let source_uri = match (input.source_id, input.source_uri) {
-            (Some(source_id), maybe_uri) => {
-                let source = self.get_semantic_source(source_id).await?;
-                Some(match maybe_uri.and_then(normalize_optional_text) {
-                    Some(uri) => uri,
-                    None => source.source_uri,
-                })
-            }
-            (None, Some(uri)) => Some(normalize_required_text(&uri, "semantic object source_uri")?),
-            (None, None) => {
-                return Err(AppError::bad_request(
-                    "semantic object requires source_id or source_uri",
-                ));
-            }
-        };
-        let now = Utc::now();
-        let object = SemanticObject {
-            id: Uuid::new_v4(),
-            source_id: input.source_id,
-            object_type: normalize_semantic_object_type(&input.object_type)?,
-            object_key: normalize_required_text(&input.object_key, "semantic object_key")?,
-            title: normalize_required_text(&input.title, "semantic title")?,
-            summary: normalize_required_text(&input.summary, "semantic summary")?,
-            content: validate_json_object(input.content, "semantic object content")?,
-            semantic_scopes: validate_json_object(
-                input.semantic_scopes,
-                "semantic object semantic_scopes",
-            )?,
-            source_uri,
-            provenance: validate_json_object(input.provenance, "semantic object provenance")?,
-            trust_level: normalize_semantic_trust_level(&input.trust_level)?,
-            freshness: normalize_semantic_freshness(&input.freshness)?,
-            status: normalize_semantic_record_status(&input.status)?,
-            created_at: now,
-            updated_at: now,
-            archived_at: None,
-        };
+        let object = self.prepare_semantic_object(input).await?;
         match &self.store {
             StoreBackend::Memory(inner) => {
                 let mut store = inner.write().await;
@@ -424,6 +388,50 @@ impl AppState {
                 semantic_object_from_row(row)
             }
         }
+    }
+
+    pub(crate) async fn prepare_semantic_object(
+        &self,
+        input: CreateSemanticObject,
+    ) -> Result<SemanticObject, AppError> {
+        let source_uri = match (input.source_id, input.source_uri) {
+            (Some(source_id), maybe_uri) => {
+                let source = self.get_semantic_source(source_id).await?;
+                Some(match maybe_uri.and_then(normalize_optional_text) {
+                    Some(uri) => uri,
+                    None => source.source_uri,
+                })
+            }
+            (None, Some(uri)) => Some(normalize_required_text(&uri, "semantic object source_uri")?),
+            (None, None) => {
+                return Err(AppError::bad_request(
+                    "semantic object requires source_id or source_uri",
+                ));
+            }
+        };
+        let now = Utc::now();
+        let object = SemanticObject {
+            id: Uuid::new_v4(),
+            source_id: input.source_id,
+            object_type: normalize_semantic_object_type(&input.object_type)?,
+            object_key: normalize_required_text(&input.object_key, "semantic object_key")?,
+            title: normalize_required_text(&input.title, "semantic title")?,
+            summary: normalize_required_text(&input.summary, "semantic summary")?,
+            content: validate_json_object(input.content, "semantic object content")?,
+            semantic_scopes: validate_json_object(
+                input.semantic_scopes,
+                "semantic object semantic_scopes",
+            )?,
+            source_uri,
+            provenance: validate_json_object(input.provenance, "semantic object provenance")?,
+            trust_level: normalize_semantic_trust_level(&input.trust_level)?,
+            freshness: normalize_semantic_freshness(&input.freshness)?,
+            status: normalize_semantic_record_status(&input.status)?,
+            created_at: now,
+            updated_at: now,
+            archived_at: None,
+        };
+        Ok(object)
     }
 
     pub(crate) async fn update_semantic_object(
