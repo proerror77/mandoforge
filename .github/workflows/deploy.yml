@@ -86,7 +86,7 @@ jobs:
         if: inputs.runtime_only != 'true'
         with:
           targets: wasm32-unknown-unknown
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         if: inputs.runtime_only != 'true'
         with:
           path: |
