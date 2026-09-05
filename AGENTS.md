@@ -18,6 +18,7 @@
 - Before modifying implementation files, perform a scope review: identify the intended files, existing dirty changes, unrelated local artifacts, and verification plan.
 - For substantial runtime, policy, security, or orchestration changes, perform a deep review before committing. The review should check correctness, authorization boundaries, failure modes, test coverage, and whether unrelated changes are being mixed in.
 - Before merge, record a review verdict (`APPROVE` or `REQUEST_CHANGES`) against the exact current PR head SHA, including scope and checks. Re-review after any subsequent change; fixing findings alone does not transfer an earlier approval to a new head.
+- Merge requires `APPROVE` for that exact head with no unresolved blocking findings. `REQUEST_CHANGES` blocks merge until the findings are fixed and the resulting head is approved.
 - Local or agent review is distinct from GitHub's required reviewer approvals and branch protection. Satisfy both applicable requirements; never describe a local verdict as a GitHub approval or bypass protection to complete a task.
 - Merge only the reviewed PR contents. Do not include unrelated local worktree changes, generated artifacts, or cleanup unless they are explicitly part of the reviewed PR scope.
 
