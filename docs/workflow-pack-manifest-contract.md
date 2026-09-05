@@ -47,7 +47,7 @@ Every pack manifest must declare:
 - Profiles, skills, workflows, agents, connectors, schemas, policies, evals, and release gates.
 - Onboarding workflow, required tenant profiles, profile schemas, and an onboarding eval.
 
-All referenced files must be relative to the package directory, must exist, and must not use absolute paths or `..` escapes.
+All referenced files must be relative to the package directory, must exist, and must not use absolute paths, `..` escapes, or symlinks whose resolved target is outside that directory.
 
 ## Safety Rules
 
@@ -83,13 +83,53 @@ The validator enforces the initial Stage 3 safety floor:
   target bindings fail closed instead of inheriting the root grant wholesale.
 - Eval gate scores must be between `0` and `1`.
 
-This contract does not install or activate packs yet. It blocks unsafe package shape before the later install/stage/release APIs exist.
+Manifest validation checks package structure. Installation, staging, and release
+are separate API operations with their own state and authority checks.
+
+### Skill instructions and runtime evidence
+
+Business skills use manifest IDs and paths; developer-skill YAML frontmatter is
+not required. A workflow step selects skills through its `skills` array. Staging
+revalidates the current package and loads the sorted, deduplicated union of the
+skills selected by each agent's steps across that pack. An agent with no selected
+skills keeps its original instructions; declaring a file alone does not select it.
+
+Skill files must be nonempty UTF-8 and at most 64 KiB each. The selected skill
+content for one agent is limited to 256 KiB; excess content fails staging rather
+than being truncated. Missing, malformed, or escaped sources and invalid step
+references also block staging before prepared agents are persisted.
+
+The materialized AgentVersion stores the loaded text in `system_prompt`, the IDs
+in `skill_ids`, and provenance in `runtime_config.workflow_pack.skills` (ID,
+relative source path, and `source_digest`). The digest uses the existing pack
+source convention: SHA-256 of the normalized JSON string containing the source
+text. Installation ID and pack version accompany it in `runtime_config.workflow_pack`.
+Provider harness input and delegated CLI/App Server messages use the session's
+pinned AgentVersion instructions. Tools, TaskGrant, tenant isolation, and
+approval policy remain authoritative; skill text adds no permissions.
+
+Changing a source file does not update already materialized versions or existing
+sessions. To adopt edits, use the pack's update/stage/release lifecycle to create
+new materialized versions. Legacy versions created without skill instructions
+remain unchanged; upgrading the API alone does not backfill or activate them.
+
+`scripts/verify-workflow-pack-manifest.sh` includes deterministic regressions for
+loading, session pinning, and rejection boundaries as well as structural checks.
+Neither those checks nor the presence of `golden_cases.jsonl` establishes live
+model quality or production readiness. Quality claims require an executed eval
+with its model/version, inputs, outputs, assertions, and gate evidence; connector
+production claims still require the corresponding live readback.
 
 ## Lifecycle Semantics
 
 ### Install
 
-Install should parse and validate the manifest, copy the package into a tenant-scoped immutable package store, and create a draft pack version. It must not create active agents, connectors, policies, schedules, or external writes by default.
+Install parses and validates the manifest and records an installation with pending
+gates. It snapshots manifest data and onboarding defaults while retaining the
+source package path; it does not currently copy the whole package into an
+immutable source store. Staging revalidates sources and pins the selected skill
+instructions to new AgentVersions. Installation alone does not activate agents,
+connectors, schedules, or external writes.
 
 The initial Stage 3 install flow also bootstraps customer-editable onboarding defaults:
 

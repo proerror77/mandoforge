@@ -4,6 +4,8 @@ steps:
   - agent: reader
     output_schema: vendor-ai-review
   - agent: analyzer
+    skills:
+      - vendor-ai-review
     handoff_intent: classify-vendor-ai-risk
   - agent: writer
     handoff_intent: draft-vendor-ai-review

@@ -590,6 +590,7 @@ pub(crate) async fn run_codex_app_server_delegated_runtime(
     step: &WorkflowStepRun,
     worker_id: &str,
 ) -> Result<Value, AppError> {
+    let message = delegated_runtime_turn_message(state, run, step).await?;
     let config = codex_app_server_config(state)?;
     let metadata = json!({
         "source": "mandoforge_delegated_runtime",
@@ -617,10 +618,7 @@ pub(crate) async fn run_codex_app_server_delegated_runtime(
         )
         .await?;
 
-    let turn_request = CodexTurnRequest {
-        message: delegated_runtime_turn_message(run, step),
-        metadata,
-    };
+    let turn_request = CodexTurnRequest { message, metadata };
     let turn = state
         .codex_app_server_client
         .create_turn(config, &thread.thread_id, turn_request.clone())
@@ -677,7 +675,7 @@ pub(crate) async fn run_agent_cli_delegated_runtime(
         session_id,
         AgentCliRequest {
             profile: adapter.to_string(),
-            task: delegated_runtime_turn_message(run, step),
+            task: delegated_runtime_turn_message(state, run, step).await?,
             args: Vec::new(),
             timeout_seconds: run
                 .runtime_envelope
@@ -695,7 +693,15 @@ pub(crate) async fn run_agent_cli_delegated_runtime(
     }))
 }
 
-pub(crate) fn delegated_runtime_turn_message(run: &WorkflowRun, step: &WorkflowStepRun) -> String {
+pub(crate) async fn delegated_runtime_turn_message(
+    state: &AppState,
+    run: &WorkflowRun,
+    step: &WorkflowStepRun,
+) -> Result<String, AppError> {
+    let session_id = step
+        .session_id
+        .ok_or_else(|| AppError::bad_request("delegated runtime step requires a pinned session"))?;
+    let version = state.agent_version_for_session(session_id).await?;
     let objective = step
         .input_payload
         .get("graph_step")
@@ -704,12 +710,13 @@ pub(crate) fn delegated_runtime_turn_message(run: &WorkflowRun, step: &WorkflowS
         .and_then(Value::as_str)
         .or_else(|| run.input_payload.get("objective").and_then(Value::as_str))
         .unwrap_or("Execute the delegated runtime workflow.");
-    format!(
-        "Run delegated workflow for MandoForge workflow run {}.\nObjective: {}\nRuntime envelope: {}",
+    Ok(format!(
+        "Run delegated workflow for MandoForge workflow run {}.\nPinned agent instructions:\n{}\nObjective: {}\nRuntime envelope: {}",
         run.id,
+        version.system_prompt,
         objective,
         workflow_graph_console_summary(&run.runtime_envelope)
-    )
+    ))
 }
 
 pub(crate) async fn create_delegated_runtime_artifact(

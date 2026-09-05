@@ -4,6 +4,8 @@ steps:
   - agent: reader
     output_schema: policy-monitor-finding
   - agent: analyzer
+    skills:
+      - policy-monitor
     handoff_intent: classify-policy-monitor-signal
   - agent: writer
     handoff_intent: draft-policy-monitor-finding
