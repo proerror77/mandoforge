@@ -38,6 +38,8 @@ observability:
 
 steps:
   - agent: connector-reader
+    skills:
+      - tmall-order-context
     observability:
       step_key: step-1-connector-reader
       expected_events:

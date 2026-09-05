@@ -4,6 +4,8 @@ steps:
   - agent: reader
     output_schema: ai-impact-assessment
   - agent: analyzer
+    skills:
+      - ai-impact-assessment
     handoff_intent: classify-ai-impact
   - agent: writer
     handoff_intent: draft-ai-impact-assessment

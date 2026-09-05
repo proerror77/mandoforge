@@ -462,6 +462,7 @@ impl WorkflowPackManifest {
         }
         for item in &self.skills {
             validate_ref("skills", item, package_dir, &mut ids_by_section)?;
+            read_skill_source(package_dir, &item.path)?;
             file_count += 1;
         }
         for item in &self.schemas {
@@ -1798,7 +1799,33 @@ fn validate_relative_existing_path(package_dir: &Path, relative_path: &str) -> R
     if !full_path.is_file() {
         bail!("pack path {} does not exist", relative_path);
     }
+    if !full_path
+        .canonicalize()?
+        .starts_with(package_dir.canonicalize()?)
+    {
+        bail!(
+            "pack path {} must not escape the package directory",
+            relative_path
+        );
+    }
     Ok(())
+}
+
+pub(crate) fn read_skill_source(package_dir: &Path, relative_path: &str) -> Result<String> {
+    use std::io::Read;
+
+    validate_relative_existing_path(package_dir, relative_path)?;
+    let mut content = String::new();
+    fs::File::open(package_dir.join(relative_path))?
+        .take(65_537)
+        .read_to_string(&mut content)?;
+    if content.len() > 65_536 {
+        bail!("skill {} exceeds 64 KiB", relative_path);
+    }
+    if content.trim().is_empty() {
+        bail!("skill {} must contain instructions", relative_path);
+    }
+    Ok(content)
 }
 
 pub fn validate_workflow_pack_manifest_path(

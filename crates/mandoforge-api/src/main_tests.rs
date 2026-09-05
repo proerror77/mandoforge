@@ -12974,6 +12974,232 @@ fn governed_handoff_back_to_primary_agent_requires_isolated_context() {
 }
 
 #[tokio::test]
+async fn workflow_pack_skills_reach_pinned_provider_input_and_reject_invalid_sources() {
+    let _env = env_lock().lock().expect("env lock");
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    state.seed_demo_agent().await.expect("seed agent");
+    let app = build_router(state.clone());
+    let manifest_path = ai_governance_update_manifest_path_string("0.1.1");
+    let package_dir = Path::new(&manifest_path).parent().unwrap();
+    let workflow_path = package_dir.join("workflows/ai-use-case-triage.workflow.yaml");
+    let workflow = fs::read_to_string(&workflow_path).unwrap();
+    fs::write(
+        &workflow_path,
+        workflow.replacen(
+            "  - agent: reader",
+            "  - agent: reader\n    skills: [ai-use-case-triage, ai-use-case-triage]",
+            1,
+        ),
+    )
+    .unwrap();
+    let skill_path = package_dir.join("skills/ai-use-case-triage/skill.md");
+    let original = fs::read_to_string(&skill_path).unwrap();
+    let installed: WorkflowPackInstallation = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-packs/install",
+            json!({"manifest_path": manifest_path}),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let _: WorkflowPackInstallation = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/workflow-packs/installations/{}/stage", installed.id),
+            json!({}),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let agent = state
+        .list_agents()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|agent| agent.name == "AI Governance Pack / reader")
+        .expect("materialized reader");
+    let version = state.current_agent_version(agent.id).await.unwrap();
+    assert_eq!(version.skill_ids, vec!["ai-use-case-triage"]);
+    assert!(version.system_prompt.contains(&original));
+    assert_eq!(
+        version.runtime_config["workflow_pack"]["skills"][0]["source_digest"],
+        normalized_json_sha256(&json!(original))
+    );
+    let session = state
+        .create_session(CreateSession {
+            agent_id: agent.id,
+            environment_id: None,
+            title: "pinned skill".to_string(),
+            message: None,
+        })
+        .await
+        .unwrap();
+    fs::write(
+        &skill_path,
+        "Changed skill must not leak into an existing session",
+    )
+    .unwrap();
+    let context = build_harness_context(&state, session.id, None, None)
+        .await
+        .unwrap();
+    assert_eq!(context.system_prompt, version.system_prompt);
+    assert!(context.system_prompt.contains(&original));
+    assert!(!context.system_prompt.contains("Changed skill"));
+    assert_eq!(
+        state
+            .agent_version_for_session(session.id)
+            .await
+            .unwrap()
+            .skill_ids,
+        version.skill_ids
+    );
+    let refreshed = workflow_pack_materialize_agents(&state, &installed)
+        .await
+        .unwrap();
+    assert!(
+        refreshed["reader"]
+            .version
+            .system_prompt
+            .contains("Changed skill")
+    );
+    assert_ne!(
+        refreshed["reader"].version.runtime_config["workflow_pack"]["skills"][0]["source_digest"],
+        version.runtime_config["workflow_pack"]["skills"][0]["source_digest"]
+    );
+
+    let definition: WorkflowDefinition = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-definitions",
+            json!({
+                "name": "Pinned skill delegate", "entrypoint": "pinned-skill-delegate",
+                "trigger_type": "manual", "default_agent_id": agent.id,
+                "execution_strategy": "delegated_runtime", "runtime_adapter": "codex_app_server",
+                "runtime_mode": "normal", "release_state": "released",
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let run: WorkflowRun = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/workflow-runs",
+            json!({"workflow_definition_id": definition.id}),
+            &[("x-mandoforge-roles", "operator")],
+        ),
+    )
+    .await;
+    let steps = state.list_workflow_step_runs(run.id).await.unwrap();
+    let message = delegated_runtime_turn_message(&state, &run, &steps[0])
+        .await
+        .unwrap();
+    assert!(message.contains(&original));
+    assert!(!message.contains("Changed skill"));
+
+    let valid_workflow = fs::read_to_string(&workflow_path).unwrap();
+    for invalid in ["null", "42", "[42]", "[unknown-skill]", "[\"\"]"] {
+        fs::write(
+            &workflow_path,
+            valid_workflow.replace("[ai-use-case-triage, ai-use-case-triage]", invalid),
+        )
+        .unwrap();
+        assert!(
+            workflow_pack_materialize_agents(&state, &installed)
+                .await
+                .is_err(),
+            "invalid post-install skill declaration must block: {invalid}"
+        );
+    }
+    fs::write(&workflow_path, valid_workflow).unwrap();
+    #[cfg(unix)]
+    {
+        fs::remove_file(&workflow_path).unwrap();
+        std::os::unix::fs::symlink(
+            ai_governance_pack_dir().join("workflows/ai-use-case-triage.workflow.yaml"),
+            &workflow_path,
+        )
+        .unwrap();
+        assert!(
+            workflow_pack_materialize_agents(&state, &installed)
+                .await
+                .is_err(),
+            "workflow source must stay inside its pack"
+        );
+        fs::remove_file(&workflow_path).unwrap();
+        fs::write(&workflow_path, &workflow).unwrap();
+    }
+    for invalid in [
+        Vec::new(),
+        b" \n\t".to_vec(),
+        vec![0xff],
+        vec![b'x'; 65_537],
+    ] {
+        fs::write(&skill_path, invalid).unwrap();
+        assert!(
+            workflow_pack_materialize_agents(&state, &installed)
+                .await
+                .is_err(),
+            "invalid skill must block materialization"
+        );
+    }
+    fs::remove_file(&skill_path).unwrap();
+    assert!(
+        workflow_pack_materialize_agents(&state, &installed)
+            .await
+            .is_err()
+    );
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
+            &skill_path,
+        )
+        .unwrap();
+        assert!(
+            workflow_pack_materialize_agents(&state, &installed)
+                .await
+                .is_err(),
+            "source must stay inside its pack"
+        );
+        fs::remove_file(&skill_path).unwrap();
+    }
+    let oversized_content = "x".repeat(65_536);
+    for skill in installed.manifest["skills"].as_array().unwrap() {
+        fs::write(
+            package_dir.join(skill["path"].as_str().unwrap()),
+            &oversized_content,
+        )
+        .unwrap();
+    }
+    assert!(
+        workflow_pack_materialize_agents(&state, &installed)
+            .await
+            .is_ok(),
+        "four 64 KiB skills fit the agent budget"
+    );
+    let mut oversized_installation = installed.clone();
+    oversized_installation.manifest["skills"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "id": "extra-skill", "path": "skills/ai-use-case-triage/skill.md", "required": true,
+        }));
+    fs::write(&workflow_path, workflow.replacen("  - agent: reader", "  - agent: reader\n    skills: [ai-use-case-triage, ai-impact-assessment, vendor-ai-review, policy-monitor, extra-skill]", 1)).unwrap();
+    let error = match workflow_pack_materialize_agents(&state, &oversized_installation).await {
+        Ok(_) => panic!("aggregate skill content must be bounded"),
+        Err(error) => error,
+    };
+    assert!(error.message.contains("256 KiB"), "{}", error.message);
+    fs::remove_dir_all(package_dir).unwrap();
+}
+
+#[tokio::test]
 async fn workflow_pack_install_stage_and_release_are_gate_checked_and_audited() {
     let _env = env_lock().lock().expect("env lock");
     let state = test_state_with_worker(Arc::new(InlineExecutionWorker));

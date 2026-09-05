@@ -4,5 +4,5 @@
 - Production connector manifests must declare `production_readiness` with `required_evidence_class: customer_grade` and `fail_closed_without_evidence: true`.
 - Connector production readiness must cover token lifecycle, rate limits and retry policy, idempotency or reconciliation, webhook provenance, compensation policy, approval boundaries, secret redaction, and prompt-injection boundaries.
 - Do not treat a demo connector, local fixture, or pilot transcript as production-ready evidence.
+- Select business skills explicitly in workflow step `skills` arrays. Verify the materialized AgentVersion and runtime input when changing skill behavior; manifest/file checks alone do not prove loading or model quality. See `docs/workflow-pack-manifest-contract.md` for pinning, limits, and legacy-version behavior.
 - When changing packs or connector manifests, run `scripts/verify-workflow-pack-manifest.sh`. If production connector semantics changed, also run the relevant production semantics gate.
-

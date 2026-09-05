@@ -4,6 +4,8 @@ steps:
   - agent: reader
     output_schema: ai-use-case
   - agent: analyzer
+    skills:
+      - ai-use-case-triage
     handoff_intent: classify-ai-use-case
   - agent: writer
     handoff_intent: draft-ai-governance-assessment
