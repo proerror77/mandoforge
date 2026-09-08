@@ -2,6 +2,9 @@
 set -euo pipefail
 
 BASE_URL="${BASE_URL:-http://127.0.0.1:8787}"
+# Artifact sync validates files in the API's session workspace. Use its shared
+# workspace root when the API is configured with a non-default location.
+WORKSPACE_ROOT="${MANDOFORGE_WORKSPACE_ROOT:-.mandoforge/workspaces}"
 SUBJECT="${MANDOFORGE_WORKFLOW_RUNTIME_GATE_SUBJECT:-managed-workflow-runtime-evidence-gate}"
 ROLES="${MANDOFORGE_WORKFLOW_RUNTIME_GATE_ROLES:-admin}"
 AUTH_TOKEN="${MANDOFORGE_WORKFLOW_RUNTIME_GATE_TOKEN:-${MANDOFORGE_STAGE2_GATE_TOKEN:-${MANDOFORGE_DEV_ADMIN_TOKEN:-}}}"
@@ -228,6 +231,11 @@ collect_b_reclaim_file="$(fetch_json POST "/api/workflow-step-runs/$collect_b_st
   lease_seconds: 300
 }')" api-workflow-runtime-proof-step-collect-b-lease-reclaim 2 managed-workflow-lease-drill-b)"
 
+# The expired owner must stay fenced after another subject reclaims the step.
+collect_b_stale_completion_file="$(fetch_json PATCH "/api/workflow-step-runs/$collect_b_step_id" \
+  '{"status":"completed","output_payload":{"source":"stale_collect_b_owner"}}' \
+  api-workflow-runtime-proof-step-collect-b-stale-completion 403 managed-workflow-lease-drill-a)"
+
 fetch_json PATCH "/api/workflow-step-runs/$collect_a_step_id" \
   '{"status":"failed","output_payload":{"error":"transient source failure for retry proof"}}' \
   api-workflow-runtime-proof-step-collect-a-failed >/dev/null
@@ -261,9 +269,9 @@ fi
 fetch_json PATCH "/api/workflow-step-runs/$activated_retry_id" \
   '{"status":"completed","output_payload":{"records":3,"source":"collect_a_retry"}}' \
   api-workflow-runtime-proof-step-collect-a-retry-completed >/dev/null
-fetch_json PATCH "/api/workflow-step-runs/$collect_b_step_id" \
+collect_b_completed_file="$(fetch_json PATCH "/api/workflow-step-runs/$collect_b_step_id" \
   '{"status":"completed","output_payload":{"records":2,"source":"collect_b"}}' \
-  api-workflow-runtime-proof-step-collect-b-completed >/dev/null
+  api-workflow-runtime-proof-step-collect-b-completed 2 managed-workflow-lease-drill-b)"
 
 steps_file="$(fetch_json GET "/api/workflow-runs/$run_id/steps" '{}' api-workflow-runtime-proof-steps-after-collectors)"
 merge_step_id="$(workflow_step_id_by_key "$steps_file" merge)"
@@ -271,7 +279,20 @@ fetch_json PATCH "/api/workflow-step-runs/$merge_step_id" \
   '{"status":"completed","output_payload":{"ready":true,"merged_records":5}}' \
   api-workflow-runtime-proof-step-merge-completed >/dev/null
 
-artifact_file="$(fetch_json POST /api/codex-app-server/artifacts/sync "$(jq -nc --arg session_id "$session_id" '{
+artifact_path="evidence/managed-workflow-runtime-proof.json"
+artifact_workspace_file="$WORKSPACE_ROOT/$session_id/$artifact_path"
+mkdir -p "$(dirname "$artifact_workspace_file")"
+jq -n --arg run_id "$run_id" '{
+  status: "completed",
+  workflow_run_id: $run_id,
+  evidence_gate: "managed-workflow-runtime-evidence-gate",
+  result: "workflow graph, scheduler, transition, artifact, and memory governance proof"
+}' >"$artifact_workspace_file"
+
+artifact_file="$(fetch_json POST /api/codex-app-server/artifacts/sync "$(jq -nc \
+  --arg session_id "$session_id" \
+  --arg path "$artifact_path" \
+  --slurpfile content "$artifact_workspace_file" '{
   session_id: $session_id,
   turn_id: "managed-workflow-runtime-proof",
   command_id: "draft-result",
@@ -279,12 +300,8 @@ artifact_file="$(fetch_json POST /api/codex-app-server/artifacts/sync "$(jq -nc 
     {
       name: "managed-workflow-runtime-proof.json",
       artifact_type: "workflow_result",
-      path: "evidence/managed-workflow-runtime-proof.json",
-      content: {
-        status: "completed",
-        evidence_gate: "managed-workflow-runtime-evidence-gate",
-        result: "workflow graph, scheduler, transition, artifact, and memory governance proof"
-      },
+      path: $path,
+      content: $content[0],
       metadata: {source: "managed-workflow-runtime-evidence-gate"}
     }
   ]
@@ -338,6 +355,9 @@ memory_writebacks_file="$(fetch_json GET /api/memory-governance/writebacks?statu
 summary_file="$EVIDENCE_DIR/summary.json"
 jq -n \
   --arg evidence_dir "$EVIDENCE_DIR" \
+  --arg artifact_path "$artifact_path" \
+  --arg artifact_id "$artifact_id" \
+  --slurpfile artifact_content "$artifact_workspace_file" \
   --slurpfile run "$final_run_file" \
   --slurpfile steps "$final_steps_file" \
   --slurpfile transitions "$transitions_file" \
@@ -345,11 +365,23 @@ jq -n \
   --slurpfile scheduler "$scheduler_run_file" \
   --slurpfile initial_claim "$collect_b_initial_claim_file" \
   --slurpfile reclaim "$collect_b_reclaim_file" \
+  --slurpfile stale_completion "$collect_b_stale_completion_file" \
+  --slurpfile completion "$collect_b_completed_file" \
   --slurpfile artifacts "$artifacts_file" \
   --slurpfile memory "$memory_summary_file" \
   --slurpfile partition "$memory_partition_file" \
   --slurpfile writebacks "$memory_writebacks_file" \
-  '{
+  'def lease_reclaim_passed:
+    ($initial_claim[0].response.step.id == $reclaim[0].response.step.id)
+    and ($initial_claim[0].response.step.claimed_by_worker == "subject:managed-workflow-lease-drill-a")
+    and ($reclaim[0].response.step.claimed_by_worker == "subject:managed-workflow-lease-drill-b")
+    and ($initial_claim[0].response.step.lease_expires_at != $reclaim[0].response.step.lease_expires_at)
+    and ($stale_completion[0].http_status == 403)
+    and ($stale_completion[0].response.error == "workflow step update requires the current claim owner")
+    and ($completion[0].response.id == $reclaim[0].response.step.id)
+    and ($completion[0].response.status == "completed")
+    and ($completion[0].response.claimed_by_worker == $reclaim[0].response.step.claimed_by_worker);
+  {
     status: (if ($run[0].response.status == "completed"
       and ($scheduler[0].response.workflow_scheduled_steps.activated_count // 0) >= 1
       and (($scheduler[0].response.actions // [] | index("workflow_scheduled_steps_activated")) != null)
@@ -357,11 +389,10 @@ jq -n \
       and (($transitions[0].response | map(.transition_type) | index("schedule")) != null)
       and (($transitions[0].response | map(.transition_type) | index("fan_in")) != null)
       and (($transitions[0].response | map(.transition_type) | index("complete")) != null)
-      and ($initial_claim[0].response.step.id == $reclaim[0].response.step.id)
-      and ($initial_claim[0].response.step.claimed_by_worker == "subject:managed-workflow-lease-drill-a")
-      and ($reclaim[0].response.step.claimed_by_worker == "subject:managed-workflow-lease-drill-b")
-      and ($initial_claim[0].response.step.lease_expires_at != $reclaim[0].response.step.lease_expires_at)
+      and lease_reclaim_passed
       and (($artifacts[0].response | length) >= 1)
+      and any($artifacts[0].response[]; .id == $artifact_id
+        and .path == $artifact_path and .content == $artifact_content[0])
       and ($graph[0].response.status == "completed")
       and ($partition[0].response.partition.partition_key == "domain=managed-workflow-proof|workflow=runtime-proof|memory=operator-evidence"))
       then "passed" else "failed" end),
@@ -370,16 +401,15 @@ jq -n \
     step_count: ($steps[0].response | length),
     transition_types: ($transitions[0].response | map(.transition_type) | unique),
     lease_expiry_reclaim: {
-      status: (if ($initial_claim[0].response.step.id == $reclaim[0].response.step.id
-        and $initial_claim[0].response.step.claimed_by_worker == "subject:managed-workflow-lease-drill-a"
-        and $reclaim[0].response.step.claimed_by_worker == "subject:managed-workflow-lease-drill-b"
-        and $initial_claim[0].response.step.lease_expires_at != $reclaim[0].response.step.lease_expires_at)
-        then "passed" else "failed" end),
+      status: (if lease_reclaim_passed then "passed" else "failed" end),
       workflow_step_run_id: $reclaim[0].response.step.id,
       initial_worker: $initial_claim[0].response.step.claimed_by_worker,
       reclaim_worker: $reclaim[0].response.step.claimed_by_worker,
       initial_lease_expires_at: $initial_claim[0].response.step.lease_expires_at,
-      reclaim_lease_expires_at: $reclaim[0].response.step.lease_expires_at
+      reclaim_lease_expires_at: $reclaim[0].response.step.lease_expires_at,
+      stale_owner_completion_http_status: $stale_completion[0].http_status,
+      completion_status: $completion[0].response.status,
+      completion_worker: $completion[0].response.claimed_by_worker
     },
     scheduler_workflow_activation: $scheduler[0].response.workflow_scheduled_steps,
     graph: {
@@ -390,6 +420,7 @@ jq -n \
       status_counts: $graph[0].response.status_counts
     },
     artifact_count: ($artifacts[0].response | length),
+    artifact_path: $artifact_path,
     memory_governance: {
       status: $memory[0].response.status,
       partition_count: $memory[0].response.partition_count,

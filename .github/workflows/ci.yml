@@ -112,7 +112,7 @@ jobs:
       - run: cargo clippy --workspace --locked --all-targets -- -D warnings
       - run: cargo test --workspace --locked --all-targets -- --test-threads=1
       - run: scripts/verify-workflow-pack-manifest.sh
-      - name: Agent OS core evidence gate
+      - name: Agent OS core and managed workflow runtime evidence gates
         shell: bash
         run: |
           set -euo pipefail
@@ -131,6 +131,9 @@ jobs:
               BASE_URL=http://127.0.0.1:8787 \
                 MANDOFORGE_WORKSPACE_ROOT=.mandoforge/ci-agent-os-core-workspaces \
                 ./scripts/agent-os-core-evidence-gate.sh
+              BASE_URL=http://127.0.0.1:8787 \
+                MANDOFORGE_WORKSPACE_ROOT=.mandoforge/ci-agent-os-core-workspaces \
+                ./scripts/managed-workflow-runtime-evidence-gate.sh
               exit 0
             fi
             if ! kill -0 "$API_PID" >/dev/null 2>&1; then
