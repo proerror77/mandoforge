@@ -132,6 +132,7 @@ jobs:
                 MANDOFORGE_WORKSPACE_ROOT=.mandoforge/ci-agent-os-core-workspaces \
                 ./scripts/agent-os-core-evidence-gate.sh
               BASE_URL=http://127.0.0.1:8787 \
+                MANDOFORGE_WORKSPACE_ROOT=.mandoforge/ci-agent-os-core-workspaces \
                 ./scripts/managed-workflow-runtime-evidence-gate.sh
               exit 0
             fi
