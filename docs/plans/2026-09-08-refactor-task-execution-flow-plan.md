@@ -2,7 +2,7 @@
 title: 收拢任务执行流程，减少交付等待与维护成本
 type: refactor
 date: 2026-09-08
-status: in-progress
+status: implemented
 ---
 
 # 收拢任务执行流程，减少交付等待与维护成本
@@ -44,7 +44,7 @@ status: in-progress
 
 | 观察 | 代码证据 | 对重构的含义 |
 | --- | --- | --- |
-| 单个 worker 按会话任务、执行任务、工作流任务顺序逐个 await | `crates/mandoforge-api/src/bin/mandoforge-worker.rs:100` | 存在单 worker 的队头等待结构；集群多 worker 可能缓解，需按实际配置复现后判断影响。 |
+| 生产内置 worker 与兼容 HTTP worker 都按会话任务、执行任务、工作流任务顺序逐个 await | `crates/mandoforge-api/src/worker_daemon.rs`；`crates/mandoforge-api/src/bin/mandoforge-worker.rs` | 存在单 worker 的队头等待结构；集群多 worker 可能缓解，需按实际配置复现后判断影响。 |
 | worker 已有 notify-wait，非成功通知后还 sleep | `crates/mandoforge-api/src/bin/mandoforge-worker.rs:239` | 先核对超时后是否额外等待；优先修已有等待逻辑，不新建调度服务。 |
 | 上下文构建读完整会话事件和当前租户执行队列，再筛选 | `crates/mandoforge-api/src/session_loop_runtime.rs:26`；`crates/mandoforge-api/src/execution_queue.rs:1895` | 可以评估按会话和事件窗口读取；必须保留历史目标与可信执行结果验证。 |
 | 工作流同步扫描运行列表，再查步骤 | `crates/mandoforge-api/src/workflow_step_execution.rs:1254` | 可改为沿现有会话关联定位，避免任务规模增大时扩大扫描。需先核实存储接口。 |
@@ -80,11 +80,11 @@ status: in-progress
 
 预期文件：`session_loop_runtime.rs`、`workflow_step_execution.rs`、`handlers/workflows.rs`、`worker_execution_runtime.rs`；仅在读完全部调用者后确定最终归属。
 
-先用现有测试固定托管/委托两条分支的开始、等待、失败、完成和恢复行为，再抽出重复的推进/结果映射代码。若发现契约漏洞，以聚焦失败用例修正，不把语义修正伪装成纯重构。保持公共 API、存储和事件格式；确需改变则单独说明影响。
+先用现有测试固定托管/委托两条分支的开始、等待、失败、完成和恢复行为，再抽出重复的推进/结果映射代码。若发现契约漏洞，以聚焦失败用例修正，不把语义修正伪装成纯重构。保持现有存储与事件格式；必要的接口可见性调整单独说明影响。
 
 ### 3. 缩短已证实的等待和读取 → 同样任务更快
 
-预期文件：`bin/mandoforge-worker.rs`、`session_loop_runtime.rs`、`store_events.rs`、`execution_queue.rs` 及对应工作流查询实现。
+预期文件：`worker_daemon.rs`、`worker_scheduler.rs`、`bin/mandoforge-worker.rs`、`session_loop_runtime.rs`、`store_events.rs`、`execution_queue.rs` 及对应工作流查询实现。
 
 先修确认的重复等待，再替换热路径宽范围读取。若基线证实队头等待，再在现有 worker 内引入有界的跨会话并发与公平调度；同一会话/同一租约仍保持互斥。审批写入和有依赖的工具不得盲目并行。并发上线前必须证明取消、预算和重复领取仍正确。
 
@@ -98,14 +98,14 @@ status: in-progress
 
 ## 验收与停止条件
 
-- [ ] 普通任务从现有能力启动并交付结果，不要求用户手工创建内部运行对象；列出前后真实操作步骤。
-- [ ] 普通成功、等待审批、拒绝审批、工具失败、超时/预算耗尽、取消、重启恢复均有明确结果；不能将“单轮结束”当作业务成功。
-- [ ] 复用并扩展最近的测试：`main_tests/provider_harness_tests.rs`、`main_tests/execution_queue_tests.rs`、`main_tests.rs` 的工作流用例与 worker 内测试。数据库查询变更需要真实 Postgres 验证。
-- [ ] 生命周期收拢后，相同场景的权限、工具调用次数、终止状态和可追踪结果不回退；关联 ID/游标仍能恢复，外部写入不重复执行。
-- [ ] 热路径不再读取无关会话的执行记录；长历史优化保留完成验证和必要历史上下文。
-- [ ] 如果实施并发，一长一短的独立会话中短任务可在长任务结束前完成；同会话不并发执行，资源有上限。
-- [ ] 改前改后在同条件下报告耗时分解和实际样本数；无收益的性能改动不继续扩张。
-- [ ] 记录被合并的重复逻辑、迁移完的调用者和实际减少的用户步骤；不保留永久双实现，不以文件数作为成功证明。
+- [x] 普通任务从现有能力启动并交付结果，不要求用户手工创建内部运行对象；列出前后真实操作步骤。
+- [x] 普通成功、等待审批、拒绝审批、工具失败、超时/预算耗尽、取消、重启恢复均有明确结果；不能将“单轮结束”当作业务成功。
+- [x] 复用并扩展最近的测试：`main_tests/provider_harness_tests.rs`、`main_tests/execution_queue_tests.rs`、`main_tests.rs` 的工作流用例与 worker 内测试。数据库查询变更需要真实 Postgres 验证。
+- [x] 生命周期收拢后，相同场景的权限、工具调用次数、终止状态和可追踪结果不回退；关联 ID/游标仍能恢复，外部写入不重复执行。
+- [x] 热路径不再读取无关会话的执行记录；长历史优化保留完成验证和必要历史上下文。
+- [x] 如果实施并发，一长一短的独立会话中短任务可在长任务结束前完成；同会话不并发执行，资源有上限。
+- [x] 改前改后在同条件下报告耗时分解和实际样本数；无收益的性能改动不继续扩张。
+- [x] 记录被合并的重复逻辑、迁移完的调用者和实际减少的用户步骤；不保留永久双实现，不以文件数作为成功证明。
 
 实施阶段按项目要求从带验收条件的 GitHub issue 开始，刷新 main 后建分支并早开 draft PR；实施 issue 为 #35，分支为 codex/task-execution-flow-35。重构可分成多个可回滚单元，每个单元完成相关调用者迁移再删除旧路径；回滚用代码版本，不删除数据。合并与部署遵守另行明确的交付范围。
 
@@ -115,4 +115,53 @@ status: in-progress
 
 允许重大重构的重点是收拢职责、删掉被验证为重复的路径，而非重建权限、记忆、调度和沙箱全套体系。五个长程 Harness 模式继续作为检查参考，不是建设清单。
 
-仍需确认：用户对交付速度和开发效率的优先级、最有代表性的业务任务、实际部署 worker 数量/模式及耗时基线。本轮没有运行性能测试、故障注入或生产验收。
+采用现有诊断任务作为可复现基线，同时优化交付等待和维护路径。已完成本地行为、故障恢复、Postgres 和页面验证；真实业务模型质量、生产负载分位数及部署验收不在此次代码交付的已验证范围内。
+
+
+## 实施记录（PR #36）
+
+- 部署核对纠正：`deploy/k8s/worker.yaml` 实际启动 `mandoforge-api`，设置 `MANDOFORGE_PROCESS_ROLE=worker`；独立 HTTP worker 是兼容入口。两者复用同一有界调度核心，生产执行继续直接调用受治理的内部接口。
+- 已复现三个问题：短任务排在约 200ms 的长任务之后，要等到约 209ms；空闲轮次被误标成步骤完成；工具结果轮次丢失历史目标。
+- 状态收拢：显式步骤完成与会话关闭分开；共享会话在最后一步前保持可继续；轮次收尾顺序为结果/步骤/图推进后再 ACK 队列。已有完成记录用于中断恢复，不重新调用模型或工具。
+- 查询收拢：仅装载相关会话执行记录、当前上下文窗口与必要目标/刷新标记及完成凭据；步骤同步按精确会话关联，排除同一工作流内的其他子会话。
+- UI 核对确认：原生产入口拒绝直接启动，运行页没有相应启动表单；任务板字段与后端不匹配。新增的表单直接复用 `/api/workflow-runs`，没有新增提交 API 或运行对象；结果、子会话产物及必要审批显示在同一任务中。
+- 开发基线已有 worker 5 项测试通过；新增重构验证与全量检查结果见下方。所有耗时样本是本地确定性测试，非真实业务模型或生产性能承诺。
+
+
+### 接口兼容性说明
+
+`GET /api/workflow-definitions` 的管理员响应保持完整定义；普通操作员原先得到 403，现在仅得到自己可见的已发布能力的启动摘要（id、名称、发布状态、默认环境、执行策略），不暴露步骤图或授权配置。完整定义详情与写入接口仍要求管理员。创建运行补充默认 Agent 的可见性检查，防止用已知 ID 越过目录过滤。
+
+### 流程验证范围
+
+共享会话的步骤结束、中断恢复、同会话跨 worker 互斥、取消后的收尾、子会话隔离与 worker 失败退出均属于本次改动的回归范围。原有已审批外部动作的执行/取消调度函数保持不变；没有增加第二套执行器、缓存服务、数据库表或消息中间件。
+
+
+### 页面联调发现并关闭的问题
+
+- 读取工具产生的内部结果在审批等待期间反复唤醒模型，重复创建审批并耗尽预算。领取入口现在检查待决审批、未完成工具和执行结果，保留队列输入窗口及尝试次数，直到决策和执行完成。
+- 本地独立 Postgres + mock provider + 预置已发布版本的页面复测：操作员提交；仅一次审批；未授权操作员及未分派审批人被拒绝；管理员将测试审批分派到既有审批组机制后，审批人通过页面批准；内置 worker 自动执行并完成。独立 API 回读确认：workflow=completed、session=terminated、模型调用 2 次、审批 1 次、工具执行 1 次、显式完成记录 1 次。
+- 此联调验证的是本地软件流程和权限检查，不是客户渠道写入、真实模型质量或生产发布证明。
+
+
+## 最终本地验证
+
+| 检查 | 结果 |
+| --- | --- |
+| `CARGO_INCREMENTAL=0 cargo test -p mandoforge-api --all-targets -- --test-threads=1` | API 658、沙箱 14、worker 14 通过；23 项 Postgres 测试单独执行。 |
+| `MANDOFORGE_TEST_POSTGRES_URL=... CARGO_INCREMENTAL=0 cargo test -p mandoforge-api --bin mandoforge-api -- --ignored --test-threads=1` | 23 项通过，包括 native worker 并发、审批等待、租户/会话隔离及恢复。 |
+| `CARGO_INCREMENTAL=0 cargo clippy -p mandoforge-api --all-targets -- -D warnings` | 通过。 |
+| `cargo fmt --all -- --check`；UI 对应格式检查 | 通过。 |
+| `cargo test --manifest-path web-ui/Cargo.toml` | 2 项通过。 |
+| `trunk build --dist <local QA directory>` | WASM 页面构建通过。 |
+| `node scripts/verify-ui-api-truth-gate.mjs` | 334 条后端路由、73 个 UI 引用通过静态检查。 |
+| 本地浏览器与独立 API 回读 | 操作员提交、权限拒绝、分派审批、自动继续、最终完成均已观察；见上述页面联调记录。 |
+
+调度样本：同一 200ms 长任务场景，原短任务完成时间约 209ms；共用调度核心的复测约 6ms（单次受控样本，非生产 SLA）。生产 native worker 另由真实 Postgres + 本地 HTTP provider 测试证明短会话先于长会话完成。
+
+上下文样本：2000 条诊断记录加任务消息、目标和工具结果共 2003 条事件，只加载本轮需要的 3 条上下文记录；总事件数和输入游标保持准确。未使用这一结果声称 prompt 缓存命中率或真实模型耗时改善。
+
+本地深度审查覆盖本任务全部已跟踪差异及新调度模块，排除原有 `AGENTS.md` 修改。最终 PR head 的审查结论和 CI 状态记录在 PR #36；此文档不代表已合并、发布或部署。
+
+
+任务输入链路也已收拢：托管模型与委托运行均接收完整的任务输入及步骤参数；控制台摘要仅用于控制元数据，不再替代实际任务。新增测试覆盖超过列表标题长度的说明、结构化字段，以及它们进入 Provider 上下文的完整链路。

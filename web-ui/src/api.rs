@@ -93,6 +93,8 @@ pub struct Session {
 pub struct Approval {
     pub id: String,
     #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
     pub status: String,
     #[serde(default)]
     pub kind: String,
@@ -133,6 +135,7 @@ pub struct ToolCall {
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 pub struct WorkflowRun {
     pub id: String,
+    pub primary_session_id: String,
     #[serde(default)]
     pub title: String,
     #[serde(default)]
@@ -151,7 +154,9 @@ pub struct WorkflowDefinition {
     #[serde(default)]
     pub version: String,
     #[serde(default)]
-    pub status: String,
+    pub release_state: String,
+    #[serde(default)]
+    pub default_environment_id: Option<String>,
     #[serde(default)]
     pub execution_strategy: String,
 }
@@ -166,17 +171,26 @@ pub struct TaskBoardSnapshot {
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 pub struct TaskBoardItem {
+    #[serde(rename = "workflow_step_run_id")]
     pub id: String,
-    #[serde(default)]
+    #[serde(default, rename = "work_item_title", deserialize_with = "null_string")]
     pub title: String,
     #[serde(default)]
     pub status: String,
-    #[serde(default)]
+    #[serde(
+        default,
+        rename = "work_item_priority",
+        deserialize_with = "null_string"
+    )]
     pub priority: String,
-    #[serde(default)]
+    #[serde(default, rename = "agent_id")]
     pub assignee_agent_id: Option<String>,
     #[serde(default)]
     pub work_item: Option<WorkItem>,
+    #[serde(default)]
+    pub step_key: String,
+    #[serde(default)]
+    pub blockers: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
@@ -983,4 +997,62 @@ fn storage_delete(key: &str) {
 
 pub fn now_ms() -> f64 {
     js_sys::Date::now()
+}
+
+fn null_string<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+pub fn create_workflow_task_body(
+    definition_id: &str,
+    environment_id: Option<&str>,
+    objective: &str,
+) -> Result<Value, String> {
+    let objective = objective.trim();
+    if definition_id.trim().is_empty() || objective.is_empty() {
+        return Err("Choose a published capability and describe the task.".to_string());
+    }
+    let mut body = json!({
+        "workflow_definition_id": definition_id,
+        "title": objective.chars().take(80).collect::<String>(),
+        "input_payload": {"objective": objective},
+    });
+    if let Some(environment_id) = environment_id.filter(|id| !id.trim().is_empty()) {
+        body["environment_id"] = json!(environment_id);
+    }
+    Ok(body)
+}
+
+#[cfg(test)]
+mod task_flow_tests {
+    use super::*;
+
+    #[test]
+    fn task_board_reads_native_workflow_step_contract_with_null_work_item() {
+        let snapshot: TaskBoardSnapshot = serde_json::from_value(json!({"items": [{
+            "workflow_step_run_id": "step-1", "work_item_title": null, "work_item_priority": null,
+            "step_key": "check-order", "agent_id": "agent-1", "status": "requires_action", "blockers": ["approval_pending"]
+        }]})).unwrap();
+        assert_eq!(snapshot.items[0].id, "step-1");
+        assert_eq!(snapshot.items[0].title, "");
+        assert_eq!(snapshot.items[0].step_key, "check-order");
+        assert_eq!(
+            snapshot.items[0].assignee_agent_id.as_deref(),
+            Some("agent-1")
+        );
+    }
+
+    #[test]
+    fn task_submission_uses_published_workflow_without_overriding_governance() {
+        let body = create_workflow_task_body("definition-1", None, " Check this order ").unwrap();
+        assert_eq!(
+            body,
+            json!({"workflow_definition_id": "definition-1", "title": "Check this order", "input_payload": {"objective": "Check this order"}})
+        );
+        assert!(create_workflow_task_body("", None, "task").is_err());
+        assert!(create_workflow_task_body("definition-1", None, "  ").is_err());
+        let definition: WorkflowDefinition = serde_json::from_value(json!({"id": "definition-1", "release_state": "released", "default_environment_id": "env-1"})).unwrap();
+        assert_eq!(definition.release_state, "released");
+        assert_eq!(definition.default_environment_id.as_deref(), Some("env-1"));
+    }
 }

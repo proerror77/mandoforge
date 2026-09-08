@@ -145,6 +145,124 @@ fn session_event_broadcaster() -> &'static broadcast::Sender<SessionEvent> {
     })
 }
 
+// Only these event payloads are consumed by the provider harness. Diagnostic
+// spans remain in the durable timeline, but are not reread into every turn.
+const HARNESS_EVENT_TYPES: &[&str] = &[
+    "user.message",
+    "tool.result",
+    "execution.completed",
+    "execution.failed",
+    "user.custom_tool_result",
+    "session.goal.created",
+    "session.goal.updated",
+    "session.goal.completed",
+    "session.goal.blocked",
+    "context_packet.refresh_deferred",
+    "context_packet.refresh_completed",
+];
+const HARNESS_GOAL_TYPES: &[&str] = &[
+    "session.goal.created",
+    "session.goal.updated",
+    "session.goal.completed",
+    "session.goal.blocked",
+];
+const HARNESS_REFRESH_TYPES: &[&str] = &[
+    "context_packet.refresh_deferred",
+    "context_packet.refresh_completed",
+];
+
+pub(crate) struct HarnessEventHistory {
+    pub(crate) event_count: usize,
+    pub(crate) pending_event_count: usize,
+    pub(crate) events: Vec<SessionEvent>,
+}
+
+impl AppState {
+    pub(crate) async fn load_harness_events(
+        &self,
+        session_id: Uuid,
+        start: Option<i64>,
+        end: Option<i64>,
+    ) -> Result<HarnessEventHistory, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let store = inner.read().await;
+                let events = store
+                    .events
+                    .get(&session_id)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                let in_window = |seq| {
+                    start
+                        .zip(end)
+                        .is_some_and(|(start, end)| seq >= start && seq <= end)
+                };
+                let last_user = events
+                    .iter()
+                    .rfind(|event| {
+                        event.event_type == "user.message" && end.is_none_or(|end| event.seq <= end)
+                    })
+                    .map(|event| event.seq);
+                let last_refresh = events
+                    .iter()
+                    .rfind(|event| HARNESS_REFRESH_TYPES.contains(&event.event_type.as_str()))
+                    .map(|event| event.seq);
+                let goals: std::collections::HashSet<_> = events
+                    .iter()
+                    .rev()
+                    .filter(|event| {
+                        HARNESS_GOAL_TYPES.contains(&event.event_type.as_str())
+                            && end.is_none_or(|end| event.seq <= end)
+                    })
+                    .take(10)
+                    .map(|event| event.seq)
+                    .collect();
+                Ok(HarnessEventHistory {
+                    event_count: events.len(),
+                    pending_event_count: events.iter().filter(|event| in_window(event.seq)).count(),
+                    events: events.iter().filter(|event| {
+                        HARNESS_EVENT_TYPES.contains(&event.event_type.as_str()) && (
+                            start.is_none() || end.is_none() || in_window(event.seq)
+                            // Completion witnesses may follow the selected window.
+                            || event.event_type == "execution.completed"
+                            || Some(event.seq) == last_user || Some(event.seq) == last_refresh || goals.contains(&event.seq)
+                        )
+                    }).cloned().collect(),
+                })
+            }
+            StoreBackend::Postgres(pool) => {
+                // Bound both reads by the immutable log's observed high-water
+                // mark, so concurrent appends do not alter this turn's counts.
+                let (count, pending, high): (i64, i64, i64) = sqlx::query_as(
+                    "SELECT COUNT(*), COUNT(*) FILTER (WHERE seq >= $3 AND seq <= $4), COALESCE(MAX(seq), 0)
+                     FROM session_events WHERE tenant_id = $1 AND session_id = $2",
+                ).bind(self.current_tenant_id()).bind(session_id).bind(start).bind(end).fetch_one(pool).await?;
+                let rows = sqlx::query(
+                    "SELECT id, session_id, seq, parent_event_id, actor_type, actor_id, event_type, payload, created_at
+                     FROM session_events
+                     WHERE tenant_id = $1 AND session_id = $2 AND seq <= $5
+                       AND event_type = ANY($6)
+                       AND ($3::bigint IS NULL OR $4::bigint IS NULL OR seq BETWEEN $3 AND $4
+                         OR event_type = 'execution.completed'
+                         OR seq = (SELECT MAX(seq) FROM session_events WHERE tenant_id = $1 AND session_id = $2 AND seq <= $5 AND ($4::bigint IS NULL OR seq <= $4) AND event_type = 'user.message')
+                         OR seq = (SELECT MAX(seq) FROM session_events WHERE tenant_id = $1 AND session_id = $2 AND seq <= $5 AND event_type = ANY($7))
+                         OR seq IN (SELECT seq FROM session_events WHERE tenant_id = $1 AND session_id = $2 AND seq <= $5 AND ($4::bigint IS NULL OR seq <= $4) AND event_type = ANY($8) ORDER BY seq DESC LIMIT 10))
+                     ORDER BY seq ASC",
+                ).bind(self.current_tenant_id()).bind(session_id).bind(start).bind(end).bind(high)
+                    .bind(HARNESS_EVENT_TYPES).bind(HARNESS_REFRESH_TYPES).bind(HARNESS_GOAL_TYPES).fetch_all(pool).await?;
+                Ok(HarnessEventHistory {
+                    event_count: count as usize,
+                    pending_event_count: pending as usize,
+                    events: rows
+                        .into_iter()
+                        .map(event_from_row)
+                        .collect::<Result<Vec<_>, _>>()?,
+                })
+            }
+        }
+    }
+}
+
 impl AppState {
     pub(crate) async fn has_unresolved_execution_result_at_or_before(
         &self,
@@ -153,7 +271,7 @@ impl AppState {
     ) -> Result<bool, AppError> {
         match &self.store {
             StoreBackend::Memory(inner) => {
-                let jobs = self.execution_queue.list().await?;
+                let jobs = self.execution_queue.list_for_session(session_id).await?;
                 let store = inner.read().await;
                 let Some(events) = store.events.get(&session_id) else {
                     return Ok(false);

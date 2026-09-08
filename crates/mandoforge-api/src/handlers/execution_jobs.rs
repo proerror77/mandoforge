@@ -18,19 +18,19 @@ use crate::execution::{
 };
 use crate::{
     AppError, AppState, CreateRemoteComputerJobAssignment, ExecutionJobStatus, Permission,
-    RemoteComputerJobAssignment, Role, SessionLoopJob, SessionStatus, StoreBackend,
-    WorkerLoadValidationRun, WorkerReadinessReport, authorize_collection_request,
-    authorize_execution_job_run, authorize_request, authorize_session_loop_job_run,
-    build_worker_readiness, cleanup_remote_computer_lease_runtime, deterministic_record_id,
+    RemoteComputerJobAssignment, Role, SessionLoopJob, StoreBackend, WorkerLoadValidationRun,
+    WorkerReadinessReport, authorize_collection_request, authorize_execution_job_run,
+    authorize_request, authorize_session_loop_job_run, build_worker_readiness,
+    cleanup_remote_computer_lease_runtime, deterministic_record_id,
     enforce_worker_environment_binding, enforce_worker_pool_binding,
     ensure_http_execution_process_role, ensure_worker_process_role, environment_worker_pool,
     execute_worker_load_validation, header_value, new_audit_log, principal_from_request,
-    reconcile_workflow_steps_after_session_loop_job, record_remote_computer_job_assignment_event,
+    record_remote_computer_job_assignment_event,
     record_remote_computer_job_assignment_event_for_execution_claim,
     replay_remote_computer_lease_runtime_cleanup_evidence, run_execution_job_with_lease_renewal,
     run_session_loop_with_lease_renewal, session_accepts_worker_execution,
-    set_managed_session_status, visible_session_ids_for_principal,
-    worker_environment_scope_required, worker_scope_headers_present,
+    visible_session_ids_for_principal, worker_environment_scope_required,
+    worker_scope_headers_present,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -205,114 +205,40 @@ async fn run_session_loop_job_as_worker(
     let job = state.get_session_loop_job(id).await?;
     enforce_worker_environment_binding(state, headers, job.session_id, job.environment_id).await?;
     enforce_worker_pool_binding(state, headers, job.session_id, job.environment_id).await?;
-    if !session_accepts_worker_execution(state, job.session_id).await? {
-        let skipped = state
-            .discard_session_loop_job(
-                job.id,
-                "session is terminal and cannot run session loop work",
-            )
-            .await?;
-        state
-            .append_event(
-                "worker",
-                Some(skipped.id),
-                skipped.session_id,
-                "session.loop.skipped",
-                json!({
-                    "session_loop_job_id": skipped.id,
-                    "status": skipped.status,
-                    "reason": "session is terminal",
-                }),
-            )
-            .await?;
-        return Ok(skipped);
-    }
     let running = state.start_session_loop_job(id, worker_id).await?;
+    if !session_accepts_worker_execution(state, job.session_id).await? {
+        let session = state.get_session(job.session_id).await?;
+        let outcome = if crate::successful_provider_completion_for_job(state, &running)
+            .await?
+            .is_some()
+        {
+            Ok(session)
+        } else {
+            Err(AppError::bad_request(
+                "session is terminal and cannot run session loop work",
+            ))
+        };
+        let settled =
+            crate::settle_session_loop_attempt(state, &running, worker_id, &outcome, None).await?;
+        state.append_event("worker", Some(settled.job.id), settled.job.session_id, "session.loop.skipped",
+            json!({"session_loop_job_id": settled.job.id, "status": settled.job.status, "reason": "session is terminal"})).await?;
+        return Ok(settled.job);
+    }
     state
         .append_event(
             "worker",
             Some(running.id),
             running.session_id,
             "session.loop.started",
-            json!({
-                "session_loop_job_id": running.id,
-                "environment_id": running.environment_id,
-                "worker_id": worker_id,
-                "attempt_count": running.attempt_count
-            }),
+            json!({"session_loop_job_id": running.id, "environment_id": running.environment_id,
+            "worker_id": worker_id, "attempt_count": running.attempt_count}),
         )
         .await?;
-    match run_session_loop_with_lease_renewal(state, &running, worker_id, None).await {
-        Ok(session) => {
-            let completed = state
-                .complete_session_loop_job(running.id, worker_id)
-                .await?;
-            state
-                .append_event(
-                    "worker",
-                    Some(completed.id),
-                    completed.session_id,
-                    "session.loop.completed",
-                    json!({
-                        "session_loop_job_id": completed.id,
-                        "status": completed.status,
-                        "session_status": session.status,
-                        "worker_id": worker_id
-                    }),
-                )
-                .await?;
-            reconcile_workflow_steps_after_session_loop_job(state, &session, &completed, worker_id)
-                .await?;
-            Ok(completed)
-        }
-        Err(error) => {
-            let failed = state
-                .fail_session_loop_job(running.id, worker_id, &error.message)
-                .await?;
-            let session_is_terminal =
-                error.message == "session is terminal and cannot run session loop work";
-            if !session_is_terminal {
-                set_managed_session_status(
-                    state,
-                    failed.session_id,
-                    SessionStatus::Failed,
-                    "session loop failed",
-                )
-                .await?;
-                state
-                    .append_event(
-                        "system",
-                        Some(failed.id),
-                        failed.session_id,
-                        "session.failed",
-                        json!({
-                            "session_loop_job_id": failed.id,
-                            "reason": "session loop failed",
-                            "error": error.message
-                        }),
-                    )
-                    .await?;
-            }
-            state
-                .append_event(
-                    "worker",
-                    Some(failed.id),
-                    failed.session_id,
-                    "session.loop.failed",
-                    json!({
-                        "session_loop_job_id": failed.id,
-                        "status": failed.status,
-                        "error": error.message,
-                        "worker_id": worker_id
-                    }),
-                )
-                .await?;
-            if session_is_terminal {
-                return Err(error);
-            }
-            Err(error)
-        }
-    }
+    let result = run_session_loop_with_lease_renewal(state, &running, worker_id, None).await;
+    let settled =
+        crate::settle_session_loop_attempt(state, &running, worker_id, &result, None).await?;
+    result?;
+    Ok(settled.job)
 }
 
 async fn run_execution_job_as_worker(

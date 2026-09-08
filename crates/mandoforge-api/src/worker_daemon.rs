@@ -1,14 +1,21 @@
-use std::time::Duration;
+use std::{
+    collections::{HashSet, VecDeque},
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
 use axum::http::{HeaderMap, HeaderValue};
 use chrono::Utc;
-use tokio::time::sleep;
 use uuid::Uuid;
 
 use crate::{
     AppState, RunWorkflowStepRun, StoreBackend,
     handlers::{execution_jobs, workflows},
+};
+
+use crate::worker_scheduler::{
+    Work, WorkKind, WorkerBackend, concurrency_from_lookup, interleave_work, run_worker,
+    work_attempt_result,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +57,7 @@ struct WorkerDaemonConfig {
     worker_token: String,
     poll_interval: Duration,
     max_jobs: usize,
+    concurrency: usize,
     run_once: bool,
     lease_seconds: i64,
 }
@@ -108,6 +116,7 @@ impl WorkerDaemonConfig {
             worker_token,
             poll_interval,
             max_jobs,
+            concurrency: concurrency_from_lookup(lookup)?,
             run_once,
             lease_seconds,
         })
@@ -172,103 +181,177 @@ pub(crate) async fn run_worker_daemon(state: AppState) -> Result<()> {
     if !matches!(state.store, StoreBackend::Postgres(_)) {
         bail!("MANDOFORGE_PROCESS_ROLE=worker requires Postgres-backed state");
     }
-
     let headers = config.worker_headers(state.configured_tenant_id())?;
-    let mut processed = 0usize;
-
-    loop {
-        processed += process_session_loop_jobs(
-            &state,
-            &headers,
-            remaining_job_budget(config.max_jobs, processed),
-        )
-        .await;
-        if should_stop(&config, processed) {
-            return Ok(());
-        }
-
-        processed += process_execution_jobs(
-            &state,
-            &headers,
-            remaining_job_budget(config.max_jobs, processed),
-        )
-        .await;
-        if should_stop(&config, processed) {
-            return Ok(());
-        }
-
-        processed += process_workflow_step_jobs(
-            &state,
-            &headers,
-            &config,
-            remaining_job_budget(config.max_jobs, processed),
-        )
-        .await;
-        if should_stop(&config, processed) {
-            return Ok(());
-        }
-
-        if config.run_once {
-            return Ok(());
-        }
-
-        sleep(config.poll_interval).await;
-    }
-}
-
-fn should_stop(config: &WorkerDaemonConfig, processed: usize) -> bool {
-    config.max_jobs != 0 && processed >= config.max_jobs
-}
-
-fn remaining_job_budget(max_jobs: usize, processed: usize) -> usize {
-    if max_jobs == 0 {
-        usize::MAX
-    } else {
-        max_jobs.saturating_sub(processed)
-    }
-}
-
-async fn process_session_loop_jobs(
-    state: &AppState,
-    headers: &HeaderMap,
-    job_budget: usize,
-) -> usize {
-    if job_budget == 0 {
-        return 0;
-    }
-    let jobs = match execution_jobs::worker_list_session_loop_jobs(state, headers).await {
-        Ok(jobs) => jobs,
-        Err(error) => {
-            eprintln!("list session loop jobs failed: {}", error.message);
-            return 0;
-        }
+    let worker = ManagedWorker {
+        state,
+        headers,
+        worker_id: config.worker_id.clone(),
+        lease_seconds: config.lease_seconds,
     };
-    let mut processed = 0usize;
-    let now = Utc::now();
-    for job in jobs
-        .into_iter()
-        .filter(|job| session_loop_job_ready_for_worker(job, now))
-    {
-        if processed >= job_budget {
-            break;
+    let processed = run_worker(
+        &worker,
+        config.concurrency,
+        config.poll_interval,
+        config.max_jobs,
+        config.run_once,
+    )
+    .await?;
+    println!("mandoforge worker processed {processed} job(s)");
+    Ok(())
+}
+
+struct ManagedWorker {
+    state: AppState,
+    headers: HeaderMap,
+    worker_id: String,
+    lease_seconds: i64,
+}
+
+#[async_trait::async_trait]
+impl WorkerBackend for ManagedWorker {
+    async fn discover(&self) -> Result<VecDeque<Work>> {
+        let (loops, executions, board) = tokio::try_join!(
+            execution_jobs::worker_list_session_loop_jobs(&self.state, &self.headers),
+            execution_jobs::worker_list_execution_jobs(&self.state, &self.headers),
+            workflows::worker_get_task_board(&self.state, &self.headers),
+        )
+        .map_err(|error| anyhow::anyhow!("worker discovery: {}", error.message))?;
+        let now = Utc::now();
+        let occupied: HashSet<_> = loops
+            .iter()
+            .filter(|job| {
+                job.status == crate::SessionLoopJobStatus::Running
+                    && !session_loop_job_ready_for_worker(job, now)
+            })
+            .map(|job| job.session_id.to_string())
+            .chain(
+                executions
+                    .iter()
+                    .filter(|job| {
+                        matches!(
+                            job.status,
+                            crate::ExecutionJobStatus::Running
+                                | crate::ExecutionJobStatus::Executing
+                                | crate::ExecutionJobStatus::Finalizing
+                                | crate::ExecutionJobStatus::CancelRequested
+                        ) && !execution_job_ready_for_worker(job, now)
+                    })
+                    .map(|job| job.session_id.to_string()),
+            )
+            .collect();
+        let loop_work = loops
+            .into_iter()
+            .filter(|job| session_loop_job_ready_for_worker(job, now))
+            .map(|job| Work {
+                id: job.id.to_string(),
+                session_id: Some(job.session_id.to_string()),
+                kind: WorkKind::SessionLoop,
+            })
+            .collect();
+        let execution_work = executions
+            .into_iter()
+            .filter(|job| execution_job_ready_for_worker(job, now))
+            .map(|job| Work {
+                id: job.id.to_string(),
+                session_id: Some(job.session_id.to_string()),
+                kind: WorkKind::Execution,
+            })
+            .collect();
+        let mut step_work = VecDeque::new();
+        for item in board.items.into_iter().filter(|item| item.claimable) {
+            let Some(agent_id) = item.agent_id else {
+                continue;
+            };
+            let step = self
+                .state
+                .get_workflow_step_run(item.workflow_step_run_id)
+                .await
+                .map_err(|error| anyhow::anyhow!("workflow identity: {}", error.message))?;
+            let session_id = match step.session_id {
+                Some(id) => id,
+                None => {
+                    self.state
+                        .get_workflow_run(step.workflow_run_id)
+                        .await
+                        .map_err(|error| anyhow::anyhow!("workflow identity: {}", error.message))?
+                        .primary_session_id
+                }
+            };
+            step_work.push_back(Work {
+                id: step.id.to_string(),
+                session_id: Some(session_id.to_string()),
+                kind: WorkKind::WorkflowStep {
+                    agent_id: agent_id.to_string(),
+                },
+            });
         }
-        match execution_jobs::worker_run_session_loop_job(state, job.id, headers).await {
-            Ok(updated) => {
-                processed += 1;
-                println!(
-                    "session loop job attempt finished: {} status={:?}",
-                    updated.id, updated.status
-                );
+        Ok(interleave_work(
+            [loop_work, execution_work, step_work],
+            &occupied,
+        ))
+    }
+
+    async fn run(&self, work: &Work) -> Result<bool> {
+        let id = Uuid::parse_str(&work.id)?;
+        let result = match &work.kind {
+            WorkKind::SessionLoop => {
+                execution_jobs::worker_run_session_loop_job(&self.state, id, &self.headers)
+                    .await
+                    .map(|job| job.status.as_str().to_string())
             }
-            Err(error) if worker_claim_rejected(&error) => {
-                eprintln!("session loop job not claimable: {}", job.id);
+            WorkKind::Execution => {
+                let job =
+                    self.state.execution_queue.get(id).await.map_err(|error| {
+                        anyhow::anyhow!("execution identity: {}", error.message)
+                    })?;
+                // Preserve recovery semantics: uncertain writes are reconciled,
+                // never sent through the normal executor a second time.
+                let result = match job.status {
+                    crate::ExecutionJobStatus::Executing => {
+                        execution_jobs::worker_record_execution_outcome_unknown(
+                            &self.state,
+                            id,
+                            &self.headers,
+                        )
+                        .await
+                    }
+                    crate::ExecutionJobStatus::CancelRequested => {
+                        execution_jobs::worker_recover_execution_cancellation(
+                            &self.state,
+                            id,
+                            &self.headers,
+                        )
+                        .await
+                    }
+                    _ => {
+                        execution_jobs::worker_run_execution_job(&self.state, id, &self.headers)
+                            .await
+                    }
+                };
+                result.map(|job| job.status.as_str().to_string())
             }
-            Err(error) => {
-                eprintln!("run session loop job {} failed: {}", job.id, error.message);
+            WorkKind::WorkflowStep { agent_id } => workflows::worker_run_workflow_step_run(
+                &self.state,
+                id,
+                &self.headers,
+                RunWorkflowStepRun {
+                    agent_id: Some(Uuid::parse_str(agent_id)?),
+                    worker_id: Some(self.worker_id.clone()),
+                    lease_seconds: Some(self.lease_seconds),
+                },
+            )
+            .await
+            .map(|response| response.step.status),
+        };
+        match result {
+            Ok(status) => {
+                println!("work attempt finished: {} status={status}", work.key());
+                work_attempt_result(&status)
             }
+            Err(error) if worker_claim_rejected(&error) => Ok(false),
+            Err(error) => bail!("{}: {}", work.key(), error.message),
         }
     }
-    processed
 }
 
 fn session_loop_job_ready_for_worker(
@@ -280,91 +363,6 @@ fn session_loop_job_ready_for_worker(
             && job
                 .lease_expires_at
                 .is_none_or(|lease_expires_at| lease_expires_at <= now))
-}
-
-async fn process_execution_jobs(state: &AppState, headers: &HeaderMap, job_budget: usize) -> usize {
-    if job_budget == 0 {
-        return 0;
-    }
-    let jobs = match execution_jobs::worker_list_execution_jobs(state, headers).await {
-        Ok(jobs) => jobs,
-        Err(error) => {
-            eprintln!("list execution jobs failed: {}", error.message);
-            return 0;
-        }
-    };
-    let mut processed = 0usize;
-    let now = Utc::now();
-    for job in jobs
-        .into_iter()
-        .filter(|job| execution_job_ready_for_worker(job, now))
-    {
-        if processed >= job_budget {
-            break;
-        }
-        if job.status == crate::ExecutionJobStatus::Executing {
-            match execution_jobs::worker_record_execution_outcome_unknown(state, job.id, headers)
-                .await
-            {
-                Ok(updated) => {
-                    processed += 1;
-                    println!(
-                        "execution outcome requires reconciliation: {} status={:?}",
-                        updated.id, updated.status
-                    );
-                }
-                Err(error) if worker_claim_rejected(&error) => {
-                    eprintln!("execution outcome already reconciled: {}", job.id);
-                }
-                Err(error) => {
-                    eprintln!(
-                        "record unknown execution outcome {} failed: {}",
-                        job.id, error.message
-                    );
-                }
-            }
-            continue;
-        }
-        if job.status == crate::ExecutionJobStatus::CancelRequested {
-            match execution_jobs::worker_recover_execution_cancellation(state, job.id, headers)
-                .await
-            {
-                Ok(updated) => {
-                    processed += 1;
-                    println!(
-                        "execution cancellation recovered: {} status={:?}",
-                        updated.id, updated.status
-                    );
-                }
-                Err(error) if worker_claim_rejected(&error) => {
-                    eprintln!("execution cancellation not recoverable: {}", job.id);
-                }
-                Err(error) => {
-                    eprintln!(
-                        "recover execution cancellation {} failed: {}",
-                        job.id, error.message
-                    );
-                }
-            }
-            continue;
-        }
-        match execution_jobs::worker_run_execution_job(state, job.id, headers).await {
-            Ok(updated) => {
-                processed += 1;
-                println!(
-                    "execution job attempt finished: {} status={:?}",
-                    updated.id, updated.status
-                );
-            }
-            Err(error) if worker_claim_rejected(&error) => {
-                eprintln!("execution job not claimable: {}", job.id);
-            }
-            Err(error) => {
-                eprintln!("run execution job {} failed: {}", job.id, error.message);
-            }
-        }
-    }
-    processed
 }
 
 fn execution_job_ready_for_worker(
@@ -385,67 +383,6 @@ fn execution_job_ready_for_worker(
         ) && job
             .lease_expires_at
             .is_none_or(|lease_expires_at| lease_expires_at <= now))
-}
-
-async fn process_workflow_step_jobs(
-    state: &AppState,
-    headers: &HeaderMap,
-    config: &WorkerDaemonConfig,
-    job_budget: usize,
-) -> usize {
-    if job_budget == 0 {
-        return 0;
-    }
-    let board = match workflows::worker_get_task_board(state, headers).await {
-        Ok(board) => board,
-        Err(error) => {
-            eprintln!("get task board failed: {}", error.message);
-            return 0;
-        }
-    };
-    let mut processed = 0usize;
-    for item in board.items.into_iter().filter(|item| item.claimable) {
-        if processed >= job_budget {
-            break;
-        }
-        let Some(agent_id) = item.agent_id else {
-            eprintln!(
-                "workflow step not runnable: {} missing agent_id",
-                item.workflow_step_run_id
-            );
-            continue;
-        };
-        match workflows::worker_run_workflow_step_run(
-            state,
-            item.workflow_step_run_id,
-            headers,
-            RunWorkflowStepRun {
-                agent_id: Some(agent_id),
-                worker_id: Some(config.worker_id.clone()),
-                lease_seconds: Some(config.lease_seconds),
-            },
-        )
-        .await
-        {
-            Ok(updated) => {
-                processed += 1;
-                println!(
-                    "workflow step attempt finished: {} status={}",
-                    updated.step.id, updated.step.status
-                );
-            }
-            Err(error) if worker_claim_rejected(&error) => {
-                eprintln!("workflow step not claimable: {}", item.workflow_step_run_id);
-            }
-            Err(error) => {
-                eprintln!(
-                    "run workflow step {} failed: {}",
-                    item.workflow_step_run_id, error.message
-                );
-            }
-        }
-    }
-    processed
 }
 
 fn worker_claim_rejected(error: &crate::AppError) -> bool {
@@ -497,11 +434,12 @@ mod tests {
     }
 
     #[test]
-    fn max_jobs_budget_is_hard_bounded() {
-        assert_eq!(remaining_job_budget(0, 42), usize::MAX);
-        assert_eq!(remaining_job_budget(3, 1), 2);
-        assert_eq!(remaining_job_budget(3, 3), 0);
-        assert_eq!(remaining_job_budget(3, 4), 0);
+    fn worker_concurrency_is_bounded_for_both_transports() {
+        assert_eq!(concurrency_from_lookup(&|_| None).unwrap(), 4);
+        assert_eq!(concurrency_from_lookup(&|_| Some("1".into())).unwrap(), 1);
+        for value in ["0", "33", "unlimited"] {
+            assert!(concurrency_from_lookup(&|_| Some(value.into())).is_err());
+        }
     }
 
     #[test]

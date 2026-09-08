@@ -112,6 +112,42 @@ fn provider_completion_records(
     (events, audit)
 }
 
+// Model turns wait for pending decisions and executions. The queue cursor stays
+// unacknowledged, so the decision/result wakes the same accumulated input window.
+pub(crate) const SESSION_PENDING_ACTIONS_SQL: &str =
+    "SELECT EXISTS (SELECT 1 FROM sessions WHERE tenant_id = $1 AND id = $2 AND status NOT IN ('terminated', 'failed')) AND (
+       EXISTS (SELECT 1 FROM approvals WHERE tenant_id = $1 AND session_id = $2 AND status = 'pending')
+       OR EXISTS (SELECT 1 FROM tool_calls WHERE tenant_id = $1 AND session_id = $2 AND status IN ('running', 'waiting_approval'))
+       OR EXISTS (SELECT 1 FROM execution_jobs WHERE tenant_id = $1 AND session_id = $2
+         AND (status NOT IN ('completed', 'failed', 'canceled') OR finalization_details->>'stage' IN ('completion_pending', 'failure_pending')))
+     )";
+
+pub(crate) fn memory_session_has_pending_actions(
+    store: &crate::store_backend::MemoryStore,
+    session_id: Uuid,
+) -> bool {
+    store
+        .approvals
+        .values()
+        .any(|approval| approval.session_id == session_id && approval.status == "pending")
+        || store.tool_calls.values().any(|call| {
+            call.session_id == session_id
+                && matches!(call.status.as_str(), "running" | "waiting_approval")
+        })
+}
+
+pub(crate) fn execution_pending_for_model(job: &crate::execution_queue::ExecutionJob) -> bool {
+    !matches!(
+        job.status,
+        crate::ExecutionJobStatus::Completed
+            | crate::ExecutionJobStatus::Failed
+            | crate::ExecutionJobStatus::Canceled
+    ) || matches!(
+        job.finalization_details["stage"].as_str(),
+        Some("completion_pending" | "failure_pending")
+    )
+}
+
 impl AppState {
     pub(crate) async fn set_session_and_primary_thread_status(
         &self,

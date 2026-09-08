@@ -5399,13 +5399,14 @@ async fn workflow_step_requires_action_can_resume_on_new_worker() {
 async fn workflow_step_claim_is_atomic() {
     let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
     let now = Utc::now();
-    let queued = test_workflow_step_run(
+    let mut queued = test_workflow_step_run(
         Uuid::new_v4(),
         "atomic-claim",
         "queued",
         empty_json_object(),
         now,
     );
+    queued.session_id = Some(Uuid::new_v4());
     let step_id = queued.id;
     let StoreBackend::Memory(inner) = &state.store else {
         panic!("test state must use memory store");
@@ -35083,6 +35084,18 @@ async fn mcp_commit_write_uses_approval_commit_token_exact_binding() {
         .await
         .expect("create team");
     state
+        .create_membership(
+            organization.id,
+            CreateMembership {
+                user_id: "admin-1".to_string(),
+                team_id: Some(team.id),
+                project_id: None,
+                role: "operator".to_string(),
+            },
+        )
+        .await
+        .expect("scoped workflow operator membership");
+    state
         .create_provider_access(
             team.id,
             CreateProviderAccess {
@@ -35185,7 +35198,10 @@ async fn mcp_commit_write_uses_approval_commit_token_exact_binding() {
             "POST",
             "/api/workflow-runs",
             json!({"workflow_definition_id": definition.id}),
-            &[("x-mandoforge-roles", "operator")],
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "operator"),
+            ],
         ),
     )
     .await;
@@ -35657,6 +35673,18 @@ async fn native_connector_commit_write_enforces_side_effect_scope_and_exact_bind
         .await
         .expect("create team");
     state
+        .create_membership(
+            organization.id,
+            CreateMembership {
+                user_id: "admin-1".to_string(),
+                team_id: Some(team.id),
+                project_id: None,
+                role: "operator".to_string(),
+            },
+        )
+        .await
+        .expect("scoped workflow operator membership");
+    state
         .create_provider_access(
             team.id,
             CreateProviderAccess {
@@ -35763,7 +35791,10 @@ async fn native_connector_commit_write_enforces_side_effect_scope_and_exact_bind
             "POST",
             "/api/workflow-runs",
             json!({"workflow_definition_id": definition.id}),
-            &[("x-mandoforge-roles", "operator")],
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "operator"),
+            ],
         ),
     )
     .await;
@@ -36060,6 +36091,18 @@ async fn ecommerce_native_connector_live_adapter_executes_after_approval_commit(
         .await
         .expect("create team");
     state
+        .create_membership(
+            organization.id,
+            CreateMembership {
+                user_id: "admin-1".to_string(),
+                team_id: Some(team.id),
+                project_id: None,
+                role: "operator".to_string(),
+            },
+        )
+        .await
+        .expect("scoped workflow operator membership");
+    state
         .create_provider_access(
             team.id,
             CreateProviderAccess {
@@ -36155,7 +36198,10 @@ async fn ecommerce_native_connector_live_adapter_executes_after_approval_commit(
             "POST",
             "/api/workflow-runs",
             json!({"workflow_definition_id": definition.id}),
-            &[("x-mandoforge-roles", "operator")],
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "operator"),
+            ],
         ),
     )
     .await;
@@ -41200,6 +41246,42 @@ async fn workflow_step_run_endpoint_claims_and_executes_session_loop() {
                 "args": {"path": "README.md"}
             }),
             &operator_headers,
+        ),
+    )
+    .await;
+    let pending_session_id = Uuid::parse_str(run["primary_session_id"].as_str().unwrap()).unwrap();
+    let pending_job = session_loop_jobs_for_session(app.clone(), pending_session_id)
+        .await
+        .into_iter()
+        .find(|job| job.status == SessionLoopJobStatus::Queued)
+        .unwrap();
+    let blocked = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/session-loop-jobs/{}/run", pending_job.id))
+                .header("x-mandoforge-worker-id", "subject:operator-1")
+                .header("x-mandoforge-subject", "mandoforge-test-worker")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        blocked.status(),
+        StatusCode::NOT_FOUND,
+        "read results must not wake the model while approval is pending"
+    );
+    let approval_id = executed["step"]["approval_ids"][0].as_str().unwrap();
+    let _: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/approvals/{approval_id}/reject"),
+            json!({}),
+            &admin_headers,
         ),
     )
     .await;

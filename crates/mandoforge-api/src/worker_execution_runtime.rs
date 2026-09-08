@@ -86,6 +86,109 @@ pub(crate) fn ensure_http_execution_process_role(state: &AppState) -> Result<(),
     ))
 }
 
+pub(crate) struct WorkflowStepAttempt<'a> {
+    pub(crate) run: &'a WorkflowRun,
+    pub(crate) step: &'a WorkflowStepRun,
+    pub(crate) before_refs: &'a SessionRuntimeRefs,
+}
+
+pub(crate) struct SettledSessionLoop {
+    pub(crate) session: Session,
+    pub(crate) job: SessionLoopJob,
+    pub(crate) workflow_step: Option<WorkflowStepRun>,
+}
+
+/// Result -> workflow reconciliation -> queue acknowledgement. Leaving the job
+/// claim alive until reconciliation finishes makes an interrupted finalization
+/// recoverable by the existing lease mechanism.
+pub(crate) async fn settle_session_loop_attempt(
+    state: &AppState,
+    running: &SessionLoopJob,
+    worker_id: &str,
+    result: &Result<Session, AppError>,
+    workflow_step: Option<WorkflowStepAttempt<'_>>,
+) -> Result<SettledSessionLoop, AppError> {
+    state
+        .renew_session_loop_job_lease(running.id, worker_id, WORKER_JOB_LEASE_SECONDS)
+        .await?;
+    let mut outcome = running.clone();
+    outcome.status = if result.is_ok() {
+        SessionLoopJobStatus::Completed
+    } else {
+        SessionLoopJobStatus::Failed
+    };
+    let error_message = result.as_ref().err().map(|error| error.message.clone());
+    if let Some(error) = &error_message
+        && error != "session is terminal and cannot run session loop work"
+    {
+        set_managed_session_status(
+            state,
+            running.session_id,
+            SessionStatus::Failed,
+            "session loop failed",
+        )
+        .await?;
+        state.append_event("system", Some(running.id), running.session_id, "session.failed",
+            json!({"session_loop_job_id": running.id, "reason": "session loop failed", "error": error})).await?;
+    }
+    let session = state.get_session(running.session_id).await?;
+    let step_id = workflow_step.as_ref().map(|attempt| attempt.step.id);
+    let updated_step = if let Some(attempt) = workflow_step {
+        let refs = diff_session_runtime_refs(
+            attempt.before_refs,
+            &collect_session_runtime_refs(state, session.id).await?,
+        );
+        Some(
+            update_workflow_step_after_worker_session(
+                state,
+                attempt.run,
+                attempt.step,
+                &session,
+                &outcome,
+                worker_id,
+                refs,
+                error_message.clone(),
+                false,
+            )
+            .await?,
+        )
+    } else {
+        reconcile_workflow_steps_after_session_loop_job(state, &session, &outcome, worker_id)
+            .await?;
+        None
+    };
+    let session = state.get_session(session.id).await?;
+    let (job, event_type, mut payload) = match error_message {
+        None => {
+            let job = state
+                .complete_session_loop_job(running.id, worker_id)
+                .await?;
+            let payload = json!({"session_loop_job_id": job.id, "status": job.status,
+                "session_status": session.status, "worker_id": worker_id});
+            (job, "session.loop.completed", payload)
+        }
+        Some(error) => {
+            let job = state
+                .fail_session_loop_job(running.id, worker_id, &error)
+                .await?;
+            let payload = json!({"session_loop_job_id": job.id, "status": job.status,
+                "error": error, "worker_id": worker_id});
+            (job, "session.loop.failed", payload)
+        }
+    };
+    if let Some(step_id) = step_id {
+        payload["workflow_step_run_id"] = json!(step_id);
+    }
+    state
+        .append_event("worker", Some(job.id), job.session_id, event_type, payload)
+        .await?;
+    Ok(SettledSessionLoop {
+        session,
+        job,
+        workflow_step: updated_step,
+    })
+}
+
 pub(crate) async fn run_session_loop_with_lease_renewal(
     state: &AppState,
     job: &SessionLoopJob,

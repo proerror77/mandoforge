@@ -300,7 +300,11 @@ pub(crate) fn WizardView(props: &WizardProps) -> Html {
                                 <strong>{ if can_start_session { "available" } else if has_runtime { "workflow required" } else { "needs agent and environment" } }</strong>
                                 <p>{ "The first-run session is an internal smoke task. It creates no external writes and remains visible in session, worker, approval, and audit surfaces." }</p>
                             </div>
-                            <button disabled={!can_start_session} onclick={start_session}>{ "Start session" }</button>
+                            if data.direct_session_launch_allowed() {
+                                <button disabled={!can_start_session} onclick={start_session}>{ "Start session" }</button>
+                            } else {
+                                <OverviewButton label="Open tasks" target={View::Workflows} on_view={props.on_view.clone()} />
+                            }
                         </div>
                         <div class="overview-gate-actions">
                             <OverviewButton label="Open packs" target={View::Packs} on_view={props.on_view.clone()} />

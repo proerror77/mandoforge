@@ -249,6 +249,13 @@ impl ExecutionQueue {
         self.backend.list().await
     }
 
+    pub(crate) async fn list_for_session(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<ExecutionJob>, AppError> {
+        self.backend.list_for_session(session_id).await
+    }
+
     #[allow(dead_code)]
     pub(crate) async fn get(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
         self.backend.get(job_id).await
@@ -448,6 +455,8 @@ pub(crate) trait ExecutionQueueBackend: Send + Sync {
     async fn retry_or_fail(&self, job_id: Uuid, error: &str) -> Result<ExecutionJob, AppError>;
 
     async fn list(&self) -> Result<Vec<ExecutionJob>, AppError>;
+
+    async fn list_for_session(&self, session_id: Uuid) -> Result<Vec<ExecutionJob>, AppError>;
 
     async fn get(&self, job_id: Uuid) -> Result<ExecutionJob, AppError>;
 
@@ -1326,6 +1335,18 @@ impl ExecutionQueueBackend for MemoryExecutionQueue {
         Ok(self.inner.read().await.jobs.clone())
     }
 
+    async fn list_for_session(&self, session_id: Uuid) -> Result<Vec<ExecutionJob>, AppError> {
+        Ok(self
+            .inner
+            .read()
+            .await
+            .jobs
+            .iter()
+            .filter(|job| job.session_id == session_id)
+            .cloned()
+            .collect())
+    }
+
     async fn get(&self, job_id: Uuid) -> Result<ExecutionJob, AppError> {
         self.inner
             .read()
@@ -1900,6 +1921,20 @@ impl ExecutionQueueBackend for PostgresExecutionQueue {
              ORDER BY enqueued_at ASC",
         )
         .bind(self.current_tenant_id())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(execution_job_from_row).collect()
+    }
+
+    async fn list_for_session(&self, session_id: Uuid) -> Result<Vec<ExecutionJob>, AppError> {
+        let rows = sqlx::query(
+            "SELECT id, session_id, environment_id, approval_id, tool_call_id, tool_name, status, enqueued_at, started_at, completed_at, worker_id, lease_expires_at, claim_generation, finalization_details, attempt_count, max_attempts, last_error
+             FROM execution_jobs
+             WHERE tenant_id = $1 AND session_id = $2
+             ORDER BY enqueued_at ASC",
+        )
+        .bind(self.current_tenant_id())
+        .bind(session_id)
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(execution_job_from_row).collect()

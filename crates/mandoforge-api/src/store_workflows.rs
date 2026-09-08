@@ -1025,6 +1025,35 @@ impl AppState {
         match &self.store {
             StoreBackend::Memory(inner) => {
                 let mut store = inner.write().await;
+                let session_id = step.session_id.or_else(|| {
+                    store
+                        .workflow_runs
+                        .get(&step.workflow_run_id)
+                        .map(|run| run.primary_session_id)
+                });
+                let occupied = session_id.is_none()
+                    || session_id.is_some_and(|id| {
+                        crate::store_session_threads::memory_session_has_pending_actions(&store, id)
+                    })
+                    || store.workflow_step_runs.values().any(|other| {
+                        other.id != step.id
+                            && matches!(other.status.as_str(), "running" | "requires_action")
+                            && other.session_id.or_else(|| {
+                                store
+                                    .workflow_runs
+                                    .get(&other.workflow_run_id)
+                                    .map(|run| run.primary_session_id)
+                            }) == session_id
+                    })
+                    || store.session_loop_jobs.values().any(|job| {
+                        Some(job.session_id) == session_id
+                            && job.status == crate::SessionLoopJobStatus::Running
+                    });
+                if occupied {
+                    return Err(AppError::not_found(
+                        "workflow step session is already in use",
+                    ));
+                }
                 let claimable = store
                     .workflow_step_runs
                     .get(&step.id)
@@ -1046,6 +1075,40 @@ impl AppState {
                 Ok(step)
             }
             StoreBackend::Postgres(pool) => {
+                let session_id = match step.session_id {
+                    Some(id) => id,
+                    None => {
+                        self.get_workflow_run(step.workflow_run_id)
+                            .await?
+                            .primary_session_id
+                    }
+                };
+                let mut tx = pool.begin().await?;
+                sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2::uuid::text, 0))")
+                    .bind(self.current_tenant_id()).bind(session_id).execute(&mut *tx).await?;
+                let pending: bool =
+                    sqlx::query_scalar(crate::store_session_threads::SESSION_PENDING_ACTIONS_SQL)
+                        .bind(self.current_tenant_id())
+                        .bind(session_id)
+                        .fetch_one(&mut *tx)
+                        .await?;
+                if pending {
+                    return Err(AppError::not_found(
+                        "session is waiting for a tool action or approval",
+                    ));
+                }
+                let occupied: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM workflow_step_runs AS step JOIN workflow_runs AS run
+                       ON run.tenant_id = step.tenant_id AND run.id = step.workflow_run_id
+                       WHERE step.tenant_id = $1 AND step.id <> $3 AND COALESCE(step.session_id, run.primary_session_id) = $2
+                         AND step.status IN ('running', 'requires_action'))
+                     OR EXISTS (SELECT 1 FROM session_loop_jobs WHERE tenant_id = $1 AND session_id = $2 AND status = 'running')",
+                ).bind(self.current_tenant_id()).bind(session_id).bind(step.id).fetch_one(&mut *tx).await?;
+                if occupied {
+                    return Err(AppError::not_found(
+                        "workflow step session is already in use",
+                    ));
+                }
                 let row = sqlx::query(
                     "UPDATE workflow_step_runs
                      SET status = $3, output_payload = $4, artifact_ids = $5, approval_ids = $6, tool_call_ids = $7, claimed_by_worker = $8, lease_expires_at = $9, context_packet_id = $10, started_at = $11, completed_at = $12, scheduled_at = $13, updated_at = $14, claim_owner_version = $15
@@ -1070,9 +1133,82 @@ impl AppState {
                 .bind(step.updated_at)
                 .bind(step.claim_owner_version)
                 .bind(now)
-                .fetch_optional(pool)
+                .fetch_optional(&mut *tx)
                 .await?
                 .ok_or_else(|| AppError::not_found("workflow step run not found"))?;
+                let step = workflow_step_run_from_row(row)?;
+                tx.commit().await?;
+                Ok(step)
+            }
+        }
+    }
+
+    /// A replacement worker may settle an expired step only while it owns a
+    /// live session-loop claim for that exact session and attempt.
+    pub(crate) async fn adopt_workflow_step_for_loop(
+        &self,
+        step_id: Uuid,
+        job: &crate::SessionLoopJob,
+        worker_id: &str,
+    ) -> Result<WorkflowStepRun, AppError> {
+        let now = Utc::now();
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let mut store = inner.write().await;
+                let owns_job = store.session_loop_jobs.get(&job.id).is_some_and(|current| {
+                    current.status == crate::SessionLoopJobStatus::Running
+                        && current.worker_id.as_deref() == Some(worker_id)
+                        && current.session_id == job.session_id
+                        && current.attempt_count == job.attempt_count
+                        && current
+                            .lease_expires_at
+                            .is_some_and(|deadline| deadline > now)
+                });
+                let step = store
+                    .workflow_step_runs
+                    .get(&step_id)
+                    .ok_or_else(|| AppError::not_found("workflow step run not found"))?;
+                let session_id = step.session_id.or_else(|| {
+                    store
+                        .workflow_runs
+                        .get(&step.workflow_run_id)
+                        .map(|run| run.primary_session_id)
+                });
+                if !owns_job
+                    || session_id != Some(job.session_id)
+                    || step.status != "running"
+                    || step.claim_owner_version != crate::WORKFLOW_STEP_CLAIM_OWNER_VERSION
+                    || step.lease_expires_at.is_some_and(|deadline| deadline > now)
+                {
+                    return Err(AppError::not_found(
+                        "workflow step claim is not recoverable",
+                    ));
+                }
+                let step = store
+                    .workflow_step_runs
+                    .get_mut(&step_id)
+                    .expect("checked step");
+                step.claimed_by_worker = Some(worker_id.to_string());
+                step.claim_owner_version = crate::WORKFLOW_STEP_CLAIM_OWNER_VERSION;
+                step.lease_expires_at =
+                    Some(now + chrono::Duration::seconds(crate::WORKER_JOB_LEASE_SECONDS));
+                Ok(step.clone())
+            }
+            StoreBackend::Postgres(pool) => {
+                let row = sqlx::query(
+                    "UPDATE workflow_step_runs AS step SET claimed_by_worker = $3, claim_owner_version = $4,
+                         lease_expires_at = now() + interval '5 minutes'
+                     WHERE step.tenant_id = $1 AND step.id = $2 AND step.status = 'running' AND step.claim_owner_version = $4
+                       AND (step.lease_expires_at IS NULL OR step.lease_expires_at <= now())
+                       AND EXISTS (SELECT 1 FROM session_loop_jobs AS job JOIN workflow_runs AS run
+                         ON run.tenant_id = job.tenant_id AND run.id = step.workflow_run_id
+                         WHERE job.tenant_id = step.tenant_id AND job.id = $5 AND job.worker_id = $3
+                           AND job.status = 'running' AND job.attempt_count = $6 AND job.lease_expires_at > now()
+                           AND job.session_id = COALESCE(step.session_id, run.primary_session_id))
+                     RETURNING step.*",
+                ).bind(self.current_tenant_id()).bind(step_id).bind(worker_id).bind(crate::WORKFLOW_STEP_CLAIM_OWNER_VERSION)
+                    .bind(job.id).bind(job.attempt_count).fetch_optional(pool).await?
+                    .ok_or_else(|| AppError::not_found("workflow step claim is not recoverable"))?;
                 workflow_step_run_from_row(row)
             }
         }
@@ -1255,6 +1391,46 @@ impl AppState {
                 .fetch_optional(pool)
                 .await?;
                 row.map(workflow_step_run_from_row).transpose()
+            }
+        }
+    }
+
+    /// Resolve a session's active steps without scanning other runs or
+    /// projecting a primary session's result onto a specialist's session.
+    pub(crate) async fn list_active_workflow_steps_for_session(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<WorkflowStepRun>, AppError> {
+        match &self.store {
+            StoreBackend::Memory(inner) => {
+                let store = inner.read().await;
+                let mut steps: Vec<_> = store
+                    .workflow_step_runs
+                    .values()
+                    .filter(|step| {
+                        matches!(step.status.as_str(), "running" | "requires_action")
+                            && step.session_id.or_else(|| {
+                                store
+                                    .workflow_runs
+                                    .get(&step.workflow_run_id)
+                                    .map(|run| run.primary_session_id)
+                            }) == Some(session_id)
+                    })
+                    .cloned()
+                    .collect();
+                steps.sort_by_key(|step| step.created_at);
+                Ok(steps)
+            }
+            StoreBackend::Postgres(pool) => {
+                let rows = sqlx::query(
+                    "SELECT step.* FROM workflow_step_runs AS step
+                     JOIN workflow_runs AS run ON run.tenant_id = step.tenant_id AND run.id = step.workflow_run_id
+                     WHERE step.tenant_id = $1
+                       AND COALESCE(step.session_id, run.primary_session_id) = $2
+                       AND step.status IN ('running', 'requires_action')
+                     ORDER BY step.created_at ASC",
+                ).bind(self.current_tenant_id()).bind(session_id).fetch_all(pool).await?;
+                rows.into_iter().map(workflow_step_run_from_row).collect()
             }
         }
     }

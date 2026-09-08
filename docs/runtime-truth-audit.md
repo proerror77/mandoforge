@@ -33,6 +33,48 @@ a second execution stack.
 | Environment worker binding | Workers can bind session-loop and execution-job claim/run paths to an Environment id or worker pool/queue. | `WORKER_ENVIRONMENT_ID`, `WORKER_POOL`, `WORKER_QUEUE`, and worker binding route guards. |
 | Restart/resume core drill | A local Postgres-backed gate enqueues a managed session event, restarts the API, drains the queued session-loop and execution jobs with a restarted worker, verifies processed cursor advancement, thread lineage, approval/execution loopback, stale-worker rejection, and runtime adapter final-message evidence. | `scripts/managed-session-restart-resume-core-gate.sh`. |
 
+## Task Execution Flow
+
+The deployed worker in `deploy/k8s/worker.yaml` runs `mandoforge-api` with
+`MANDOFORGE_PROCESS_ROLE=worker`. `worker_daemon.rs` calls the governed worker
+entrypoints directly. The separate `mandoforge-worker` binary is the HTTP
+compatibility transport; production API role restrictions still apply to it.
+Both transports use `worker_scheduler.rs`, so session exclusion, bounded
+concurrency, queue fairness, and finite-batch outcomes share one implementation.
+
+- `WORKER_CONCURRENCY` defaults to 4 and accepts 1–32. Independent sessions may
+  progress concurrently; a session retains exclusive execution. Store-level
+  workflow/loop claims also fence competing workers. An unresolved HTTP-work
+  identity is run exclusively rather than guessed.
+- `RUN_ONCE=1` processes one discovered snapshot. `MAX_JOBS` limits handled
+  attempts, including failures (claim rejections do not consume the budget); a finite batch with failed or uncertain attempts
+  exits unsuccessfully. Neither exit code nor an acknowledged turn replaces the
+  task's persisted completion status.
+- Pending approvals, tools, and execution outcomes prevent a new model-turn
+  claim without consuming its cursor or budget. The accumulated input resumes
+  after the decision and execution are resolved.
+- A managed turn settles its result and workflow state before acknowledging its
+  queue job. A recorded `complete_task` result finishes the relevant step; shared
+  primary sessions stay open between steps and close after the graph completes.
+  Recovery consumes existing completion evidence without rerunning the model or
+  tools, and later cancellation prevents graph continuation.
+- Both managed and delegated paths receive the full task and step input as data;
+  the console summary is only used for control metadata, not as the task itself.
+- Harness input reads the current event window plus historical task markers and
+  completion witnesses. Counts still describe the durable timeline; diagnostic
+  payloads are not fetched into every context-building pass. Execution records and workflow
+  reconciliation are scoped to the exact session, including child sessions.
+- The task page submits the existing `/api/workflow-runs` contract and shows
+  progress, session results, child-session artifacts, and relevant approvals.
+  Operators receive a visible, published capability catalog; full workflow
+  configuration and management remain admin-only. Starting a run also checks
+  access to its default agent. This is a read-catalog projection, not a new
+  workflow or authorization service.
+
+These are implementation boundaries. Local mock-provider and Postgres tests
+establish their tested behavior; target-specific production readiness still
+requires deployment and runtime evidence.
+
 ## Important Gaps
 
 - Runtime turn records are event-based today. There is no dedicated

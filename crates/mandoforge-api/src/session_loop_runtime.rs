@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use axum::http::HeaderMap;
 use chrono::{DateTime, Utc};
@@ -30,58 +30,54 @@ pub(crate) async fn build_harness_context(
     pending_event_seq_end: Option<i64>,
 ) -> Result<HarnessContext, AppError> {
     let agent_version = state.agent_version_for_session(session_id).await?;
-    let events = state.list_events(session_id).await?;
-    let execution_jobs = state.execution_queue.list().await?;
+    let history = state
+        .load_harness_events(session_id, pending_event_seq_start, pending_event_seq_end)
+        .await?;
+    let events = &history.events;
+    let execution_jobs = state.execution_queue.list_for_session(session_id).await?;
+    let jobs_by_id: HashMap<_, _> = execution_jobs.iter().map(|job| (job.id, job)).collect();
+    let completed_jobs: HashSet<_> = events
+        .iter()
+        .filter_map(|event| {
+            let job = jobs_by_id.get(&event.actor_id?)?;
+            execution_completion_event_matches_job(event, job).then_some(job.id)
+        })
+        .collect();
     let hidden_execution_tool_calls: HashSet<_> = execution_jobs
         .iter()
-        .filter(|job| {
-            job.session_id == session_id
-                && !events
-                    .iter()
-                    .any(|event| execution_completion_event_matches_job(event, job))
-        })
+        .filter(|job| !completed_jobs.contains(&job.id))
         .map(|job| job.tool_call_id)
         .collect();
-    let pending_events = events
+    let trusted = |event: &&SessionEvent| match event.event_type.as_str() {
+        "tool.result" => event
+            .actor_id
+            .is_none_or(|id| !hidden_execution_tool_calls.contains(&id)),
+        "execution.completed" => event
+            .actor_id
+            .and_then(|id| jobs_by_id.get(&id))
+            .is_some_and(|job| execution_completion_event_matches_job(event, job)),
+        "execution.failed" => event
+            .actor_id
+            .and_then(|id| jobs_by_id.get(&id))
+            .is_some_and(|job| execution_failure_event_matches_job(event, job)),
+        _ => true,
+    };
+    let in_window = |event: &&SessionEvent| {
+        pending_event_seq_start
+            .zip(pending_event_seq_end)
+            .is_some_and(|(start, end)| event.seq >= start && event.seq <= end)
+    };
+    let rejected_pending = events
         .iter()
-        .filter(|event| {
-            pending_event_seq_start.is_some_and(|start| event.seq >= start)
-                && pending_event_seq_end.is_some_and(|end| event.seq <= end)
-                && !(event.event_type == "tool.result"
-                    && event
-                        .actor_id
-                        .is_some_and(|actor_id| hidden_execution_tool_calls.contains(&actor_id)))
-                && (event.event_type != "execution.completed"
-                    || execution_jobs
-                        .iter()
-                        .any(|job| execution_completion_event_matches_job(event, job)))
-                && (event.event_type != "execution.failed"
-                    || execution_jobs
-                        .iter()
-                        .any(|job| execution_failure_event_matches_job(event, job)))
-        })
-        .collect::<Vec<_>>();
+        .filter(in_window)
+        .filter(|event| !trusted(event))
+        .count();
+    let pending_events: Vec<_> = events.iter().filter(in_window).filter(trusted).collect();
     let context_events: Vec<&SessionEvent> =
         if pending_event_seq_start.is_some() && pending_event_seq_end.is_some() {
             pending_events.clone()
         } else {
-            events
-                .iter()
-                .filter(|event| {
-                    !(event.event_type == "tool.result"
-                        && event.actor_id.is_some_and(|actor_id| {
-                            hidden_execution_tool_calls.contains(&actor_id)
-                        }))
-                        && (event.event_type != "execution.completed"
-                            || execution_jobs
-                                .iter()
-                                .any(|job| execution_completion_event_matches_job(event, job)))
-                        && (event.event_type != "execution.failed"
-                            || execution_jobs
-                                .iter()
-                                .any(|job| execution_failure_event_matches_job(event, job)))
-                })
-                .collect()
+            events.iter().filter(trusted).collect()
         };
     let last_user_message = if context_events
         .iter()
@@ -187,11 +183,15 @@ pub(crate) async fn build_harness_context(
             })
         })
         .collect::<Vec<_>>();
-    let latest_goal_event = recent_goal_events.first().cloned();
+    let latest_goal_event = recent_goal_events.first().cloned().or_else(|| {
+        events.iter().rev().find(|event| is_session_goal_event(&event.event_type)).map(|event| json!({
+            "event_id": event.id, "event_type": event.event_type, "created_at": event.created_at, "payload": event.payload,
+        }))
+    });
     let refresh_context = pending_events
         .iter()
         .any(|event| event.event_type == "user.message")
-        || context_packet_refresh_is_deferred(&events);
+        || context_packet_refresh_is_deferred(events);
     let (task_grant_id, context_packet_id, rendered_context_packet, provider_tool_names) =
         build_provider_context_packet(state, session_id, refresh_context).await?;
     Ok(HarnessContext {
@@ -203,10 +203,10 @@ pub(crate) async fn build_harness_context(
         context_packet_id,
         rendered_context_packet,
         provider_tool_names,
-        event_count: events.len(),
+        event_count: history.event_count,
         pending_event_seq_start,
         pending_event_seq_end,
-        pending_event_count: pending_events.len(),
+        pending_event_count: history.pending_event_count.saturating_sub(rejected_pending),
         last_user_message,
         latest_goal_event,
         approved_tool_result_count: approved_event_result_count,
@@ -460,7 +460,11 @@ pub(crate) async fn apply_provider_completion(
     summary: &str,
 ) -> Result<Session, AppError> {
     let session_status = if status == "completed" {
-        SessionStatus::Terminated
+        if workflow_step_keeps_session_open(state, session_id, task_grant_id).await? {
+            SessionStatus::Idle
+        } else {
+            SessionStatus::Terminated
+        }
     } else {
         SessionStatus::RequiresAction
     };
@@ -1124,6 +1128,9 @@ pub(crate) async fn run_session_loop(
         return Err(AppError::bad_request(
             "session is terminal and cannot run session loop work",
         ));
+    }
+    if let Some(session) = resume_recorded_workflow_completion(state, job).await? {
+        return Ok(session);
     }
     state.ensure_session_runnable(id).await?;
     let active_task_grant = if crate::store_entities::agent_release_enforcement_required() {
