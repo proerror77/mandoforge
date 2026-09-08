@@ -15490,6 +15490,15 @@ async fn create_delegated_runtime_test_run(
     runtime_adapter: &str,
     objective: &str,
 ) -> Value {
+    create_delegated_runtime_test_run_with_graph(app, runtime_adapter, objective, json!({})).await
+}
+
+async fn create_delegated_runtime_test_run_with_graph(
+    app: Router,
+    runtime_adapter: &str,
+    objective: &str,
+    step_graph: Value,
+) -> Value {
     let agents: Vec<Agent> = request_json(
         app.clone(),
         Request::builder()
@@ -15504,6 +15513,7 @@ async fn create_delegated_runtime_test_run(
             "POST",
             "/api/workflow-definitions",
             json!({
+                "step_graph": step_graph,
                 "name": "Delegated runtime test",
                 "entrypoint": format!("delegated-runtime-test-{}", Uuid::new_v4()),
                 "trigger_type": "manual",
@@ -15535,6 +15545,46 @@ async fn create_delegated_runtime_test_run(
         ),
     )
     .await
+}
+
+#[tokio::test]
+async fn delegated_runtime_steps_keep_shared_session_open_until_graph_finishes() {
+    let client = Arc::new(RecordingCodexAppServerClient::default());
+    let app = test_app_with_codex_app_server(client).await;
+    let run = create_delegated_runtime_test_run_with_graph(
+        app.clone(),
+        "codex_app_server",
+        "two steps",
+        json!({"steps":[
+            {"key":"first", "type":"delegated_runtime", "start":true},
+            {"key":"second", "type":"delegated_runtime", "depends_on":["first"]}
+        ]}),
+    )
+    .await;
+    for key in ["first", "second"] {
+        let steps: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/workflow-runs/{}/steps",
+                    run["id"].as_str().unwrap()
+                ))
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        let step = steps.iter().find(|s| s["step_key"] == key).unwrap();
+        let response: Value = request_json(app.clone(), json_request_with_headers("POST",
+            &format!("/api/workflow-step-runs/{}/run", step["id"].as_str().unwrap()),
+            json!({"agent_id":step["agent_id"], "worker_id":"delegated-worker", "lease_seconds":600}),
+            &[("x-mandoforge-roles","operator")])).await;
+        assert_eq!(response["step"]["status"], "completed");
+        assert_eq!(
+            response["session"]["status"],
+            if key == "first" { "idle" } else { "terminated" }
+        );
+    }
 }
 
 #[tokio::test]

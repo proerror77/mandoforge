@@ -165,3 +165,17 @@ status: implemented
 
 
 任务输入链路也已收拢：托管模型与委托运行均接收完整的任务输入及步骤参数；控制台摘要仅用于控制元数据，不再替代实际任务。新增测试覆盖超过列表标题长度的说明、结构化字段，以及它们进入 Provider 上下文的完整链路。
+
+## 2026-09-09 merge review corrections
+
+The five GitHub review findings on PR #36 were verified and corrected within the existing runtime paths:
+
+- Workflow completion events and audit records precede fallible session finalization.
+- A terminal session can retry remote runtime cleanup without repeating its status transition.
+- Generic continuation reconciliation preserves the attempt error through the job outcome.
+- Delegated graph steps use the existing shared-session completion rule; response state is read again after graph advancement.
+- HTTP worker discovery reads existing finalization details and recovers pending completion/failure and expired execution/cancellation leases, matching the native worker rules.
+
+Five regression tests cover these paths. `cargo test -p mandoforge-api --bins -- --test-threads=1` passed: API 662, sandbox 14, HTTP worker 15; 23 Postgres tests remain explicitly ignored in this local run. Formatting and diff checks passed. No schema, dependency, public API, deployment or business-action policy change was added.
+
+Local deep review of the correction diff checked completion ordering, terminal cleanup retry, sanitized error propagation, shared-session and child-session boundaries, lease expiry, finalization discovery, and the five regression tests. No unresolved blocking findings remained before committing. The PR body records the review verdict against the resulting exact head; GitHub protection and CI remain separate merge requirements.

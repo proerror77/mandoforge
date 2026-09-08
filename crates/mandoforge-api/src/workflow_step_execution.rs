@@ -423,10 +423,17 @@ pub(crate) async fn run_workflow_delegated_runtime_step(
             let completed_job = state
                 .complete_session_loop_job(running_job.id, &worker_id)
                 .await?;
-            let session = set_managed_session_status(
+            let keeps_session_open =
+                workflow_step_keeps_session_open(state, session_id, Some(claim.task_grant.id))
+                    .await?;
+            set_managed_session_status(
                 state,
                 session_id,
-                SessionStatus::Terminated,
+                if keeps_session_open {
+                    SessionStatus::Idle
+                } else {
+                    SessionStatus::Terminated
+                },
                 "delegated runtime completed",
             )
             .await?;
@@ -474,6 +481,7 @@ pub(crate) async fn run_workflow_delegated_runtime_step(
                 )
                 .await?;
             advance_workflow_graph_after_step_update(state, &run, &completed_step).await?;
+            let session = state.get_session(session_id).await?;
             Ok(Json(RunWorkflowStepRunResponse {
                 step: completed_step,
                 task_grant: claim.task_grant,
@@ -1245,6 +1253,9 @@ pub(crate) async fn finish_completed_workflow_session(
             "workflow objectives completed",
         )
         .await?;
+    } else {
+        // Terminal status can persist before cleanup fails. Retry the resource
+        // finalization independently of the status transition.
         cleanup_remote_computer_session_runtimes(
             state,
             session.id,
@@ -1474,7 +1485,7 @@ pub(crate) async fn reconcile_workflow_steps_after_session_loop_job(
             session_loop_job,
             worker_id,
             runtime_refs.clone(),
-            None,
+            session_loop_job.last_error.clone(),
             true,
         )
         .await?;

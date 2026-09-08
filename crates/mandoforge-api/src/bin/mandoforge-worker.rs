@@ -23,22 +23,29 @@ struct QueueJob {
     session_id: String,
     status: String,
     lease_expires_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    finalization_details: serde_json::Value,
 }
 
 impl QueueJob {
     fn claimable(&self) -> bool {
         self.status == "queued"
-            || (self.status == "running"
-                && self
-                    .lease_expires_at
-                    .is_none_or(|deadline| deadline <= Utc::now()))
+            || (self.status == "completed"
+                && self.finalization_details["stage"] == "completion_pending")
+            || (self.status == "failed" && self.finalization_details["stage"] == "failure_pending")
+            || (matches!(
+                self.status.as_str(),
+                "running" | "executing" | "finalizing" | "cancel_requested"
+            ) && self
+                .lease_expires_at
+                .is_none_or(|deadline| deadline <= Utc::now()))
     }
 
     fn executing(&self) -> bool {
         matches!(
             self.status.as_str(),
-            "executing" | "finalizing" | "cancel_requested"
-        ) || (self.status == "running" && !self.claimable())
+            "running" | "executing" | "finalizing" | "cancel_requested"
+        ) && !self.claimable()
     }
 }
 
@@ -418,6 +425,40 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
     use tokio::net::TcpListener;
+
+    #[test]
+    fn execution_recovery_states_are_claimable_after_lease_expiry() {
+        for (status, stage) in [
+            ("completed", "completion_pending"),
+            ("failed", "failure_pending"),
+            ("cancel_requested", ""),
+            ("executing", ""),
+            ("finalizing", ""),
+        ] {
+            let job: QueueJob = serde_json::from_value(json!({"id":"job", "session_id":"session", "status":status, "finalization_details":{"stage":stage}})).unwrap();
+            assert!(
+                job.claimable(),
+                "recovery state {status} must be discovered"
+            );
+            assert!(
+                !job.executing(),
+                "recoverable {status} must not occupy its session"
+            );
+        }
+        for status in ["running", "executing", "finalizing", "cancel_requested"] {
+            let job: QueueJob = serde_json::from_value(json!({"id":"job", "session_id":"session", "status":status, "lease_expires_at": Utc::now() + chrono::Duration::minutes(1)})).unwrap();
+            assert!(!job.claimable());
+            assert!(job.executing());
+        }
+        for status in ["completed", "failed", "canceled"] {
+            let job: QueueJob = serde_json::from_value(
+                json!({"id":"job", "session_id":"session", "status":status}),
+            )
+            .unwrap();
+            assert!(!job.claimable());
+            assert!(!job.executing());
+        }
+    }
 
     fn test_worker(base_url: String) -> Worker {
         Worker {

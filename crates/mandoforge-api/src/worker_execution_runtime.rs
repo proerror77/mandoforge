@@ -118,6 +118,7 @@ pub(crate) async fn settle_session_loop_attempt(
         SessionLoopJobStatus::Failed
     };
     let error_message = result.as_ref().err().map(|error| error.message.clone());
+    outcome.last_error = error_message.clone();
     if let Some(error) = &error_message
         && error != "session is terminal and cannot run session loop work"
     {

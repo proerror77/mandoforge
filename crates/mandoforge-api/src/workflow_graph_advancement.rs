@@ -686,7 +686,6 @@ pub(crate) async fn update_workflow_run_status_and_record(
             .close_active_task_grants_for_workflow_run(run.id, grant_status)
             .await?;
     }
-    finish_completed_workflow_session(state, &updated).await?;
     let event_type = format!("workflow.run.{status}");
     state
         .append_event(
@@ -719,5 +718,7 @@ pub(crate) async fn update_workflow_run_status_and_record(
             }),
         ))
         .await?;
+    // Persist completion evidence before fallible session/runtime finalization.
+    finish_completed_workflow_session(state, &updated).await?;
     Ok(updated)
 }

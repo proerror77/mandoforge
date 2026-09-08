@@ -2279,6 +2279,119 @@ async fn workflow_step_completion_keeps_shared_session_open_until_last_step() {
     );
 }
 
+#[tokio::test]
+async fn workflow_completion_records_evidence_before_session_finalization() {
+    let (state, session) = harness_test_session().await;
+    let (run, _, _) = shared_workflow_completion_fixture(&state, &session).await;
+    let completed = update_workflow_run_status_and_record(&state, &run, "completed")
+        .await
+        .unwrap();
+    let events = state.list_events(session.id).await.unwrap();
+    let completion = events
+        .iter()
+        .find(|e| e.event_type == "workflow.run.completed")
+        .unwrap();
+    let terminal = events
+        .iter()
+        .find(|e| e.event_type == "session.status_terminated")
+        .unwrap();
+    assert!(
+        completion.seq < terminal.seq,
+        "completion evidence must precede fallible finalization"
+    );
+    update_workflow_run_status_and_record(&state, &completed, "completed")
+        .await
+        .unwrap();
+    assert_eq!(
+        state
+            .list_events(session.id)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|e| e.event_type == "workflow.run.completed")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn workflow_continuation_preserves_attempt_failure() {
+    let (state, session) = harness_test_session().await;
+    let (_, _, step) = shared_workflow_completion_fixture(&state, &session).await;
+    let job = state
+        .enqueue_session_loop_job(session.id, None, "continuation")
+        .await
+        .unwrap();
+    let job = state
+        .start_session_loop_job(job.id, "workflow-worker")
+        .await
+        .unwrap();
+    let result = Err(AppError::bad_request("provider continuation unavailable"));
+    settle_session_loop_attempt(&state, &job, "workflow-worker", &result, None)
+        .await
+        .unwrap();
+    let step = state.get_workflow_step_run(step.id).await.unwrap();
+    assert_eq!(step.status, "failed");
+    assert_eq!(
+        step.output_payload["worker_execution"]["error"],
+        "provider continuation unavailable"
+    );
+}
+
+#[tokio::test]
+async fn workflow_completion_retries_cleanup_for_terminal_sessions() {
+    let (state, session) = harness_test_session().await;
+    let (run, _, _) = shared_workflow_completion_fixture(&state, &session).await;
+    let computer = state
+        .create_remote_computer(CreateRemoteComputer {
+            id: None,
+            name: "workflow-cleanup".into(),
+            profile: Some("workspace-write".into()),
+            namespace: None,
+            pod_name: Some("workflow-cleanup-pod".into()),
+            workspace_path: None,
+            state_mount_path: None,
+            metadata: Some(json!({"warm_pool":true})),
+        })
+        .await
+        .unwrap();
+    let lease = state
+        .create_remote_computer_lease(
+            computer.id,
+            CreateRemoteComputerLease {
+                session_id: Some(session.id),
+                worker_id: Some("workflow-worker".into()),
+                lease_seconds: Some(60),
+                metadata: Some(json!({"on_demand":false})),
+            },
+        )
+        .await
+        .unwrap();
+    // Reproduce an interrupted finalization: terminal status persisted, lease still active.
+    let StoreBackend::Memory(inner) = &state.store else {
+        unreachable!()
+    };
+    inner
+        .write()
+        .await
+        .sessions
+        .get_mut(&session.id)
+        .unwrap()
+        .status = SessionStatus::Terminated;
+    let completed = state
+        .update_workflow_run_status(run.id, "completed".into(), run.started_at, Some(Utc::now()))
+        .await
+        .unwrap();
+    update_workflow_run_status_and_record(&state, &completed, "completed")
+        .await
+        .unwrap();
+    let leases = state.list_remote_computer_leases().await.unwrap();
+    assert_eq!(
+        leases.iter().find(|l| l.id == lease.id).unwrap().status,
+        "released"
+    );
+}
+
 async fn assert_workflow_completion_recovers_before_queue_ack(
     state: &AppState,
     session: &Session,
