@@ -5399,13 +5399,14 @@ async fn workflow_step_requires_action_can_resume_on_new_worker() {
 async fn workflow_step_claim_is_atomic() {
     let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
     let now = Utc::now();
-    let queued = test_workflow_step_run(
+    let mut queued = test_workflow_step_run(
         Uuid::new_v4(),
         "atomic-claim",
         "queued",
         empty_json_object(),
         now,
     );
+    queued.session_id = Some(Uuid::new_v4());
     let step_id = queued.id;
     let StoreBackend::Memory(inner) = &state.store else {
         panic!("test state must use memory store");
@@ -15489,6 +15490,15 @@ async fn create_delegated_runtime_test_run(
     runtime_adapter: &str,
     objective: &str,
 ) -> Value {
+    create_delegated_runtime_test_run_with_graph(app, runtime_adapter, objective, json!({})).await
+}
+
+async fn create_delegated_runtime_test_run_with_graph(
+    app: Router,
+    runtime_adapter: &str,
+    objective: &str,
+    step_graph: Value,
+) -> Value {
     let agents: Vec<Agent> = request_json(
         app.clone(),
         Request::builder()
@@ -15503,6 +15513,7 @@ async fn create_delegated_runtime_test_run(
             "POST",
             "/api/workflow-definitions",
             json!({
+                "step_graph": step_graph,
                 "name": "Delegated runtime test",
                 "entrypoint": format!("delegated-runtime-test-{}", Uuid::new_v4()),
                 "trigger_type": "manual",
@@ -15534,6 +15545,46 @@ async fn create_delegated_runtime_test_run(
         ),
     )
     .await
+}
+
+#[tokio::test]
+async fn delegated_runtime_steps_keep_shared_session_open_until_graph_finishes() {
+    let client = Arc::new(RecordingCodexAppServerClient::default());
+    let app = test_app_with_codex_app_server(client).await;
+    let run = create_delegated_runtime_test_run_with_graph(
+        app.clone(),
+        "codex_app_server",
+        "two steps",
+        json!({"steps":[
+            {"key":"first", "type":"delegated_runtime", "start":true},
+            {"key":"second", "type":"delegated_runtime", "depends_on":["first"]}
+        ]}),
+    )
+    .await;
+    for key in ["first", "second"] {
+        let steps: Vec<Value> = request_json(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/workflow-runs/{}/steps",
+                    run["id"].as_str().unwrap()
+                ))
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        let step = steps.iter().find(|s| s["step_key"] == key).unwrap();
+        let response: Value = request_json(app.clone(), json_request_with_headers("POST",
+            &format!("/api/workflow-step-runs/{}/run", step["id"].as_str().unwrap()),
+            json!({"agent_id":step["agent_id"], "worker_id":"delegated-worker", "lease_seconds":600}),
+            &[("x-mandoforge-roles","operator")])).await;
+        assert_eq!(response["step"]["status"], "completed");
+        assert_eq!(
+            response["session"]["status"],
+            if key == "first" { "idle" } else { "terminated" }
+        );
+    }
 }
 
 #[tokio::test]
@@ -35083,6 +35134,18 @@ async fn mcp_commit_write_uses_approval_commit_token_exact_binding() {
         .await
         .expect("create team");
     state
+        .create_membership(
+            organization.id,
+            CreateMembership {
+                user_id: "admin-1".to_string(),
+                team_id: Some(team.id),
+                project_id: None,
+                role: "operator".to_string(),
+            },
+        )
+        .await
+        .expect("scoped workflow operator membership");
+    state
         .create_provider_access(
             team.id,
             CreateProviderAccess {
@@ -35185,7 +35248,10 @@ async fn mcp_commit_write_uses_approval_commit_token_exact_binding() {
             "POST",
             "/api/workflow-runs",
             json!({"workflow_definition_id": definition.id}),
-            &[("x-mandoforge-roles", "operator")],
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "operator"),
+            ],
         ),
     )
     .await;
@@ -35657,6 +35723,18 @@ async fn native_connector_commit_write_enforces_side_effect_scope_and_exact_bind
         .await
         .expect("create team");
     state
+        .create_membership(
+            organization.id,
+            CreateMembership {
+                user_id: "admin-1".to_string(),
+                team_id: Some(team.id),
+                project_id: None,
+                role: "operator".to_string(),
+            },
+        )
+        .await
+        .expect("scoped workflow operator membership");
+    state
         .create_provider_access(
             team.id,
             CreateProviderAccess {
@@ -35763,7 +35841,10 @@ async fn native_connector_commit_write_enforces_side_effect_scope_and_exact_bind
             "POST",
             "/api/workflow-runs",
             json!({"workflow_definition_id": definition.id}),
-            &[("x-mandoforge-roles", "operator")],
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "operator"),
+            ],
         ),
     )
     .await;
@@ -36060,6 +36141,18 @@ async fn ecommerce_native_connector_live_adapter_executes_after_approval_commit(
         .await
         .expect("create team");
     state
+        .create_membership(
+            organization.id,
+            CreateMembership {
+                user_id: "admin-1".to_string(),
+                team_id: Some(team.id),
+                project_id: None,
+                role: "operator".to_string(),
+            },
+        )
+        .await
+        .expect("scoped workflow operator membership");
+    state
         .create_provider_access(
             team.id,
             CreateProviderAccess {
@@ -36155,7 +36248,10 @@ async fn ecommerce_native_connector_live_adapter_executes_after_approval_commit(
             "POST",
             "/api/workflow-runs",
             json!({"workflow_definition_id": definition.id}),
-            &[("x-mandoforge-roles", "operator")],
+            &[
+                ("x-mandoforge-subject", "admin-1"),
+                ("x-mandoforge-roles", "operator"),
+            ],
         ),
     )
     .await;
@@ -41200,6 +41296,42 @@ async fn workflow_step_run_endpoint_claims_and_executes_session_loop() {
                 "args": {"path": "README.md"}
             }),
             &operator_headers,
+        ),
+    )
+    .await;
+    let pending_session_id = Uuid::parse_str(run["primary_session_id"].as_str().unwrap()).unwrap();
+    let pending_job = session_loop_jobs_for_session(app.clone(), pending_session_id)
+        .await
+        .into_iter()
+        .find(|job| job.status == SessionLoopJobStatus::Queued)
+        .unwrap();
+    let blocked = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/session-loop-jobs/{}/run", pending_job.id))
+                .header("x-mandoforge-worker-id", "subject:operator-1")
+                .header("x-mandoforge-subject", "mandoforge-test-worker")
+                .header("x-mandoforge-roles", "admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        blocked.status(),
+        StatusCode::NOT_FOUND,
+        "read results must not wake the model while approval is pending"
+    );
+    let approval_id = executed["step"]["approval_ids"][0].as_str().unwrap();
+    let _: Value = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            &format!("/api/approvals/{approval_id}/reject"),
+            json!({}),
+            &admin_headers,
         ),
     )
     .await;

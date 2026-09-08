@@ -292,57 +292,6 @@ impl AppState {
         .await
     }
 
-    pub(crate) async fn discard_session_loop_job(
-        &self,
-        id: Uuid,
-        error: &str,
-    ) -> Result<SessionLoopJob, AppError> {
-        match &self.store {
-            StoreBackend::Memory(inner) => {
-                let mut store = inner.write().await;
-                let job = store
-                    .session_loop_jobs
-                    .get_mut(&id)
-                    .ok_or_else(|| AppError::not_found("session loop job not found"))?;
-                if !matches!(
-                    job.status,
-                    SessionLoopJobStatus::Queued | SessionLoopJobStatus::Running
-                ) {
-                    return Err(AppError::not_found("session loop job not found"));
-                }
-                let worker_id = job.worker_id.clone();
-                apply_session_loop_job_status(
-                    job,
-                    SessionLoopJobStatus::Failed,
-                    worker_id.as_deref(),
-                    Some(error.to_string()),
-                );
-                Ok(job.clone())
-            }
-            StoreBackend::Postgres(pool) => {
-                let row = sqlx::query(
-                    "UPDATE session_loop_jobs
-                     SET status = 'failed',
-                         completed_at = COALESCE(completed_at, now()),
-                         lease_expires_at = NULL,
-                         last_error = $1
-                     WHERE tenant_id = $2 AND id = $3 AND status IN ('queued', 'running')
-                     RETURNING id, session_id, environment_id, status, trigger_event_id,
-                               pending_event_seq_start, pending_event_seq_end, processed_event_seq, reason,
-                               enqueued_at, started_at, completed_at, worker_id, lease_expires_at,
-                               attempt_count, max_attempts, last_error",
-                )
-                .bind(error)
-                .bind(self.current_tenant_id())
-                .bind(id)
-                .fetch_optional(pool)
-                .await?
-                .ok_or_else(|| AppError::not_found("session loop job not found"))?;
-                session_loop_job_from_row(row)
-            }
-        }
-    }
-
     async fn update_session_loop_job_status(
         &self,
         id: Uuid,
@@ -350,6 +299,18 @@ impl AppState {
         worker_id: Option<&str>,
         last_error: Option<String>,
     ) -> Result<SessionLoopJob, AppError> {
+        let pending_execution = if matches!(&self.store, StoreBackend::Memory(_))
+            && status == SessionLoopJobStatus::Running
+        {
+            let job = self.get_session_loop_job(id).await?;
+            self.execution_queue
+                .list_for_session(job.session_id)
+                .await?
+                .iter()
+                .any(crate::store_session_threads::execution_pending_for_model)
+        } else {
+            false
+        };
         match &self.store {
             StoreBackend::Memory(inner) => {
                 let mut store = inner.write().await;
@@ -358,6 +319,23 @@ impl AppState {
                         .session_loop_jobs
                         .get(&id)
                         .ok_or_else(|| AppError::not_found("session loop job not found"))?;
+                    let terminal = store.sessions.get(&job.session_id).is_some_and(|session| {
+                        matches!(
+                            session.status,
+                            crate::SessionStatus::Terminated | crate::SessionStatus::Failed
+                        )
+                    });
+                    if !terminal
+                        && (pending_execution
+                            || crate::store_session_threads::memory_session_has_pending_actions(
+                                &store,
+                                job.session_id,
+                            ))
+                    {
+                        return Err(AppError::not_found(
+                            "session is waiting for a tool action or approval",
+                        ));
+                    }
                     let lease_expired = matches!(job.status, SessionLoopJobStatus::Running)
                         && job
                             .lease_expires_at
@@ -367,6 +345,24 @@ impl AppState {
                             && existing.session_id == job.session_id
                             && existing.status == SessionLoopJobStatus::Running
                     });
+                    let foreign_step = store.workflow_step_runs.values().any(|step| {
+                        step.session_id.or_else(|| {
+                            store
+                                .workflow_runs
+                                .get(&step.workflow_run_id)
+                                .map(|run| run.primary_session_id)
+                        }) == Some(job.session_id)
+                            && step.status == "running"
+                            && step.claimed_by_worker.as_deref() != worker_id
+                            && step
+                                .lease_expires_at
+                                .is_some_and(|deadline| deadline > Utc::now())
+                    });
+                    if foreign_step {
+                        return Err(AppError::not_found(
+                            "session has a live workflow step owner",
+                        ));
+                    }
                     let claimable = match job.status {
                         SessionLoopJobStatus::Queued => !other_running_job,
                         SessionLoopJobStatus::Running => lease_expired,
@@ -398,7 +394,24 @@ impl AppState {
             }
             StoreBackend::Postgres(pool) => {
                 let row = match status {
-                    SessionLoopJobStatus::Running => sqlx::query(
+                    SessionLoopJobStatus::Running => {
+                        let mut tx = pool.begin().await?;
+                        let session_id: Uuid = sqlx::query_scalar("SELECT session_id FROM session_loop_jobs WHERE tenant_id = $1 AND id = $2")
+                            .bind(self.current_tenant_id()).bind(id).fetch_optional(&mut *tx).await?
+                            .ok_or_else(|| AppError::not_found("session loop job not found"))?;
+                        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2::uuid::text, 0))")
+                            .bind(self.current_tenant_id()).bind(session_id).execute(&mut *tx).await?;
+                        let pending: bool = sqlx::query_scalar(crate::store_session_threads::SESSION_PENDING_ACTIONS_SQL)
+                            .bind(self.current_tenant_id()).bind(session_id).fetch_one(&mut *tx).await?;
+                        if pending { return Err(AppError::not_found("session is waiting for a tool action or approval")); }
+                        let foreign_step: bool = sqlx::query_scalar(
+                            "SELECT EXISTS (SELECT 1 FROM workflow_step_runs AS step JOIN workflow_runs AS run
+                             ON run.tenant_id = step.tenant_id AND run.id = step.workflow_run_id
+                             WHERE step.tenant_id = $1 AND COALESCE(step.session_id, run.primary_session_id) = $2
+                               AND step.status = 'running' AND step.claimed_by_worker IS DISTINCT FROM $3 AND step.lease_expires_at > now())",
+                        ).bind(self.current_tenant_id()).bind(session_id).bind(worker_id).fetch_one(&mut *tx).await?;
+                        if foreign_step { return Err(AppError::not_found("session has a live workflow step owner")); }
+                        let row = sqlx::query(
                         "UPDATE session_loop_jobs
                          SET status = 'running',
                              started_at = COALESCE(started_at, now()),
@@ -430,8 +443,11 @@ impl AppState {
                     .bind(worker_id.unwrap_or("session-loop-worker"))
                     .bind(self.current_tenant_id())
                     .bind(id)
-                    .fetch_optional(pool)
-                    .await?,
+                    .fetch_optional(&mut *tx)
+                    .await?;
+                        tx.commit().await?;
+                        row
+                    },
                     SessionLoopJobStatus::Completed | SessionLoopJobStatus::Failed => sqlx::query(
                         "UPDATE session_loop_jobs
                          SET status = $1,

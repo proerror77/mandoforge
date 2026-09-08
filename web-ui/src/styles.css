@@ -4206,3 +4206,11 @@ h2 {
     grid-template-columns: 1fr;
   }
 }
+
+.task-history { display: grid; gap: 8px; }
+.task-history-item { display: flex; justify-content: space-between; gap: 16px; text-align: left; }
+.task-history-item strong { overflow-wrap: anywhere; }
+.task-history-item span { flex-shrink: 0; color: var(--muted); }
+.task-step-result { display: flex; flex-wrap: wrap; gap: 12px; padding: 10px 0; }
+.task-step-result p { width: 100%; margin: 0; }
+.task-result-text { white-space: pre-wrap; overflow-wrap: anywhere; }

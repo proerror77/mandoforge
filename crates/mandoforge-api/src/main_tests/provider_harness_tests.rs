@@ -1783,3 +1783,1207 @@ async fn postgres_due_run_repairs_legacy_expiry_without_duplicate_evidence() {
         1
     );
 }
+
+#[tokio::test]
+async fn workflow_turn_end_does_not_complete_an_unfinished_task() {
+    let (state, session) = harness_test_session().await;
+    let grant = persisted_harness_task_grant(&state, &session).await;
+    let run = state
+        .update_workflow_run_root_task_grant(grant.workflow_run_id, grant.id)
+        .await
+        .unwrap();
+    let mut step = state
+        .get_workflow_step_run(grant.workflow_step_run_id.unwrap())
+        .await
+        .unwrap();
+    step.claimed_by_worker = Some("worker-turn-test".to_string());
+    step.claim_owner_version = WORKFLOW_STEP_CLAIM_OWNER_VERSION;
+    let step = state.update_workflow_step_run(step).await.unwrap();
+    let job = state
+        .enqueue_session_loop_job(session.id, None, "test turn")
+        .await
+        .unwrap();
+    state
+        .start_session_loop_job(job.id, "worker-turn-test")
+        .await
+        .unwrap();
+    let completed = state
+        .complete_session_loop_job(job.id, "worker-turn-test")
+        .await
+        .unwrap();
+    let refs = collect_session_runtime_refs(&state, session.id)
+        .await
+        .unwrap();
+    let updated = update_workflow_step_after_worker_session(
+        &state,
+        &run,
+        &step,
+        &session,
+        &completed,
+        "worker-turn-test",
+        refs,
+        None,
+        false,
+    )
+    .await
+    .unwrap();
+    assert_ne!(
+        updated.status, "completed",
+        "finishing one idle turn must not close the business task"
+    );
+    assert!(updated.completed_at.is_none());
+    assert_eq!(
+        state.get_task_grant(grant.id).await.unwrap().status,
+        "active"
+    );
+}
+
+#[tokio::test]
+async fn long_history_context_retains_goal_and_current_result() {
+    let (state, session) = harness_test_session().await;
+    let user = state
+        .append_event(
+            "user",
+            None,
+            session.id,
+            "user.message",
+            json!({"message": "Check the order status"}),
+        )
+        .await
+        .unwrap();
+    state
+        .append_event(
+            "user",
+            None,
+            session.id,
+            "session.goal.created",
+            json!({"objective": "Check the order status"}),
+        )
+        .await
+        .unwrap();
+    for _ in 0..2000 {
+        state
+            .append_event(
+                "agent",
+                None,
+                session.id,
+                "llm.request",
+                json!({"context": "x".repeat(4096)}),
+            )
+            .await
+            .unwrap();
+    }
+    let result = state
+        .append_event(
+            "user",
+            None,
+            session.id,
+            "user.custom_tool_result",
+            json!({"order_status": "shipped"}),
+        )
+        .await
+        .unwrap();
+    let start = std::time::Instant::now();
+    let mut has_goal = false;
+    for _ in 0..10 {
+        let context = build_harness_context(&state, session.id, Some(result.seq), Some(result.seq))
+            .await
+            .unwrap();
+        assert_eq!(
+            context.last_user_message.as_deref(),
+            Some("Check the order status")
+        );
+        assert_eq!(context.event_count, 2003);
+        assert_eq!(context.pending_event_count, 1);
+        assert_eq!(context.recent_custom_tool_results.len(), 1);
+        has_goal = context.latest_goal_event.is_some();
+    }
+    eprintln!(
+        "long-history context, 2000 diagnostic payloads, 10 reads: {:?}; initial event {}",
+        start.elapsed(),
+        user.seq
+    );
+    assert!(has_goal, "tool-result-only turns must retain the task goal");
+}
+async fn assert_context_reads_are_session_scoped(state: &AppState, session: &Session) {
+    let other = state
+        .create_session(CreateSession {
+            agent_id: session.agent_id,
+            environment_id: None,
+            title: "unrelated session".into(),
+            message: None,
+        })
+        .await
+        .unwrap();
+    let mut job_ids = Vec::new();
+    for target in [session, &other] {
+        let call = state
+            .insert_tool_call(waiting_ontology_action_call(target.id))
+            .await
+            .unwrap();
+        let approval = state
+            .insert_approval(pending_tool_approval(&call, None))
+            .await
+            .unwrap();
+        let job = state
+            .execution_queue
+            .enqueue(ExecutionJobRequest {
+                session_id: target.id,
+                environment_id: None,
+                approval_id: approval.id,
+                tool_call_id: call.id,
+                tool_name: call.tool_name.clone(),
+                max_attempts: None,
+            })
+            .await
+            .unwrap();
+        job_ids.push(job.id);
+    }
+    let relevant = state
+        .execution_queue
+        .list_for_session(session.id)
+        .await
+        .unwrap();
+    assert_eq!(relevant.len(), 1);
+    assert_eq!(relevant[0].id, job_ids[0]);
+    let user = state
+        .append_event(
+            "user",
+            None,
+            session.id,
+            "user.message",
+            json!({"message":"original task"}),
+        )
+        .await
+        .unwrap();
+    state
+        .append_event(
+            "user",
+            None,
+            session.id,
+            "session.goal.created",
+            json!({"objective":"original task"}),
+        )
+        .await
+        .unwrap();
+    for _ in 0..30 {
+        state
+            .append_event(
+                "agent",
+                None,
+                session.id,
+                "llm.request",
+                json!({"context":"diagnostic only"}),
+            )
+            .await
+            .unwrap();
+    }
+    let result = state
+        .append_event(
+            "user",
+            None,
+            session.id,
+            "user.custom_tool_result",
+            json!({"answer":42}),
+        )
+        .await
+        .unwrap();
+    state
+        .append_event(
+            "user",
+            None,
+            other.id,
+            "user.message",
+            json!({"message":"must not enter the current task"}),
+        )
+        .await
+        .unwrap();
+    state
+        .append_event(
+            "user",
+            None,
+            session.id,
+            "user.message",
+            json!({"message":"future task change"}),
+        )
+        .await
+        .unwrap();
+    state
+        .append_event(
+            "user",
+            None,
+            session.id,
+            "session.goal.updated",
+            json!({"objective":"future objective"}),
+        )
+        .await
+        .unwrap();
+    let history = state
+        .load_harness_events(session.id, Some(result.seq), Some(result.seq))
+        .await
+        .unwrap();
+    assert_eq!(history.event_count, 35);
+    assert_eq!(history.pending_event_count, 1);
+    assert_eq!(
+        history.events.len(),
+        3,
+        "only current input and durable task markers are read"
+    );
+    assert_eq!(history.events[0].id, user.id);
+    let context = build_harness_context(state, session.id, Some(result.seq), Some(result.seq))
+        .await
+        .unwrap();
+    assert_eq!(context.last_user_message.as_deref(), Some("original task"));
+    assert_eq!(
+        context.latest_goal_event.as_ref().unwrap()["payload"]["objective"],
+        "original task"
+    );
+
+    let reconciliation_session = state
+        .create_session(CreateSession {
+            agent_id: session.agent_id,
+            environment_id: None,
+            title: "reconciliation only".into(),
+            message: None,
+        })
+        .await
+        .unwrap();
+    let session = &reconciliation_session;
+    let grant = persisted_harness_task_grant(state, session).await;
+    state
+        .update_workflow_run_root_task_grant(grant.workflow_run_id, grant.id)
+        .await
+        .unwrap();
+    let mut primary = state
+        .get_workflow_step_run(grant.workflow_step_run_id.unwrap())
+        .await
+        .unwrap();
+    primary.claimed_by_worker = Some("primary-worker".into());
+    primary.claim_owner_version = WORKFLOW_STEP_CLAIM_OWNER_VERSION;
+    let primary = state.update_workflow_step_run(primary).await.unwrap();
+    let mut child = primary.clone();
+    child.id = Uuid::new_v4();
+    child.step_key = "other-session-step".into();
+    child.session_id = Some(other.id);
+    child.claimed_by_worker = Some("other-worker".into());
+    state.create_workflow_step_run(child.clone()).await.unwrap();
+    assert_eq!(
+        state
+            .list_active_workflow_steps_for_session(session.id)
+            .await
+            .unwrap()
+            .iter()
+            .map(|step| step.id)
+            .collect::<Vec<_>>(),
+        vec![primary.id]
+    );
+    let job = state
+        .enqueue_session_loop_job(session.id, None, "context test")
+        .await
+        .unwrap();
+    state
+        .start_session_loop_job(job.id, "primary-worker")
+        .await
+        .unwrap();
+    let job = state
+        .complete_session_loop_job(job.id, "primary-worker")
+        .await
+        .unwrap();
+    let updated =
+        reconcile_workflow_steps_after_session_loop_job(state, session, &job, "primary-worker")
+            .await
+            .unwrap();
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0].status, "requires_action");
+    assert_eq!(
+        state
+            .get_workflow_step_run(child.id)
+            .await
+            .unwrap()
+            .claimed_by_worker
+            .as_deref(),
+        Some("other-worker")
+    );
+    assert_eq!(
+        state.get_workflow_step_run(child.id).await.unwrap().status,
+        "running"
+    );
+}
+
+#[tokio::test]
+async fn context_queries_read_only_current_session_and_preserve_task_markers() {
+    let (state, session) = harness_test_session().await;
+    assert_context_reads_are_session_scoped(&state, &session).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MANDOFORGE_TEST_POSTGRES_URL"]
+async fn postgres_context_queries_preserve_session_and_tenant_boundaries() {
+    let (state, session) = postgres_harness_test_session().await;
+    assert_context_reads_are_session_scoped(&state, &session).await;
+    let StoreBackend::Postgres(pool) = &state.store else {
+        unreachable!()
+    };
+    let other_tenant = Uuid::new_v4();
+    sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, 'Context isolation test', $2)")
+        .bind(other_tenant)
+        .bind(format!("context-isolation-{other_tenant}"))
+        .execute(pool)
+        .await
+        .unwrap();
+    let mut isolated = state.clone();
+    isolated.tenant_id = other_tenant;
+    isolated.execution_queue = ExecutionQueue::postgres(pool.clone(), other_tenant);
+    assert!(
+        isolated
+            .execution_queue
+            .list_for_session(session.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        isolated
+            .load_harness_events(session.id, None, None)
+            .await
+            .unwrap()
+            .event_count,
+        0
+    );
+    assert!(
+        isolated
+            .list_active_workflow_steps_for_session(session.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+async fn shared_workflow_completion_fixture(
+    state: &AppState,
+    session: &Session,
+) -> (WorkflowRun, TaskGrant, WorkflowStepRun) {
+    let grant = persisted_harness_task_grant(state, session).await;
+    let run = state
+        .update_workflow_run_root_task_grant(grant.workflow_run_id, grant.id)
+        .await
+        .unwrap();
+    let mut step = state
+        .get_workflow_step_run(grant.workflow_step_run_id.unwrap())
+        .await
+        .unwrap();
+    step.claimed_by_worker = Some("workflow-worker".into());
+    step.claim_owner_version = WORKFLOW_STEP_CLAIM_OWNER_VERSION;
+    let step = state.update_workflow_step_run(step).await.unwrap();
+    let mut definition = state
+        .get_workflow_definition(run.workflow_definition_id)
+        .await
+        .unwrap();
+    definition.step_graph = json!({"steps": [
+        {"key": step.step_key, "type": "agent", "start": true},
+        {"key": "followup", "type": "agent", "depends_on": [step.step_key]}
+    ]});
+    state.update_workflow_definition(definition).await.unwrap();
+    (run, grant, step)
+}
+
+#[tokio::test]
+async fn workflow_step_completion_keeps_shared_session_open_until_last_step() {
+    let (state, session) = harness_test_session().await;
+    let (run, grant, mut step) = shared_workflow_completion_fixture(&state, &session).await;
+    for turn in 0..2 {
+        let event = state
+            .append_event(
+                "user",
+                None,
+                session.id,
+                "user.message",
+                json!({"message": format!("step {turn}")}),
+            )
+            .await
+            .unwrap();
+        let job = state
+            .enqueue_session_loop_job(session.id, Some(event.id), "workflow.step.run")
+            .await
+            .unwrap();
+        let job = state
+            .start_session_loop_job(job.id, "workflow-worker")
+            .await
+            .unwrap();
+        let completed_session = apply_provider_completion(
+            &state,
+            session.id,
+            Some(grant.id),
+            "completed",
+            "step objective satisfied",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            completed_session.status,
+            SessionStatus::Idle,
+            "step completion must leave shared conversation available for graph continuation"
+        );
+        let completed_job = state
+            .complete_session_loop_job(job.id, "workflow-worker")
+            .await
+            .unwrap();
+        let updated = update_workflow_step_after_worker_session(
+            &state,
+            &run,
+            &step,
+            &completed_session,
+            &completed_job,
+            "workflow-worker",
+            collect_session_runtime_refs(&state, session.id)
+                .await
+                .unwrap(),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.status, "completed");
+        if turn == 0 {
+            assert_ne!(
+                state.get_workflow_run(run.id).await.unwrap().status,
+                "completed"
+            );
+            assert_eq!(
+                state.get_task_grant(grant.id).await.unwrap().status,
+                "active"
+            );
+            step = state
+                .list_workflow_step_runs(run.id)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|step| step.step_key == "followup")
+                .unwrap();
+            step.status = "running".into();
+            step.claimed_by_worker = Some("workflow-worker".into());
+            step.claim_owner_version = WORKFLOW_STEP_CLAIM_OWNER_VERSION;
+            state
+                .claim_workflow_step_run_if_available(step.clone(), Utc::now())
+                .await
+                .unwrap();
+        }
+    }
+    assert_eq!(
+        state.get_workflow_run(run.id).await.unwrap().status,
+        "completed"
+    );
+    assert_eq!(
+        state.get_session(session.id).await.unwrap().status,
+        SessionStatus::Terminated
+    );
+}
+
+#[tokio::test]
+async fn workflow_completion_records_evidence_before_session_finalization() {
+    let (state, session) = harness_test_session().await;
+    let (run, _, _) = shared_workflow_completion_fixture(&state, &session).await;
+    let completed = update_workflow_run_status_and_record(&state, &run, "completed")
+        .await
+        .unwrap();
+    let events = state.list_events(session.id).await.unwrap();
+    let completion = events
+        .iter()
+        .find(|e| e.event_type == "workflow.run.completed")
+        .unwrap();
+    let terminal = events
+        .iter()
+        .find(|e| e.event_type == "session.status_terminated")
+        .unwrap();
+    assert!(
+        completion.seq < terminal.seq,
+        "completion evidence must precede fallible finalization"
+    );
+    update_workflow_run_status_and_record(&state, &completed, "completed")
+        .await
+        .unwrap();
+    assert_eq!(
+        state
+            .list_events(session.id)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|e| e.event_type == "workflow.run.completed")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn workflow_continuation_preserves_attempt_failure() {
+    let (state, session) = harness_test_session().await;
+    let (_, _, step) = shared_workflow_completion_fixture(&state, &session).await;
+    let job = state
+        .enqueue_session_loop_job(session.id, None, "continuation")
+        .await
+        .unwrap();
+    let job = state
+        .start_session_loop_job(job.id, "workflow-worker")
+        .await
+        .unwrap();
+    let result = Err(AppError::bad_request("provider continuation unavailable"));
+    settle_session_loop_attempt(&state, &job, "workflow-worker", &result, None)
+        .await
+        .unwrap();
+    let step = state.get_workflow_step_run(step.id).await.unwrap();
+    assert_eq!(step.status, "failed");
+    assert_eq!(
+        step.output_payload["worker_execution"]["error"],
+        "provider continuation unavailable"
+    );
+}
+
+#[tokio::test]
+async fn workflow_completion_retries_cleanup_for_terminal_sessions() {
+    let (state, session) = harness_test_session().await;
+    let (run, _, _) = shared_workflow_completion_fixture(&state, &session).await;
+    let computer = state
+        .create_remote_computer(CreateRemoteComputer {
+            id: None,
+            name: "workflow-cleanup".into(),
+            profile: Some("workspace-write".into()),
+            namespace: None,
+            pod_name: Some("workflow-cleanup-pod".into()),
+            workspace_path: None,
+            state_mount_path: None,
+            metadata: Some(json!({"warm_pool":true})),
+        })
+        .await
+        .unwrap();
+    let lease = state
+        .create_remote_computer_lease(
+            computer.id,
+            CreateRemoteComputerLease {
+                session_id: Some(session.id),
+                worker_id: Some("workflow-worker".into()),
+                lease_seconds: Some(60),
+                metadata: Some(json!({"on_demand":false})),
+            },
+        )
+        .await
+        .unwrap();
+    // Reproduce an interrupted finalization: terminal status persisted, lease still active.
+    let StoreBackend::Memory(inner) = &state.store else {
+        unreachable!()
+    };
+    inner
+        .write()
+        .await
+        .sessions
+        .get_mut(&session.id)
+        .unwrap()
+        .status = SessionStatus::Terminated;
+    let completed = state
+        .update_workflow_run_status(run.id, "completed".into(), run.started_at, Some(Utc::now()))
+        .await
+        .unwrap();
+    update_workflow_run_status_and_record(&state, &completed, "completed")
+        .await
+        .unwrap();
+    let leases = state.list_remote_computer_leases().await.unwrap();
+    assert_eq!(
+        leases.iter().find(|l| l.id == lease.id).unwrap().status,
+        "released"
+    );
+}
+
+async fn assert_workflow_completion_recovers_before_queue_ack(
+    state: &AppState,
+    session: &Session,
+    step_was_saved: bool,
+) {
+    let (run, grant, mut step) = shared_workflow_completion_fixture(state, session).await;
+    let event = state
+        .append_event(
+            "user",
+            None,
+            session.id,
+            "user.message",
+            json!({"message":"complete first step"}),
+        )
+        .await
+        .unwrap();
+    let job = state
+        .enqueue_session_loop_job(session.id, Some(event.id), "workflow.step.run")
+        .await
+        .unwrap();
+    state
+        .start_session_loop_job(job.id, "workflow-worker")
+        .await
+        .unwrap();
+    apply_provider_completion(
+        state,
+        session.id,
+        Some(grant.id),
+        "completed",
+        "first step done",
+    )
+    .await
+    .unwrap();
+    if step_was_saved {
+        step.status = "completed".into();
+        step.output_payload = json!({"worker_execution": {"session_loop_job_id": job.id}});
+        state
+            .update_claimed_workflow_step_run(step.clone(), "workflow-worker")
+            .await
+            .unwrap();
+    }
+    let expired = Utc::now() - chrono::Duration::seconds(1);
+    match &state.store {
+        StoreBackend::Memory(inner) => {
+            let mut store = inner.write().await;
+            store
+                .session_loop_jobs
+                .get_mut(&job.id)
+                .unwrap()
+                .lease_expires_at = Some(expired);
+            store
+                .workflow_step_runs
+                .get_mut(&step.id)
+                .unwrap()
+                .lease_expires_at = Some(expired);
+        }
+        StoreBackend::Postgres(pool) => {
+            sqlx::query("UPDATE session_loop_jobs SET lease_expires_at = $2 WHERE id = $1")
+                .bind(job.id)
+                .bind(expired)
+                .execute(pool)
+                .await
+                .unwrap();
+            sqlx::query("UPDATE workflow_step_runs SET lease_expires_at = $2 WHERE id = $1")
+                .bind(step.id)
+                .bind(expired)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+    }
+    let claimed = state
+        .start_session_loop_job(job.id, "replacement-worker")
+        .await
+        .unwrap();
+    let result = run_session_loop(state, &claimed).await;
+    assert!(
+        result.is_ok(),
+        "recorded completion must bypass the model: {result:?}"
+    );
+    let settled = settle_session_loop_attempt(state, &claimed, "replacement-worker", &result, None)
+        .await
+        .unwrap();
+    assert_eq!(settled.job.status, SessionLoopJobStatus::Completed);
+    assert_eq!(
+        state.get_workflow_step_run(step.id).await.unwrap().status,
+        "completed"
+    );
+    assert_eq!(
+        state.list_workflow_step_runs(run.id).await.unwrap().len(),
+        2
+    );
+    assert_eq!(
+        state.list_tool_calls(Some(session.id)).await.unwrap().len(),
+        1
+    );
+    assert!(
+        state
+            .list_events(session.id)
+            .await
+            .unwrap()
+            .iter()
+            .all(|event| event.event_type != "llm.request")
+    );
+}
+
+#[tokio::test]
+async fn workflow_completion_recovers_without_reexecuting_model_or_tools() {
+    for step_was_saved in [false, true] {
+        let (state, session) = harness_test_session().await;
+        assert_workflow_completion_recovers_before_queue_ack(&state, &session, step_was_saved)
+            .await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires MANDOFORGE_TEST_POSTGRES_URL"]
+async fn postgres_workflow_completion_recovers_without_reexecuting_effects() {
+    for step_was_saved in [false, true] {
+        let (state, session) = postgres_harness_test_session().await;
+        assert_workflow_completion_recovers_before_queue_ack(&state, &session, step_was_saved)
+            .await;
+    }
+}
+
+async fn assert_workflow_session_claims_are_exclusive(state: &AppState, session: &Session) {
+    let (_, _, mut first) = shared_workflow_completion_fixture(state, session).await;
+    first.status = "queued".into();
+    first.claimed_by_worker = None;
+    first.claim_owner_version = 0;
+    state.update_workflow_step_run(first.clone()).await.unwrap();
+    let mut second = first.clone();
+    second.id = Uuid::new_v4();
+    second.step_key = "parallel-same-session".into();
+    state
+        .create_workflow_step_run(second.clone())
+        .await
+        .unwrap();
+    let now = Utc::now();
+    first.status = "running".into();
+    first.claimed_by_worker = Some("worker-a".into());
+    first.claim_owner_version = WORKFLOW_STEP_CLAIM_OWNER_VERSION;
+    first.lease_expires_at = Some(now + chrono::Duration::minutes(5));
+    second.status = "running".into();
+    second.claimed_by_worker = Some("worker-b".into());
+    second.claim_owner_version = WORKFLOW_STEP_CLAIM_OWNER_VERSION;
+    second.lease_expires_at = first.lease_expires_at;
+    let (a, b) = tokio::join!(
+        state.claim_workflow_step_run_if_available(first, now),
+        state.claim_workflow_step_run_if_available(second, now)
+    );
+    assert_ne!(
+        a.is_ok(),
+        b.is_ok(),
+        "only one step may own a shared conversation"
+    );
+    let winner = a.or(b).unwrap();
+    let job = state
+        .enqueue_session_loop_job(session.id, None, "claim test")
+        .await
+        .unwrap();
+    assert!(
+        state
+            .start_session_loop_job(job.id, "unrelated-worker")
+            .await
+            .is_err()
+    );
+    assert!(
+        state
+            .start_session_loop_job(job.id, winner.claimed_by_worker.as_deref().unwrap())
+            .await
+            .is_ok()
+    );
+    let running_job = state.get_session_loop_job(job.id).await.unwrap();
+    let mut legacy = winner.clone();
+    legacy.claim_owner_version = 0;
+    legacy.claimed_by_worker = None;
+    legacy.lease_expires_at = Some(now - chrono::Duration::seconds(1));
+    state.update_workflow_step_run(legacy).await.unwrap();
+    assert!(
+        state
+            .adopt_workflow_step_for_loop(
+                winner.id,
+                &running_job,
+                winner.claimed_by_worker.as_deref().unwrap()
+            )
+            .await
+            .is_err(),
+        "a valid loop claim must not upgrade an unversioned legacy workflow claim"
+    );
+}
+
+#[tokio::test]
+async fn workflow_and_loop_claims_share_the_session_execution_boundary() {
+    let (state, session) = harness_test_session().await;
+    assert_workflow_session_claims_are_exclusive(&state, &session).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MANDOFORGE_TEST_POSTGRES_URL"]
+async fn postgres_workflow_and_loop_claims_share_the_session_execution_boundary() {
+    let (state, session) = postgres_harness_test_session().await;
+    assert_workflow_session_claims_are_exclusive(&state, &session).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MANDOFORGE_TEST_POSTGRES_URL"]
+async fn postgres_native_worker_runs_independent_sessions_concurrently() {
+    let _env = env_lock().lock().unwrap();
+    let (state, seed_session) = postgres_harness_test_session().await;
+    let environment = state.create_environment(serde_json::from_value(json!({"name":format!("native worker {}", Uuid::new_v4()), "release_state":"active"})).unwrap()).await.unwrap();
+    let mut sessions = Vec::new();
+    for title in ["long", "short"] {
+        let session = state
+            .create_session(CreateSession {
+                agent_id: seed_session.agent_id,
+                environment_id: Some(environment.id),
+                title: title.into(),
+                message: None,
+            })
+            .await
+            .unwrap();
+        let event = state
+            .append_event(
+                "user",
+                None,
+                session.id,
+                "user.message",
+                json!({"message":title}),
+            )
+            .await
+            .unwrap();
+        state
+            .enqueue_session_loop_job(session.id, Some(event.id), "native worker benchmark")
+            .await
+            .unwrap();
+        sessions.push(session);
+    }
+    let finished = Arc::new(tokio::sync::Notify::new());
+    let order = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let observed = order.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, Router::new().route("/v1/chat/completions", axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+            let finished = finished.clone(); let order = order.clone();
+            async move {
+                let context: Value = serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
+                let task = context["last_user_message"].as_str().unwrap();
+                if task == "long" { tokio::time::timeout(std::time::Duration::from_secs(5), finished.notified()).await.unwrap(); }
+                order.lock().await.push(task.to_string());
+                if task == "short" { finished.notify_one(); }
+                axum::Json(json!({"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"complete", "type":"function", "function":{"name":"complete_task","arguments":"{\"status\":\"completed\",\"summary\":\"task done\"}"}}]}}],"usage":{"prompt_tokens":5,"completion_tokens":5,"total_tokens":10}}))
+            }
+        }))).await.unwrap();
+    });
+    let _database = EnvVarGuard::set(
+        "DATABASE_URL",
+        &std::env::var("MANDOFORGE_TEST_POSTGRES_URL").unwrap(),
+    );
+    let _worker_token = EnvVarGuard::set("MANDOFORGE_WORKER_TOKEN", "native-worker-test-token");
+    let _worker_id = EnvVarGuard::set("WORKER_ID", "native-worker-test");
+    let _environment = EnvVarGuard::set("WORKER_ENVIRONMENT_ID", &environment.id.to_string());
+    let _pool = EnvVarGuard::remove("WORKER_POOL");
+    let _queue = EnvVarGuard::remove("WORKER_QUEUE");
+    let _concurrency = EnvVarGuard::set("WORKER_CONCURRENCY", "2");
+    let _once = EnvVarGuard::set("RUN_ONCE", "1");
+    let _max_jobs = EnvVarGuard::set("MAX_JOBS", "2");
+    let _provider = EnvVarGuard::set("MANDOFORGE_PROVIDER_BASE_URL", &format!("http://{address}"));
+    let _key = EnvVarGuard::set("MANDOFORGE_PROVIDER_API_KEY", "local-test-only");
+    let result = crate::worker_daemon::run_worker_daemon(state.clone()).await;
+    server.abort();
+    result.unwrap();
+    assert_eq!(*observed.lock().await, vec!["short", "long"]);
+    for session in sessions {
+        assert_eq!(
+            state.get_session(session.id).await.unwrap().status,
+            SessionStatus::Terminated
+        );
+    }
+}
+
+#[tokio::test]
+async fn operator_task_catalog_exposes_only_visible_published_capabilities() {
+    let (state, session) = harness_test_session().await;
+    let grant = persisted_harness_task_grant(&state, &session).await;
+    let run = state.get_workflow_run(grant.workflow_run_id).await.unwrap();
+    let visible = state
+        .get_workflow_definition(run.workflow_definition_id)
+        .await
+        .unwrap();
+    let mut draft = visible.clone();
+    draft.id = Uuid::new_v4();
+    draft.name = "draft capability".into();
+    draft.release_state = "draft".into();
+    state
+        .create_workflow_definition(draft.clone())
+        .await
+        .unwrap();
+    let mut hidden_agent = state.get_agent(session.agent_id).await.unwrap();
+    hidden_agent.id = Uuid::new_v4();
+    hidden_agent.team_id = Some(Uuid::new_v4());
+    let StoreBackend::Memory(inner) = &state.store else {
+        unreachable!()
+    };
+    inner
+        .write()
+        .await
+        .agents
+        .insert(hidden_agent.id, hidden_agent.clone());
+    let mut hidden = visible.clone();
+    hidden.id = Uuid::new_v4();
+    hidden.name = "private team capability".into();
+    hidden.default_agent_id = hidden_agent.id;
+    state
+        .create_workflow_definition(hidden.clone())
+        .await
+        .unwrap();
+    let app = build_router(state.clone());
+    let operator_headers = [
+        ("x-mandoforge-subject", "catalog-operator"),
+        ("x-mandoforge-roles", "operator"),
+    ];
+    let catalog: Vec<Value> = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "GET",
+            "/api/workflow-definitions",
+            json!({}),
+            &operator_headers,
+        ),
+    )
+    .await;
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(catalog[0]["id"], json!(visible.id));
+    assert!(catalog[0].get("step_graph").is_none());
+    assert!(catalog[0].get("handoff_rules").is_none());
+    let admin: Vec<WorkflowDefinition> = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "GET",
+            "/api/workflow-definitions",
+            json!({}),
+            &[
+                ("x-mandoforge-subject", "admin"),
+                ("x-mandoforge-roles", "admin"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(admin.len(), 3);
+    let before = state.list_sessions().await.unwrap().len();
+    let response = app
+        .clone()
+        .oneshot(json_request_with_headers(
+            "POST",
+            "/api/workflow-runs",
+            json!({"workflow_definition_id":hidden.id}),
+            &operator_headers,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(state.list_sessions().await.unwrap().len(), before);
+    let response = app
+        .oneshot(json_request_with_headers(
+            "GET",
+            &format!("/api/workflow-definitions/{}", visible.id),
+            json!({}),
+            &operator_headers,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "full workflow configuration remains admin-only"
+    );
+}
+
+#[tokio::test]
+async fn cancellation_after_model_completion_does_not_advance_the_workflow() {
+    let (state, session) = harness_test_session().await;
+    let (run, grant, _) = shared_workflow_completion_fixture(&state, &session).await;
+    let event = state
+        .append_event(
+            "user",
+            None,
+            session.id,
+            "user.message",
+            json!({"message":"first step"}),
+        )
+        .await
+        .unwrap();
+    let job = state
+        .enqueue_session_loop_job(session.id, Some(event.id), "workflow.step.run")
+        .await
+        .unwrap();
+    let job = state
+        .start_session_loop_job(job.id, "workflow-worker")
+        .await
+        .unwrap();
+    apply_provider_completion(
+        &state,
+        session.id,
+        Some(grant.id),
+        "completed",
+        "first step done",
+    )
+    .await
+    .unwrap();
+    append_incoming_session_event(
+        &state,
+        session.id,
+        serde_json::from_value(
+            json!({"type":"user.interrupt","payload":{"reason":"stop before next step"}}),
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        successful_provider_completion_for_job(&state, &job)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let stopped = state.get_session(session.id).await.unwrap();
+    settle_session_loop_attempt(&state, &job, "workflow-worker", &Ok(stopped), None)
+        .await
+        .unwrap();
+    assert_ne!(
+        state.get_workflow_run(run.id).await.unwrap().status,
+        "completed"
+    );
+    assert!(
+        state
+            .list_workflow_step_runs(run.id)
+            .await
+            .unwrap()
+            .iter()
+            .all(|step| step.step_key != "followup"
+                || !matches!(step.status.as_str(), "queued" | "running"))
+    );
+}
+
+async fn assert_pending_approval_preserves_the_queued_model_window(
+    state: &AppState,
+    session: &Session,
+) {
+    let call = state
+        .insert_tool_call(waiting_ontology_action_call(session.id))
+        .await
+        .unwrap();
+    let approval = state
+        .insert_approval(pending_tool_approval(&call, None))
+        .await
+        .unwrap();
+    let event = state
+        .append_event(
+            "tool",
+            None,
+            session.id,
+            "tool.result",
+            json!({"tool":"file.read","content":{"summary":"read before approval"}}),
+        )
+        .await
+        .unwrap();
+    let queued = state
+        .enqueue_session_loop_job(session.id, Some(event.id), "tool.result")
+        .await
+        .unwrap();
+    for _ in 0..3 {
+        assert!(
+            state
+                .start_session_loop_job(queued.id, "waiting-worker")
+                .await
+                .is_err(),
+            "pending approval must not invoke another model turn"
+        );
+    }
+    let waiting = state.get_session_loop_job(queued.id).await.unwrap();
+    assert_eq!(waiting.status, SessionLoopJobStatus::Queued);
+    assert_eq!(waiting.attempt_count, 0);
+    assert_eq!(
+        waiting.pending_event_seq_start,
+        queued.pending_event_seq_start
+    );
+    assert_eq!(
+        state
+            .list_approvals()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|approval| approval.session_id == session.id)
+            .count(),
+        1
+    );
+    let (_, _, events) = state
+        .decline_approval_and_tool_call(approval.id, "rejected", "user")
+        .await
+        .unwrap();
+    state
+        .enqueue_session_loop_job(
+            session.id,
+            events.last().map(|event| event.id),
+            "approval.rejected",
+        )
+        .await
+        .unwrap();
+    let resumed = state
+        .start_session_loop_job(queued.id, "waiting-worker")
+        .await
+        .unwrap();
+    assert_eq!(resumed.attempt_count, 1);
+    assert_eq!(
+        resumed.pending_event_seq_start,
+        queued.pending_event_seq_start
+    );
+    assert!(resumed.pending_event_seq_end > queued.pending_event_seq_end);
+}
+
+#[tokio::test]
+async fn pending_approval_does_not_repeat_model_work_or_consume_the_cursor() {
+    let (state, session) = harness_test_session().await;
+    assert_pending_approval_preserves_the_queued_model_window(&state, &session).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MANDOFORGE_TEST_POSTGRES_URL"]
+async fn postgres_pending_approval_does_not_repeat_model_work_or_consume_the_cursor() {
+    let (state, session) = postgres_harness_test_session().await;
+    assert_pending_approval_preserves_the_queued_model_window(&state, &session).await;
+}
+
+#[tokio::test]
+async fn workflow_task_details_reach_both_runtime_paths_and_provider_context() {
+    let (state, session) = harness_test_session().await;
+    let grant = persisted_harness_task_grant(&state, &session).await;
+    let mut run = state
+        .update_workflow_run_root_task_grant(grant.workflow_run_id, grant.id)
+        .await
+        .unwrap();
+    let detail = format!(
+        "{} important details after the short display title",
+        "task detail ".repeat(30)
+    );
+    run.input_payload =
+        json!({"objective":detail,"order_id":"order-35","items":["first","last-item"]});
+    run.runtime_envelope = json!({"private_note":"INTERNAL-CONTROL-ONLY"});
+    let mut step = state
+        .get_workflow_step_run(grant.workflow_step_run_id.unwrap())
+        .await
+        .unwrap();
+    step.input_payload = workflow_graph_step_input_payload(
+        &run,
+        &json!({"key":"inspect","type":"agent","input":{"objective":"Inspect the order","limit":3}}),
+        json!({}),
+    );
+    let message = workflow_step_worker_message(&step, &grant);
+    let delegated = delegated_runtime_turn_message(&state, &run, &step)
+        .await
+        .unwrap();
+    for text in [&message, &delegated] {
+        assert!(
+            text.contains(&detail),
+            "full user instructions must survive the display summary"
+        );
+        assert!(text.contains("order-35") && text.contains("last-item"));
+        assert!(text.contains("not execution authority"));
+        assert!(!text.contains("INTERNAL-CONTROL-ONLY"));
+    }
+    let event = append_user_message_event(&state, session.id, message.clone())
+        .await
+        .unwrap();
+    run_provider_harness(
+        &state,
+        session.id,
+        &HarnessTestProvider { fail: false },
+        "input-test",
+        Some(event.seq),
+        Some(event.seq),
+    )
+    .await
+    .unwrap();
+    let events = state.list_events(session.id).await.unwrap();
+    let request = events
+        .iter()
+        .find(|event| event.event_type == "llm.request")
+        .unwrap();
+    assert_eq!(
+        request.payload["context"]["last_user_message"],
+        json!(message)
+    );
+}

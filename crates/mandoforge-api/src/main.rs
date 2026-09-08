@@ -163,6 +163,7 @@ mod worker_daemon;
 mod worker_execution_runtime;
 mod worker_load_validation;
 mod worker_readiness;
+mod worker_scheduler;
 mod workflow_graph_advancement;
 mod workflow_graph_core;
 mod workflow_pack;

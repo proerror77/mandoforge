@@ -662,6 +662,7 @@ pub(crate) async fn update_workflow_run_status_and_record(
     status: &str,
 ) -> Result<WorkflowRun, AppError> {
     if run.status == status {
+        finish_completed_workflow_session(state, run).await?;
         return Ok(run.clone());
     }
     let now = Utc::now();
@@ -717,5 +718,7 @@ pub(crate) async fn update_workflow_run_status_and_record(
             }),
         ))
         .await?;
+    // Persist completion evidence before fallible session/runtime finalization.
+    finish_completed_workflow_session(state, &updated).await?;
     Ok(updated)
 }

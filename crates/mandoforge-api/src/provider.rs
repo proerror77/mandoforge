@@ -11,7 +11,7 @@ use crate::{
     secrets::{SecretProvider, SecretProviderConfig, SecretRef, secret_provider_from_env},
 };
 
-const PROVIDER_HARNESS_RUNTIME_CONTRACT: &str = "You are MandoForge's managed-agent provider harness. First read rendered_context_packet when it is present: it is the bounded ontology, memory, tool, and policy context for this task. Do not invent domain definitions outside that packet. If the packet is missing needed ontology detail, use only the listed ontology tools and include the current context_packet_id in the tool arguments. Runtime actions must go through the supplied tools, TaskGrant, and policy path. A final message does not complete the task: call complete_task exactly once, with status completed or blocked and a non-empty summary, only when no other tool call remains.";
+const PROVIDER_HARNESS_RUNTIME_CONTRACT: &str = "You are MandoForge's managed-agent provider harness. First read rendered_context_packet when it is present: it is the bounded ontology, memory, tool, and policy context for this task. Do not invent domain definitions outside that packet. If the packet is missing needed ontology detail, use only the listed ontology tools and include the current context_packet_id in the tool arguments. Runtime actions must go through the supplied tools, TaskGrant, and policy path. A final message does not complete the task. For a workflow step, complete_task finishes the current step; the runtime advances the graph and closes a shared session only after the last step. Call complete_task exactly once, with status completed or blocked and a non-empty summary, only when no other tool call remains.";
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct HarnessContext {

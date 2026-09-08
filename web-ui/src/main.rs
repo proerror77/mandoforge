@@ -65,7 +65,7 @@ fn App() -> Html {
         environments: use_polling::<Vec<Environment>>(
             "/api/environments",
             6_000,
-            poll_agent_detail,
+            poll_agent_detail || poll_runs_detail,
         ),
         sessions: use_polling::<Vec<Session>>("/api/sessions", 1_800, true),
         approvals: use_polling::<Vec<Approval>>("/api/approvals", 1_800, true),
@@ -819,6 +819,7 @@ fn App() -> Html {
     };
 
     let start_task = {
+        let active_view = active_view.clone();
         let agents = data.agents.data.clone();
         let environments = data.environments.data.clone();
         let agent_release_environment = data.agent_release_environment().map(str::to_string);
@@ -830,10 +831,8 @@ fn App() -> Html {
         let mutation_status = mutation_status.clone();
         Callback::from(move |_| {
             if !direct_session_launch_allowed {
-                mutation_status.set(
-                    "Start task blocked: production requires a WorkflowRun-issued TaskGrant."
-                        .to_string(),
-                );
+                persist_active_view(View::Workflows);
+                active_view.set(View::Workflows);
                 return;
             }
             let selected_agent_id = agents
@@ -1027,7 +1026,7 @@ fn App() -> Html {
 
                 {
                     if matches!(*active_view, View::Workflows) {
-                        html! { <VisualCommandDeck data={data.clone()} view={*active_view} lang={*ui_lang} /> }
+                        html! { <details><summary>{ (*ui_lang).text("Operations overview", "运行概览") }</summary><VisualCommandDeck data={data.clone()} view={*active_view} lang={*ui_lang} /></details> }
                     } else {
                         html! {}
                     }

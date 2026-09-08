@@ -186,6 +186,7 @@ pub(crate) fn AgentsView(props: &AgentsProps) -> Html {
                 <ManagerObservationRail data={data.clone()} lang={lang} />
             </Panel>
             <Panel title={lang.text("Task Launcher", "任务启动器")}>
+                if direct_session_launch_allowed {
                 <div class="taskbar">
                     <label>
                         <span>{ lang.text("Agent", "智能体") }</span>
@@ -228,12 +229,16 @@ pub(crate) fn AgentsView(props: &AgentsProps) -> Html {
                         placeholder={lang.text("Describe the task for the selected agent", "描述要交给所选智能体的任务")}
                         oninput={props.on_task_message.clone()}
                     />
-                    <button disabled={runnable_agents.is_empty() || !direct_session_launch_allowed} onclick={props.on_start_task.clone()}>{ lang.text("Start task", "启动任务") }</button>
+                    <button disabled={runnable_agents.is_empty()} onclick={props.on_start_task.clone()}>{ lang.text("Start task", "启动任务") }</button>
                     <small>{ lang.text(
-                        "Creates POST /api/sessions with an initial message; runtime queues the session loop.",
-                        "创建 POST /api/sessions 初始消息，并由运行时排入 session loop。"
+                        "Starts a task with the selected agent and environment.",
+                        "使用所选智能体和环境启动任务。"
                     ) }</small>
                 </div>
+                } else {
+                    <p>{ lang.text("Choose a published capability to submit a task and follow its progress.", "选择已发布的能力，提交任务并查看进展。") }</p>
+                    <button onclick={props.on_start_task.clone()}>{ lang.text("Open tasks", "前往任务") }</button>
+                }
             </Panel>
             <Panel title={lang.text("Runtime Topology", "运行拓扑")}>
                 <AgentTopology agents={data.agents.data.clone()} sessions={data.sessions.data.clone()} lang={lang} />
