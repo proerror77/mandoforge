@@ -359,7 +359,7 @@ fn normalize_runtime_type(runtime_type: &str) -> Result<String, AppError> {
     let normalized = runtime_type.trim().to_ascii_lowercase();
     match normalized.as_str() {
         "agent_cli" | "codex_cli" | "codex_app_server" | "claude_code" | "gemini" | "opencode"
-        | "aider" | "hosted" => Ok(normalized),
+        | "aider" | "hosted" | "ax_pilot" => Ok(normalized),
         _ => Err(AppError::bad_request(format!(
             "unsupported agent runtime profile type: {normalized}"
         ))),

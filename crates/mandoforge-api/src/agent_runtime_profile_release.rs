@@ -81,6 +81,7 @@ pub(crate) fn evaluate_agent_runtime_profile_release_gate(
 fn supported_agent_runtime_profile_types() -> &'static [&'static str] {
     &[
         "agent_cli",
+        "ax_pilot",
         "codex_cli",
         "codex_app_server",
         "claude_code",
@@ -94,7 +95,8 @@ fn supported_agent_runtime_profile_types() -> &'static [&'static str] {
 fn agent_runtime_profile_requires_managed_gate(runtime_type: &str) -> bool {
     matches!(
         runtime_type,
-        "codex_cli"
+        "ax_pilot"
+            | "codex_cli"
             | "codex_app_server"
             | "claude_code"
             | "gemini"
@@ -106,6 +108,7 @@ fn agent_runtime_profile_requires_managed_gate(runtime_type: &str) -> bool {
 
 fn agent_runtime_profile_allowed_commands(runtime_type: &str) -> Vec<&'static str> {
     match runtime_type {
+        "ax_pilot" => vec!["mandoforge-ax-pilot"],
         "codex_cli" => vec!["codex"],
         "codex_app_server" => vec!["codex-app-server", "codex_app_server"],
         "claude_code" => vec!["claude", "claude-code", "claude_code"],
