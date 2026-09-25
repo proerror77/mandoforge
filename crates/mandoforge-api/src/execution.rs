@@ -3451,6 +3451,12 @@ async fn execute_approved_remote_computer_codex(
     assignment: &crate::RemoteComputerJobAssignment,
     commit: &mut ExecutionCommit<'_>,
 ) -> Result<(), AppError> {
+    if is_ontology_business_call(state, tool_call).await? {
+        return Err(AppError::forbidden(
+            "Ontology business runtime is not enabled for Remote Computer adapters; use the constrained native Codex worker path",
+        ));
+    }
+
     let request: CodexRequest = serde_json::from_value(tool_call.args.clone())?;
     if request.sandbox_mode != "read-only" && request.sandbox_mode != "workspace-write" {
         return Err(AppError::bad_request(
@@ -3742,6 +3748,12 @@ async fn execute_approved_remote_computer_agent_cli(
     assignment: &crate::RemoteComputerJobAssignment,
     commit: &mut ExecutionCommit<'_>,
 ) -> Result<(), AppError> {
+    if is_ontology_business_call(state, tool_call).await? {
+        return Err(AppError::forbidden(
+            "Ontology business runtime is not enabled for Remote Computer adapters; use the constrained native Codex worker path",
+        ));
+    }
+
     let request: AgentCliRequest = serde_json::from_value(tool_call.args.clone())?;
     let profile = normalize_agent_cli_profile(&request.profile)?;
     let target = remote_computer_pod_exec_target(state, approval.session_id, assignment).await?;
@@ -4049,6 +4061,38 @@ async fn execute_approved_remote_computer_agent_cli(
     Ok(())
 }
 
+pub(crate) async fn business_codex_command(
+    state: &AppState,
+    session_id: Uuid,
+) -> Result<String, AppError> {
+    let session = state.get_session(session_id).await?;
+    let version = state.agent_version_for_session(session_id).await?;
+    let profile_id = version.runtime_profile_id.ok_or_else(|| {
+        AppError::forbidden("business session requires a managed Codex runtime profile")
+    })?;
+    let profile = state.get_agent_runtime_profile(profile_id).await?;
+    let config = agent_cli_profile_config_for_session(state, session.id, &profile.name).await?;
+    if config.runtime_type != "codex_cli"
+        || config.remote_computer_required
+        || !config.env.is_empty()
+        || (!config.args.is_empty() && config.args != ["exec".to_string(), "--json".to_string()])
+    {
+        return Err(AppError::forbidden(
+            "business session requires the constrained native Codex profile",
+        ));
+    }
+    Ok(config.command)
+}
+
+async fn is_ontology_business_call(state: &AppState, call: &ToolCall) -> Result<bool, AppError> {
+    let Some(id) = call.task_grant_id else {
+        return Ok(false);
+    };
+    let grant = state.get_task_grant(id).await?;
+    crate::validate_ontology_runtime_lineage(state, &grant).await?;
+    Ok(crate::ontology_runtime_binding(&grant)?.is_some())
+}
+
 async fn execute_approved_codex(
     state: &AppState,
     approval: &Approval,
@@ -4056,7 +4100,24 @@ async fn execute_approved_codex(
     commit: &mut ExecutionCommit<'_>,
 ) -> Result<(), AppError> {
     let request: CodexRequest = serde_json::from_value(tool_call.args.clone())?;
-    match run_codex(state, approval.session_id, request, commit).await {
+    let outcome = if is_ontology_business_call(state, tool_call).await? {
+        if request.sandbox_mode != "read-only"
+            || request
+                .execution_strategy
+                .as_deref()
+                .is_some_and(|s| !matches!(s, "cli" | "codex-cli"))
+        {
+            return Err(AppError::forbidden(
+                "business runtime requires the constrained read-only native Codex path",
+            ));
+        }
+        commit.begin().await?;
+        crate::ontology_codex_runtime::run_ontology_codex(state, tool_call, "codex", &request.task)
+            .await
+    } else {
+        run_codex(state, approval.session_id, request, commit).await
+    };
+    match outcome {
         Ok(result) => {
             commit
                 .append_tool_outcome(tool_call, "tool.result", result.clone(), true)
@@ -4111,7 +4172,36 @@ async fn execute_approved_agent_cli(
     commit: &mut ExecutionCommit<'_>,
 ) -> Result<(), AppError> {
     let request: AgentCliRequest = serde_json::from_value(tool_call.args.clone())?;
-    match run_agent_cli_with_commit(state, approval.session_id, request, commit).await {
+    let outcome = if is_ontology_business_call(state, tool_call).await? {
+        let profile =
+            agent_cli_profile_config_for_session(state, approval.session_id, &request.profile)
+                .await?;
+        if profile.runtime_type != "codex_cli"
+            || profile.remote_computer_required
+            || !request.args.is_empty()
+            || !profile.env.is_empty()
+        {
+            return Err(AppError::forbidden(
+                "business agent_cli requires a native Codex profile with no request arguments or profile environment overrides",
+            ));
+        }
+        if !profile.args.is_empty() && profile.args != ["exec".to_string(), "--json".to_string()] {
+            return Err(AppError::forbidden(
+                "business Codex profile has unsupported execution arguments",
+            ));
+        }
+        commit.begin().await?;
+        crate::ontology_codex_runtime::run_ontology_codex(
+            state,
+            tool_call,
+            &profile.command,
+            &request.task,
+        )
+        .await
+    } else {
+        run_agent_cli_with_commit(state, approval.session_id, request, commit).await
+    };
+    match outcome {
         Ok(result) => {
             commit
                 .append_tool_outcome(tool_call, "tool.result", result.clone(), true)

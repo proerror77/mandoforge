@@ -75,6 +75,15 @@ These are implementation boundaries. Local mock-provider and Postgres tests
 establish their tested behavior; target-specific production readiness still
 requires deployment and runtime evidence.
 
+## Ontology-first business work
+
+Native business workflows now have an explicit Ontology/Action runtime path.
+The trusted TaskGrant binds the WorkItem, published application and object scope.
+Codex receives scoped Ontology tools; registered internal Actions require actual
+read evidence and approval, and completion requires committed business readback.
+See [the runtime contract](ontology-business-runtime.md) for supported adapters,
+test commands and limits. Local tests are not production deployment evidence.
+
 ## Important Gaps
 
 - Runtime turn records are event-based today. There is no dedicated

@@ -37,6 +37,8 @@ pub(crate) struct OntologySdkCatalogRelation {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct OntologySdkCatalogAction {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) internal_executor: Option<String>,
     pub(crate) stable_key: String,
     pub(crate) api_name: String,
     #[serde(default)]
@@ -72,6 +74,8 @@ pub(crate) struct OntologySdkSubsetManifest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CreateOntologySdkApplicationRequest {
     pub(crate) ontology_release_id: Uuid,
+    #[serde(default)]
+    pub(crate) agent_id: Option<Uuid>,
     #[serde(alias = "subset_manifest", alias = "manifest")]
     pub(crate) subset: OntologySdkSubsetManifest,
 }

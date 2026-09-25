@@ -2593,6 +2593,9 @@ pub(crate) struct ValidatedOntologyActionProposal {
     contract_digest: String,
     action_name: String,
     parameters: Value,
+    read_receipt: Option<crate::OntologyReadReceipt>,
+    business_object: Option<SemanticObject>,
+    closeout_read_receipts: Vec<crate::OntologyReadReceipt>,
 }
 
 struct PreparedOntologyActionProposal {
@@ -2661,10 +2664,52 @@ pub(crate) async fn validate_ontology_action_proposal(
         .cloned()
         .unwrap_or_else(empty_json_object);
     validate_ontology_action_parameters(&spec.input_schema, &parameters)?;
-    if !spec.read_only && spec.execution_mode != "proposal_only" {
+    let read_receipt = crate::validate_business_action_read(state, input, &spec).await?;
+    if !spec.read_only
+        && spec.execution_mode != "proposal_only"
+        && crate::internal_business_action_kind(&spec).is_none()
+    {
         return Err(AppError::forbidden(
             "ontology action side effects are disabled unless the published contract is proposal_only",
         ));
+    }
+    let business_object = if crate::internal_business_action_kind(&spec) == Some("draft") {
+        Some(
+            crate::prepare_internal_business_draft(
+                state,
+                input,
+                &spec,
+                read_receipt.as_ref().expect("internal receipt validated"),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let mut closeout_read_receipts = Vec::new();
+    if crate::internal_business_action_kind(&spec) == Some("closeout") {
+        let ids = parameters["result_read_receipt_ids"]
+            .as_array()
+            .filter(|ids| !ids.is_empty() && ids.len() <= 128)
+            .ok_or_else(|| AppError::bad_request("closeout requires result_read_receipt_ids"))?;
+        for id in ids {
+            let mut evidence_input = ExecuteTool {
+                session_id: input.session_id,
+                task_grant_id: input.task_grant_id,
+                args: input.args.clone(),
+            };
+            evidence_input.args["result_read_receipt_id"] = id.clone();
+            closeout_read_receipts.push(
+                crate::validate_ontology_read_receipt(
+                    state,
+                    &evidence_input,
+                    "action_result",
+                    "result_read_receipt_id",
+                )
+                .await?,
+            );
+        }
+        crate::validate_business_closeout_inputs(state, input, &closeout_read_receipts).await?;
     }
     Ok(ValidatedOntologyActionProposal {
         packet,
@@ -2674,6 +2719,9 @@ pub(crate) async fn validate_ontology_action_proposal(
         contract_digest,
         action_name: action_name.to_string(),
         parameters,
+        read_receipt,
+        business_object,
+        closeout_read_receipts,
     })
 }
 
@@ -2687,15 +2735,29 @@ impl ValidatedOntologyActionProposal {
             contract_digest,
             action_name,
             parameters,
+            read_receipt,
+            business_object,
+            closeout_read_receipts,
         } = self;
+        let is_business = business_object.is_some() || !closeout_read_receipts.is_empty();
+        let business_status = if business_object.is_some() {
+            "business_draft_created"
+        } else {
+            "work_item_completed"
+        };
         let artifact = Artifact {
             id: Uuid::new_v4(),
             session_id: input.session_id,
-            artifact_type: "ontology_action_proposal".to_string(),
+            artifact_type: if is_business {
+                "ontology_action_receipt"
+            } else {
+                "ontology_action_proposal"
+            }
+            .to_string(),
             name: format!("{}-proposal.json", workflow_slug(&action_name)),
             path: None,
             content: json!({
-                "status": "draft",
+                "status": if is_business {"committed"} else {"draft"},
                 "ontology_release_id": release.id,
                 "ontology_version": release.version,
                 "domain_scope": release.domain_scope,
@@ -2709,9 +2771,12 @@ impl ValidatedOntologyActionProposal {
                 "approval_required": spec.approval_required,
                 "transaction_profile": spec.transaction_profile,
                 "execution_mode": spec.execution_mode,
-                "commit_status": "blocked_pending_explicit_production_policy",
+                "commit_status": if is_business {"internal_only"} else {"blocked_pending_explicit_production_policy"},
                 "context_packet_id": packet.id,
                 "task_grant_id": grant.id,
+                "ontology_read_receipt": read_receipt,
+                "internal_business_object": business_object,
+                "closeout_read_receipts": closeout_read_receipts,
             }),
             created_at: Utc::now(),
         };
@@ -2728,13 +2793,15 @@ impl ValidatedOntologyActionProposal {
             "context_packet_id": packet.id,
         });
         let result = json!({
-            "status": "proposal_created",
+            "status": if is_business {business_status} else {"proposal_created"},
+            "work_item_id": read_receipt.as_ref().map(|r|r.work_item_id),
+            "ontology_read_receipt_id": read_receipt.as_ref().map(|r|r.id),
             "artifact_id": artifact.id,
             "ontology_release_id": release.id,
             "action": spec.name,
             "execution_mode": spec.execution_mode,
             "approval_required": spec.approval_required,
-            "commit_status": "blocked_pending_explicit_production_policy",
+            "commit_status": if is_business {"internal_only"} else {"blocked_pending_explicit_production_policy"},
         });
         PreparedOntologyActionProposal {
             artifact,
@@ -2749,6 +2816,11 @@ impl ValidatedOntologyActionProposal {
         input: &ExecuteTool,
         tool_call: &ToolCall,
     ) -> Result<Value, AppError> {
+        if crate::internal_business_action_kind(&self.spec).is_some() {
+            return Err(AppError::forbidden(
+                "internal business Action requires approved execution",
+            ));
+        }
         let PreparedOntologyActionProposal {
             artifact,
             details,
@@ -2821,6 +2893,8 @@ impl ValidatedOntologyActionProposal {
             mut result,
         } = self.prepare(input, tool_call);
         result["approval"] = json!("approved");
+        result["approval_id"] = json!(approval_id);
+        result["action_tool_call_id"] = json!(tool_call.id);
         state
             .commit_approved_ontology_action_proposal(job, approval_id, artifact, details, result)
             .await
@@ -3124,6 +3198,8 @@ pub(crate) fn tool_registry() -> HashMap<&'static str, Box<dyn ToolExecutor>> {
         Box::new(FileReadTool),
         Box::new(McpCallTool),
         Box::new(OntologyActionExecuteTool),
+        Box::new(crate::OntologyContextReadTool),
+        Box::new(crate::OntologyActionResultReadTool),
         Box::new(OntologyTypeLookupTool),
         Box::new(SemanticLinkExpandTool),
         Box::new(SemanticObjectFetchTool),
@@ -3195,6 +3271,18 @@ pub(crate) async fn principal_from_request(
     headers: &HeaderMap,
 ) -> Result<Principal, AppError> {
     let tenant_id = resolve_request_tenant_id(state, headers)?;
+    if header_value(headers, "authorization").is_some_and(|value| {
+        value.split_whitespace().nth(1).is_some_and(|credential| {
+            credential
+                .to_ascii_lowercase()
+                .starts_with("mforuntime-v1.")
+        })
+    }) {
+        return Err(AppError::unauthorized(
+            "business runtime capabilities are not valid at the general API",
+        ));
+    }
+
     if worker_token_authenticated(headers) {
         return Ok(Principal {
             tenant_id,
@@ -3460,6 +3548,7 @@ pub(crate) fn parse_roles_header(value: &str) -> Result<Vec<Role>, AppError> {
 pub(crate) enum ToolInvocationOrigin {
     ManualRoute,
     SessionLoop,
+    RuntimeAdapter,
 }
 
 pub(crate) fn task_grant_requires_approval_commit_token(
@@ -3639,6 +3728,23 @@ pub(crate) async fn execute_tool_invocation(
     let policy = state.policy_for_session(input.session_id).await;
     let mut policy_decision =
         policy.evaluate_tool_for_agent_version_with_args(name, &input.args, &agent_version);
+    // Business identity is read from the persisted TaskGrant, never a caller mode flag.
+    crate::enforce_ontology_business_tool_boundary(task_grant.as_ref(), name)?;
+    if name == "ontology.action.execute"
+        && task_grant
+            .as_ref()
+            .is_some_and(|g| g.approval_policy.get("ontology_runtime").is_some())
+    {
+        let proposal = validate_ontology_action_proposal(state, &input).await?;
+        if crate::internal_business_action_kind(&proposal.spec).is_some()
+            && proposal.spec.approval_required
+            && policy_decision.decision != "denied"
+        {
+            policy_decision.decision = "requires_approval";
+            policy_decision.reason =
+                "published internal business Action requires explicit approval".to_string();
+        }
+    }
     let commit_binding =
         approval_commit_binding_for_invocation(name, &input.args, task_grant.as_ref())?;
     if commit_binding.is_some() && policy_decision.decision != "denied" {
@@ -3666,6 +3772,7 @@ pub(crate) async fn execute_tool_invocation(
     let mut policy_decision_payload = json!({
         "decision": policy_decision.decision,
         "reason": policy_decision.reason.clone(),
+        "origin": match origin {ToolInvocationOrigin::ManualRoute=>"manual",ToolInvocationOrigin::SessionLoop=>"session_loop",ToolInvocationOrigin::RuntimeAdapter=>"runtime_adapter"},
         "agent_version_id": agent_version.id,
         "agent_version": agent_version.version,
     });
@@ -3968,6 +4075,7 @@ pub(crate) async fn execute_tool_invocation(
     let result_origin = match origin {
         ToolInvocationOrigin::ManualRoute => "manual",
         ToolInvocationOrigin::SessionLoop => "session_loop",
+        ToolInvocationOrigin::RuntimeAdapter => "runtime_adapter",
     };
     let result_event = state
         .commit_tool_invocation_result(tool_call.id, status, result.clone(), result_origin)

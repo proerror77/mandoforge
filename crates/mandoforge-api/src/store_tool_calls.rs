@@ -275,6 +275,14 @@ fn approved_ontology_action_proposal_records(
     proposal_details: Value,
     result: &Value,
 ) -> (Vec<SessionEvent>, Vec<AuditLog>) {
+    let lifecycle_event = if matches!(
+        result["status"].as_str(),
+        Some("business_draft_created" | "work_item_completed")
+    ) {
+        "ontology_action.executed"
+    } else {
+        "ontology_action.proposal_created"
+    };
     let artifact_event_id =
         crate::deterministic_record_id(artifact.id, "ontology-action-event", &["artifact.created"]);
     let proposal_event_id =
@@ -304,7 +312,7 @@ fn approved_ontology_action_proposal_records(
             parent_event_id: None,
             actor_type: "system".to_string(),
             actor_id: Some(artifact.id),
-            event_type: "ontology_action.proposal_created".to_string(),
+            event_type: lifecycle_event.to_string(),
             payload: proposal_details.clone(),
             created_at: Utc::now(),
         },
@@ -344,16 +352,13 @@ fn approved_ontology_action_proposal_records(
         Some(artifact.session_id),
         "tool",
         Some(tool_call.id),
-        "ontology_action.proposal_created",
+        lifecycle_event,
         "artifact",
         Some(artifact.id),
         proposal_details,
     );
-    proposal_audit.id = crate::deterministic_record_id(
-        proposal_event_id,
-        "audit",
-        &["ontology_action.proposal_created"],
-    );
+    proposal_audit.id =
+        crate::deterministic_record_id(proposal_event_id, "audit", &[lifecycle_event]);
     let mut completed_audit = new_audit_log(
         Some(artifact.session_id),
         "worker",
@@ -846,9 +851,9 @@ impl AppState {
         &self,
         job: &crate::execution_queue::ExecutionJob,
         approval_id: Uuid,
-        artifact: Artifact,
+        mut artifact: Artifact,
         proposal_details: Value,
-        result: Value,
+        mut result: Value,
     ) -> Result<(), AppError> {
         if job.status != crate::ExecutionJobStatus::Executing {
             return Err(AppError::bad_request(
@@ -926,6 +931,15 @@ impl AppState {
                     return Err(AppError::conflict("artifact already exists")
                         .with_known_execution_outcome());
                 }
+                let business_object =
+                    crate::store_ontology_business::prepare_business_effect_memory(
+                        &store,
+                        self.current_tenant_id(),
+                        &mut artifact,
+                        &tool_call,
+                        &mut result,
+                    )
+                    .map_err(AppError::with_known_execution_outcome)?;
                 let (mut events, audits) = approved_ontology_action_proposal_records(
                     job,
                     approval_id,
@@ -947,6 +961,11 @@ impl AppState {
                     return Err(
                         AppError::conflict("ontology proposal records already exist")
                             .with_known_execution_outcome(),
+                    );
+                }
+                if let Some(effect) = business_object {
+                    crate::store_ontology_business::commit_memory_business_effect(
+                        &mut store, effect,
                     );
                 }
                 let persisted_events = store.events.entry(tool_call.session_id).or_default();
@@ -976,6 +995,11 @@ impl AppState {
                     .await
                     .map_err(AppError::from)
                     .map_err(AppError::with_retry_safe_execution)?;
+                if crate::store_ontology_business::receipt_from_artifact(&artifact)?.is_some() {
+                    sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+                        .execute(&mut *tx)
+                        .await?;
+                }
                 let precommit = async {
                     sqlx::query(
                         "SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2::uuid::text, 0))",
@@ -1110,6 +1134,9 @@ impl AppState {
                         })?;
                         current_id = grant.parent_grant_id;
                     }
+                    crate::store_ontology_business::apply_business_effect_postgres(
+                        &mut tx, tenant_id, &mut artifact, &tool_call, &mut result,
+                    ).await.map_err(|e| if e.status.is_client_error() {e.with_known_execution_outcome()} else {e})?;
                     let (mut events, audits) = approved_ontology_action_proposal_records(
                         job,
                         approval_id,

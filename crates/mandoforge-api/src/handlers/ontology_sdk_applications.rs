@@ -133,10 +133,16 @@ async fn create_application(
     }
     let (catalog, catalog_digest) = release_catalog_from_evidence(&release)?;
     let (subset_manifest, subset_digest) = normalize_and_validate_subset(&catalog, &input.subset)?;
+    let subject = if let Some(agent_id) = input.agent_id {
+        state.get_agent(agent_id).await?;
+        crate::ontology_runtime_subject(agent_id)
+    } else {
+        principal.subject_id.clone()
+    };
     let application = OntologySdkApplication {
         id: Uuid::new_v4(),
         tenant_id: state.current_tenant_id(),
-        subject: principal.subject_id.clone(),
+        subject,
         ontology_release_id: release.id,
         release_version: release.version.clone(),
         domain_scope: release.domain_scope.clone(),
@@ -155,6 +161,8 @@ async fn create_application(
         Some(application.id),
         serde_json::json!({
             "subject": principal.subject_id,
+            "runtime_agent_id": input.agent_id,
+            "application_subject": application.subject,
             "application_id": application.id,
             "ontology_release_id": application.ontology_release_id,
             "catalog_digest": application.catalog_digest,

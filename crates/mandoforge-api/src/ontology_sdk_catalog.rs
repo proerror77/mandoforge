@@ -218,6 +218,8 @@ pub(crate) fn build_ontology_release_catalog(
         actions.insert(
             stable_key.clone(),
             OntologySdkCatalogAction {
+                internal_executor: crate::internal_business_action_kind(&tool_spec)
+                    .map(|_| tool_spec.executor["type"].as_str().unwrap().to_string()),
                 stable_key,
                 api_name,
                 runtime_name: tool_spec.name,
@@ -413,7 +415,12 @@ pub(crate) fn normalize_and_validate_subset(
                 "ontology SDK subset references an unknown action: {name}"
             ))
         })?;
-        if action.execution_mode != "proposal_only" {
+        let internal = matches!(
+            action.internal_executor.as_deref(),
+            Some("internal_followup_draft" | "internal_work_item_closeout")
+        ) && action.execution_mode == "executable_after_approval"
+            && action.approval_required;
+        if action.execution_mode != "proposal_only" && !internal {
             return Err(AppError::forbidden(format!(
                 "ontology SDK subset action {name} is not proposal_only"
             )));
@@ -1361,6 +1368,13 @@ fn validate_action_contract_digests(
         if action.target_object_api_name != target_object.api_name {
             return Err(AppError::forbidden(
                 "ontology release action target does not match the catalog",
+            ));
+        }
+        let expected_internal = crate::internal_business_action_kind(&tool_spec)
+            .map(|_| tool_spec.executor["type"].as_str().unwrap().to_string());
+        if action.internal_executor != expected_internal {
+            return Err(AppError::forbidden(
+                "ontology Action internal executor does not match its contract",
             ));
         }
         if tool_spec.execution_mode != action.execution_mode {

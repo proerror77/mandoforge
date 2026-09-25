@@ -29,12 +29,15 @@ pub(crate) struct OntologySdkConsumerActionRequest {
     pub(crate) session_id: Uuid,
     pub(crate) task_grant_id: Uuid,
     pub(crate) context_packet_id: Uuid,
+    #[serde(default)]
+    pub(crate) ontology_read_receipt_id: Option<Uuid>,
     #[serde(default = "crate::empty_json_object")]
     pub(crate) parameters: Value,
 }
 
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct OntologySdkConsumerObject {
+    pub(crate) version: String,
     pub(crate) id: Uuid,
     pub(crate) api_name: String,
     pub(crate) object_type: String,
@@ -46,6 +49,7 @@ pub(crate) struct OntologySdkConsumerObject {
 
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct OntologySdkConsumerRelation {
+    pub(crate) version: String,
     pub(crate) id: Uuid,
     pub(crate) api_name: String,
     pub(crate) relation_type: String,
@@ -73,6 +77,23 @@ pub(crate) async fn authorize_consumer_read(
         "ontology_sdk_consumer",
     )
     .await?;
+    let (application, release, catalog) =
+        resolve_consumer_application(state, &principal, application_id).await?;
+    Ok((principal, application, release, catalog))
+}
+
+pub(crate) async fn resolve_consumer_application(
+    state: &AppState,
+    principal: &Principal,
+    application_id: Uuid,
+) -> Result<
+    (
+        OntologySdkApplication,
+        OntologyRelease,
+        OntologyReleaseCatalogV1,
+    ),
+    AppError,
+> {
     let application = state.get_ontology_sdk_application(application_id).await?;
     if application.subject != principal.subject_id {
         return Err(AppError::forbidden(
@@ -110,7 +131,7 @@ pub(crate) async fn authorize_consumer_read(
             "ontology SDK application subset manifest is invalid or tampered",
         ));
     }
-    Ok((principal, application, release, catalog))
+    Ok((application, release, catalog))
 }
 
 pub(crate) async fn task_grant_for_consumer_read(
@@ -207,7 +228,13 @@ async fn consumer_objects_filtered(
     let objects = visible_semantic_objects_for_principal(state, principal).await?;
     let mut projected = Vec::new();
     for object in objects {
-        if object_id.is_some_and(|object_id| object.id != object_id)
+        if grant
+            .and_then(|g| g.approval_policy["ontology_consumer_scope"]["object_ids"].as_array())
+            .is_some_and(|ids| {
+                !ids.iter()
+                    .any(|id| id.as_str() == Some(&object.id.to_string()))
+            })
+            || object_id.is_some_and(|object_id| object.id != object_id)
             || object.object_type != "business_object"
             || object.status != "active"
             || object.archived_at.is_some()
@@ -300,7 +327,13 @@ pub(crate) async fn consumer_relations(
         .await?
         .into_iter()
         .filter(|object| {
-            object.object_type == "business_object"
+            grant
+                .and_then(|g| g.approval_policy["ontology_consumer_scope"]["object_ids"].as_array())
+                .is_none_or(|ids| {
+                    ids.iter()
+                        .any(|id| id.as_str() == Some(&object.id.to_string()))
+                })
+                && object.object_type == "business_object"
                 && object.status == "active"
                 && object.archived_at.is_none()
                 && !ontology_sdk_definition_object(object)
@@ -381,6 +414,7 @@ pub(crate) async fn consumer_relations(
             continue;
         }
         projected.push(OntologySdkConsumerRelation {
+            version: crate::normalized_json_sha256(&serde_json::to_value(&link)?),
             id: link.id,
             api_name: relation.api_name.clone(),
             relation_type: relation.relation_type.clone(),
@@ -533,7 +567,9 @@ pub(crate) async fn propose_consumer_action(
         ));
     }
     let (spec, _) = ontology_action_tool_spec_for_release(release, &action.runtime_name)?;
-    if spec.execution_mode != "proposal_only" {
+    if spec.execution_mode != "proposal_only"
+        && crate::internal_business_action_kind(&spec).is_none()
+    {
         return Err(AppError::forbidden(
             "consumer actions must remain proposal_only",
         ));
@@ -549,6 +585,7 @@ pub(crate) async fn propose_consumer_action(
                 "action": action.runtime_name,
                 "parameters": input.parameters,
                 "context_packet_id": input.context_packet_id,
+                "ontology_read_receipt_id": input.ontology_read_receipt_id,
             }),
         },
         ToolInvocationOrigin::ManualRoute,
@@ -587,6 +624,7 @@ fn project_object(
         projected.insert(property.api_name.clone(), value);
     }
     Ok(OntologySdkConsumerObject {
+        version: crate::ontology_object_version(&object),
         id: object.id,
         api_name: catalog_object.api_name.clone(),
         object_type: catalog_object.object_type.clone(),

@@ -89,6 +89,7 @@ pub(crate) struct MemoryStore {
     pub(crate) ontology_releases: HashMap<Uuid, OntologyRelease>,
     pub(crate) ontology_release_workflow_triggers: HashMap<Uuid, OntologyReleaseWorkflowTrigger>,
     pub(crate) ontology_sdk_applications: HashMap<Uuid, OntologySdkApplication>,
+    pub(crate) ontology_read_receipts: HashMap<Uuid, crate::OntologyReadReceipt>,
     pub(crate) context_packets: HashMap<Uuid, ContextPacket>,
     pub(crate) memory_writeback_candidates: HashMap<Uuid, MemoryWritebackCandidate>,
     pub(crate) project_github_bindings: HashMap<Uuid, ProjectGitHubBinding>,
