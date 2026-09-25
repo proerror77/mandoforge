@@ -459,6 +459,21 @@ pub(crate) async fn apply_provider_completion(
     status: &str,
     summary: &str,
 ) -> Result<Session, AppError> {
+    if status == "completed"
+        && let Some(id) = task_grant_id
+    {
+        let grant = state.get_task_grant(id).await?;
+        if crate::ontology_runtime_binding(&grant)?.is_some()
+            && !crate::ontology_codex_runtime::business_completion_verified(
+                state, session_id, id, None,
+            )
+            .await?
+        {
+            return Err(AppError::forbidden(
+                "business completion requires executed Actions, verified result readback and controlled WorkItem closeout",
+            ));
+        }
+    }
     let session_status = if status == "completed" {
         if workflow_step_keeps_session_open(state, session_id, task_grant_id).await? {
             SessionStatus::Idle
@@ -1172,6 +1187,12 @@ pub(crate) async fn run_session_loop(
             json!({"status": "running"}),
         ))
         .await?;
+
+    if let Some((_, grant)) = active_task_grant.as_ref()
+        && crate::ontology_runtime_binding(grant)?.is_some()
+    {
+        return crate::ontology_codex_runtime::run_ontology_session_turn(state, job, grant).await;
+    }
 
     let (provider_label, provider) = provider_client_for_session(state, id).await?;
     let cost_metering_provider = if let Some((run, grant)) = active_task_grant.as_ref()

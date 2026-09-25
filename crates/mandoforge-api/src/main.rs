@@ -74,6 +74,9 @@ mod native_connectors;
 mod observability;
 mod observability_runtime;
 mod ontology_action_profile;
+mod ontology_business_runtime;
+mod ontology_codex_runtime;
+pub(crate) use ontology_business_runtime::*;
 mod ontology_dataset_profile;
 mod ontology_engine;
 mod ontology_onboarding_engine;
@@ -132,6 +135,7 @@ mod store_github_bindings;
 mod store_governance;
 mod store_manager_plans;
 mod store_memory_writeback;
+mod store_ontology_business;
 mod store_ontology_onboarding;
 mod store_ontology_release_workflow_triggers;
 mod store_ontology_releases;
@@ -245,7 +249,7 @@ pub(crate) use ontology_sdk_catalog::*;
 pub(crate) use ontology_sdk_consumer_runtime::{
     OntologySdkConsumerActionRequest, OntologySdkConsumerReadQuery, authorize_consumer_read,
     consumer_object_by_id, consumer_objects, consumer_relations, propose_consumer_action,
-    task_grant_for_consumer_read,
+    resolve_consumer_application, task_grant_for_consumer_read,
 };
 pub(crate) use ontology_sdk_typescript::generate_typescript_sdk;
 pub(crate) use ontology_seed_builders::{

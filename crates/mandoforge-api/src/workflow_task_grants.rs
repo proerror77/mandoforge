@@ -32,6 +32,61 @@ pub(crate) async fn issue_root_task_grant_for_workflow_run(
             ontology_release.clone(),
         );
     }
+    let mut objective = session.title.clone();
+    if let Some(binding) = approval_policy.get_mut("ontology_runtime") {
+        if !matches!(
+            run.execution_strategy.as_str(),
+            "native_steps" | "managed_graph"
+        ) || run
+            .runtime_adapter
+            .as_deref()
+            .is_some_and(|adapter| adapter != "codex_cli")
+        {
+            return Err(AppError::forbidden(
+                "Ontology business work requires the managed native session-loop backend",
+            ));
+        }
+        let work_item_id = run.source_work_item_id.ok_or_else(|| {
+            AppError::forbidden("business workflow must have a server-bound source WorkItem")
+        })?;
+        let work = state
+            .list_work_items()
+            .await?
+            .into_iter()
+            .find(|w| {
+                w.id == work_item_id
+                    && w.archived_at.is_none()
+                    && w.status != "done"
+                    && w.status != "canceled"
+            })
+            .ok_or_else(|| AppError::forbidden("business source WorkItem is unavailable"))?;
+        if binding
+            .get("work_item_id")
+            .is_some_and(|v| v != &json!(work_item_id))
+        {
+            return Err(AppError::forbidden(
+                "business runtime cannot replace the workflow's source WorkItem",
+            ));
+        }
+        binding
+            .as_object_mut()
+            .ok_or_else(|| AppError::forbidden("business runtime binding must be an object"))?
+            .insert("work_item_id".into(), json!(work_item_id));
+        let resolved: crate::OntologyRuntimeBinding = serde_json::from_value(binding.clone())
+            .map_err(|_| AppError::forbidden("invalid business runtime binding"))?;
+        let application = state
+            .get_ontology_sdk_application(resolved.application_id)
+            .await?;
+        if application.subject != crate::ontology_runtime_subject(definition.default_agent_id) {
+            return Err(AppError::forbidden(
+                "business application is not bound to this workflow Agent",
+            ));
+        }
+        objective = work
+            .description
+            .clone()
+            .unwrap_or_else(|| work.title.clone());
+    }
     let grant = TaskGrant {
         id: Uuid::new_v4(),
         workflow_run_id: run.id,
@@ -44,7 +99,7 @@ pub(crate) async fn issue_root_task_grant_for_workflow_run(
         grantee_agent_id: Some(definition.default_agent_id),
         grantee_session_id: Some(session.id),
         agent_class: Some(agent_class),
-        objective: session.title.clone(),
+        objective,
         risk_level: "low".to_string(),
         status: "active".to_string(),
         expires_at: None,
@@ -504,6 +559,8 @@ async fn validate_task_grant_for_tool_invocation(
         }
         return Err(AppError::forbidden(reason));
     }
+    crate::validate_ontology_runtime_lineage(state, &grant).await?;
+    crate::enforce_ontology_business_tool_boundary(Some(&grant), tool_name)?;
     if !task_grant_allows_tool(&grant, tool_name) {
         let reason = "task grant tool scope does not allow tool";
         if record_denied {

@@ -502,6 +502,7 @@ mod tests {
                 to_object_api_name: "SupportTicket".to_string(),
             }],
             actions: vec![OntologySdkCatalogAction {
+                internal_executor: None,
                 stable_key: "action:commerce.adjust_inventory".to_string(),
                 api_name: "adjustInventory".to_string(),
                 runtime_name: "commerce.adjust_inventory".to_string(),

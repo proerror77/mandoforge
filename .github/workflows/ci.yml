@@ -77,6 +77,20 @@ jobs:
   rust:
     name: Rust tests
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: mandoforge_test
+          POSTGRES_PASSWORD: isolated_ci_fixture_only
+          POSTGRES_DB: mandoforge_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mandoforge_test -d mandoforge_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.97.0
@@ -111,6 +125,10 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --locked --all-targets -- -D warnings
       - run: cargo test --workspace --locked --all-targets -- --test-threads=1
+      - name: Ontology business transaction and tenant evidence
+        env:
+          MANDOFORGE_TEST_POSTGRES_URL: postgres://mandoforge_test:isolated_ci_fixture_only@127.0.0.1:5432/mandoforge_test
+        run: cargo test -p mandoforge-api --bin mandoforge-api --locked ontology_business_postgres -- --ignored --nocapture --test-threads=1
       - run: scripts/verify-workflow-pack-manifest.sh
       - name: Agent OS core and managed workflow runtime evidence gates
         shell: bash

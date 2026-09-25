@@ -1201,6 +1201,7 @@ fn tenant_rls_migration_covers_tracked_tables() {
         include_str!("../../../../db/migrations/0066_workflow_schedules.sql"),
         include_str!("../../../../db/migrations/0069_ontology_release_workflow_triggers.sql"),
         include_str!("../../../../db/migrations/0081_ontology_sdk_applications.sql"),
+        include_str!("../../../../db/migrations/0083_ontology_runtime_read_receipts.sql"),
     ]
     .join("\n");
     assert!(migration.contains("mandoforge_current_tenant_id"));

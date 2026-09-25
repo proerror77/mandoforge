@@ -92,6 +92,8 @@ impl Default for PolicyConfig {
                     "semantic_object.search".to_string(),
                     "semantic_link.expand".to_string(),
                     "ontology.action.execute".to_string(),
+                    "ontology.context.read".to_string(),
+                    "ontology.action.result.read".to_string(),
                     "ontology_type.lookup".to_string(),
                 ],
             )]),

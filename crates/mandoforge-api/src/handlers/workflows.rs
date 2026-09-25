@@ -672,6 +672,14 @@ async fn create_workflow_run(
         ));
     }
     if let Some(work_item_id) = input.source_work_item_id {
+        authorize_request(
+            &state,
+            &headers,
+            Permission::SessionsRead,
+            "work_item",
+            Some(work_item_id),
+        )
+        .await?;
         state.ensure_work_item_exists(work_item_id).await?;
     }
     if let Some(source_event_id) = input.source_event_id {

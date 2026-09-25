@@ -37,6 +37,8 @@ allowed_tools:
     - semantic_object.fetch
     - semantic_link.expand
     - ontology.action.execute
+    - ontology.context.read
+    - ontology.action.result.read
     - ontology_type.lookup
 sql_policy:
   default_mode: read_only

@@ -671,6 +671,7 @@ fn ontology_sdk_subset_rejects_non_proposal_only_actions() {
         }],
         relations: Vec::new(),
         actions: vec![OntologySdkCatalogAction {
+            internal_executor: None,
             stable_key: "action:commerce.update_order".to_string(),
             api_name: "updateOrder".to_string(),
             runtime_name: "commerce.update_order".to_string(),

@@ -46286,3 +46286,6 @@ async fn queue_backed_worker_revalidates_task_grant_before_file_write() {
         .join(relative_path);
     assert!(tokio::fs::metadata(workspace_file).await.is_err());
 }
+
+#[path = "main_tests/ontology_business_runtime_tests.rs"]
+pub(crate) mod ontology_business_runtime_tests;
