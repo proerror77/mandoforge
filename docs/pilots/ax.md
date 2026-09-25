@@ -158,3 +158,36 @@ Coding Agent workloads. Its cost is an extra Redis/gRPC controller, Substrate
 worker infrastructure, and an adapter-owned result/recovery protocol. Direct
 Substrate integration would remove AX's layer but would also require MandoForge
 to implement its task/workspace lifecycle; it is not substituted for this pilot.
+
+## Local readback, 2026-09-25
+
+This is a shared local kind cluster (`kind-monday-ax-lab`), not a production or
+customer deployment. Live Substrate was independently identified as
+`944abe3278b895ccbf5d45555a49dd0f2f6ceae7`; it differs from AX's Go dependency
+revision. The observed calls below establish only this fixture's interoperability.
+
+| Check | Observed result |
+| --- | --- |
+| Pinned AX server/controller and Substrate | Real services, no mock Substrate |
+| AX task submission and guest file readback | Passed through atenet router |
+| Rust helper diagnostic | Passed; session/key/nonce matched, exit 0, normalized final event |
+| MandoForge approval → real AX → API readback | Passed diagnostic; no execution before approval, 25 session events, linked final artifact and `tool.completed` audit read back |
+| Codex binary in guest | Real `codex-cli 0.155.1` process observed |
+| Codex model-backed result | **Not passed**; deadline produced exit 124, no verified model response |
+| MandoForge Codex failure readback | 24 session events, tool status `failed`, error 124 retained, no `runtime.final` or false final artifact |
+| Failed-result replay | Same saved failure/nonce returned; no new turn submitted |
+| Guest timeout | Entire launcher/native process group stopped; a defunct child remained until actor deletion |
+| AX suspend | `Suspended` status observed |
+| Data checkpoint restore | **Not passed**; later resume returned Substrate `context canceled` |
+| First resource cleanup | AX task list and independent Substrate actor list empty |
+| Local contracts | 6 Rust helper tests, 5 guest tests, metadata normalization test and 11 existing profile/approval regression tests passed |
+
+The first host-CLI readback exposed a direct-worker probe false positive; the
+router patch above resolved it. The first Codex timeout exposed a launcher-only
+kill bug; the guest now creates and terminates a process group. These are real
+failure observations, not inferred coverage from a healthy Pod.
+
+Model success remains blocked on both reliable guest execution and an explicit,
+secure credential path. The timeout by itself does not prove authentication was
+the only cause. File checkpoint success is also unproven; the adapter must not be
+used to promise transparent Codex conversation continuation.

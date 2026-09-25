@@ -69,8 +69,14 @@ artifacts = api('/api/sessions/' + session['id'] + '/artifacts')
 save('tool-calls', calls)
 save('events', events)
 save('artifacts', artifacts)
+audit = api('/api/sessions/' + session['id'] + '/audit-logs')
+save('audit', audit)
 save('identity', {'profile_id': profile['id'], 'profile_name': profile_name, 'agent_id': agent['id'], 'session_id': session['id'], 'key': key})
-success = any(c['status'] == 'completed' for c in calls) and any(e['event_type'] == 'runtime.final' for e in events)
+success = (
+    any(c['status'] == 'completed' and c.get('result', {}).get('runtime_type') == 'ax_pilot' for c in calls)
+    and any(e['event_type'] == 'runtime.final' and any(a['id'] == e['payload'].get('artifact_id') for a in artifacts) for e in events)
+    and any(a['action'] == 'tool.completed' and a.get('details', {}).get('runtime_type') == 'ax_pilot' for a in audit)
+)
 summary = {'evidence_class': 'local_pilot', 'real_ax': True, 'mode': 'codex' if args.prompt else 'diagnostic',
            'verified': success, 'session_id': session['id'], 'key': key,
            'approval_id': submission['approval_id'], 'event_count': len(events), 'artifact_count': len(artifacts)}

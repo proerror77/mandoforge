@@ -99,6 +99,7 @@ impl Config {
     async fn ax(&self, args: &[&str], input: Option<&Value>) -> Result<String> {
         let mut command = Command::new(&self.cli);
         command.env("AX_SSH_FORCE_ROUTER", "1");
+        command.process_group(0);
         command
             .kill_on_drop(true)
             .args([
@@ -124,9 +125,7 @@ impl Config {
                 .write_all(serde_json::to_string(input)?.as_bytes())
                 .await?;
         }
-        let output = timeout(Duration::from_secs(25), child.wait_with_output())
-            .await
-            .context("AX command timed out; reconcile existing identity, do not resubmit")??;
+        let output = bounded_output(child, Duration::from_secs(25)).await?;
         ensure!(
             output.status.success(),
             "AX command failed: {}",
@@ -140,6 +139,24 @@ impl Config {
         let task: Value = serde_yaml::from_str(&raw)?;
         validate_task(receipt, &task)?;
         Ok(task)
+    }
+}
+
+async fn bounded_output(
+    child: tokio::process::Child,
+    duration: Duration,
+) -> Result<std::process::Output> {
+    let pid = child.id().context("AX child PID missing")?;
+    match timeout(duration, child.wait_with_output()).await {
+        Ok(output) => Ok(output?),
+        Err(_) => {
+            // ax ssh can spawn kubectl port-forward; kill the complete process
+            // group on timeout rather than leaving the tunnel running.
+            unsafe {
+                libc::kill(-(pid as i32), libc::SIGKILL);
+            }
+            bail!("AX command timed out; reconcile existing identity, do not resubmit")
+        }
     }
 }
 
@@ -492,6 +509,23 @@ mod tests {
         validate_coding_result(&receipt, &result).unwrap();
         result["prompt_sha256"] = json!("wrong");
         assert!(validate_coding_result(&receipt, &result).is_err());
+    }
+    #[tokio::test]
+    async fn ax_timeout_stops_process_group_with_inherited_pipes() {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "sleep 30 & wait"])
+            .process_group(0)
+            .kill_on_drop(true)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let started = Instant::now();
+        assert!(
+            bounded_output(command.spawn().unwrap(), Duration::from_millis(100))
+                .await
+                .is_err()
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
     #[test]
     fn concurrent_reconciliation_is_excluded() {

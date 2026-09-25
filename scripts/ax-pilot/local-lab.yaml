@@ -167,4 +167,34 @@ spec:
     app.kubernetes.io/name: ax-redis
 
 ---
-{"apiVersion": "ate.dev/v1alpha1", "kind": "WorkerPool", "metadata": {"name": "ax-pilot", "namespace": "mandoforge-ax-pilot", "labels": {"workload": "mandoforge-ax-pilot"}}, "spec": {"replicas": 2, "sandboxClass": "gvisor", "template": {"nodeSelector": {"ate.dev/substrate-version": "944abe32"}, "resources": {"limits": {"cpu": "1", "memory": "1Gi"}, "requests": {"cpu": "250m", "memory": "1Gi"}}}, "workerImage": "localhost:5001/ateom-gvisor-715889664656de67e44382a8d6ab981d@sha256:4dbae9f4d9c0c24cf69c025457d29f3f6a9ddd6609d4bd45cc6618e9453a69fb"}}
+{
+  "apiVersion": "ate.dev/v1alpha1",
+  "kind": "WorkerPool",
+  "metadata": {
+    "name": "ax-pilot",
+    "namespace": "mandoforge-ax-pilot",
+    "labels": {
+      "workload": "mandoforge-ax-pilot"
+    }
+  },
+  "spec": {
+    "replicas": 2,
+    "sandboxClass": "gvisor",
+    "template": {
+      "nodeSelector": {
+        "ate.dev/substrate-version": "944abe32"
+      },
+      "resources": {
+        "limits": {
+          "cpu": "1",
+          "memory": "1Gi"
+        },
+        "requests": {
+          "cpu": "250m",
+          "memory": "1Gi"
+        }
+      }
+    },
+    "workerImage": "localhost:5001/ateom-gvisor-715889664656de67e44382a8d6ab981d@sha256:4dbae9f4d9c0c24cf69c025457d29f3f6a9ddd6609d4bd45cc6618e9453a69fb"
+  }
+}
