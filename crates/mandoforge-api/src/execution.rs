@@ -6435,6 +6435,19 @@ mod tests {
     static ENV_VAR_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
+    fn ax_pilot_lifecycle_ack_is_not_a_coding_turn_result() {
+        let events = parse_runtime_adapter_events(
+            "ax_pilot",
+            r#"{"type":"ax.pilot.lifecycle.started","turn_id":"mf-test"}
+{"type":"ax.pilot.lifecycle.completed","operation":"cancel","turn_id":"mf-test","status":"completed","message":"AX delete acknowledged"}"#,
+        );
+        let metadata = build_runtime_adapter_turn_metadata(&events, &[]);
+        assert!(metadata.started_event_index.is_none());
+        assert!(metadata.completed_event_index.is_none());
+        assert!(metadata.final_message.is_none());
+    }
+
+    #[test]
     fn remote_codex_output_splits_jsonl_from_final_message() {
         let output = split_remote_codex_output(&format!(
             "{{\"type\":\"session.started\"}}\n{}\n# Report\n\nDone\n{}\nignored",

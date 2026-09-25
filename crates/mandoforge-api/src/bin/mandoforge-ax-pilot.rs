@@ -339,8 +339,13 @@ async fn run() -> Result<()> {
         }
         Err(err) => return Err(err.into()),
     };
+    let start_type = if matches!(request.operation.as_str(), "run" | "resume") {
+        "turn.started"
+    } else {
+        "ax.pilot.lifecycle.started"
+    };
     event(
-        json!({"type":"turn.started", "turn_id":receipt.name,"resume_handle":{"ax_task":receipt.name,"atespace":ATESPACE,"key":receipt.key,"session_id":session,"source":"ax_pilot"}, "ax_revision":AX_REVISION}),
+        json!({"type":start_type, "turn_id":receipt.name,"resume_handle":{"ax_task":receipt.name,"atespace":ATESPACE,"key":receipt.key,"session_id":session,"source":"ax_pilot"}, "ax_revision":AX_REVISION}),
     );
     if submit {
         config
@@ -352,7 +357,7 @@ async fn run() -> Result<()> {
     if request.operation == "cancel" {
         config.ax(&["delete", "task", &receipt.name], None).await?;
         event(
-            json!({"type":"turn.completed", "turn_id":receipt.name,"status":"completed","final_message":"AX delete acknowledged; retained local receipt prevents resubmission. Substrate cleanup requires independent readback."}),
+            json!({"type":"ax.pilot.lifecycle.completed", "operation":"cancel", "turn_id":receipt.name,"status":"completed","message":"AX delete acknowledged; retained local receipt prevents resubmission. Substrate cleanup requires independent readback."}),
         );
         return Ok(());
     }
@@ -370,7 +375,7 @@ async fn run() -> Result<()> {
     if request.operation == "read" {
         event(json!({"type":"item.completed","item":{"kind":"ax_state","task":initial}}));
         event(
-            json!({"type":"turn.completed","turn_id":receipt.name,"status":"completed","final_message":format!("AX state readback: {}. This is not command completion evidence.", initial["status"]["phase"])}),
+            json!({"type":"ax.pilot.lifecycle.completed","operation":"read","turn_id":receipt.name,"status":"completed","message":format!("AX state readback: {}. This is not command completion evidence.", initial["status"]["phase"])}),
         );
         return Ok(());
     }
@@ -387,7 +392,7 @@ async fn run() -> Result<()> {
         }
         if phase == "Suspended" && request.operation == "suspend" {
             event(
-                json!({"type":"turn.completed","turn_id":receipt.name,"status":"completed","final_message":"AX reports Suspended. Data checkpoint only; process-memory resume is not claimed."}),
+                json!({"type":"ax.pilot.lifecycle.completed","operation":"suspend","turn_id":receipt.name,"status":"completed","message":"AX reports Suspended. Data checkpoint only; process-memory resume is not claimed."}),
             );
             return Ok(());
         }

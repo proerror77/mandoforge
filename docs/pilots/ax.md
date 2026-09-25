@@ -66,7 +66,8 @@ The guest writes its own durable start marker before Codex. A marker without a
 result fails closed on restart. The same result can be read again without
 running another Codex turn. A changed prompt or target is rejected for that key.
 
-Operations `read` and `cancel` reuse the same key. `cancel` calls AX delete and
+Operations `read` and `cancel` reuse the same key. Lifecycle acknowledgements
+use `ax.pilot.lifecycle.*` events and never emit a Coding Agent final artifact. `cancel` calls AX delete and
 keeps the receipt; deleting the AX resource is not independent proof that every
 Substrate artifact has been removed. Operator readback/cleanup is required.
 `run` with the original input also reattaches to existing result polling.
