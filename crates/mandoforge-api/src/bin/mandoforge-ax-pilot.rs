@@ -160,6 +160,9 @@ fn manifest(receipt: &Receipt) -> Value {
 }
 
 fn expected_result(receipt: &Receipt) -> Value {
+    if receipt.prompt.is_some() {
+        return json!({"schema":"mandoforge.ax-pilot.v1", "session_id":receipt.session,"key":receipt.key,"nonce":receipt.nonce,"kind":"codex"});
+    }
     json!({"schema":"mandoforge.ax-pilot.v1", "session_id":receipt.session,"key":receipt.key,"nonce":receipt.nonce,"exit_code":0,"message":"AX isolated diagnostic completed"})
 }
 
@@ -279,7 +282,7 @@ async fn run() -> Result<()> {
         key: request.key,
         name: format!(
             "mf-{}",
-            hex::encode(Sha256::digest(format!("{session}:{}", request.key)))[..40].to_string()
+            &hex::encode(Sha256::digest(format!("{session}:{}", request.key)))[..40]
         ),
         nonce: Uuid::new_v4(),
         server: config.server.clone(),

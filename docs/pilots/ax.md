@@ -9,7 +9,8 @@ No production manifest, default agent profile, workflow or scheduler is changed.
 
 - Google AX: `acb6c1709b405eeaf0507031556426bf20493d52`, plus the checked-in
   `scripts/ax-pilot/ax-force-router.patch` for the host CLI only. Apply this patch
-  before building `cmd/ax`; the controller and runner remain upstream unchanged.
+  with `git apply --unidiff-zero` before building `cmd/ax`; the controller and runner
+  remain upstream unchanged.
   The helper sets `AX_SSH_FORCE_ROUTER=1`: direct TCP probing can succeed through
   a macOS tunnel/proxy even when the worker gRPC endpoint is unreachable. Explicit
   atenet routing avoids that observed false-positive path.
