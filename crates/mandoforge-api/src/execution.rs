@@ -5324,7 +5324,7 @@ fn managed_agent_cli_profile_config(
 fn agent_runtime_profile_is_cli_executable(runtime_type: &str) -> bool {
     matches!(
         runtime_type,
-        "agent_cli" | "codex_cli" | "claude_code" | "gemini" | "opencode" | "aider"
+        "agent_cli" | "codex_cli" | "claude_code" | "gemini" | "opencode" | "aider" | "ax_pilot"
     )
 }
 
@@ -5347,7 +5347,7 @@ fn runtime_adapter_log_mode(runtime_type: &str) -> RuntimeAdapterLogMode {
     match runtime_type {
         "codex_cli" => RuntimeAdapterLogMode::CodexJsonl,
         "claude_code" => RuntimeAdapterLogMode::ClaudeStreamJson,
-        "gemini" | "opencode" | "aider" => RuntimeAdapterLogMode::GenericJsonl,
+        "gemini" | "opencode" | "aider" | "ax_pilot" => RuntimeAdapterLogMode::GenericJsonl,
         _ => RuntimeAdapterLogMode::Stdout,
     }
 }
@@ -5757,7 +5757,7 @@ async fn record_runtime_adapter_turn_metadata(
 }
 
 fn runtime_adapter_turn_metadata_supported(runtime_type: &str) -> bool {
-    matches!(runtime_type, "codex_cli" | "claude_code")
+    matches!(runtime_type, "codex_cli" | "claude_code" | "ax_pilot")
 }
 
 fn build_runtime_adapter_turn_metadata(
@@ -6411,9 +6411,41 @@ pub(crate) fn truncate_output(value: &str, max_bytes: usize) -> TruncatedOutput 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ax_pilot_metadata_preserves_ax_lineage_and_final_artifact_input() {
+        let events = parse_runtime_adapter_events(
+            "ax_pilot",
+            r#"{"type":"turn.started","turn_id":"mf-ax-test","resume_handle":{"ax_task":"mf-ax-test","source":"ax_pilot"}}
+{"type":"item.completed","item":{"kind":"codex_event","event":{"type":"thread.started","thread_id":"codex-test"}}}
+{"type":"turn.completed","turn_id":"mf-ax-test","status":"completed","final_message":"verified AX result"}"#,
+        );
+        assert_eq!(events.len(), 3);
+        let metadata = build_runtime_adapter_turn_metadata(&events, &[]);
+        assert_eq!(metadata.turn_id.as_deref(), Some("mf-ax-test"));
+        assert_eq!(
+            metadata.final_message.as_deref(),
+            Some("verified AX result")
+        );
+        assert_eq!(metadata.items.len(), 1);
+        assert_eq!(metadata.resume_handle.unwrap()["source"], "ax_pilot");
+    }
+
     use super::*;
 
     static ENV_VAR_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn ax_pilot_lifecycle_ack_is_not_a_coding_turn_result() {
+        let events = parse_runtime_adapter_events(
+            "ax_pilot",
+            r#"{"type":"ax.pilot.lifecycle.started","turn_id":"mf-test"}
+{"type":"ax.pilot.lifecycle.completed","operation":"cancel","turn_id":"mf-test","status":"completed","message":"AX delete acknowledged"}"#,
+        );
+        let metadata = build_runtime_adapter_turn_metadata(&events, &[]);
+        assert!(metadata.started_event_index.is_none());
+        assert!(metadata.completed_event_index.is_none());
+        assert!(metadata.final_message.is_none());
+    }
 
     #[test]
     fn remote_codex_output_splits_jsonl_from_final_message() {

@@ -14,6 +14,12 @@ Codex CLI, Claude Code CLI, Codex App Server, and future hosted runtimes are
 runtime adapters called and supervised by MandoForge. They are not the Agent OS
 itself.
 
+The opt-in [AX Coding Agent pilot](pilots/ax.md) uses the governed
+`agent_cli.exec` boundary to run a read-only Codex process inside AX / Agent
+Substrate. It does not replace the business orchestrator or enable production
+execution. Sandbox startup, command completion, Codex model success and checkpoint
+recovery have separate acceptance evidence.
+
 Manager Agents are managed agents running on MandoForge. They coordinate
 WorkItems, Assignments, Reviews, escalations, and child threads. They do not own
 a second execution stack.

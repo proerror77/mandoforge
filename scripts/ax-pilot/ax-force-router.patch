@@ -1,0 +1,14 @@
+diff --git a/cmd/ax/main.go b/cmd/ax/main.go
+index ed794d3..2033894 100644
+--- a/cmd/ax/main.go
++++ b/cmd/ax/main.go
+@@ -1077 +1077,8 @@ func runSSH(serverURL, atespace, kubeContext string, args []string) error {
+-	if testConn, dialErr := d.Dial("tcp", guestEndpoint); dialErr == nil {
++	var testConn net.Conn
++	var dialErr error
++	if os.Getenv("AX_SSH_FORCE_ROUTER") == "1" {
++		dialErr = fmt.Errorf("router explicitly requested")
++	} else {
++		testConn, dialErr = d.Dial("tcp", guestEndpoint)
++	}
++	if dialErr == nil {
