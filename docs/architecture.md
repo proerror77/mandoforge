@@ -219,6 +219,7 @@ normalize external agent runtimes into the Agent OS event model.
 Targets:
 
 - Codex CLI.
+- Grok CLI.
 - Claude Code CLI.
 - Codex App Server.
 - Future hosted or self-hosted runtimes.
@@ -238,7 +239,7 @@ collected items, final messages, artifacts, and runtime lineage.
 Adapter rules:
 
 - CLI-backed runtimes are not opaque shell tools in the product model.
-- `Environment.runtime_profile_id` selects the adapter for a session.
+- `Environment.runtime_profile_id` selects the adapter for a session. When Codex and Grok specialists share one Environment, leave that field unset and pin `codex_cli` or `grok_cli` on each specialist AgentVersion. A pinned Environment profile overrides the handoff profile and the specialist version.
 - `agent_cli.exec` remains a compatibility facade while managed sessions move
   toward direct Environment-owned runtime adapters.
 - The adapter can call the model and run its local loop, but session state,
@@ -309,7 +310,7 @@ control plane:
 - `native_steps`: MandoForge materializes and schedules the declared step graph.
 - `delegated_runtime`: MandoForge creates one governed runtime envelope and
   delegates inner planning, fan-out/fan-in, and subagent execution to a runtime
-  adapter such as `claude_code`, `codex_app_server`, or `codex_cli`.
+  adapter such as `claude_code`, `codex_app_server`, `codex_cli`, or `grok_cli`.
 The delegated path records `runtime_adapter`, `runtime_mode`,
 `runtime_capability_contract`, and `event_ingestion_policy` on the definition.
 Each `WorkflowRun` snapshots those values with `delegation_status`,

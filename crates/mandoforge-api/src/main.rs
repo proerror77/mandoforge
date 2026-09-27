@@ -172,7 +172,10 @@ mod workflow_step_execution;
 mod workflow_task_grants;
 
 pub(crate) use agent_release_automation::*;
-pub(crate) use agent_runtime_profile_release::evaluate_agent_runtime_profile_release_gate;
+pub(crate) use agent_runtime_profile_release::{
+    evaluate_agent_runtime_profile_release_gate, grok_cli_launch_args,
+    validate_grok_cli_profile_contract,
+};
 pub(crate) use approval_runtime::*;
 pub(crate) use artifact_files::{
     artifact_type_from_path, discover_artifact_files, normalize_codex_artifact_path,

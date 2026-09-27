@@ -238,7 +238,7 @@ It should include:
 - `handoff_rules`
 - `execution_strategy`: `native_steps` or `delegated_runtime`
 - `runtime_adapter`: optional `codex_app_server`, `codex_cli`,
-  `claude_code`, or another released runtime profile family
+  `claude_code`, `grok_cli`, or another released runtime profile family
 - `runtime_mode`: optional `normal` or `ultracode`
 - `runtime_capability_contract`
 - `event_ingestion_policy`

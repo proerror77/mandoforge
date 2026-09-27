@@ -332,20 +332,44 @@ curl -sS -X POST "$BASE_URL/api/agent-runtime-profiles" \
     "default_args": ["--print"],
     "remote_computer_required": true
   }'
+
+# Grok CLI profile
+curl -sS -X POST "$BASE_URL/api/agent-runtime-profiles" \
+  -H 'content-type: application/json' \
+  -H 'x-mandoforge-subject: admin-1' \
+  -H 'x-mandoforge-roles: admin' \
+  -d '{
+    "name": "grok-cli-worker",
+    "runtime_type": "grok_cli",
+    "command": "grok",
+    "default_args": ["--output-format", "streaming-messages-json", "--permission-mode", "acceptEdits", "-p"],
+    "remote_computer_required": true
+  }'
 ```
 
-把其中一个 profile 绑定到 Environment、specialist agent 或 handoff assignment
-后，MandoForge Agent Runtime 会通过 session-loop worker path 调用选定的
+把 profile 绑定到 Environment、specialist agent 或 handoff assignment。
+Codex 与 Grok 两个 Specialist 共用一个 Environment 时，不要设置
+`Environment.runtime_profile_id`，而是分别把 `codex-cli-worker` 和
+`grok-cli-worker` 钉在各自的 AgentVersion 上。Environment 一旦钉住 profile，
+就会覆盖 handoff 和 Specialist 版本，两个 Agent 会被锁到同一个 CLI。
+MandoForge Agent Runtime 会通过 session-loop worker path 调用选定的
 CLI/runtime adapter。`agent_cli.exec` 仍可以作为兼容 facade，传入匹配的
 `profile` 和 `task`；批准后的 execution job 由 `mandoforge-worker` 消费。
 
-受管 `codex_cli`、`claude_code`、Gemini、OpenCode、Aider profile 会被当作
-runtime adapter：它们的 JSONL 或 stream-json 输出会被写成
+启用的 `grok_cli` profile 必须以 `-p` 或 `--single` 结尾，必须设置
+`--output-format streaming-messages-json`，并且不能使用 `--yolo`、
+`--always-approve`、`--permission-mode bypassPermissions` 或
+`--include-partial-messages`。运行时把任务文本追加在这个 prompt flag 后面。
+`--resume` 这类额外参数会插在 flag 之前。
+
+受管 `codex_cli`、`grok_cli`、`claude_code`、Gemini、OpenCode、Aider profile
+会被当作 runtime adapter：它们的 JSONL 或 stream-json 输出会被写成
 `runtime_adapter.event` session events，并带基础 secret-key redaction 和
-event-count limits。Codex CLI 和 Claude Code CLI 输出也会映射成 normalized
-runtime turn records，覆盖 turn start、items/tool calls、usage、final
-message、artifact 和 completion；Codex App Server turn API 也会用同一套
-taxonomy 记录 thread/turn lineage。
+event-count limits。Codex CLI、Grok CLI 和 Claude Code CLI 输出也会映射成
+normalized runtime turn records，覆盖 turn start、items/tool calls、usage、
+final message、artifact 和 completion；Codex App Server turn API 也会用同一套
+taxonomy 记录 thread/turn lineage。Grok 的 `session_id` 是 CLI 会话恢复句柄，
+它恢复的是 CLI 对话，不是业务 handoff。
 
 这样 CLI-backed agents 仍然在 Tool Router、Policy Engine、Approval Engine、
 worker lease、Remote Computer、event log、audit path 之内，同时产品语义会往

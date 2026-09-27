@@ -281,7 +281,7 @@ pub(crate) async fn run_workflow_delegated_runtime_step(
             "codex_app_server" => {
                 run_codex_app_server_delegated_runtime(state, &run, &claim.step, &worker_id).await
             }
-            "codex_cli" | "claude_code" => {
+            "codex_cli" | "claude_code" | "grok_cli" => {
                 run_agent_cli_delegated_runtime(state, &run, &claim.step, session_id, adapter).await
             }
             _ => Err(AppError::bad_request(format!(
