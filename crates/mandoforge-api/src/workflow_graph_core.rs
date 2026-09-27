@@ -107,9 +107,9 @@ pub(crate) fn normalize_runtime_adapter(value: &str) -> Result<String, AppError>
     let normalized = value.trim().to_ascii_lowercase();
     match normalized.as_str() {
         "codex_app_server" | "codex_cli" | "claude_code" | "gemini" | "opencode" | "aider"
-        | "hosted" => Ok(normalized),
+        | "grok_cli" | "hosted" => Ok(normalized),
         _ => Err(AppError::bad_request(
-            "runtime_adapter must be codex_app_server, codex_cli, claude_code, gemini, opencode, aider, or hosted",
+            "runtime_adapter must be codex_app_server, codex_cli, claude_code, gemini, opencode, aider, grok_cli, or hosted",
         )),
     }
 }

@@ -27,8 +27,8 @@ use crate::{
     RemoteComputer, RemoteComputerJobAssignment, RemoteComputerLease,
     RemoteComputerRuntimeIdentity, RemoteComputerSubstrate, SandboxRuntimeOperation,
     SandboxRuntimeRequest, ToolCall, delete_remote_computer_runtime_resource,
-    deterministic_record_id, metadata_with_remote_computer_runtime_identity, new_audit_log,
-    normalize_agent_cli_executable, record_remote_computer_job_assignment_event,
+    deterministic_record_id, grok_cli_launch_args, metadata_with_remote_computer_runtime_identity,
+    new_audit_log, normalize_agent_cli_executable, record_remote_computer_job_assignment_event,
     record_remote_computer_job_assignment_event_for_execution_claim,
     remote_computer_runtime_identity, required_remote_computer_runtime_identity,
     resolve_mcp_runtime_secret_refs, revalidate_task_grant_for_tool_invocation,
@@ -3754,8 +3754,7 @@ async fn execute_approved_remote_computer_agent_cli(
     let runtime_type = profile_config.runtime_type.clone();
     let mut environment = BTreeMap::new();
     environment.extend(profile_config.env.iter().cloned());
-    let mut args = profile_config.args.clone();
-    args.extend(request.args.clone());
+    let args = agent_cli_launch_args(&runtime_type, &profile_config.args, &request.args)?;
     let runtime_request = SandboxRuntimeRequest::new(
         approval.session_id,
         request
@@ -4967,14 +4966,12 @@ async fn run_agent_cli_inner(
         )
         .await?;
 
+    let request_args = request.args.clone();
+    let launch_args = agent_cli_launch_args(&runtime_type, &config.args, &request_args)?;
     let mut command = Command::new(&config.command);
     command.kill_on_drop(true);
     command.current_dir(&workspace);
-    for arg in &config.args {
-        command.arg(arg);
-    }
-    let request_args = request.args.clone();
-    for arg in &request_args {
+    for arg in &launch_args {
         command.arg(arg);
     }
     command.arg(&request.task);
@@ -5324,14 +5321,28 @@ fn managed_agent_cli_profile_config(
 fn agent_runtime_profile_is_cli_executable(runtime_type: &str) -> bool {
     matches!(
         runtime_type,
-        "agent_cli" | "codex_cli" | "claude_code" | "gemini" | "opencode" | "aider"
+        "agent_cli" | "codex_cli" | "claude_code" | "gemini" | "opencode" | "aider" | "grok_cli"
     )
+}
+
+fn agent_cli_launch_args(
+    runtime_type: &str,
+    profile_args: &[String],
+    request_args: &[String],
+) -> Result<Vec<String>, AppError> {
+    if runtime_type == "grok_cli" {
+        return grok_cli_launch_args(profile_args, request_args);
+    }
+    let mut args = profile_args.to_vec();
+    args.extend(request_args.iter().cloned());
+    Ok(args)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeAdapterLogMode {
     CodexJsonl,
     ClaudeStreamJson,
+    GrokStreamingMessagesJson,
     GenericJsonl,
     Stdout,
 }
@@ -5347,6 +5358,7 @@ fn runtime_adapter_log_mode(runtime_type: &str) -> RuntimeAdapterLogMode {
     match runtime_type {
         "codex_cli" => RuntimeAdapterLogMode::CodexJsonl,
         "claude_code" => RuntimeAdapterLogMode::ClaudeStreamJson,
+        "grok_cli" => RuntimeAdapterLogMode::GrokStreamingMessagesJson,
         "gemini" | "opencode" | "aider" => RuntimeAdapterLogMode::GenericJsonl,
         _ => RuntimeAdapterLogMode::Stdout,
     }
@@ -5356,6 +5368,7 @@ fn runtime_adapter_log_mode_name(mode: RuntimeAdapterLogMode) -> &'static str {
     match mode {
         RuntimeAdapterLogMode::CodexJsonl => "codex_jsonl",
         RuntimeAdapterLogMode::ClaudeStreamJson => "claude_stream_json",
+        RuntimeAdapterLogMode::GrokStreamingMessagesJson => "grok_streaming_messages_json",
         RuntimeAdapterLogMode::GenericJsonl => "generic_jsonl",
         RuntimeAdapterLogMode::Stdout => "stdout",
     }
@@ -5757,7 +5770,7 @@ async fn record_runtime_adapter_turn_metadata(
 }
 
 fn runtime_adapter_turn_metadata_supported(runtime_type: &str) -> bool {
-    matches!(runtime_type, "codex_cli" | "claude_code")
+    matches!(runtime_type, "codex_cli" | "claude_code" | "grok_cli")
 }
 
 fn build_runtime_adapter_turn_metadata(
@@ -6451,6 +6464,40 @@ mod tests {
         assert_eq!(events[0].adapter_event_type, "system");
         assert_eq!(events[0].event["credential"], "[REDACTED]");
         assert_eq!(events[1].adapter_event_type, "assistant");
+    }
+
+    #[test]
+    fn runtime_adapter_maps_grok_streaming_messages_json_into_a_turn() {
+        let events = parse_runtime_adapter_events(
+            "grok_cli",
+            r#"{"type":"system","subtype":"init","session_id":"grok-session-1","model":"grok-4.6"}
+{"type":"assistant","session_id":"grok-session-1","message":{"content":[{"type":"tool_use","id":"call_1","name":"read_file","input":{"path":"src/main.rs"}}]}}
+{"type":"result","subtype":"success","session_id":"grok-session-1","duration_ms":1200,"result":"Reviewed the handoff.","usage":{"input_tokens":12,"output_tokens":4}}"#,
+        );
+
+        assert_eq!(
+            runtime_adapter_log_mode_name(runtime_adapter_log_mode("grok_cli")),
+            "grok_streaming_messages_json"
+        );
+        let metadata = build_runtime_adapter_turn_metadata(&events, &[]);
+        assert_eq!(metadata.turn_id.as_deref(), Some("grok-session-1"));
+        assert_eq!(metadata.started_event_index, Some(0));
+        assert_eq!(metadata.tool_calls.len(), 1);
+        assert_eq!(metadata.tool_calls[0].value["tool"], "read_file");
+        assert_eq!(metadata.tool_calls[0].value["call_id"], "call_1");
+        assert_eq!(
+            metadata.final_message.as_deref(),
+            Some("Reviewed the handoff.")
+        );
+        assert_eq!(metadata.completed_event_index, Some(2));
+        assert_eq!(metadata.status.as_deref(), Some("completed"));
+        assert_eq!(
+            metadata
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.get("input_tokens")),
+            Some(&json!(12))
+        );
     }
 
     #[test]

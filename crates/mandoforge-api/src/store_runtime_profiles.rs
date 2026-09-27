@@ -7,7 +7,7 @@ use crate::store_backend::StoreBackend;
 use crate::store_rows::agent_runtime_profile_from_row;
 use crate::{
     AgentRuntimeProfile, AppError, AppState, CreateAgentRuntimeProfile, UpdateAgentRuntimeProfile,
-    evaluate_agent_runtime_profile_release_gate,
+    evaluate_agent_runtime_profile_release_gate, validate_grok_cli_profile_contract,
 };
 
 impl AppState {
@@ -200,8 +200,10 @@ impl AppState {
                     .get_mut(&id)
                     .filter(|profile| profile.archived_at.is_none())
                     .ok_or_else(|| AppError::not_found("agent runtime profile not found"))?;
-                apply_runtime_profile_update(profile, input, updated_at);
-                ensure_enabled_runtime_profile_release_gate(profile)?;
+                let mut updated = profile.clone();
+                apply_runtime_profile_update(&mut updated, input, updated_at);
+                ensure_enabled_runtime_profile_release_gate(&updated)?;
+                *profile = updated;
                 Ok(profile.clone())
             }
             StoreBackend::Postgres(pool) => {
@@ -338,7 +340,7 @@ fn ensure_enabled_runtime_profile_release_gate(
             gate.blocking_reasons.join("; ")
         )));
     }
-    Ok(())
+    validate_grok_cli_profile_contract(profile)
 }
 
 fn normalize_runtime_profile_name(name: &str) -> Result<String, AppError> {
@@ -359,7 +361,7 @@ fn normalize_runtime_type(runtime_type: &str) -> Result<String, AppError> {
     let normalized = runtime_type.trim().to_ascii_lowercase();
     match normalized.as_str() {
         "agent_cli" | "codex_cli" | "codex_app_server" | "claude_code" | "gemini" | "opencode"
-        | "aider" | "hosted" => Ok(normalized),
+        | "aider" | "grok_cli" | "hosted" => Ok(normalized),
         _ => Err(AppError::bad_request(format!(
             "unsupported agent runtime profile type: {normalized}"
         ))),

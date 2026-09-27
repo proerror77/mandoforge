@@ -386,21 +386,45 @@ curl -sS -X POST "$BASE_URL/api/agent-runtime-profiles" \
     "default_args": ["--print"],
     "remote_computer_required": true
   }'
+
+# Grok CLI profile
+curl -sS -X POST "$BASE_URL/api/agent-runtime-profiles" \
+  -H 'content-type: application/json' \
+  -H 'x-mandoforge-subject: admin-1' \
+  -H 'x-mandoforge-roles: admin' \
+  -d '{
+    "name": "grok-cli-worker",
+    "runtime_type": "grok_cli",
+    "command": "grok",
+    "default_args": ["--output-format", "streaming-messages-json", "--permission-mode", "acceptEdits", "-p"],
+    "remote_computer_required": true
+  }'
 ```
 
 Bind one profile to an Environment, specialist agent, or handoff assignment.
-MandoForge Agent Runtime then calls the selected CLI/runtime adapter through the
-session-loop worker path. `agent_cli.exec` can still be used with the matching
-`profile` and `task` as a compatibility facade, and the approved execution job
-is drained by `mandoforge-worker`.
+For a Codex specialist and a Grok specialist in the same Environment, leave
+`Environment.runtime_profile_id` unset and pin `codex-cli-worker` or
+`grok-cli-worker` on each specialist AgentVersion. A pinned Environment profile
+overrides the handoff and the specialist version, so both agents would be forced
+onto that one CLI. MandoForge Agent Runtime then calls the selected CLI/runtime
+adapter through the session-loop worker path. `agent_cli.exec` can still be used
+with the matching `profile` and `task` as a compatibility facade, and the
+approved execution job is drained by `mandoforge-worker`.
 
-Managed `codex_cli`, `claude_code`, Gemini, OpenCode, and Aider profiles are
-treated as runtime adapters: their JSONL or stream-json output is ingested into
-`runtime_adapter.event` session events with basic secret-key redaction and
-event-count limits. Codex CLI and Claude Code CLI output also maps into
-normalized runtime turn records for turn start, items/tool calls, usage, final
-messages, artifacts, and completion; Codex App Server turn APIs emit the same
-taxonomy with thread/turn lineage.
+The enabled `grok_cli` profile must end with `-p` or `--single`, must select
+`--output-format streaming-messages-json`, and cannot enable `--yolo`,
+`--always-approve`, `--permission-mode bypassPermissions`, or
+`--include-partial-messages`. The runtime appends the task after that prompt
+flag. Extra request arguments, such as `--resume`, are inserted before the flag.
+
+Managed `codex_cli`, `grok_cli`, `claude_code`, Gemini, OpenCode, and Aider
+profiles are treated as runtime adapters: their JSONL or stream-json output is
+ingested into `runtime_adapter.event` session events with basic secret-key
+redaction and event-count limits. Codex CLI, Grok CLI, and Claude Code CLI
+output also maps into normalized runtime turn records for turn start, items/tool
+calls, usage, final messages, artifacts, and completion; Codex App Server turn
+APIs emit the same taxonomy with thread/turn lineage. Grok's `session_id` is the
+resume handle. It restores the CLI conversation, not the business handoff.
 
 This keeps CLI-backed agents inside the same Tool Router, Policy Engine,
 Approval Engine, worker lease, Remote Computer, event log, and audit path while
