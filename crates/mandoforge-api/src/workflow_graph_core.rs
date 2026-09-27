@@ -730,24 +730,39 @@ pub(crate) fn validate_handoff_payload_schema(
     payload: &Value,
     schema: Option<&Value>,
 ) -> Result<(), AppError> {
+    validate_handoff_json_schema(payload, schema, "payload")
+}
+
+pub(crate) fn validate_handoff_result_schema(
+    result: &Value,
+    schema: Option<&Value>,
+) -> Result<(), AppError> {
+    validate_handoff_json_schema(result, schema, "result")
+}
+
+fn validate_handoff_json_schema(
+    payload: &Value,
+    schema: Option<&Value>,
+    subject: &str,
+) -> Result<(), AppError> {
     let Some(schema) = schema else {
         return Ok(());
     };
     if schema.get("type").and_then(Value::as_str) != Some("object") {
-        return Err(AppError::bad_request(
-            "handoff payload_schema must declare type object",
-        ));
+        return Err(AppError::bad_request(format!(
+            "handoff {subject}_schema must declare type object"
+        )));
     }
     let Some(payload_object) = payload.as_object() else {
-        return Err(AppError::bad_request(
-            "handoff payload must be a JSON object",
-        ));
+        return Err(AppError::bad_request(format!(
+            "handoff {subject} must be a JSON object"
+        )));
     };
     if let Some(required) = schema.get("required").and_then(Value::as_array) {
         for key in required.iter().filter_map(Value::as_str) {
             if !payload_object.contains_key(key) {
                 return Err(AppError::bad_request(format!(
-                    "handoff payload missing required field {key}"
+                    "handoff {subject} missing required field {key}"
                 )));
             }
         }
@@ -762,12 +777,12 @@ pub(crate) fn validate_handoff_payload_schema(
         if let Some(allowed_values) = property_schema.get("enum") {
             let allowed_values = allowed_values.as_array().ok_or_else(|| {
                 AppError::bad_request(format!(
-                    "handoff payload_schema enum for field {key} must be an array"
+                    "handoff {subject}_schema enum for field {key} must be an array"
                 ))
             })?;
             if !json_schema_enum_contains(allowed_values, value) {
                 return Err(AppError::bad_request(format!(
-                    "handoff payload field {key} is not an allowed enum value"
+                    "handoff {subject} field {key} is not an allowed enum value"
                 )));
             }
         }
@@ -783,13 +798,13 @@ pub(crate) fn validate_handoff_payload_schema(
             "array" => value.is_array(),
             _ => {
                 return Err(AppError::bad_request(format!(
-                    "unsupported handoff payload_schema type {expected_type}"
+                    "unsupported handoff {subject}_schema type {expected_type}"
                 )));
             }
         };
         if !matches_type {
             return Err(AppError::bad_request(format!(
-                "handoff payload field {key} must be {expected_type}"
+                "handoff {subject} field {key} must be {expected_type}"
             )));
         }
     }

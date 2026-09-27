@@ -528,7 +528,7 @@ pub(crate) async fn create_agent_handoff_event_for_session(
         })
         .await?;
     let audit =
-        record_agent_handoff_audit_and_event(state, &event, "agent_handoff.requested", None)
+        record_agent_handoff_audit_and_event(state, &event, "agent_handoff.requested", None, None)
             .await?;
     let event = state
         .update_agent_handoff_event_status(event.id, "requested", Some(audit.id))
@@ -544,6 +544,7 @@ pub(crate) async fn materialize_workflow_handoff_assignment(
     target_agent: &Agent,
     specialist_session: &Session,
     child_thread: &SessionThread,
+    artifact_ids: &[Uuid],
 ) -> Result<Option<(WorkflowStepRun, TaskGrant)>, AppError> {
     let Some((run, parent_grant)) =
         active_task_grant_for_session(state, handoff.source_session_id).await?
@@ -641,7 +642,7 @@ pub(crate) async fn materialize_workflow_handoff_assignment(
             "remote_computer_required": assignment.remote_computer_required
         }),
         output_payload: empty_json_object(),
-        artifact_ids: Vec::new(),
+        artifact_ids: artifact_ids.to_vec(),
         approval_ids: Vec::new(),
         tool_call_ids: Vec::new(),
         claimed_by_worker: None,
@@ -660,6 +661,146 @@ pub(crate) async fn materialize_workflow_handoff_assignment(
     record_task_grant_issued(state, &child_grant, run.primary_session_id).await?;
     record_workflow_step_run_created(state, &run, &step).await?;
     Ok(Some((step, child_grant)))
+}
+
+pub(crate) async fn materialize_handoff_artifacts(
+    state: &AppState,
+    handoff: &AgentHandoffEvent,
+    assignment: &AgentHandoffAssignment,
+    specialist_session_id: Uuid,
+) -> Result<Vec<Uuid>, AppError> {
+    let source_artifacts = state.list_artifacts(handoff.source_session_id).await?;
+    if source_artifacts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let now = Utc::now();
+    let mut copied_ids = Vec::with_capacity(source_artifacts.len());
+    for artifact in source_artifacts {
+        let copy = Artifact {
+            id: Uuid::new_v4(),
+            session_id: specialist_session_id,
+            artifact_type: artifact.artifact_type.clone(),
+            name: artifact.name.clone(),
+            path: artifact.path.clone(),
+            content: artifact.content.clone(),
+            created_at: now,
+        };
+        let copy = state.insert_artifact(copy).await?;
+        copied_ids.push(copy.id);
+    }
+    state
+        .append_event(
+            "system",
+            None,
+            specialist_session_id,
+            "agent_handoff.artifacts_materialized",
+            json!({
+                "agent_handoff_event_id": handoff.id,
+                "agent_handoff_assignment_id": assignment.id,
+                "artifact_ids": copied_ids,
+            }),
+        )
+        .await?;
+    Ok(copied_ids)
+}
+
+pub(crate) async fn start_assigned_handoff_work(
+    state: &AppState,
+    assignment: &AgentHandoffAssignment,
+) -> Result<(), AppError> {
+    if assignment.status == "waiting_remote_computer" {
+        return Ok(());
+    }
+    let session = state.get_session(assignment.specialist_session_id).await?;
+    if session.status == SessionStatus::Idle {
+        set_managed_session_status(
+            state,
+            assignment.specialist_session_id,
+            SessionStatus::Running,
+            "agent handoff assignment started",
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn finish_specialist_handoff_from_outputs(
+    state: &AppState,
+    session_id: Uuid,
+    texts: &[String],
+    explicit_result: Option<&Value>,
+    task_completed: bool,
+) -> Result<(), AppError> {
+    let Some(thread) = state
+        .list_session_threads(Some(session_id))
+        .await?
+        .into_iter()
+        .find(|thread| thread.specialist_session_id == Some(session_id))
+    else {
+        return Ok(());
+    };
+    let Some(handoff_id) = thread.source_handoff_id else {
+        return Ok(());
+    };
+    let current = state.get_agent_handoff_event(handoff_id).await?;
+    if matches!(current.status.as_str(), "completed" | "failed" | "rejected") {
+        return Ok(());
+    }
+    if !task_completed {
+        return Ok(());
+    }
+    let result = match explicit_result {
+        Some(value) => value.clone(),
+        None => json!({ "summary": texts.join("\n\n") }),
+    };
+    commit_completed_handoff(state, &current, Some(&result), None).await?;
+    Ok(())
+}
+
+async fn commit_completed_handoff(
+    state: &AppState,
+    current: &AgentHandoffEvent,
+    result: Option<&Value>,
+    reason: Option<String>,
+) -> Result<AgentHandoffEvent, AppError> {
+    let audit = record_agent_handoff_audit_and_event(
+        state,
+        current,
+        "agent_handoff.completed",
+        reason,
+        result.cloned(),
+    )
+    .await?;
+    let updated = state
+        .update_agent_handoff_event_status(current.id, "completed", Some(audit.id))
+        .await?;
+    close_workflow_handoff_step(state, current, "completed").await?;
+    if let Some(thread) = state.session_thread_for_handoff(current.id).await? {
+        let thread = state
+            .update_session_thread_status(thread.id, "terminated")
+            .await?;
+        state
+            .append_event(
+                "system",
+                Some(thread.id),
+                current.source_session_id,
+                "thread.status_changed",
+                session_thread_event_payload(&thread),
+            )
+            .await?;
+        if let Some(specialist_session_id) = thread.specialist_session_id {
+            state
+                .append_event(
+                    "system",
+                    Some(thread.id),
+                    specialist_session_id,
+                    "thread.status_changed",
+                    session_thread_event_payload(&thread),
+                )
+                .await?;
+        }
+    }
+    Ok(updated)
 }
 
 pub(crate) fn child_handoff_memory_scope(parent: &Value) -> Value {
@@ -924,13 +1065,19 @@ pub(crate) async fn transition_agent_handoff_event(
         require_active_task_grant_for_session(&state, current.source_session_id).await?;
     }
     ensure_agent_handoff_transition(&current.status, next_status)?;
+    if next_status == "completed" {
+        let updated =
+            commit_completed_handoff(&state, &current, input.result.as_ref(), input.reason).await?;
+        return Ok(Json(updated));
+    }
     let event_type = format!("agent_handoff.{next_status}");
     let audit =
-        record_agent_handoff_audit_and_event(&state, &current, &event_type, input.reason).await?;
+        record_agent_handoff_audit_and_event(&state, &current, &event_type, input.reason, None)
+            .await?;
     let updated = state
         .update_agent_handoff_event_status(current.id, next_status, Some(audit.id))
         .await?;
-    if matches!(next_status, "completed" | "failed") {
+    if next_status == "failed" {
         close_workflow_handoff_step(&state, &current, next_status).await?;
     }
     if matches!(next_status, "completed" | "failed")
@@ -1009,6 +1156,7 @@ pub(crate) async fn record_agent_handoff_audit_and_event(
     handoff: &AgentHandoffEvent,
     action: &str,
     reason: Option<String>,
+    result: Option<Value>,
 ) -> Result<AuditLog, AppError> {
     let details = json!({
         "agent_handoff_event_id": handoff.id,
@@ -1027,6 +1175,7 @@ pub(crate) async fn record_agent_handoff_audit_and_event(
         "human_escalation_status": handoff.human_escalation_status,
         "status": handoff.status,
         "reason": reason,
+        "result": result,
     });
     state
         .append_event(

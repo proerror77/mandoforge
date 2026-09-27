@@ -1263,6 +1263,7 @@ pub(crate) async fn run_session_loop(
     let completion = provider_completion_request(&provider_response.tool_calls)?;
     let session_task_grant_id = active_task_grant.as_ref().map(|(_, grant)| grant.id);
     let mut waiting_for_approval = false;
+    let mut cli_outputs = Vec::new();
     for tool_call in &provider_response.tool_calls {
         if tool_call.tool_name == "complete_task" {
             continue;
@@ -1278,6 +1279,7 @@ pub(crate) async fn run_session_loop(
             ToolInvocationOrigin::SessionLoop,
         )
         .await?;
+        collect_cli_output_text(&result, &mut cli_outputs);
         if result.get("status").and_then(Value::as_str) == Some("approval_required") {
             waiting_for_approval = true;
             break;
@@ -1306,7 +1308,7 @@ pub(crate) async fn run_session_loop(
         )
         .await?;
 
-    if let Some(final_message) = provider_response.final_message {
+    if let Some(final_message) = provider_response.final_message.as_ref() {
         state
             .append_event(
                 "agent",
@@ -1319,8 +1321,30 @@ pub(crate) async fn run_session_loop(
     }
 
     if let Some((status, summary)) = completion {
+        if status == "completed" && !waiting_for_approval {
+            let explicit_result = provider_response
+                .tool_calls
+                .iter()
+                .find(|call| call.tool_name == "complete_task")
+                .and_then(|call| call.args.get("result"));
+            let mut texts = cli_outputs;
+            texts.push(summary.clone());
+            if let Some(message) = provider_response.final_message.as_ref() {
+                texts.push(message.clone());
+            }
+            finish_specialist_handoff_from_outputs(state, id, &texts, explicit_result, true)
+                .await?;
+        }
         return apply_provider_completion(state, id, session_task_grant_id, &status, &summary)
             .await;
+    }
+
+    if !waiting_for_approval {
+        let mut texts = cli_outputs;
+        if let Some(message) = provider_response.final_message.as_ref() {
+            texts.push(message.clone());
+        }
+        finish_specialist_handoff_from_outputs(state, id, &texts, None, false).await?;
     }
 
     let session = if waiting_for_approval {
@@ -1347,6 +1371,23 @@ pub(crate) async fn run_session_loop(
         session
     };
     Ok(session)
+}
+
+fn collect_cli_output_text(value: &Value, texts: &mut Vec<String>) {
+    for key in ["stdout", "final_message", "message"] {
+        if let Some(text) = value.get(key).and_then(Value::as_str) {
+            texts.push(text.to_string());
+        }
+    }
+    for key in ["content", "result"] {
+        if let Some(nested) = value.get(key) {
+            if let Some(text) = nested.as_str() {
+                texts.push(text.to_string());
+            } else if nested.is_object() {
+                collect_cli_output_text(nested, texts);
+            }
+        }
+    }
 }
 
 pub(crate) async fn authorize_session_run(

@@ -14,11 +14,12 @@ use crate::{
     TransitionAgentHandoffEvent, active_task_grant_for_session, authorize_collection_request,
     authorize_request, create_agent_handoff_event_for_session, create_handoff_session_thread,
     default_handoff_assignment_message, ensure_primary_session_thread,
-    materialize_workflow_handoff_assignment, normalize_handoff_human_escalation_status,
-    normalize_optional_text, record_agent_handoff_assignment_audit_and_events,
+    materialize_handoff_artifacts, materialize_workflow_handoff_assignment,
+    normalize_handoff_human_escalation_status, normalize_optional_text,
+    record_agent_handoff_assignment_audit_and_events,
     record_agent_handoff_assignment_remote_computer_event, record_agent_handoff_audit_and_event,
     require_active_task_grant_for_session, session_thread_event_payload,
-    task_grant_remaining_budgets, transition_agent_handoff_event,
+    start_assigned_handoff_work, task_grant_remaining_budgets, transition_agent_handoff_event,
     visible_session_ids_for_principal,
 };
 
@@ -409,6 +410,8 @@ async fn assign_agent_handoff_event(
         Some(parent_thread.id),
     )
     .await?;
+    let copied_artifacts =
+        materialize_handoff_artifacts(&state, &handoff, &assignment, specialist_session.id).await?;
     materialize_workflow_handoff_assignment(
         &state,
         &handoff,
@@ -417,8 +420,10 @@ async fn assign_agent_handoff_event(
         &target_agent,
         &specialist_session,
         &child_thread,
+        &copied_artifacts,
     )
     .await?;
+    start_assigned_handoff_work(&state, &assignment).await?;
     state
         .append_event(
             "system",
@@ -485,6 +490,7 @@ async fn attach_agent_handoff_remote_computer_assignment(
         .await?;
     record_agent_handoff_assignment_remote_computer_event(&state, &updated, &remote_assignment)
         .await?;
+    start_assigned_handoff_work(&state, &updated).await?;
     if let Some(thread) = state
         .session_thread_for_handoff(updated.agent_handoff_event_id)
         .await?
@@ -546,6 +552,7 @@ async fn escalate_agent_handoff_event(
         &current,
         "agent_handoff.escalated",
         input.reason,
+        None,
     )
     .await?;
     let updated = state
