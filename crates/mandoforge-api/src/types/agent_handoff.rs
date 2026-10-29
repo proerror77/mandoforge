@@ -113,6 +113,8 @@ pub(crate) struct CreateAgentHandoffEvent {
 pub(crate) struct TransitionAgentHandoffEvent {
     #[serde(default)]
     pub(crate) reason: Option<String>,
+    #[serde(default)]
+    pub(crate) result: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]

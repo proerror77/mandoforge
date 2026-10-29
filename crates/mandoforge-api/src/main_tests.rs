@@ -8279,6 +8279,272 @@ async fn agent_handoff_accept_complete_and_reject_fail_paths_are_audited() {
 }
 
 #[tokio::test]
+async fn agent_handoff_completion_carries_result_payload() {
+    let app = test_app().await;
+    let target: Agent = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/agents",
+            json!({
+                "name": "Result Writer Worker",
+                "kind": "writer",
+                "provider": "openai-compatible",
+                "model": "gpt-5.5-mini",
+                "system_prompt": "Write governed output."
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let source: Agent = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/agents",
+            json!({
+                "name": "Result Analyzer Worker",
+                "kind": "analyzer",
+                "provider": "openai-compatible",
+                "model": "gpt-5.5-mini",
+                "system_prompt": "Analyze then hand off.",
+                "runtime_config": {
+                    "handoffs": {
+                        "allowed_targets": [{
+                            "target_agent_id": target.id,
+                            "intents": ["write_summary"],
+                            "schema_versions": ["handoff.v1"],
+                            "risk_levels": ["low"],
+                            "approval_required": false
+                        }]
+                    }
+                }
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let session: Session = request_json(
+        app.clone(),
+        json_request(
+            "POST",
+            "/api/sessions",
+            json!({"agent_id": source.id, "title": "handoff result payload"}),
+        ),
+    )
+    .await;
+    let handoff: AgentHandoffEvent = request_json(
+        app.clone(),
+        json_request(
+            "POST",
+            &format!("/api/sessions/{}/agent-handoffs", session.id),
+            json!({
+                "target_agent_id": target.id,
+                "intent": "write_summary",
+                "payload": {"artifact_id": "artifact-1"},
+                "schema_version": "handoff.v1",
+                "risk_level": "low"
+            }),
+        ),
+    )
+    .await;
+    let accepted: AgentHandoffEvent = request_json(
+        app.clone(),
+        json_request(
+            "POST",
+            &format!("/api/agent-handoffs/{}/accept", handoff.id),
+            json!({"reason": "worker available"}),
+        ),
+    )
+    .await;
+    assert_eq!(accepted.status, "accepted");
+
+    let completed: AgentHandoffEvent = request_json(
+        app.clone(),
+        json_request(
+            "POST",
+            &format!("/api/agent-handoffs/{}/complete", handoff.id),
+            json!({
+                "reason": "summary produced",
+                "result": {"summary": "Report is ready.", "artifact_count": 2}
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(completed.status, "completed");
+
+    let audit_logs: Vec<AuditLog> = request_json(
+        app,
+        Request::builder()
+            .uri("/api/audit-logs")
+            .header("x-mandoforge-roles", "admin")
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    let completion_log = audit_logs
+        .iter()
+        .find(|log| log.action == "agent_handoff.completed")
+        .expect("completion audit log recorded");
+    assert_eq!(
+        completion_log.details.get("result"),
+        Some(&json!({"summary": "Report is ready.", "artifact_count": 2}))
+    );
+}
+
+#[tokio::test]
+async fn agent_handoff_assignment_copies_source_artifacts_to_specialist_session() {
+    let state = test_state_with_worker(Arc::new(InlineExecutionWorker));
+    let app = build_router(state.clone());
+    let specialist: Agent = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/agents",
+            json!({
+                "name": "Artifact Copy Specialist",
+                "kind": "specialist",
+                "agent_role": "specialist",
+                "provider": "openai-compatible",
+                "model": "gpt-5.5-mini",
+                "tools": ["file.read"]
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let manager: Agent = request_json(
+        app.clone(),
+        json_request_with_headers(
+            "POST",
+            "/api/agents",
+            json!({
+                "name": "Artifact Copy Manager",
+                "kind": "manager",
+                "agent_role": "manager",
+                "provider": "openai-compatible",
+                "model": "gpt-5.5-mini",
+                "runtime_config": {
+                    "handoffs": {
+                        "allowed_targets": [{
+                            "target_agent_id": specialist.id,
+                            "intents": ["review_findings"],
+                            "schema_versions": ["handoff.v1"],
+                            "risk_levels": ["low"],
+                            "approval_required": false
+                        }]
+                    }
+                }
+            }),
+            &[("x-mandoforge-roles", "admin")],
+        ),
+    )
+    .await;
+    let session: Session = request_json(
+        app.clone(),
+        json_request(
+            "POST",
+            "/api/sessions",
+            json!({"agent_id": manager.id, "title": "artifact propagation"}),
+        ),
+    )
+    .await;
+    let plan: ManagerAgentPlan = request_json(
+        app.clone(),
+        json_request(
+            "POST",
+            &format!("/api/sessions/{}/manager-plans", session.id),
+            json!({
+                "specialist_agent_id": specialist.id,
+                "task_intake": {"goal": "Review findings artifact"},
+                "decomposition": {"steps": ["assign specialist"]},
+                "specialist_selection": {"selected_agent_id": specialist.id},
+                "risk_classification": "low",
+                "review": {"status": "pending"}
+            }),
+        ),
+    )
+    .await;
+    let reviewed: ManagerAgentPlan = request_json(
+        app.clone(),
+        json_request(
+            "POST",
+            &format!("/api/manager-plans/{}/review", plan.id),
+            json!({
+                "status": "approved",
+                "review": {"status": "approved", "summary": "Ready for handoff"}
+            }),
+        ),
+    )
+    .await;
+    let source_artifact = state
+        .insert_artifact(Artifact {
+            id: Uuid::new_v4(),
+            session_id: session.id,
+            artifact_type: "text".to_string(),
+            name: "findings.md".to_string(),
+            path: None,
+            content: json!({"body": "Vendor findings summary."}),
+            created_at: Utc::now(),
+        })
+        .await
+        .expect("seed source artifact");
+    let handoff: AgentHandoffEvent = request_json(
+        app.clone(),
+        json_request(
+            "POST",
+            &format!("/api/sessions/{}/agent-handoffs", session.id),
+            json!({
+                "target_agent_id": specialist.id,
+                "manager_plan_id": reviewed.id,
+                "intent": "review_findings",
+                "payload": {"artifact_id": source_artifact.id},
+                "schema_version": "handoff.v1",
+                "risk_level": "low"
+            }),
+        ),
+    )
+    .await;
+    let _: AgentHandoffEvent = request_json(
+        app.clone(),
+        json_request(
+            "POST",
+            &format!("/api/agent-handoffs/{}/accept", handoff.id),
+            json!({"reason": "specialist available"}),
+        ),
+    )
+    .await;
+    let assignment: AgentHandoffAssignment = request_json(
+        app.clone(),
+        json_request(
+            "POST",
+            &format!("/api/agent-handoffs/{}/assignment", handoff.id),
+            json!({"assigned_by": "manager-agent"}),
+        ),
+    )
+    .await;
+
+    let specialist_artifacts: Vec<Artifact> = request_json(
+        app.clone(),
+        Request::builder()
+            .uri(format!(
+                "/api/sessions/{}/artifacts",
+                assignment.specialist_session_id
+            ))
+            .body(Body::empty())
+            .expect("valid request"),
+    )
+    .await;
+    assert_eq!(specialist_artifacts.len(), 1);
+    assert_eq!(specialist_artifacts[0].name, "findings.md");
+    assert_eq!(
+        specialist_artifacts[0].content,
+        json!({"body": "Vendor findings summary."})
+    );
+    assert_ne!(specialist_artifacts[0].id, source_artifact.id);
+}
+
+#[tokio::test]
 async fn agent_handoff_escalation_records_review_status_event_and_audit() {
     let app = test_app().await;
     let target: Agent = request_json(
@@ -18544,6 +18810,7 @@ async fn workflow_handoff_assignment_materializes_step_and_child_grant() {
             .max_runtime_seconds
             .is_some_and(|value| value > 0 && value <= 3600)
     );
+    assert_eq!(handoff_step.artifact_ids, Vec::<Uuid>::new());
     assert_eq!(child_grant.max_cost_usd_micros, Some(750));
     assert_eq!(child_grant.tool_scope["read"], json!(["file.read"]));
     assert_eq!(child_grant.tool_scope["write"], json!(["agent_cli.exec"]));
