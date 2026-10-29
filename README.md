@@ -522,3 +522,7 @@ Governance and operations:
 MandoForge is a reusable Agent middleware kernel for running, governing,
 approving, auditing, and replaying agent jobs across different industries.
 ```
+
+## Optional local Blaze experiment
+
+See [Blaze local development](docs/blaze-local-development.md) for scoped commands and comparison steps.
